@@ -39,3 +39,4 @@ tenants/*/source_artifacts/*
 !tenants/*/source_artifacts/.gitkeep
 tenants/*/datasets/*
 !tenants/*/datasets/.gitkeep
+.DS_Store
