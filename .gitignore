@@ -9,6 +9,8 @@ __pycache__/
 # Local-only operational artifacts (never checked in)
 tenants/*/evals/
 tenants/*/configs/**
+!tenants/mcp_example/datasets/
+!tenants/mcp_example/datasets/**
 !tenants/mcp_example/
 !tenants/mcp_example/configs/
 !tenants/mcp_example/configs/**
