@@ -20,6 +20,9 @@ FAPO provides the full loop: **evaluate** a chain against a dataset, **analyze**
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
+
+# For MCP support (agentic workflows with tool calling)
+pip install -e ".[mcp]"
 ```
 
 ### 2. Set up a tenant
@@ -594,6 +597,7 @@ Full config schema with all fields (see [docs/config-schema.md](docs/config-sche
 - Python 3.10+
 - Core: `openai`, `langgraph`, `requests`, `datasets`, `pytest`
 - Optional extras:
+  - `pip install -e ".[mcp]"` — MCP integration for agentic workflows
   - `pip install -e ".[hotpotqa]"` — BM25 retrieval dependencies
   - `pip install -e ".[cti_rcm]"` — [FAITH](https://github.com/cisco-foundation-ai/faith) test harness for CTI benchmarks
   - `pip install -e ".[local-models]"` — Local model support (llama-cpp)

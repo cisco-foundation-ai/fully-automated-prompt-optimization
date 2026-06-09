@@ -126,3 +126,10 @@ When you finish (success criteria met or user stops), report:
 - **Optimization level used**: prompt / parameter / structural
 - **Outstanding failure clusters**: what remains unresolved, categorized by which optimization level would address them
 - **Recommendations**: next steps within allowed levels; if all allowed levels are exhausted, state the ceiling without proposing forbidden-level changes
+
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->

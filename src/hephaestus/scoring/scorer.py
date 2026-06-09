@@ -25,12 +25,20 @@ class Scorer(ABC):
         step_outputs: Dict[str, str],
         scoring_profile: Dict[str, Any],
         output_text: Optional[str] = None,
+        tool_call_history: Optional[list] = None,
     ) -> Dict[str, Any]:
-        """Score a chain result with access to intermediate step outputs.
+        """Score a chain result with access to intermediate step outputs and tool calls.
 
         Default: score output_text (if provided) via score_case(), falling back
         to the last value in step_outputs for backwards compatibility.
-        Override in chain-aware scorers that need intermediate outputs.
+        Override in chain-aware scorers that need intermediate outputs or tool history.
+
+        Args:
+            case: The evaluation case
+            step_outputs: Outputs from each chain step
+            scoring_profile: Scoring configuration
+            output_text: Final output text (optional)
+            tool_call_history: List of tool calls made (optional, for agentic chains)
         """
         if output_text is None:
             if not step_outputs:

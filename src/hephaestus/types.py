@@ -48,6 +48,11 @@ class EvalCaseResult:
     step_outputs: Dict[str, Any]
     step_timings: List[List] = field(default_factory=list)
 
+    # Agentic workflow tracking (MCP integration)
+    tool_call_history: Optional[List[Dict[str, Any]]] = None
+    total_tool_calls: int = 0
+    failed_tool_calls: int = 0
+
 
 @dataclass
 class EvalProgress:
@@ -76,3 +81,4 @@ class EvalConfig:
     chain: ChainConfig
     max_workers: Optional[int] = None
     run_id: Optional[str] = None
+    mcp: Optional[Any] = None  # MCPConfig from mcp.types, but avoid circular import
