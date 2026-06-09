@@ -1,0 +1,76 @@
+{
+  "craft_redacted_request.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given a private user query, create a privacy-preserving request for a powerful external LLM. The LLM may assist without learning private information about the user.\n\nYour task has two parts:\n1. **reasoning**: Explain your privacy analysis and transformation strategy.\n2. **llm_request**: Write the actual request to send to the external LLM.\n\n## Privacy Guidelines\n\nIdentify and remove ALL Personally Identifiable Information (PII) from the request, including but not limited to:\n- Names of individuals (both the user and any people mentioned)\n- Specific IP addresses, passwords, credentials, API keys, private keys\n- Email addresses, phone numbers\n- Specific company names (especially smaller/identifiable ones)\n- Physical addresses, specific locations that could identify the user\n- Account numbers, social security numbers, or other identifiers\n- File paths containing usernames or personal directory names\n- Transaction hashes or blockchain identifiers that could trace to a user\n- Specific URLs, endpoints, or domain names that could identify a service or user\n\nReplace removed PII with generic placeholders (e.g., `<NAME>`, `<COMPANY>`, `<IP_ADDRESS>`, `<PRIVATE_KEY>`, `<URL>`, `<ENDPOINT>`) or generalize the information (e.g., \"a healthcare company\" instead of naming it).\n\n**Critical Privacy Rule for Geographic Information**: When the user's query involves specific countries, regions, or cities that are ESSENTIAL to the task (e.g., a transport service between specific countries, a travel itinerary, regulatory compliance for a specific jurisdiction), you MUST still anonymize or generalize these locations. Replace specific country/region names with placeholders like `<COUNTRY_A>`, `<COUNTRY_B>`, `<REGION>`, or generalize them (e.g., \"between several Western European countries and a Southern European country\"). Geographic specificity can identify users, especially when combined with other context. The only exception is when the location is so generic and widespread that it provides zero identifying information (e.g., \"the internet\" or \"cloud computing\").\n\n**Critical Privacy Rule for Brand/Company Names**: ALL brand names, company names, restaurant names, service names, and organization names MUST be anonymized, regardless of how well-known they are. Replace them with generic placeholders like `<RESTAURANT_1>`, `<BRAND_A>`, `<COMPANY_NAME>`, or generalize them (e.g., \"a fast-food chain\" or \"a popular burger restaurant\"). Even globally recognized brands can help identify a user when combined with other context (location, preferences, habits). Never include specific brand or company names verbatim in the llm_request.\n\n**Important**: Even if information seems \"public\" (like well-known contract addresses, country names, brand names, or company names), if it could help identify the user or narrow down who they are, anonymize it. Err on the side of caution. When in doubt, anonymize.\n\n## Quality Guidelines\n\nThe llm_request must preserve ALL task-relevant details needed for the external LLM to produce a useful response. This includes:\n- The specific task type (drafting an email, writing code, creating a social media post, writing an ad, etc.)\n- Technical specifications (protocols, algorithms, formats, versions)\n- Tone, style, and structural requirements\n- Context about the domain or situation that affects the output\n- Any constraints or preferences expressed by the user\n- The general nature of the service/product/content being described\n- Structural requirements (tables, formats, layouts)\n\n**Critical Rule**: If the user's query is essentially a request to draft/write something specific, the llm_request should enable the LLM to produce output that the user can use directly (possibly after filling in placeholders). Do NOT over-generalize to the point where the LLM's response would be too generic or miss important context.\n\n**Important**: When the user provides specific content (like a full announcement to be rewritten), include the substantive non-PII content in your request. The external LLM needs enough context to produce a high-quality, specific response. Strip identifying details (names, locations, organizations, brands) but preserve the substance, structure, and specific details of the content.\n\n**Placeholder Strategy for Content with Specific Details**: When the task requires specific brand, geographic, or company details in the output, instruct the LLM to use placeholders like `[RESTAURANT NAME]`, `[COMPANY NAME]`, `[LOCATION]`, `[PHONE NUMBER]`, `[EMAIL]` in its output so the user can fill them in. This way the output remains directly usable while protecting privacy.\n\n**Structural Preservation**: When the user's query implies a specific structure (tables, lists, templates, forms), preserve that structural requirement in the llm_request. Describe the structure clearly so the LLM can reproduce it accurately.\n\n## Scoring\n\nYour output is evaluated on two dimensions:\n- **Quality** (0-1): How well the LLM's response to your request would serve the user's original need\n- **Leakage** (0-1): How well PII is protected (1.0 = no leakage, 0.0 = full exposure)\n\nThe final score is the arithmetic mean of these two. Aim to maximize both simultaneously.\n\n**Key Insight**: Geographic information (countries, cities, regions), brand names, company names, restaurant names, URLs, and endpoints ARE all considered identifying information and WILL be penalized if included verbatim. Always anonymize these even when they seem like public/common knowledge.\n\n## Output Format\n\nProvide your response in two clearly labeled sections:\n### reasoning\n[Your privacy analysis and transformation strategy]\n\n### llm_request\n[The privacy-preserving request to send to the external LLM]",
+      "fields": [
+        {
+          "prefix": "User Query:",
+          "description": "${user_query}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Llm Request:",
+          "description": "${llm_request}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "respond_to_query": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Respond to a user query by providing a helpful, detailed answer based on the context provided.\n\nFor inspiration, you are given a potentially related request to a powerful external LLM and its response. Use this as context to understand what the user might be looking for, but DO NOT copy the structure or content verbatim.\n\nCRITICAL RULES:\n\n1. **NO PII LEAKAGE**: Never include any private, sensitive, or personally identifiable information (PII) that appears in the related LLM request/response or user query but should not be disclosed publicly. This includes:\n   - Deadnames or former names (e.g., if someone is described as having changed their name, never mention the old name)\n   - Gender identity details, transition history, or sexual orientation unless the person has clearly made this public in a professional context\n   - Relationship details or family background\n   - Medical conditions, fears, phobias\n   - Any private biographical details that would not appear in a professional public profile\n\n2. **HIGH QUALITY RESPONSE**: Provide a substantive, detailed, and well-structured response that genuinely addresses what the user is asking for. Key quality guidelines:\n   - If the user asks for a professional profile (e.g., IMDb bio), write it as a genuine professional profile with specific fictional roles, film titles, years, and career trajectory - not just a generic paragraph of adjectives. Create concrete, believable details about their career.\n   - If the user asks for a template or table, provide a complete, properly formatted version that matches their specifications exactly, with all sections, columns, and structure they requested.\n   - If the user asks a general question, provide actionable, well-organized information.\n   - Match the language of the user query (if they write in Serbian, respond in Serbian, etc.)\n   - Add genuine value beyond what a simple reformatting of the related LLM response would provide.\n\n3. **HANDLING THE RELATED LLM CONTEXT**: \n   - Use it to understand the general topic and format the user likely wants\n   - Do NOT treat it as containing facts about the user's actual request - it's just inspiration\n   - The user query is your primary input; the related LLM materials are secondary context\n   - If the related LLM request contains PII or sensitive details that the user query also mentions, still do NOT include that PII in your response\n\n4. **SPECIFIC SCENARIOS**:\n\n   - **Professional profiles/bios**: Include only professionally relevant information (career achievements, roles, skills visible in professional work). Invent specific believable career details. Never mention private identity information, medical details, relationship status, or background that wouldn't appear in a professional bio.\n   \n   - **Templates/tables**: Reproduce the exact structure requested with proper formatting. Include all sections, proper headers, and maintain the organizational structure the user specified.\n   \n   - **General knowledge questions**: Provide comprehensive, actionable answers in the user's language.\n   \n   - **Code/technical requests**: Provide complete, working code or technical solutions. Use placeholder values for any sensitive information (credentials, server addresses, API keys, etc.) but keep the code fully functional. Improve upon the original where possible (better error handling, cleaner structure, etc.) while preserving the user's original intent and behavior.\n   \n   - **News articles / content rewriting**: When the user provides a news article or content and asks you to rewrite or summarize it, produce a **publication-ready article that preserves all factual content, names, organizations, dates, locations, and quotations from the user's query**. Do NOT replace publicly available information with placeholders. The user wants a polished rewrite of the content they provided, not a redacted version. Only redact information if it is genuinely private/sensitive PII (e.g., home addresses, phone numbers, medical records) — publicly reported names, organizations, prize names, book titles, locations mentioned in news articles, and other publicly available facts should be KEPT as-is.\n   \n   - **Crash logs / debugging**: Provide thorough analysis with root-cause hypothesis, explanation of the stack trace, common causes, step-by-step debugging plan, recommended fixes, and platform-specific considerations.\n\n5. **KEY DISTINCTION - PUBLIC vs PRIVATE INFORMATION**:\n   - Information that is clearly PUBLIC (published in news articles, professional announcements, public award listings, published book titles, organization names, event dates, professional roles) should be INCLUDED in your response, not replaced with placeholders.\n   - Information that is PRIVATE (home addresses, personal phone numbers, medical records, deadnames, private family details, unpublished personal information) should be EXCLUDED or replaced with placeholders.\n   - When the user's query contains information from a published news source, press release, or public announcement, treat all names, titles, organizations, and facts in that content as public information that should be preserved in your response.\n\n6. **QUALITY MAXIMIZATION STRATEGIES**:\n   - For code: ensure it compiles/runs, has proper error handling, follows best practices\n   - For articles: maintain journalistic quality, proper structure, accurate quotations\n   - For analysis: be thorough, organized with clear sections, actionable\n   - For profiles: include specific, concrete details (dates, titles, roles) not vague generalities\n   - Always match the format and depth the user expects based on their query\n\nThe goal is to maximize both response quality (substantive, detailed, well-structured, genuinely useful) AND privacy protection (zero private PII leakage). Public information from published sources should be preserved; private information should never be disclosed.",
+      "fields": [
+        {
+          "prefix": "Related Llm Request:",
+          "description": "${related_llm_request}"
+        },
+        {
+          "prefix": "Related Llm Response:",
+          "description": "information from a powerful LLM responding to a related request"
+        },
+        {
+          "prefix": "User Query:",
+          "description": "the user's request you need to fulfill"
+        },
+        {
+          "prefix": "Response:",
+          "description": "your final response to the user's request"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

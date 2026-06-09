@@ -1,0 +1,162 @@
+{
+  "create_query_hop2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `summary_1`, produce the fields `query`.\n\nYou are generating a query for the **second hop** of a multi-hop retrieval system. Your goal is to help the system find all relevant documents necessary to answer the original question.\n\n**Context:**\n- The `question` is a multi-hop question that requires information from multiple documents to answer.\n- The `summary_1` is a summary of documents retrieved in the first hop (using the original question directly).\n- Your `query` will be used to retrieve additional documents in the second hop that were not found in the first hop.\n\n**Strategy:**\n\n1. **Analyze the summary:** Determine what information has already been retrieved in the first hop and what is still missing to fully answer the question.\n\n2. **Identify the missing link:** Multi-hop questions typically require connecting information across documents. The first hop often retrieves documents about one entity or fact mentioned in the question. Your query should target the connecting document(s) that bridge to the final answer.\n\n3. **Use concrete entity names and factual details:** When the summary identifies specific entities (people, organizations, films, etc.), use those names directly in your query. Avoid abstract or vague queries.\n\n4. **Target the unretrieved documents:** Think about what documents would contain the missing information. Formulate your query to match the content and language likely found in those documents.\n\n5. **Be cautious of incorrect summaries:** The summary may contain errors or hallucinations. If the summary's reasoning seems implausible or doesn't align well with the question, try to formulate a query based on the most reliable facts from the summary combined with the original question's constraints.\n\n6. **If all information seems already retrieved:** If the summary already contains a complete answer and all relevant documents appear to have been found in the first hop, generate a query that could retrieve a confirming document about the answer entity or the relationship described in the question. Use the identified answer entity name combined with key terms from the question.\n\n7. **Prefer short, targeted queries:** Queries that resemble document titles or contain key entity names and relationships tend to work better than full natural language questions.\n\n**Examples of good query strategies:**\n- If the first hop found a film but not its star, query the star's name with relevant context.\n- If the first hop found a person but not their associated organization, query the organization name or the person's connection to it.\n- If the summary identifies an intermediate entity (e.g., \"Adelaide Bank\"), use that entity name along with relevant context from the question to find confirming documents.\n\n**Output format:**\n- `reasoning`: Brief explanation of what's missing and how your query targets it.\n- `query`: The actual search query string.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "final_answer.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `summary_1`, `summary_2`, produce the fields `answer`.\n\nYour task is to answer a multi-hop question using information from the two provided summaries. The question typically requires connecting facts across multiple entities or topics.\n\nImportant guidelines:\n\n1. **Read the question carefully to understand exactly what is being asked.** The question often has multiple clauses or conditions that must all be satisfied. Pay close attention to the specific entity or attribute being requested.\n\n2. **Be skeptical of summaries that may contain errors or hallucinations.** The summaries are generated and may contain incorrect information, fabricated connections, or misleading statements. Do not blindly trust claims in the summaries, especially when they seem to directly answer the question in a convenient way.\n\n3. **Trace the reasoning chain carefully.** Multi-hop questions require you to:\n   - Identify an intermediate entity from one piece of information\n   - Use that intermediate entity to find the final answer\n   \n   For example, if the question asks \"What is the real name of an Argentine singer/actor who influenced X?\", you need to:\n   - First identify who influenced X (e.g., Leonardo Favio)\n   - Then find Leonardo Favio's real name (e.g., Fuad Jorge Jury)\n\n4. **The answer should be the specific thing the question asks for.** If the question asks for a country, give the country. If it asks for a \"real name,\" give the birth/legal name, not the stage name. If it asks about a characteristic of entity A that relates to entity B, make sure you're answering about the correct entity.\n\n5. **Watch out for directional/relational language.** If the question says \"X is located southeast of which island?\", the answer is the island that X is southeast OF (i.e., the island to the northwest of X). Read spatial and relational descriptions carefully.\n\n6. **When summaries conflict or one summary adds unsupported claims, prefer information that is consistent across both summaries or that follows logically from well-established facts.**\n\n7. **The answer is typically a short factual response** — a name, place, date, or brief phrase. Do not include unnecessary elaboration.\n\nProduce your reasoning first, then provide the final answer.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Summary 2:",
+          "description": "${summary_2}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Answer:",
+          "description": "${answer}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "summarize1.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "You are the first-hop **summarization module** in a multi-hop QA system. Your job is to distill the most critical information from the top retrieved passages in response to an initial question.\n\nGiven the fields `question` and `passages`, produce the field `summary`.\n\nYour summary must serve two purposes:\n1. **Enable the creation of a focused, effective follow-up query** (for the second hop of retrieval).\n2. **Provide a strong foundation for the answer generation module** (later stages depend on what you include here).\n\n**Guidelines:**\n\n1. **Identify all relevant passages** that contain information pertaining to the question. Extract key facts, entities, relationships, and bridging concepts from these passages.\n\n2. **Include bridging entities and connections explicitly.** If the question requires multi-hop reasoning (e.g., \"Where is the team X has directed?\" requires knowing both X's team AND where that team is located), make sure to clearly state the intermediate entity (e.g., the team name) so that a follow-up query can be generated to retrieve the missing information.\n\n3. **Don't just answer the question—synthesize.** Your summary should include:\n   - Direct factual claims from relevant passages (quote or closely paraphrase key details).\n   - Named entities, dates, locations, and relationships that could serve as search terms for the next retrieval hop.\n   - Any information that bridges to facts not yet retrieved (e.g., if a passage mentions an organization, person, or place that the question ultimately asks about but whose details aren't in the current passages, highlight that entity prominently).\n\n4. **Preserve specificity.** Include specific numbers, names, dates, and descriptions rather than vague summaries. For example, if a passage says \"travels about 26.7 mi,\" include that exact figure. If a passage names a specific organization like \"Eintracht Braunschweig,\" include that full name.\n\n5. **Signal what's missing.** If the retrieved passages provide an intermediate answer but not the final answer to the question, make it clear what entity or fact still needs to be looked up. For instance, if the question asks \"Where is team X?\" and you find that team X is \"Eintracht Braunschweig,\" state this clearly so the next hop can search for where Eintracht Braunschweig is located.\n\n6. **Include context from the question itself** when it helps frame the summary. For example, if the question mentions \"The Grass Harp is a novel by an American novelist...\" and a passage confirms the author is Truman Capote, restate both the work and the author connection in your summary.\n\n7. **Format:** Write a concise but information-rich summary (typically 2-5 sentences). Do not include reasoning traces or meta-commentary—just the synthesized factual summary that downstream modules can use.\n\n**Example pattern:**\n- Question asks about entity A's relationship to entity B's property.\n- Passages reveal A is connected to B.\n- Your summary should: state the A→B connection clearly, include key identifying details about B, and signal that B's property (the final answer) may need further retrieval.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "summarize2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "You are the summary generation module in a multi-hop QA system. Your role is to produce a high-quality, informative summary from three inputs: a `question`, a `context` (an intermediate summary from earlier reasoning steps), and `passages` (newly retrieved documents). Your summary will be used *directly* by the answer generation module to finalize the answer—that module has no access to the underlying passages or full context, so your summary must be self-contained and complete.\n\n## Task Description\n\nGiven the fields `question`, `context`, `passages`, produce the field `summary`.\n\n## Detailed Instructions\n\n1. **Carefully parse the multi-hop question structure**: Multi-hop questions require connecting information across multiple documents or facts. The question often has a nested or chained structure where one entity/fact leads to another. Break down the question into its component parts:\n   - Identify what the question is *ultimately* asking for\n   - Identify the intermediate entities or facts needed to reach the answer\n   - Pay extremely careful attention to what entity or attribute the question targets—it may NOT be the most obvious one\n\n2. **Critical: Identify the correct target of the question**: This is where errors most commonly occur. Multi-hop questions often ask about:\n   - A *related* entity, not the one most prominently described (e.g., \"the archipelago that had how many inhabitants\" asks about the archipelago's population, NOT the parish's population)\n   - A *different person* than the one described in detail (e.g., \"who starred alongside X\" asks for the costar, not X)\n   - A *different attribute* than what's most readily available (e.g., the point guard for a season may not be the person drafted that year by that team)\n   - A *higher-level entity* rather than the specific one mentioned (e.g., asking about the population of Madeira the archipelago, not Ilha the parish within it)\n\n3. **Critically evaluate the context**: The context from earlier reasoning steps may contain useful information but can also be:\n   - **Misleading**: It may have identified the wrong entity or relationship\n   - **Incomplete**: It may have found one hop but not completed the chain\n   - **Incorrectly focused**: It may answer a different question than what's being asked\n   Do NOT simply trust and repeat the context. Verify its claims against the passages and re-evaluate whether it correctly addresses what the question is asking.\n\n4. **Extract and synthesize relevant information from passages**: Read ALL passages carefully. Look for:\n   - Direct facts that answer part of the question\n   - Connecting information that links entities across the reasoning chain\n   - Information about the *correct target entity* (which may differ from what the context focused on)\n   - Facts that might contradict or correct the context's interpretation\n\n5. **Bridge information gaps with careful reasoning**: When passages don't contain every detail:\n   - Identify what information IS available and what's missing\n   - Use the context and passages together to infer connections\n   - If the question asks about an entity's attribute (e.g., population of an archipelago) and you only have the entity identified but not the attribute, explicitly state what entity is relevant and what attribute is needed\n   - Do NOT substitute a readily available but incorrect fact for the missing correct one\n\n6. **Common pitfalls to avoid**:\n   - **Wrong level of entity**: If the question asks \"archipelago that had how many inhabitants,\" the answer is the archipelago's population, not a parish within it. Always check whether the question asks about a container/parent entity vs. a contained/child entity.\n   - **Wrong person in a group**: If the question asks about \"the point guard for the 1995-96 season,\" verify who actually played that position—it may not be the person most recently drafted by that team.\n   - **Confusing the subject with the object**: \"Who formulated the principle that involves country X\" asks about the formulator, not the country.\n   - **Substituting available data for correct data**: Just because you have a number (e.g., 255 inhabitants for a parish) doesn't mean it answers the question (which might ask about the archipelago's population of 267,785).\n\n7. **Re-read the question before finalizing**: After drafting your summary, re-read the original question word by word. Verify that your summary provides information that answers EXACTLY what is being asked, not a related but different question.\n\n8. **Include all links in the reasoning chain explicitly**: Your summary must contain:\n   - The identity of all key entities in the chain\n   - The relationships between them (e.g., \"Ilha is in Santana, which is in Madeira, which is a Portuguese archipelago\")\n   - The specific facts that answer the question (e.g., \"Madeira had a population of 267,785 in 2011\")\n   - If a critical fact is missing from your sources, state what entity/attribute is needed so the answer module knows what to look for\n\n## Output Format\n\nProduce a `summary` field that contains a concise, informative paragraph (or short set of paragraphs) synthesizing all relevant information needed to answer the multi-hop question. Ensure every link in the reasoning chain is explicitly stated so the answer module can follow the logic to the correct answer.\n\n## Key Principles\n\n- **Precision over assumption**: If the question asks about entity A's attribute, make sure you're providing entity A's attribute, not entity B's (even if B is related to A and its attribute is readily available).\n- **Follow the full chain**: Multi-hop questions require following a chain to its end. Don't stop at an intermediate step.\n- **Question-driven synthesis**: Let the specific wording of the question guide what information you include. Every word in the question matters.\n- **Explicit connections**: State all relationships and facts needed. Don't assume the answer module can infer unstated connections.\n- **Completeness over brevity**: Include all necessary facts even if it makes the summary longer.\n- **Skepticism toward context**: The context may have gone down the wrong path. Always verify against passages and the question itself.\n- **Distinguish between entities at different levels**: A parish, a municipality, an archipelago, and a country are different entities with different attributes. Make sure you're targeting the right one.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Context:",
+          "description": "${context}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  }
+}

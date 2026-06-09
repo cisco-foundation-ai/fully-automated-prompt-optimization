@@ -1,0 +1,166 @@
+{
+  "create_query_hop2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim` and `summary_1`, produce the fields `query`.\n\nYour task is to generate search queries that will help retrieve evidence documents relevant to verifying the claim. The summary provides partial information gathered so far, and your query should target the gaps in knowledge needed to fully verify or refute the claim.\n\n**Key Guidelines:**\n\n1. **Identify missing information:** Carefully read the summary to determine what facts are still needed to verify the claim. Focus on information gaps explicitly noted in the summary (e.g., missing birth years, death dates, launch dates, character roles, etc.).\n\n2. **Generate queries that retrieve Wikipedia-style entity pages:** Your queries are used to retrieve evidence documents, which are typically Wikipedia articles or similar reference pages about specific entities (people, places, organizations, etc.). Therefore:\n   - Include simple, direct queries for the key entities involved in the claim, especially those whose details are missing or incomplete in the summary.\n   - Rather than asking complex multi-part questions, prefer shorter queries that name the specific entity you need information about.\n   - For example, if you need the birth year of \"Morgan Llywelyn,\" a good query would be: \"Morgan Llywelyn\" — this will retrieve her Wikipedia page which contains her birth year.\n\n3. **Cover ALL key entities, especially individual cast/crew members:** Make sure your query can help retrieve pages for ALL major entities mentioned in the claim and summary that still need verification. This is critical:\n   - If the claim involves a film's cast, don't just search for the film — also search for individual actors/people mentioned in the cast, especially those who might have connections to other parts of the claim.\n   - For example, if a claim says \"a star of Film X played Character Y in Film Z,\" you need to identify which specific actor from Film X's cast could have played that role, and then query for that specific actor's name to retrieve their filmography page.\n   - When a summary lists a cast (e.g., \"starring Samuel L. Jackson, John Rhys-Davies, Jeff Goldblum...\"), consider which of those individuals might be the link to the other part of the claim, and query for that specific person.\n\n4. **Think about the logical connections in the claim:** Many claims involve chains of reasoning (e.g., \"the director of X also did Y\" or \"a star of X played a character in Y\"). Identify the linking entity — the person, place, or thing that connects different parts of the claim — and make sure to query for that specific entity. Often the key evidence is on the Wikipedia page of a specific person mentioned in the summary's cast list or other details.\n\n5. **Use entity names as queries:** When you need to retrieve a Wikipedia-style page about a person, place, or thing, simply use their name as part of your query. Short, entity-focused queries (e.g., \"John Rhys-Davies,\" \"Robert Jordan author,\" \"Paul Bowles,\" \"Chris Columbus filmmaker\") tend to work better for document retrieval than long natural-language questions.\n\n6. **Disambiguate common names:** When querying for people with common names, add a disambiguating term like their profession (e.g., \"Chris Columbus filmmaker\" rather than just \"Chris Columbus,\" which might retrieve the explorer). This helps retrieve the correct Wikipedia page.\n\n7. **Multiple entities, multiple query terms:** If multiple pieces of evidence are needed, you can combine them into one query or produce a query that mentions multiple entity names to maximize retrieval coverage. For example: \"Morgan Llywelyn birth year Robert Jordan birth year\" or \"Morgan Llywelyn Robert Jordan.\" However, be careful not to make queries so long that they become ineffective.\n\n8. **Prioritize the most likely linking entities:** When a claim connects two domains (e.g., a comedy film and a Bond film), look at the cast list provided in the summary and identify which specific person is most likely to be the bridge between those domains. Query for that person specifically. For instance, if a claim says \"a star of The Great White Hype played General Pushkin in a Bond film,\" and the summary lists John Rhys-Davies in the cast, query for \"John Rhys-Davies\" since he is a character actor known for appearing in many films including action/adventure roles.\n\n9. **Reasoning field:** Before producing the query, provide a brief reasoning that identifies:\n   - What the claim asserts\n   - What the summary already confirms\n   - What information is still missing\n   - Which specific entities/documents need to be retrieved to fill those gaps\n   - Which person or entity from the summary is most likely the \"linking\" entity that connects different parts of the claim\n\nProduce the output in the following format:\n- `reasoning`: Brief analysis of what's known and what's missing, including identification of the most likely linking entity\n- `query`: The search query designed to retrieve the missing evidence documents",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "create_query_hop3.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `summary_1`, `summary_2`, produce the field `query`.\n\nYour task is to generate a search query that will help retrieve evidence documents relevant to verifying the claim. The summaries provide analysis of the claim and identify key entities, facts, and corrections.\n\n**Instructions:**\n\n1. Read the claim carefully and identify the key entities, relationships, and facts that need to be verified.\n\n2. Read both summaries to understand what evidence was found, what corrections were made, and what key entities are mentioned (especially named entities like people, places, organizations, etc.).\n\n3. Generate a query that is designed to retrieve the most relevant evidence documents. Your query should:\n   - Focus on the key named entities mentioned in the summaries (e.g., specific people, places, works) that are central to verifying the claim.\n   - Include the names of specific people, places, or things identified in the summaries, even if they are corrections or clarifications of what the claim states.\n   - Be broad enough to retrieve documents about the key entities themselves, not just narrow questions about specific attributes.\n   - Prioritize retrieving documents about the most important entities that serve as evidence for or against the claim.\n\n4. **Important:** If the summaries identify a specific person, place, or entity (e.g., \"Delmer Daves,\" \"Christian Poulsen,\" \"Moonlite BunnyRanch\"), make sure your query includes those entity names directly. The goal is to retrieve Wikipedia-style articles or evidence pages about those entities. A query like \"Delmer Daves filmmaker career\" is better than \"Who co-wrote Flirtation Walk with Lou Edelman?\" because the former will directly retrieve the relevant evidence document.\n\n5. If the summaries identify that a premise of the claim is incorrect (e.g., no Nigerian midfielder played in a certain match), your query should still target the actual entities involved (e.g., the actual midfielder who played) so that evidence can be retrieved to demonstrate why the claim is wrong.\n\n6. **Critical Strategy - Multiple Targeted Queries:** When a claim involves multiple distinct entities or facts that need verification, consider whether a single combined query might fail to retrieve some evidence documents. In such cases, structure your query to ensure each key entity can be independently matched. Specifically:\n   - If the claim involves a film, person, or event, include the specific title/name AND any key people (actors, directors) associated with it as identified in the summaries.\n   - For films or creative works mentioned in the claim, include both the title and year (e.g., \"Separation 2013 film\") as a retrievable unit, AND separately include key people associated with it (e.g., actor names like \"Sarah Manninen\" or \"Peter Capaldi\").\n   - For entities that are the subject of their own Wikipedia article (like a specific film, person, or place), make sure your query would plausibly match that article's title or opening paragraph.\n\n7. **Handling Lesser-Known Entities:** When summaries mention specific people, actors, or entities that may not be widely known, include their names explicitly in the query. Even if the summaries don't mention a specific actor by name, think about what entity articles would contain the evidence needed. For example, if verifying who starred in a specific film, the film's own article would list its cast.\n\n8. **Query Construction Tips:**\n   - Prefer shorter, more targeted queries over long ones with many terms, as long queries may fail to match any single document well.\n   - If you must include many entities, prioritize the ones most likely to appear together in a single evidence document.\n   - Consider that evidence documents are typically Wikipedia-style articles about a single topic (a person, film, place, event).\n   - When a claim connects two entities (e.g., \"the star of X also appeared in Y\"), you may need evidence from BOTH entity articles. Structure your query to retrieve at least the most informative one, ideally the one that explicitly states the connection.\n\n**Strategy:** Think of your query as targeting the retrieval of encyclopedia-style articles about the key entities mentioned in the summaries. Use the proper names and identifying details from the summaries to construct queries that would match those documents. When multiple separate evidence documents are needed, ensure your query terms would help retrieve each of them — sometimes this means including a specific person's name alongside a film title, or including both a film title and its key cast member separately.\n\nProduce only the `query` field.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Summary 2:",
+          "description": "${summary_2}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "summarize1.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `passages`, produce the fields `summary`.\n\nYour task is to analyze a claim and a set of passages, then produce a summary that:\n\n1. Identifies the key entities, relationships, and facts mentioned in the claim\n2. Cross-references these with information found in the passages\n3. Clarifies what is accurate and what is inaccurate in the claim based on the passages\n4. Explicitly names all relevant people, works, and connections - even when the claim uses indirect references (e.g., \"the star of Sayonara\" refers to Marlon Brando, \"series developer\" refers to Frank Darabont)\n\nImportant guidelines:\n\n- **Resolve indirect references**: When the claim refers to someone indirectly (e.g., \"G.D. Spradlin's collaborator,\" \"the star of Sayonara,\" \"this series developer\"), use the passages to identify who is actually being referenced and explicitly name them in your summary. If a passage mentions a collaboration (e.g., both appearing in the same film), state the connection and name the person.\n\n- **Make all implicit connections explicit**: If passage A mentions that Person X appeared in Film Y, and passage B mentions that Person Z also appeared in Film Y, state that connection explicitly. The summary should bridge information across multiple passages to resolve the claim's references.\n\n- **Name all key entities**: Your summary will be used to generate search queries to find evidence relevant to the claim. Therefore, explicitly mention all important names (people, films, characters, etc.) that are relevant, even if the claim only refers to them indirectly. For example, if the claim says \"the star of Sayonara\" and the passages indicate this is Marlon Brando, your summary must mention \"Marlon Brando\" by name.\n\n- **Distinguish between roles**: Clearly differentiate between actors, characters they play, directors, and other roles. For example, Rod Steiger is an actor who played a character (Charlie) in \"On the Waterfront\" — he is not himself a character portrayed by someone else.\n\n- **Correct factual errors in the claim**: If the claim conflates a director with a character, misattributes a role, or makes other factual errors, clearly state what the correct information is according to the passages.\n\n- **Include nationality/origin details**: When passages provide information about someone's nationality or origin (e.g., \"French-Hungarian-American\"), include this as it may be relevant to evaluating the claim.\n\n- **Be comprehensive but concise**: Include all information necessary to evaluate the claim and generate useful search queries, but avoid unnecessary repetition.\n\nYour summary should serve as a bridge between the claim and the evidence, making it easy to formulate queries that will retrieve documents confirming or refuting the claim's assertions.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "summarize2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `context`, `passages`, produce the fields `summary`.\n\nYour task is to analyze a claim by cross-referencing it with the provided context and passages, then produce a concise summary that captures the key factual relationships and entities relevant to verifying the claim. Your summary will be used to generate search queries to retrieve evidence documents, so it must include all important named entities, relationships, and factual details that connect the claim to verifiable evidence.\n\n**Instructions:**\n\n1. **Analyze the claim:** Identify all factual assertions, named entities, relationships, and any potential inaccuracies in the claim.\n\n2. **Cross-reference with context and passages:** Use the provided context and passages to verify or refute each part of the claim. Pay attention to:\n   - Correct names, titles, and roles of people mentioned\n   - Dates, publication years, and temporal relationships\n   - Connections between entities (e.g., authorship, adaptation, location)\n   - Any factual errors in the claim (e.g., wrong titles, wrong nationalities, wrong dates)\n\n3. **Produce a summary that:**\n   - States the verified factual chain connecting entities in the claim\n   - Explicitly names all key entities using their full, correct identifiers (e.g., \"George IV of the United Kingdom\" rather than just \"George IV\" or \"King of the United Kingdom\")\n   - Clearly identifies any inaccuracies in the claim and provides the correct information\n   - Includes enough specific detail that search queries derived from the summary would successfully retrieve relevant evidence documents\n   - Connects all intermediate entities in the reasoning chain (e.g., if the claim says \"the author whose work inspired film X,\" your summary should name that author explicitly)\n\n4. **Key principles:**\n   - Always use the most specific and complete names for entities (full titles, full names, specific identifiers) to maximize retrievability\n   - When the claim contains an error (e.g., wrong country, wrong year, wrong title), state both what the claim says AND what the correct information is\n   - Ensure every link in the chain of reasoning is explicitly stated with named entities\n   - Do not omit intermediate connections that would be needed to find evidence\n   - Be concise but comprehensive — every factual detail that could help retrieve evidence should be included\n\n**Output format:** Produce a `summary` field containing a concise paragraph that captures the verified (or refuted) factual relationships in the claim, with all key entities explicitly named.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Context:",
+          "description": "${context}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

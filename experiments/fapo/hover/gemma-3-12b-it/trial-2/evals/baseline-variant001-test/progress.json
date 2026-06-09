@@ -1,0 +1,19 @@
+{
+  "run_id": "hephaestus-hover-tfpmo0",
+  "status": "completed",
+  "total_cases": 300,
+  "completed_cases": 300,
+  "started_at": "2026-05-27T19:12:00.458763+00:00",
+  "updated_at": "2026-05-27T19:20:09.709728+00:00",
+  "avg_composite_score": 17.0,
+  "weighted_avg_score": null,
+  "score_breakdown_averages": {
+    "recall": 17.0,
+    "partial_recall": 57.666666666666664,
+    "num_gold": 3.0,
+    "num_found": 1.73,
+    "num_missing": 1.27
+  },
+  "failed_case_ids": [],
+  "in_flight_case_ids": []
+}

@@ -1,0 +1,16 @@
+{
+  "model": "gpt-4.1-mini",
+  "model_short": "gpt41mini",
+  "model_name": "gpt-4.1-mini",
+  "provider": "openai",
+  "trial": 1,
+  "tenants": [
+  "aime2025",
+  "hotpotqa",
+  "hover",
+  "ifbench",
+  "livebench_math",
+  "papillon"
+],
+  "created_at": "2026-05-20T01:34:54+00:00"
+}

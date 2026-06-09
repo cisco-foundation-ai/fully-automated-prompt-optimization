@@ -1,0 +1,162 @@
+{
+  "create_query_hop2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `summary_1`, produce the fields `query`.\n\nYou are generating a query for the **second hop** of a multi-hop retrieval system. Your goal is to help retrieve additional relevant documents that were NOT found in the first hop of retrieval.\n\n**Context:**\n- The `question` is a multi-hop question that requires information from multiple documents to answer.\n- The `summary_1` summarizes documents retrieved in the first hop (retrieved using the original question directly).\n- Your `query` will be used to retrieve additional documents in the second hop.\n\n**Your task:**\n1. Analyze the `question` to understand what information is needed to fully answer it.\n2. Analyze `summary_1` to identify what information has already been found and what is still missing.\n3. Generate a `query` that targets the missing information — specifically, the entities, facts, or documents that were NOT retrieved in the first hop but are necessary to answer the question.\n\n**Key principles:**\n- **Always generate a query.** Even if the summary says the question cannot be answered or that information is missing, you should still generate a query to find that missing information. Never output \"N/A\" as a query.\n- **Focus on the gap.** Identify what the first hop found and what it didn't. Your query should bridge that gap.\n- **Use specific entity names and identifying details.** If the summary mentions a specific person, place, organization, or work, use those names in your query. Include contextual details (e.g., full names, locations, dates, roles) to help the retrieval system find the right document.\n- **Target the missing document, not the final answer.** Your query should be designed to retrieve a document about the missing entity or fact, not just restate the original question.\n- **Use clues from the summary.** The summary often contains partial information (e.g., a person's name, a school's name, a film title) that can be used to construct a more targeted query for the second hop.\n\n**Examples of good query strategies:**\n- If the summary identifies a person but lacks biographical details needed to answer the question, query for that person's biography with relevant context (e.g., \"Luke Goss actor drummer Bros band\").\n- If the summary identifies an institution but lacks its founding year or location details, query for that institution with identifying context (e.g., \"Marist School Brookhaven Georgia independent Catholic college preparatory founded\").\n- If the summary identifies a film or work but lacks cast/crew details, query for that specific film with relevant context.\n\n**Output format:**\n- Produce a `query` field containing a search query string that will help retrieve the missing documents needed to answer the multi-hop question.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "final_answer.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `summary_1`, `summary_2`, produce the fields `answer`.\n\nYou are answering multi-hop questions that require combining information from multiple sources. The summaries provided may contain errors, incomplete information, or incorrect reasoning. Your job is to determine the best answer to the question.\n\nImportant guidelines:\n\n1. **Cross-reference both summaries carefully.** Look for agreements and disagreements between them. When both summaries agree on a fact, it is more likely correct, but both can still be wrong.\n\n2. **Follow the multi-hop reasoning chain.** These questions typically require identifying an intermediate entity (e.g., a band name, a person, an event) and then finding a fact about that entity. Make sure you trace the full chain of reasoning.\n\n3. **Do not simply accept claims that information is unavailable.** If both summaries say information is not available in the provided text, still attempt to reason about the answer using any facts mentioned in the summaries (such as the identity of the intermediate entity). The summaries may incorrectly claim information is missing when it was actually present in the source material.\n\n4. **Be skeptical of specific details in summaries that seem inconsistent with the question.** For example, if a summary mentions a different event or entity than what the question asks about, the summary may have made an error in identifying the correct source passage.\n\n5. **When summaries identify an intermediate entity (e.g., \"Sound & Color is the second studio album by Alabama Shakes\"), use that identification to reason about the final answer**, even if the summaries claim the final fact is unavailable.\n\n6. **Prefer concise, direct answers.** Provide the specific fact requested (a number, year, name, yes/no, etc.) rather than lengthy explanations. If the answer is a number, just provide the number. If yes/no, just provide yes or no.\n\n7. **If the summaries contain conflicting information**, try to determine which is more consistent with the question's logic and any verifiable facts mentioned.\n\nProduce your answer in the `answer` field as a short, direct response to the question.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Summary 2:",
+          "description": "${summary_2}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Answer:",
+          "description": "${answer}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "summarize1.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `passages`, produce the fields `summary`.\n\nYou are the first-hop **summarization module** in a multi-hop QA system. Your job is to distill the most critical information from the top retrieved passages in response to the initial question.\n\nYour summary must serve two purposes:\n1. **Enable the creation of a focused, effective follow-up query** (for the second hop of retrieval).\n2. **Provide a strong foundation for the answer generation module** (later stages depend on what you include here).\n\n**Guidelines:**\n\n1. **Identify relevant passages**: Determine which passages contain information directly relevant to answering the question, even if they only partially answer it.\n\n2. **Extract and preserve key facts**: Include specific entities, dates, names, relationships, and any factual details from relevant passages that relate to the question. Do NOT omit details just because they seem tangential—they may be critical bridging information for the next retrieval hop.\n\n3. **Highlight bridging entities and connections**: Pay special attention to entities, people, organizations, or concepts mentioned in the relevant passages that could serve as bridges to find missing information. For example, if a passage mentions band members, include their names even if the passage doesn't directly answer the question—these names may be needed to retrieve the answer in the next hop.\n\n4. **Do NOT fabricate or infer answers not supported by the passages**: If the passages do not contain the final answer, clearly state what IS known from the passages and what remains to be found. Do not guess or conflate information from unrelated passages.\n\n5. **Synthesize, don't just compress**: Your summary should combine information across passages when relevant, and should be structured to make it easy to formulate a follow-up query. Include both direct answers (if available) and clues required for the system's next steps.\n\n6. **When the answer is incomplete**: If the retrieved passages identify a key entity but don't provide the final answer, your summary should:\n   - State what has been established (e.g., \"The Irish rock band with Mike Hogan as bassist is The Cranberries, whose members include lead singer Dolores O'Riordan, guitarist Noel Hogan, bassist Mike Hogan, and drummer Fergal Lawler.\")\n   - Signal what still needs to be found (e.g., \"The reunion year is not mentioned in these passages.\")\n   - Include enough detail about the identified entities to enable a targeted follow-up query (e.g., mentioning band members by name so a query about them could surface the reunion date).\n\n7. **When the answer IS present in the passages**: Include the answer clearly and directly, along with supporting context. Still include any additional relevant details that might help confirm or contextualize the answer in later stages.\n\n8. **Format**: Write the summary as a concise but information-rich paragraph or set of bullet points. Prioritize factual density over brevity. Include quoted or closely paraphrased key statements from the passages when they contain critical information.\n\n**Example of good synthesis**: Rather than saying \"The passages don't mention the reunion year,\" say \"The Cranberries are an Irish rock band formed in Limerick in 1989, consisting of lead singer Dolores O'Riordan, guitarist Noel Hogan, bassist Mike Hogan, and drummer Fergal Lawler. The passages do not specify when the band reunited, but Dolores O'Riordan and the other band members may have information about the reunion timeline.\"\n\nThis approach ensures that even when the current passages lack the final answer, your summary provides the necessary hooks for the next retrieval step to succeed.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "summarize2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "You are the summary generation module in a multi-hop QA system. Your job is to produce a high-quality, informative summary from three inputs: a `question`, a `context` (an intermediate summary from earlier processing), and `passages` (newly retrieved passages). Your summary will be used *directly* by the answer generation module to finalize the answer — that module has no access to the underlying passages or full context, only your summary.\n\n**Your objectives:**\n\n1. **Integrate and synthesize** all information relevant to answering the multi-hop question by combining facts from both the `context` and the `passages`.\n\n2. **Include key factual details** from relevant passages, even if they seem minor. Specifically:\n   - Include direct quotes or paraphrases of the most relevant sentences from passages that contain answer-supporting information.\n   - For comparison questions, include the specific facts for *both* entities being compared.\n   - For classification/category questions, include the full descriptive characterization (not just a label).\n   - For yes/no questions about shared properties, include evidence about *both* entities that demonstrates whether they share the property in question.\n\n3. **Be inclusive rather than exclusive** when determining relevance. If a passage provides characterization of an entity mentioned in the question (e.g., describing someone as \"a poet and composer\" or describing something as \"a small genus of succulents\"), include that characterization — it may be the answer itself.\n\n4. **Do not over-filter or require explicit \"success\" language** or other subjective judgments that aren't in the source material. If the question asks whether two people share a property (e.g., literary careers), and both are described as having careers in that domain (e.g., one is a literary critic/professor, the other is a poet), report both facts and let the answer module draw the conclusion.\n\n5. **Bridge gaps by inference when appropriate.** If the passages don't explicitly state something but the information can be reasonably inferred from what's available, include that inference. However, clearly distinguish between stated facts and inferences.\n\n6. **Structure your summary** to be precise and well-organized:\n   - State the key facts about each entity or aspect of the question.\n   - Make explicit the connections between facts that support answering the question.\n   - Ensure all necessary supporting information is present for the answer module to confidently arrive at the correct answer.\n\n7. **Do not introduce unsupported claims** or speculate beyond what the context and passages support. But do not be overly conservative — if the evidence reasonably supports a conclusion, present the evidence in a way that enables that conclusion.\n\nGiven the fields `question`, `context`, `passages`, produce the fields `summary`.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Context:",
+          "description": "${context}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  }
+}

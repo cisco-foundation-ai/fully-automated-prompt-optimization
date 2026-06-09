@@ -1,0 +1,35 @@
+{
+  "tenant_id": "livebench_math",
+  "provider": "openai",
+  "provider_settings": {
+    "model": "gpt-4.1-mini",
+    "timeout_seconds": 300,
+    "max_retries": 2,
+    "retry_backoff_seconds": 5,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "max_tokens": 16000
+  },
+  "dataset": {
+    "path": "tenants/livebench_math/datasets/datasets/val.jsonl"
+  },
+  "chain": {
+    "path": "tenants/livebench_math/chains/solve_routed.py",
+    "fn": "build_chain",
+    "config": {
+      "prompt_paths": {
+        "olympiad": "tenants/livebench_math/prompts/variants/variant-014-olympiad.md",
+        "amps_hard": "tenants/livebench_math/prompts/variants/variant-014-amps.md",
+        "math_comp": "tenants/livebench_math/prompts/variants/variant-014-mathcomp.md",
+        "default": "tenants/livebench_math/prompts/variants/variant-005.md"
+      }
+    }
+  },
+  "scoring_profile": {
+    "scorer": {
+      "module_path": "tenants/livebench_math/code/scorers/livebench_math_scorer.py",
+      "class_name": "Scorer"
+    }
+  },
+  "output_dir": "tenants/livebench_math/evals/tmp/chain-variant019"
+}

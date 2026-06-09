@@ -1,0 +1,76 @@
+{
+  "generate_response_module.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Respond to the query by carefully following ALL formatting and constraint instructions specified within it. Pay close attention to these key requirements:\n\n1. **Constraint Instructions**: The query may contain specific constraints about your response format, content, or style (e.g., letter frequency limits, bullet point counts, section formatting, repetition requirements). You must follow ALL of them precisely.\n\n2. **Repetition Instructions**: If asked to \"repeat the request word for word without change,\" you must repeat the ENTIRE query text exactly as written (excluding only the sentence that tells you to repeat it, if it says \"the request you need to repeat does not include this sentence\"). Do not add any words, characters, or formatting before the repetition. The repetition must come first, before your answer.\n\n3. **Section/Paragraph Formatting**: If instructed to have a specific number of sections marked with \"Paragraph X,\" ensure you have EXACTLY that many sections, each properly labeled. For example, if it says \"3 sections,\" you need Paragraph 1, Paragraph 2, and Paragraph 3.\n\n4. **Bullet Points**: If instructed to use a specific number of bullet points, provide exactly that number using markdown format (e.g., \"* This is a point\").\n\n5. **Letter/Word Constraints**: If the query specifies that certain letters should appear a limited number of times, carefully construct your response to satisfy that constraint.\n\n6. **Content**: Answer the actual question or task accurately and helpfully while satisfying all formatting constraints.\n\n7. **Priority**: When multiple instructions exist, satisfy ALL of them simultaneously. Do not sacrifice one constraint to fulfill another.\n\nAlways parse the query thoroughly before responding to identify every instruction and constraint that must be followed.",
+      "fields": [
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Response:",
+          "description": "${response}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "ensure_correct_response_module.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "You are tasked with evaluating and finalizing responses to user queries. Your job is to ensure the response is correct, complete, and adheres to all constraints specified in the query.\n\nKey responsibilities:\n\n1. **Identify all constraints in the query**: Carefully read the entire query to identify both the main task AND any formatting/structural constraints (e.g., \"First repeat the request word for word without change, then give your answer\", \"Your response should contain at least X sentences\", etc.).\n\n2. **Verify constraint compliance**: Check that the response follows every constraint exactly. Pay special attention to:\n   - **Word-for-word repetition requirements**: If the query asks to \"repeat the request word for word without change,\" the repetition must be EXACT - including all punctuation, spacing, and formatting. Even minor differences (like changing a period to a space, or combining sentences differently) count as violations. The repeated portion should match the original character-for-character.\n   - **\"Do not say any words or characters before repeating the request\"**: The very first character of the response must be the start of the repeated request. No preamble, no labels, no extra text before it.\n   - **\"The request you need to repeat does not include this sentence\"**: The instruction sentence itself (about repeating) should NOT be included in the repetition.\n   - **Minimum/maximum sentence or word counts**: Count carefully to ensure compliance.\n   - **Content requirements**: Ensure the actual answer/content portion is accurate and complete.\n\n3. **Verify factual correctness**: Check that any calculations, facts, or logical reasoning in the response are correct.\n\n4. **Produce the final response**: Output the corrected/verified response that satisfies all constraints. If the original response already meets all requirements, output it as-is. If it needs corrections (especially for exact repetition requirements), fix them.\n\nWhen a query contains a repetition instruction like \"First repeat the request word for word without change, then give your answer (1. do not say any words or characters before repeating the request; 2. the request you need to repeat does not include this sentence)\":\n- Identify the exact text that constitutes \"the request\" (everything in the query EXCEPT the repetition instruction sentence itself)\n- Reproduce that text with perfect fidelity as the first part of your response\n- Then provide the answer after the repeated text\n\nYour response will be used as the final response, so accuracy and constraint adherence are critical.",
+      "fields": [
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        },
+        {
+          "prefix": "Response:",
+          "description": "${response}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Final Response:",
+          "description": "${final_response}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

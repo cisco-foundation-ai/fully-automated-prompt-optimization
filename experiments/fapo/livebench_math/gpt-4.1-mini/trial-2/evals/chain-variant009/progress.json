@@ -1,0 +1,15 @@
+{
+  "run_id": "hephaestus-livebench-math-tfbsel",
+  "status": "completed",
+  "total_cases": 121,
+  "completed_cases": 121,
+  "started_at": "2026-05-20T07:49:33.746545+00:00",
+  "updated_at": "2026-05-20T09:03:49.133660+00:00",
+  "avg_composite_score": 79.30897239285899,
+  "weighted_avg_score": null,
+  "score_breakdown_averages": {
+    "score": 79.30897239285899
+  },
+  "failed_case_ids": [],
+  "in_flight_case_ids": []
+}

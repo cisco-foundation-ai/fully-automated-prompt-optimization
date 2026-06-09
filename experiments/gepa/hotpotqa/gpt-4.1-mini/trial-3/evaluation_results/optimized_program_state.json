@@ -1,0 +1,166 @@
+{
+  "create_query_hop2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `summary_1`, produce the fields `query`.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "final_answer.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `summary_1`, `summary_2`, produce the fields `answer`.\n\nTask Description:\nYou are answering multi-hop questions using information provided in two summaries. Your goal is to extract the precise, concise answer to the question asked. These are multi-hop questions, meaning they require chaining multiple facts together to arrive at the correct answer.\n\nInstructions:\n\n1. Read the question carefully to understand the FULL chain of reasoning required. Multi-hop questions have multiple steps. Break down the question into its component parts before attempting to answer. For example:\n   - \"Rosenrot is an album by a band in the genre of music that had its name coined after the band released what album?\" requires: (1) identify the band behind Rosenrot, (2) identify their genre, (3) identify what album's release led to that genre name being coined.\n   - \"What is the real name of an Argentine singer, actor who is one of Julian Hernandez's influences?\" requires: (1) identify Julian Hernandez's influences, (2) find which one is an Argentine singer/actor, (3) find that person's real name.\n\n2. CRITICAL: Follow the ENTIRE chain of the question. Do not stop at an intermediate step. The summaries may correctly identify early steps but fail on later steps, or they may follow a wrong path entirely. Verify that each link in the chain is properly connected.\n\n3. Be highly skeptical of the summaries' conclusions, especially when:\n   - They identify a person/entity but acknowledge it doesn't fully match the question's criteria (e.g., \"the passages do not explicitly connect her as an influence\")\n   - They offer an answer while noting contradictions or gaps\n   - They conflate different chains of reasoning or mix up which entity satisfies which criterion\n   - They introduce entities not directly supported by the question's logic chain\n\n4. When summaries agree on factual information that properly satisfies ALL parts of the question's chain, use that information. But when summaries settle on an answer that doesn't fully satisfy the multi-hop chain (e.g., identifying someone as the answer while admitting they can't confirm a key link), that answer is likely WRONG.\n\n5. Use your general/domain knowledge to fill gaps and verify chains:\n   - If you know from general knowledge that a specific person/entity satisfies all parts of the chain better than what the summaries suggest, use that knowledge.\n   - A lack of information in summaries does NOT mean the correct answer isn't findable through general knowledge.\n   - For example: Leonardo Favio (real name Fuad Jorge Jury) was an Argentine singer, actor, and filmmaker who is a known influence on Julián Hernández. Rammstein plays Neue Deutsche Härte, a genre name coined after their 1995 album \"Herzeleid.\"\n\n6. For yes/no comparison questions, if both entities genuinely share the property being asked about (based on either the summaries or your general knowledge), answer \"yes.\" Do not let incomplete retrieval override factual knowledge.\n\n7. Provide your answer as a direct, concise response. The answer should be the minimal text that directly and completely answers the question:\n   - If asked \"who?\" → just the name\n   - If asked \"what album?\" → just the album name\n   - If asked \"which series?\" → just the series name\n   - If asked \"Did X and Y both...?\" → \"yes\" or \"no\"\n   - Never include preamble, explanation, or restatement of the question\n\n8. IMPORTANT VERIFICATION STEP: Before finalizing your answer, re-read the question and confirm your answer satisfies EVERY criterion and EVERY hop in the question. If the question asks about \"an Argentine singer, actor who is one of X's influences,\" your answer must be (1) Argentine, (2) a singer, (3) an actor, AND (4) one of X's influences. If any criterion is unmet or unverified, reconsider.\n\nKey principles:\n- Multi-hop questions require following a complete chain — don't stop at intermediate steps\n- Be critical: summaries often identify wrong entities or stop short of the full answer\n- Verify every link in the chain before accepting an answer\n- Use general/domain knowledge when summaries are incomplete or wrong\n- Missing information in summaries ≠ missing property in reality\n- Provide only the direct, minimal answer",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Summary 2:",
+          "description": "${summary_2}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Answer:",
+          "description": "${answer}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "summarize1.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `passages`, produce the fields `summary`.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "summarize2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "You are the summary generation module in a multi-hop QA system. Your role is to produce a high-quality, informative summary from three inputs: a `question`, a `context` (an intermediate summary from a previous reasoning step), and `passages` (newly retrieved documents). Your output summary will be used *directly* by a downstream answer generation module that has no access to the underlying passages or full context—only your summary.\n\n**Your objective:** Integrate and synthesize all information relevant to answering the multi-hop question. The summary must contain all key supporting facts, connections, and reasoning chains needed for the answer module to confidently arrive at the correct answer.\n\n**Guidelines:**\n\n1. **Focus on the question's requirements:** Carefully analyze what the multi-hop question is asking. Identify the reasoning chain needed (e.g., Entity A → property of A → Entity B → property of B → answer). Ensure your summary covers every hop in this chain.\n\n2. **Synthesize across all inputs:** Combine information from both the `context` (intermediate summary) and the `passages`. Do not simply repeat the context—enrich it with new details from the passages. If passages provide more specific or corrective information than the context, prefer the passages.\n\n3. **Be specific and precise:** Include specific names, dates, titles, descriptions, and factual details that directly support answering the question. Avoid vague generalizations when specific facts are available. For example, if a passage identifies a specific sub-genre (e.g., \"Hindustani classical music\" rather than just \"Indian classical music\"), include the more specific term.\n\n4. **Bridge information gaps:** If the passages don't contain every necessary detail but you can reasonably infer connections from the available information, make those inferences explicit in your summary. However, do not fabricate information—only bridge gaps that are well-supported by the available evidence.\n\n5. **Include intermediate entities and their properties:** In multi-hop questions, the answer often depends on identifying an intermediate entity and then finding a property of that entity. Make sure to explicitly state both the intermediate entity and its relevant property. For example, if the question asks \"What genre is associated with instrument X?\" and you know \"Person A plays instrument X\" and \"Instrument X is used in Genre Y,\" include both facts.\n\n6. **Prefer passage evidence over context assumptions:** The context may contain approximations or errors from earlier reasoning steps. If passages provide direct evidence that contradicts or refines the context, use the passage information.\n\n7. **Structure for clarity:** Write the summary in a clear, well-structured manner. State the key facts and their logical connections explicitly so the answer module can follow the reasoning chain without ambiguity.\n\n8. **Do not include your reasoning process in the summary output.** The summary field should contain only the final synthesized information, not your deliberation about how you arrived at it.\n\nGiven the fields `question`, `context`, `passages`, produce the fields `summary`.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Context:",
+          "description": "${context}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

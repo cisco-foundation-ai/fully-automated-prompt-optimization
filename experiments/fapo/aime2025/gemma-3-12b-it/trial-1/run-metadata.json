@@ -1,0 +1,57 @@
+{
+  "model": "google.gemma-3-12b-it",
+  "model_short": "gemma12b",
+  "model_name": "bedrock/google.gemma-3-12b-it",
+  "provider": "litellm",
+  "trial": 1,
+  "tenants": [
+    "aime2025",
+    "hotpotqa",
+    "hover",
+    "ifbench",
+    "livebench_math",
+    "papillon"
+  ],
+  "created_at": "2026-05-20T01:34:56+00:00",
+  "papillon_best": {
+    "config": "tenants/papillon/configs/local-optimization-variant011.json",
+    "composite": 97.41,
+    "quality": 98.2,
+    "privacy": 96.6,
+    "prompts": {
+      "redact_query": "tenants/papillon/prompts/modules/redact_query/variant-006.md",
+      "reconstruct_response": "tenants/papillon/prompts/modules/reconstruct_response/variant-002.md"
+    },
+    "variants_used": 12,
+    "variants_budget": 50
+  },
+  "hover_best": {
+    "config": "tenants/hover/configs/local-optimization-variant013.json",
+    "composite": 58.33,
+    "partial_recall": 82.56,
+    "prompts": {
+      "summarize1": "tenants/hover/prompts/modules/summarize1/variant-007.md",
+      "query_hop2": "tenants/hover/prompts/modules/query_hop2/variant-008.md",
+      "summarize2": "tenants/hover/prompts/modules/summarize2/variant-007.md",
+      "query_hop3": "tenants/hover/prompts/modules/query_hop3/variant-008.md"
+    },
+    "chain_params": {
+      "retrieval_k": 10,
+      "retrieval_k_hop3": 10
+    },
+    "variants_used": 37,
+    "variants_budget": 50
+  },
+  "ifbench_best": {
+    "config": "tenants/ifbench/configs/local-optimization-variant001.json",
+    "composite": 87.97,
+    "instruction_adherence_val": 87.97,
+    "instruction_adherence_test": 42.18,
+    "prompts": {
+      "generate": "tenants/ifbench/prompts/modules/generate/variant-009.md",
+      "verify": "tenants/ifbench/prompts/modules/verify/variant-004.md"
+    },
+    "variants_used": 9,
+    "variants_budget": 50
+  }
+}

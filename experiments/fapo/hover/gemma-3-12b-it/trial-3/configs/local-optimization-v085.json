@@ -1,0 +1,44 @@
+{
+  "tenant_id": "hover",
+  "provider": "litellm",
+  "provider_settings": {
+    "model": "bedrock/google.gemma-3-12b-it",
+    "timeout_seconds": 300,
+    "max_retries": 2,
+    "retry_backoff_seconds": 5,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "max_tokens": 16000
+  },
+  "dataset": {
+    "path": "tenants/hover/datasets/datasets/val.jsonl"
+  },
+  "chain": {
+    "path": "tenants/hover/chains/multi_hop_v2f.py",
+    "fn": "build_chain",
+    "config": {
+      "prompt_paths": {
+        "summarize1": "tenants/hover/prompts/modules/summarize1/variant-004.md",
+        "query_hop2": "tenants/hover/prompts/modules/query_hop2/variant-008.md",
+        "summarize2": "tenants/hover/prompts/modules/summarize2/variant-006.md",
+        "extract_entities": "tenants/hover/prompts/modules/extract_entities/variant-001.md",
+        "query_hop3": "tenants/hover/prompts/modules/query_hop3/variant-008.md",
+        "query_hop3b": "tenants/hover/prompts/modules/query_hop3b/variant-006.md",
+        "query_hop3c": "tenants/hover/prompts/modules/query_hop3c/variant-009.md"
+      },
+      "retrieval_k": 200,
+      "retrieval_k_hop3": 55,
+      "retrieval_k_hop3b": 65,
+      "retrieval_k_hop3c": 65,
+      "bm25_data_dir": "tenants/hover/data/bm25"
+    }
+  },
+  "scoring_profile": {
+    "scorer": {
+      "module_path": "tenants/hover/code/scorers/hover_scorer.py",
+      "class_name": "Scorer"
+    }
+  },
+  "output_dir": "tenants/hover/evals/optimization-v085",
+  "max_workers": 5
+}

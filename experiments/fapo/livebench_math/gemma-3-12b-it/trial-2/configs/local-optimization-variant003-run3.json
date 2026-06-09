@@ -1,0 +1,32 @@
+{
+  "tenant_id": "livebench_math",
+  "provider": "litellm",
+  "provider_settings": {
+    "model": "bedrock/google.gemma-3-12b-it",
+    "timeout_seconds": 300,
+    "max_retries": 2,
+    "retry_backoff_seconds": 5,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "max_tokens": 16000
+  },
+  "dataset": {
+    "path": "tenants/livebench_math/datasets/datasets/val.jsonl"
+  },
+  "chain": {
+    "path": "tenants/livebench_math/chains/solve.py",
+    "fn": "build_chain",
+    "config": {
+      "prompt_paths": {
+        "solve": "tenants/livebench_math/prompts/variants/variant-003.md"
+      }
+    }
+  },
+  "scoring_profile": {
+    "scorer": {
+      "module_path": "tenants/livebench_math/code/scorers/livebench_math_scorer.py",
+      "class_name": "Scorer"
+    }
+  },
+  "output_dir": "tenants/livebench_math/evals/tmp/chain-variant003-run3"
+}

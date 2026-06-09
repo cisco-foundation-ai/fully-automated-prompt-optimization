@@ -1,0 +1,37 @@
+{
+  "predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Solve the question and provide the answer in the correct format.\n\nFor math computation questions (like computing geometric means, integrals, etc.), show your work step by step and put your final answer in LaTeX inside a $\\boxed{}$.\n\nFor multiple-choice questions where the instructions say to duplicate the letter five times:\n1. Solve the problem carefully, showing your work.\n2. Double-check your arithmetic and logic before committing to an answer.\n3. Once you determine the answer letter (A, B, C, D, or E), write it five times consecutively as your final answer (e.g., CCCCC).\n4. Be especially careful with modular arithmetic, cycle detection, and edge cases in recursive sequences.\n5. When computing units digits or values mod 10, verify your formula by checking against known small cases before extrapolating.\n6. Be very careful with combinatorial problems — double-check for overcounting or undercounting. For problems involving factoring integers into distinct integer roots, carefully enumerate ALL valid factorizations (including those with negative factors) and verify distinctness.\n7. Your FINAL line of output should be ONLY the five repeated letters (e.g., AAAAA). Do not put anything after it.\n\nFor formula-matching questions where you need to fill in missing tags in a solution with given expressions:\n\n1. Read the ENTIRE solution carefully before attempting to match any expressions. Understand the full logical flow first.\n2. For each <missing X> tag, determine which <expression Y> best fits based on the mathematical meaning and logical flow of the proof.\n3. Pay very careful attention to what each expression actually represents:\n   - Substitution expressions (like \"(x, 1) → ...\") represent specific variable substitutions being made in the functional equation. These typically fill blanks that describe \"making a substitution.\"\n   - Result expressions (like \"f(x) = x + 1\") represent conclusions derived from substitutions.\n   - Intermediate expressions represent steps between substitutions and conclusions.\n4. When the solution says \"substitution 1, 2, 3\" followed by \"it follows from (2) and (3) that...\", the substitutions are the expressions showing specific (x,y) values being plugged in, and what follows is a derived result.\n5. Key distinctions to watch for:\n   - A substitution like \"(x, 1) → f(x + f(x)) = xf(1) + 2\" is the ACT of substituting, not the conclusion.\n   - A statement like \"f(x) = x + 1\" is a CONCLUSION about the function.\n   - An inequality like \"xy + f(x) > x > 1\" is a CONDITION or observation about domains.\n   - A verification like \"f(xy + f(x)) = xy + x + 2 = xf(y) + 2\" CONFIRMS a solution works.\n6. When the solution says \"let x > 1 and <missing>\", the blank likely describes a condition on y (like y ≤ 1) or a specific choice of y.\n7. When the solution says \"since f(x) = x + 1, <missing>, so <missing>\", the first blank is likely an intermediate calculation and the second is a conclusion.\n8. Expressions can potentially be reused (same expression filling multiple blanks), but carefully verify whether that makes mathematical sense.\n9. Some expressions may not be used at all — don't force every expression to appear.\n10. Focus on what makes mathematical sense in context rather than trying to use each expression exactly once.\n\nCRITICAL additional guidelines for formula-matching based on learned patterns:\n\n11. Pay extremely close attention to the GRAMMATICAL and STRUCTURAL context of each blank:\n    - \"Abbreviate <missing>\" → expects a NOTATION DEFINITION (like \"[n] := {1,...,n}\"), not a complex formula\n    - \"we first rewrite... as <missing> <missing> <missing>\" → expects a CHAIN OF EQUALITIES showing the rewriting steps\n    - \"define the <missing> variables <missing> for each <missing>\" → first blank is a NUMBER (like n²), second is the VARIABLE NAME, third is the INDEX SET\n    - \"the previous expression simplifies to just <missing>\" → expects the SIMPLIFIED FORM\n    \n12. When a solution presents a chain of rewriting steps (e.g., \"rewrite LHS as <missing 4> <missing 5> <missing 6>\"), these should follow logical order:\n    - First: the original expression rewritten with indicator functions\n    - Second: switching order of summation  \n    - Third: the final simplified form\n    \n13. When matching \"For the terms p=q, <missing> <missing>\" and \"When p≠q we instead have <missing> <missing>\":\n    - The FIRST blank in each pair should be the COMPUTATION/IDENTITY used (e.g., sum equals 1)\n    - The SECOND blank should be the INEQUALITY/BOUND derived from it (e.g., by QM-AM ≥ 1/n)\n    \n14. For construction/equality conditions: \"if <missing> is the same for all p\" → expects a VARIABLE (like v_{p,p}), not a full equation.\n\n15. Distinguish carefully between:\n    - An abbreviation/definition (e.g., \"[n] := {1,...,n}\")  \n    - A variable name (e.g., \"v_{p,q}\")\n    - A computation showing a sum equals something (e.g., \"∑v_{p,p} = 1\")\n    - An inequality bound (e.g., \"⟹ ∑v_{p,p}² ≥ 1/n\")\n    - A rewriting step (e.g., \"= ∑∑ x_i/|A_i| · x_j/|A_j| · |A_i∩A_j|²\")\n\n16. When multiple expressions look similar, use the surrounding text to disambiguate:\n    - \"Abbreviate\" → short notation definition\n    - \"rewrite\" → algebraic manipulation showing equality\n    - \"it follows\" / \"combining\" → derived bound or conclusion\n    - \"define\" → introducing new notation\n\nImportant verification step: After matching, re-read the solution with your chosen expressions filled in and verify the logical flow makes sense as a coherent mathematical argument. Check that each sentence reads grammatically and mathematically correctly with the filled expression.\n\nYour final answer for formula-matching questions should be STRICTLY in the format:\n\n<Detailed reasoning>\n\nAnswer: <comma separated list of numbers representing expression identifiers>\n\nFor example, if expression 5 fills <missing 1>, expression 22 fills <missing 2>, and expression 3 fills <missing 3>, write:\nAnswer: 5, 22, 3",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Answer:",
+          "description": "${answer}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

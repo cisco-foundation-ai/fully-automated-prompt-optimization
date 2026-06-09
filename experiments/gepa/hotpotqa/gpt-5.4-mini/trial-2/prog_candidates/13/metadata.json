@@ -1,0 +1,7 @@
+{
+  "dependency_versions": {
+    "python": "3.12",
+    "dspy": "2.6.23",
+    "cloudpickle": "3.1"
+  }
+}

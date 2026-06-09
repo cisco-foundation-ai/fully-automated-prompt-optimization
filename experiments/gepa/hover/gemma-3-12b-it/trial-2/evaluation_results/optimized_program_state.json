@@ -1,0 +1,162 @@
+{
+  "create_query_hop2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `summary_1`, produce the field `query`.\n\nYour task is to generate a search query that will help retrieve evidence relevant to verifying the claim. The summary provides initial information gathered about the claim, but there may be gaps or missing connections that need to be filled.\n\nKey guidelines for generating effective queries:\n\n1. **Identify the specific missing entity or fact that needs to be verified.** Read the claim carefully and determine what the summary has NOT yet resolved. Focus your query on filling that specific gap.\n\n2. **Query for the specific named entities themselves, not abstract relationships or quoted phrases.** Avoid using quoted multi-word phrases like \"similar to Vefa Kilise\" or \"near Galata Bridge\" — these are unlikely to appear verbatim in any article. Instead, query for the proper nouns and key terms that would appear in encyclopedia-style articles about the relevant entities.\n\n3. **Think about what Wikipedia article titles or content would contain the answer.** If you need to find the winner of a specific tournament, query for that tournament's name and year. If you need to find a mosque related to another mosque, think about what architectural or historical connections exist and query for terms that would appear in the relevant Wikipedia article.\n\n4. **When the claim references an entity indirectly (e.g., \"the first one of two races\"), think about what that entity's actual name might be.** For NASCAR races at a track, there are typically two races per year — a spring race and a fall race. If the claim mentions \"the first one of two races\" at Richmond Raceway, query for the spring race at Richmond (which has had different sponsor names over the years). Query for the track name, the time period mentioned, and relevant sponsor/brand information separately rather than combining everything into one overly specific query.\n\n5. **Use simple, broad queries with key proper nouns rather than complex quoted phrases.** A query like `Richmond Raceway NASCAR spring race 2007 sponsor` is more effective than `\"Federated Auto Parts 400\" sponsors 2007 2008 2009 2010 2011 \"Diageo\" \"alcoholic beverage brands\"`. The former will match articles about the actual race (which may have a different name than the fall race), while the latter is too specific and may miss the actual article.\n\n6. **When looking for connections between entities, query for the intermediate entity.** For example:\n   - If you need to find \"a mosque like Vefa Kilise,\" think about what mosques in Istanbul share architectural characteristics with Vefa Kilise (both are former Byzantine churches converted to mosques) and query for `Istanbul former church converted mosque Byzantine`.\n   - If you need to find a sponsor owned by Diageo, query for `Diageo brands` or the specific race name during that era (e.g., `Richmond Raceway spring race NASCAR 2007`).\n   - If you need to find the winner of a tournament, query for the tournament name and year directly (e.g., `2015 Family Circle Cup Singles winner`).\n\n7. **Include the names of specific entities identified in the summary AND the unresolved entities from the claim.** If the summary identifies that Vefa Kilise is a former Byzantine church converted to a mosque, and the claim mentions \"a mosque that is like Vefa Kilise,\" query for other mosques that share that characteristic (former Byzantine churches in Istanbul converted to mosques).\n\n8. **For claims involving \"the first/second of two\" events, or indirect references to related events, think about what the actual name of that related event might be.** Events at the same venue often have different names based on their sponsors. Query for the venue + time period + context to find the actual event name.\n\n9. **Consider that the answer might be a well-known proper noun that you should query for directly.** For example:\n   - The spring NASCAR race at Richmond has been called the \"Toyota Owners 400\" and was previously sponsored by Crown Royal.\n   - Kalenderhane Mosque is another former Byzantine church converted to a mosque in Istanbul.\n   - Angelique Kerber won the 2015 Family Circle Cup.\n   \n   Think about what specific proper nouns would appear in the Wikipedia articles that contain the evidence, and include terms that would help surface those articles.\n\n10. **Keep queries concise (3-7 key terms) and avoid boolean-style constructions.** Use the most distinctive proper nouns and terms that would appear in the target article. Multiple specific terms are better than long quoted phrases.\n\n11. **When the summary identifies one entity but you need a related entity, query for the relationship.** For example, if you know Vefa Kilise is a former Byzantine church in Istanbul converted to a mosque, and you need to find another mosque \"like\" it, query for: `Istanbul Byzantine church converted mosque` — this will surface articles about similar mosques like Kalenderhane Mosque.\n\nIn summary: Generate concise queries using specific proper nouns and key terms that would appear in the Wikipedia articles containing the missing evidence. Avoid overly complex quoted phrases. Think about what the actual name of the missing entity might be, and query for terms that would appear in that entity's encyclopedia entry.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "create_query_hop3.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `summary_1`, `summary_2`, produce the field `query`.\n\nYour task is to generate a search query that will help retrieve Wikipedia articles or evidence passages relevant to verifying the claim. The summaries provide context about what information is relevant to the claim and what entities/facts are involved.\n\nKey guidelines for generating effective queries:\n\n1. **Target specific entities mentioned in the summaries**: Rather than asking broad questions, create queries that target specific entities, people, teams, films, or events mentioned in the summaries that are central to verifying the claim.\n\n2. **Generate queries that can retrieve Wikipedia-style article titles**: The evidence you're trying to retrieve consists of Wikipedia articles or similar reference documents. Your query should be designed to match the titles or key content of such articles. Think about what the Wikipedia article title would be for the missing evidence.\n\n3. **Cover ALL key entities in the claim and summaries**: Don't focus on just one entity. If the claim involves multiple entities (e.g., two people, multiple teams, a person and a film), make sure your query addresses each of them specifically. Consider generating a query that includes the names of all relevant entities.\n\n4. **Use specific names and identifying details**: Include full names of people, exact titles of works, specific team names, years, and other identifying details from the summaries. For example, if a summary mentions \"John Candy\" and \"Planes, Trains and Automobiles,\" include both in your query.\n\n5. **Think about what evidence might be stored under less obvious article titles**: Sometimes the relevant evidence is stored under a specific season (e.g., \"1974-75 New York Islanders season\"), a person's full disambiguation (e.g., \"Jeff Martin Canadian musician\"), or a specific film/album title. Consider what related articles might exist that aren't immediately obvious from the claim alone but are suggested by the summaries.\n\n6. **Prioritize entity-specific queries over question-format queries**: Instead of asking \"What bands were X and Y in?\", try queries like \"Jeff Martin Canadian musician Kyle Patrick\" or \"John Candy Planes Trains and Automobiles Dell Griffith\" that directly name the entities and concepts that would appear in relevant evidence documents.\n\n7. **Include contextual qualifiers from the summaries**: If a summary provides disambiguating information (like nationality, profession, time period, or specific roles), include those qualifiers in your query to help retrieve the correct evidence.\n\nYour query should be a single search string optimized to retrieve the maximum number of relevant evidence passages needed to verify or refute the claim.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Summary 2:",
+          "description": "${summary_2}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "summarize1.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `passages`, produce the fields `summary`.\n\nYour task is to analyze a claim and a set of passages, then produce a summary that connects information from the passages to help identify evidence relevant to verifying the claim. The summary will be used to generate queries to retrieve additional evidence documents.\n\n**Key Instructions:**\n\n1. **Identify all entities mentioned in the passages that could be relevant to the claim.** Pay special attention to named individuals, especially those who won championships, participated in events, or are otherwise connected to the claim's subject matter.\n\n2. **Follow chains of connection.** Claims often require multi-hop reasoning. For example:\n   - If a claim mentions \"the father of a TCW Tag Team Championship winner,\" first identify who won the TCW Tag Team Championship from the passages (e.g., Scott Anton, Erik Watts), then consider who their fathers might be.\n   - If a claim mentions \"the singer of [song title] was part of [show],\" identify the show from the passages, then note that the singer of that song needs to be connected to the show.\n   - If a claim mentions \"the Nigerian midfielder that played in [game],\" identify all players mentioned in that game's passage, even if their nationality isn't explicitly stated as Nigerian in the passage.\n\n3. **Name all specific people, events, and entities explicitly in your summary.** Do not leave connections implicit. If a passage mentions winners of a championship (e.g., \"Scott Anton & Erik Watts\"), name them explicitly in your summary, as these names are crucial for generating follow-up queries.\n\n4. **Do not dismiss information as irrelevant prematurely.** Even if a passage doesn't perfectly match every detail in the claim (e.g., the claim says \"Nigerian\" but the passage says \"Danish\"), still include the relevant names and connections in your summary. The passages may contain partial information that leads to the correct answer through additional retrieval.\n\n5. **Do not fabricate information.** Only state what is directly supported by the passages. If a connection requires external knowledge (e.g., who someone's father is, or who sang a particular song), note the gap explicitly so that queries can be generated to fill it.\n\n6. **Include all potentially relevant named entities from the passages in your summary**, especially:\n   - Winners of championships or competitions mentioned in the claim\n   - Participants in events mentioned in the claim\n   - People connected to TV shows, films, or other works mentioned in the claim\n   - Any person whose biographical details (birth dates, nationalities, roles) might relate to the claim\n\n7. **Structure your summary to highlight the chain of reasoning needed:**\n   - State what the passages confirm\n   - Identify the specific named entities that form links in the reasoning chain\n   - Note what additional information is needed to complete the verification\n\nFor example, if the claim is about \"the father of a TCW Tag Team Championship winner\" and a passage states the TCW Tag Team Championship was won by \"Scott Anton & Erik Watts,\" your summary should explicitly name both Scott Anton and Erik Watts as TCW Tag Team Championship winners and note that their fathers' birth dates need to be verified.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "summarize2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `context`, `passages`, produce the fields `summary`.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Context:",
+          "description": "${context}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  }
+}

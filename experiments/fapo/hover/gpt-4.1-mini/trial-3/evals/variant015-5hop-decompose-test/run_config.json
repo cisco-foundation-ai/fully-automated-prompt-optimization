@@ -1,0 +1,44 @@
+{
+  "run_id": "hephaestus-hover-tfmvkh",
+  "tenant_id": "hover",
+  "provider": "openai",
+  "provider_settings": {
+    "model": "gpt-4.1-mini",
+    "timeout_seconds": 300,
+    "max_retries": 2,
+    "retry_backoff_seconds": 5,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "max_tokens": 16000
+  },
+  "dataset_path": "tenants/hover/datasets/datasets/test.jsonl",
+  "scoring_profile": {
+    "scorer": {
+      "module_path": "tenants/hover/code/scorers/hover_scorer.py",
+      "class_name": "Scorer"
+    }
+  },
+  "max_workers": 5,
+  "chain": {
+    "path": "tenants/hover/chains/multi_hop_5hop.py",
+    "fn": "build_chain",
+    "config": {
+      "prompt_paths": {
+        "summarize1": "tenants/hover/prompts/modules/summarize1/variant-005.md",
+        "query_hop2": "tenants/hover/prompts/modules/query_hop2/variant-007.md",
+        "summarize2": "tenants/hover/prompts/modules/summarize2/variant-004.md",
+        "query_hop3": "tenants/hover/prompts/modules/query_hop3/variant-007.md",
+        "summarize3": "tenants/hover/prompts/modules/summarize3/variant-002.md",
+        "query_hop4": "tenants/hover/prompts/modules/query_hop4/variant-003.md",
+        "summarize4": "tenants/hover/prompts/modules/summarize4/variant-001.md",
+        "query_hop5": "tenants/hover/prompts/modules/query_hop5/variant-002.md"
+      },
+      "retrieval_k": 2000,
+      "retrieval_k_hop2": 500,
+      "retrieval_k_hop3": 500,
+      "retrieval_k_hop4": 500,
+      "retrieval_k_hop5": 500,
+      "bm25_data_dir": "tenants/hover/data/bm25"
+    }
+  }
+}

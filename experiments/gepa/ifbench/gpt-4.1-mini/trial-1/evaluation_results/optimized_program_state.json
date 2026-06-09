@@ -1,0 +1,76 @@
+{
+  "generate_response_module.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Respond to the query by carefully following ALL instructions and constraints specified within it. The query may contain:\n\n1. A primary task or question to answer (e.g., a math problem, creative writing prompt, or general question)\n2. One or more formatting/style constraints (e.g., \"do not include keywords [...]\", \"refrain from the use of any commas\", \"the word X should appear at least N times\", \"first repeat the request word for word without change, then give your answer\")\n\nYou must satisfy EVERY constraint simultaneously. Pay close attention to:\n\n- **Keyword restrictions**: If told not to include certain keywords, ensure none of those exact words appear anywhere in your response.\n- **Punctuation restrictions**: If told to avoid certain punctuation (like commas), ensure that punctuation does not appear anywhere in your entire response, including in repeated text.\n- **Word frequency requirements**: If told a word must appear at least N times, count carefully to ensure you meet or exceed that threshold.\n- **Ordering/formatting requirements**: If told to repeat the request first and then answer, do exactly that—start your response with the verbatim request text, then provide your answer. Do not add any preamble before the repeated request.\n- **Multiple constraints**: When multiple constraints are present, ensure compliance with ALL of them simultaneously. Do not sacrifice one constraint to satisfy another.\n\nWhen solving math word problems, show your work in reasoning but present the final answer clearly. When doing creative writing, fulfill the creative prompt fully while adhering to all stated constraints.\n\nAlways re-read your response before finalizing to verify every constraint is met.",
+      "fields": [
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Response:",
+          "description": "${response}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "ensure_correct_response_module.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "You are tasked with evaluating whether an assistant's response correctly follows ALL instructions/constraints specified in the query. Your job is to:\n\n1. Identify all explicit instructions and constraints in the query (e.g., \"repeat the request word for word\", \"response should contain less than 17 sentences\", \"finish with this exact phrase\", \"the word X should appear at least N times\", \"words with all capital letters should appear less than N times\", \"response must contain at least N placeholders represented by square brackets\", etc.)\n\n2. Check whether the provided response adheres to EACH of these instructions/constraints.\n\n3. In your reasoning, analyze each constraint separately and determine if it was followed correctly. Be precise in your counting and verification:\n   - When checking sentence counts, carefully count each sentence in the response. A sentence typically ends with a period, question mark, or exclamation mark. Be thorough—count every single sentence and ensure the total meets the \"at least N sentences\" or \"less than N sentences\" requirement.\n   - When checking word appearance counts, search for every instance of the specified word (case-insensitive unless otherwise stated) and verify the count meets the requirement.\n   - When checking for capitalized words, identify all words written entirely in capital letters and count them.\n   - When checking for placeholders in square brackets, count all instances of text enclosed in square brackets like [this].\n\n4. In your final_response, provide the corrected response that properly adheres to ALL constraints. The final_response should be the complete, properly formatted response as it should appear to the end user.\n\nKey guidelines:\n- Format constraints (like \"repeat the request first\", \"end with exact phrase\", sentence limits, etc.) must be followed precisely in the final_response.\n- Content constraints (like the topic or question being answered) must also be satisfied.\n- If the original response's content/answer is correct but formatting constraints were violated, fix the formatting while preserving the correct content. For example, if a response needs at least 35 sentences but only has 29, you must add additional relevant sentences to meet the minimum.\n- If the response correctly refuses unethical requests, maintain that refusal while ensuring all format constraints are met.\n- Pay special attention to instructions about exact phrases - they must appear character-for-character as specified, including punctuation.\n- When instructions say \"no other words should follow this phrase,\" ensure absolutely nothing (no newlines, spaces, or characters) comes after the specified ending phrase.\n- When instructions say to repeat the request \"word for word without change,\" reproduce the original query text exactly (excluding meta-instructions about repeating).\n- When counting sentences, be meticulous. Count each sentence individually. If the constraint says \"at least 35 sentences,\" make sure there are 35 or more distinct sentences in the final_response.\n- When a response is close to meeting a constraint but falls short (e.g., 29 sentences when 35 are needed), add additional relevant content sentences to meet the requirement rather than declaring it compliant.\n\nYour response format should be:\n- reasoning: Your analysis of whether constraints were followed and what needs to be fixed\n- final_response: The corrected response that properly follows all constraints",
+      "fields": [
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        },
+        {
+          "prefix": "Response:",
+          "description": "${response}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Final Response:",
+          "description": "${final_response}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Solve the question and provide the answer in the correct format.\n\nImportant guidelines:\n\n1. For characteristic polynomial problems: Use the convention det(A - λI) rather than det(λI - A). This means the leading coefficient of the highest degree term should be negative (for odd-dimensional matrices). Specifically, for a 3×3 matrix, the characteristic polynomial should start with -λ³. If you compute det(λI - A), negate the entire result to get the standard form det(A - λI).\n\n2. For geometric mean problems: Compute the nth root of the product of n numbers. Simplify to exact form.\n\n3. For formula matching problems: Read the solution context very carefully. Pay attention to the logical flow - what makes sense grammatically and mathematically in each blank. Consider that \"X is a factor of Y\" means X divides Y, so the simpler/smaller expression should fill the \"X\" slot and the larger expression should fill the \"Y\" slot. Double-check by re-reading the completed sentence with your choices filled in.\n\n   Additional guidance for formula matching:\n   - Pay very close attention to the sequential logical structure of the proof/solution. Each missing tag should be filled with an expression that makes the mathematical argument flow correctly.\n   - When the solution describes rewriting a sum using indicator functions and switching order of summation, the sequence typically goes: (a) original LHS expression expanded, (b) intermediate rewriting steps showing the switching of summation order, (c) final simplified form. Match expressions to the step they represent in this logical chain.\n   - Distinguish between expressions that DEFINE variables (like \"v_{p,q} := ...\") versus expressions that USE those variables (like \"v_{p,p}\" or \"v_{p,q}\"). Definitions typically appear when the solution says \"define\" or introduces notation, while uses appear in subsequent calculations.\n   - When the solution says \"the previous expression simplifies to just <missing>\", this should be the compact form using the newly defined variables (e.g., \"LHS = sum of v_{p,q}^2\"), NOT the final bound.\n   - For equality/construction sections, carefully distinguish between conditions on variables (like \"|A_i| = ℓ\") versus the objects themselves (like \"A_i\"). \"Takes <missing> to be all subsets\" needs an object (like A_1, ..., A_k), while \"<missing> for all i\" needs a condition.\n   - Multi-line derivations split across multiple missing tags should follow the logical order: first the computation/equality, then the inequality/bound derived from it.\n\n4. Always put your final answer in a $\\boxed{}$ unless the question specifies a different format (like a comma-separated list, or a repeated letter string for multiple choice).\n\n5. Pay careful attention to the specific format requested in the question. If the question asks for a specific format (e.g., \"Your answer should be in the form of a list of numbers\"), follow that format exactly. If the question asks you to duplicate a multiple-choice letter five times, do exactly that (e.g., \"AAAAA\"). If the question says the answer is an integer consisting of exactly 3 digits (including leading zeros), ranging from 000 to 999, provide exactly 3 digits as your final answer (e.g., 068 or 972), and make sure this 3-digit number appears within the last 50 characters of your response.\n\n6. Double-check your arithmetic and algebraic manipulations, especially signs and exponents.\n\n7. For indefinite integrals: Use standard substitution techniques. Remember to substitute back to the original variable. The answer may vary by a constant C.\n\n8. For combinatorics/counting problems: Be systematic in enumeration. Consider all cases and verify distinctness conditions carefully.\n\n9. When a question includes specific output format instructions (like \"duplicate that letter five times in a single string\"), follow those instructions precisely in your final answer.\n\n10. For geometry problems involving tetrahedra, triangles, and inradii:\n    - For isosceles tetrahedra (where opposite edges are equal), use the Cayley-Menger determinant to compute the volume exactly. The volume formula is: 288V² = det of the Cayley-Menger matrix.\n    - The inradius formula for a tetrahedron is r = 3V/S where S is the TOTAL surface area (sum of all four face areas) and V is the volume.\n    - For an isosceles tetrahedron with opposite edges equal (a, b, c), all four faces are congruent triangles with sides a, b, c. So the total surface area is 4 times the area of one face.\n    - Compute face areas using Heron's formula with the three edge lengths of each face.\n    - Keep calculations exact using fractions and radicals rather than approximating with decimals, as approximations compound errors and make it impossible to identify the correct simplified form.\n\n11. For competition geometry problems involving chains of tangent circles inside triangles:\n    - Set up the problem using half-angles of the triangle. If B and C are the base angles, the key relationships involve cot(B/2) and cot(C/2).\n    - For n circles of radius r tangent to base BC, sequentially tangent to each other, with the first tangent to AB and last tangent to AC: the horizontal distance occupied relates to the angles and radius through the formula involving cot(B/2) + cot(C/2) and the number of circles.\n    - The distance from vertex B to the center of the first circle (projected onto BC) is r·cot(B/2), and similarly the distance from C to the last circle center is r·cot(C/2).\n    - The total base length is: BC = r·cot(B/2) + 2r(n-1) + r·cot(C/2) = r[cot(B/2) + cot(C/2) + 2(n-1)].\n    - When two different configurations (different r and n) fit the same triangle, set up two equations and solve the system.\n    - The inradius of a triangle equals (s-a)tan(A/2) where s is the semi-perimeter, or equivalently r_in = (Area)/(semi-perimeter).\n    - Use the relationship: inradius = (BC × tan(B/2) × tan(C/2)) / (tan(B/2) + tan(C/2)) or similar formulas connecting the inradius to the base and base angles.\n\n12. For problems requiring exact symbolic answers: Always prefer exact computation over numerical approximation. When you need to verify a form like m√n/p, compute the exact value symbolically and then verify it matches. Do not rely on decimal approximations to guess the answer.\n\n13. For GCD/number theory problems: Use the Euclidean algorithm systematically. Double-check each division step.\n\n14. For competition math problems: If your approach leads to contradictions or seems overly complex, step back and look for a cleaner formulation. Many competition problems have elegant solutions that avoid heavy computation.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Answer:",
+          "description": "${answer}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

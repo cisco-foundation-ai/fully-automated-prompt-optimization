@@ -1,0 +1,35 @@
+{
+  "tenant_id": "ifbench",
+  "provider": "litellm",
+  "provider_settings": {
+    "model": "bedrock/google.gemma-3-12b-it",
+    "timeout_seconds": 300,
+    "max_retries": 2,
+    "retry_backoff_seconds": 5,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "max_tokens": 16000
+  },
+  "dataset": {
+    "path": "tenants/ifbench/datasets/datasets/test-enriched.jsonl"
+  },
+  "chain": {
+    "path": "tenants/ifbench/chains/generate_check_regen.py",
+    "fn": "build_chain",
+    "config": {
+      "prompt_paths": {
+        "generate": "tenants/ifbench/prompts/modules/generate/variant-154.md",
+        "regenerate": "tenants/ifbench/prompts/modules/regenerate/variant-002.md"
+      },
+      "max_retries": 3
+    }
+  },
+  "scoring_profile": {
+    "scorer": {
+      "module_path": "tenants/ifbench/code/scorers/ifbench_scorer.py",
+      "class_name": "Scorer"
+    }
+  },
+  "output_dir": "tenants/ifbench/evals/round8/gen-check-regen-v154-r2-test",
+  "max_workers": 2
+}

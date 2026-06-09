@@ -1,0 +1,16 @@
+{
+  "model": "google.gemma-3-12b-it",
+  "model_short": "gemma12b",
+  "model_name": "bedrock/google.gemma-3-12b-it",
+  "provider": "litellm",
+  "trial": 2,
+  "tenants": [
+  "aime2025",
+  "hotpotqa",
+  "hover",
+  "ifbench",
+  "livebench_math",
+  "papillon"
+],
+  "created_at": "2026-05-20T01:34:56+00:00"
+}

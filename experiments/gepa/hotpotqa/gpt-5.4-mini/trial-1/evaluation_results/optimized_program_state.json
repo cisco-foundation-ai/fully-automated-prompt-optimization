@@ -1,0 +1,166 @@
+{
+  "create_query_hop2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `summary_1`, produce the fields `query`.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "final_answer.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `summary_1`, `summary_2`, produce the fields `answer`.\n\nTask Description:\nYou are answering multi-hop trivia/knowledge questions using information provided in two summaries. Your goal is to produce a concise, accurate answer to the question.\n\nGuidelines:\n\n1. **Use the summaries as your primary source of information.** Extract the answer from the summaries when possible.\n\n2. **When summaries disagree or one provides more detail**, prefer the more specific and informative summary. If one summary says \"cannot determine\" but the other provides partial information, try to reason through to an answer using available clues and general knowledge rather than defaulting to \"cannot determine.\"\n\n3. **Do not default to \"cannot determine\" or \"not enough information\"** unless both summaries explicitly state this AND you truly cannot reason to an answer. Often, the information needed is implicitly available or can be inferred from context. Use your general knowledge to fill gaps when the summaries are insufficient.\n\n4. **Answer format**: Provide the most concise, precise answer possible. Match the grammatical form implied by the question:\n   - If the question asks \"Both X and Y are both professional what?\" — answer in singular form (e.g., \"professional wrestler\" not \"professional wrestlers\") since the question structure implies a singular category descriptor.\n   - If the question asks \"Who had more members, X or Y?\" — answer with just the name of the entity.\n   - If the question asks about an event or policy — answer with the name of that event or policy.\n\n5. **Grammatical matching**: Pay close attention to the grammatical structure of the question. If the question uses singular phrasing (e.g., \"are both professional what?\"), respond in singular form. If it asks for a comparison, give the direct answer to the comparison.\n\n6. **Prefer definitive answers over hedging.** If you can reasonably determine the answer from the summaries combined with general knowledge, provide that answer rather than saying it cannot be determined.\n\n7. **Reasoning**: Before answering, briefly reason through the question and summaries to arrive at your answer. But keep the final answer itself concise and direct.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Summary 2:",
+          "description": "${summary_2}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Answer:",
+          "description": "${answer}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "summarize1.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `passages`, produce the fields `summary`.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "summarize2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `context`, `passages`, produce the fields `summary`.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Context:",
+          "description": "${context}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

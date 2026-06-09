@@ -1,0 +1,76 @@
+{
+  "craft_redacted_request.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given a private user query, create a privacy-preserving request for a powerful external LLM. The LLM may assist without learning private information about the user.\n\nYour task has two components:\n1. **reasoning**: Explain your privacy-preservation strategy for this specific query.\n2. **llm_request**: Write the actual request to send to the external LLM.\n\n## Key Principles\n\n### Privacy Preservation (Leakage Score)\n- **Remove or generalize all Personally Identifiable Information (PII)**: names, addresses, phone numbers, emails, account numbers, specific dates of birth, etc.\n- **Generalize specific locations** when they reveal where the user lives or works. However, if the location is simply the subject of the query (e.g., searching for events in a region) and does not reveal the user's personal information, you may still need to be cautious — consider whether including the location implies the user lives there.\n- **Remove proprietary system names, internal codenames, or identifiers** (e.g., \"Yoda\", \"SSEDSM2\") that could identify the user's employer or specific project.\n- **Remove or generalize specific URLs/links** that could be traced back to the user's browsing history or interests in a way that identifies them.\n- **Do NOT pass through the user's query verbatim** if it contains any potentially identifying information — paraphrase, generalize, or abstract the content.\n- When the query contains technical content (code, system descriptions, foreign language text), abstract or paraphrase it rather than passing it through directly, as specific details may be identifying.\n\n### Quality (Quality Score)\n- Ensure the llm_request is **complete enough** for the external LLM to provide a useful response that addresses the user's actual need.\n- Add helpful structure, context, or formatting instructions to improve the response quality.\n- If the user's query is about a specific topic, provide enough context (without PII) for the LLM to give a relevant answer.\n- Make the request actionable and clear.\n\n## Strategy\n1. Identify what the user actually needs (translation, information, recommendations, summarization, etc.).\n2. Identify all potentially private or identifying elements in the query.\n3. Determine which elements are essential for the LLM to produce a quality response and which can be removed/generalized.\n4. For elements that must be included for quality, generalize them as much as possible while retaining utility.\n5. Write a clear, well-structured llm_request that will get the user what they need without leaking private information.\n\n## Important Notes\n- The overall score is the arithmetic mean of quality score (how well the LLM can answer the user's need) and leakage score (how well privacy is preserved, where 1.0 = no leakage).\n- Even seemingly innocuous details like specific system names, subscription types, URLs, or exact foreign-language text can be identifying — paraphrase these.\n- When the query is purely about public information (e.g., general knowledge questions), focus more on quality while still not revealing that a specific user asked the question.\n- For translation tasks: paraphrase or generalize the content rather than passing the exact text, as the specific text may identify the user's workplace or project.\n- For location-based queries: generalize the location if it could reveal where the user lives (e.g., use a broader region instead of a specific county).\n- For academic/URL-based queries: describe the topic generally rather than including the specific URL or DOI, as these could be linked to the user's research interests or institutional access.",
+      "fields": [
+        {
+          "prefix": "User Query:",
+          "description": "${user_query}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Llm Request:",
+          "description": "${llm_request}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "respond_to_query": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Respond to the user query by generating an appropriate response that fulfills their request.\n\nYou have access to a potentially related request made to an external LLM and its response, which you can use as inspiration or reference. However, you must follow these critical guidelines:\n\n## Core Principles\n\n1. **Prioritize the user's actual query**: The user's query is your primary input. The related LLM request/response is supplementary inspiration only. Tailor your response specifically to what the user is asking for, incorporating any specific details, names, organizations, or context they provide.\n\n2. **CRITICAL - Never leak private or personally identifiable information (PII)**:\n   - Do NOT include ANY PII that appears in the related_llm_request or related_llm_response that was not explicitly provided in the user_query itself.\n   - PII includes but is not limited to: registration numbers, ID numbers, addresses, phone numbers, email addresses, personal names (when not public figures), account numbers, dates of birth, and any other identifying information.\n   - If information appears in BOTH the user_query AND the related materials, it is safe to include because the user themselves provided it.\n   - If information appears ONLY in the related_llm_request or related_llm_response but NOT in the user_query, do NOT include it even if it seems like public or corporate information. This includes registration numbers, specific legal identifiers, and similar details.\n   - When in doubt, OMIT the information rather than risk leakage.\n   - Use placeholders (e.g., [Your Name], [Registration Number]) where personal or identifying details would go if the user hasn't provided them.\n\n3. **Determining what counts as user-provided information**:\n   - Carefully compare the user_query against the related_llm_request and related_llm_response.\n   - Only information that is explicitly present in the user_query text can be included in your response.\n   - Even if the user_query and related_llm_request seem to ask the same thing, treat the user_query as the sole source of \"safe\" information.\n   - For translation tasks: only translate/include the exact text provided in the user_query. If the user_query contains specific identifiers (like registration numbers), those are safe to include. If such identifiers only appear in the related materials, they must be excluded.\n\n4. **Quality and relevance**:\n   - Match the tone, format, and purpose of what the user is requesting.\n   - If the user query contains specific details (organization names, locations, context, facts), incorporate those accurately.\n   - If the related LLM response contains useful structural elements or phrasing that fits the user's request, you may adapt it, but always customize it to the user's specific situation.\n   - Do not include meta-commentary, system artifacts, or markers like \"[[ ## completed ## ]]\" in your response.\n   - Ensure your response is substantively different from the related_llm_response - don't just copy it verbatim. Rephrase, restructure, or add value where appropriate.\n\n5. **Format matching**:\n   - If the user is asking for a translation, provide only the translation.\n   - If the user is asking for a social media post, write a social media post.\n   - If the user is asking for a personal statement, write a personal statement.\n   - If the user is sending a casual message, respond conversationally.\n   - Match the expected length and formality level of the request.\n\n6. **Completeness**:\n   - Ensure your response is complete and ready to use (or ready to customize with clearly marked placeholders).\n   - Include all relevant information from the user's query.\n   - Don't cut off abruptly or leave the response feeling unfinished.\n\n## Strategy\n\n- First, understand what the user is actually asking for.\n- Second, carefully identify what specific information is present in the user_query vs. what is only in the related materials.\n- Third, look at the related LLM request/response for structural inspiration and relevant content patterns.\n- Fourth, compose your response tailored specifically to the user's query, incorporating ONLY details that appear in the user's query.\n- Fifth, review your response to ensure:\n  - No PII leakage from the related materials (any identifier, number, name, or detail not in the user_query must be removed)\n  - High quality and relevance to the user's actual request\n  - The response adds value and isn't a mere copy of the related response\n\n## Special Cases\n\n- **Translation tasks**: Translate exactly what the user provides. If the user's text contains identifiers like registration numbers, include them (they're user-provided). Do not add information from related materials that isn't in the user's source text.\n- **Knowledge questions**: If the user asks about something you're uncertain about, be honest about limitations. Don't fabricate details based on the related response.\n- **When user_query and related_llm_request are nearly identical**: Be extra careful - the related response may contain PII that was appropriate for that context but should not be leaked to this user. Only include information explicitly in the user_query.",
+      "fields": [
+        {
+          "prefix": "Related Llm Request:",
+          "description": "${related_llm_request}"
+        },
+        {
+          "prefix": "Related Llm Response:",
+          "description": "information from a powerful LLM responding to a related request"
+        },
+        {
+          "prefix": "User Query:",
+          "description": "the user's request you need to fulfill"
+        },
+        {
+          "prefix": "Response:",
+          "description": "your final response to the user's request"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

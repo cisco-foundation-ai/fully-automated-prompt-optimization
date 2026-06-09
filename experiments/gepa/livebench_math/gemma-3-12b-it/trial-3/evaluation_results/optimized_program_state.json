@@ -1,0 +1,36 @@
+{
+  "predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Solve the given question step by step with careful reasoning.\n\n**Important formatting instructions:**\n1. After solving, clearly identify your final answer.\n2. If the question is multiple choice (A-E), output your final answer as the letter repeated five times (e.g., AAAAA for answer A) wrapped in <solution> tags. For example: <solution>AAAAA</solution>\n3. If the question asks for a mathematical expression or numerical answer, put your final answer in a $\\boxed{}$ AND also wrap it in <solution> tags. For example: <solution>$\\boxed{\\frac{2}{7}}$</solution>\n4. Double-check your work before finalizing, especially:\n   - For math problems: verify constraints, check edge cases, and ensure all conditions are satisfied.\n   - For matching/ordering problems: carefully trace through the logic to ensure each item is correctly matched.\n   - For expression matching problems: read the surrounding context of each missing tag carefully to determine what logically fits.\n\n**Critical formatting rules:**\n- For multiple choice: The content inside <solution> tags must be EXACTLY the correct letter repeated 5 times (e.g., AAAAA, BBBBB, CCCCC, DDDDD, EEEEE). Nothing else.\n- For numerical/expression answers: Simplify fractions fully. For example, $\\frac{23871}{90}$ should be simplified to $\\frac{7957}{30}$ if that's the reduced form, or verify your arithmetic is correct. Always double-check division and simplification.\n- Make sure your final numerical answers are fully reduced fractions or simplified expressions.\n\n**Tips for specific problem types:**\n\n- **Multiple choice math problems:** Work through the problem carefully, verify your answer satisfies all given conditions, and select the letter corresponding to your answer. Output that letter five times in <solution> tags, e.g., <solution>CCCCC</solution>.\n\n- **Expression/formula matching problems:** For each missing tag, carefully read the surrounding context in the solution to determine what expression logically belongs there. Consider the flow of the argument and what each case/section is establishing. Output your answer as a comma-separated list of expression identifiers corresponding to missing 1, missing 2, missing 3, etc.\n\n- **Indefinite integrals and symbolic math:** Keep your answer in exact symbolic form (not decimal approximations). Include the constant of integration where appropriate.\n\n- **Numerical computations (sample variance, standard deviation, etc.):** \n  - Keep your final answer in exact form (e.g., using square roots, fractions) rather than decimal approximations, unless the problem specifically asks for a decimal.\n  - For sample variance: use the formula $s^2 = \\frac{\\sum_{i=1}^n (x_i - \\bar{x})^2}{n-1}$\n  - ALWAYS simplify your final fraction to lowest terms by finding the GCD of numerator and denominator.\n  - Double-check arithmetic: verify your sum of squared differences by recomputing at least one term.\n\n- **Completing the square:** Factor out the leading coefficient, complete the square inside, then distribute back. Express in the form $a(x-h)^2 + k$.\n\n- **Geometry problems involving inscribed triangles:** \n  - A right triangle inscribed in a circle has its hypotenuse as the diameter of the circle (Thales' theorem).\n  - The radius equals half the hypotenuse.\n\n- **Probability problems:** Use generating functions, character theory, or direct combinatorial arguments as appropriate. For problems involving parity constraints on multinomial distributions, consider using the identity:\n  - For $n$ balls in $k$ bins, the probability that all bins have an odd number of balls can be computed using the formula involving $(1 \\pm (1-2/k)^n)$ type expressions.\n  - Specifically for 3 bins: P(all odd) = (1/4)(1 + 3·(-1/3)^n) when n is odd, which approaches 1/4 for large n.\n\n- **General problem solving:** Show your work clearly, state your final answer explicitly, and ensure it matches the requested format exactly.\n\n**Verification checklist before submitting:**\n1. Is my arithmetic correct? (Re-verify key calculations)\n2. Is my fraction fully simplified?\n3. Does my answer format match what's required? (Letter×5 for MC, boxed for numerical)\n4. For multiple choice: does my computed answer match one of the given options?\n5. Are my <solution> tags present and correctly formatted?\n\nAlways prioritize correctness over speed. If you're unsure between options, reason through elimination carefully before making your final choice.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Answer:",
+          "description": "${answer}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  }
+}

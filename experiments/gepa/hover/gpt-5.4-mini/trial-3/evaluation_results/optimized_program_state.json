@@ -1,0 +1,166 @@
+{
+  "create_query_hop2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `summary_1`, produce the fields `query`.\n\nYour task is to generate a search query that will help retrieve evidence relevant to verifying the claim. The summary_1 field contains information about what is already known and what gaps exist in verifying the claim.\n\n**Instructions:**\n\n1. Read the claim carefully and identify all entities, relationships, and factual assertions that need to be verified.\n\n2. Read summary_1 to understand what information is missing or insufficient for verifying the claim.\n\n3. Generate a query that will help retrieve the missing evidence needed to verify the claim.\n\n**Key guidelines for query generation:**\n\n- Your queries are used to identify evidence relevant to the claim. They should be designed to retrieve specific documents or passages that contain the missing information.\n\n- When the claim involves a chain of facts (e.g., \"Person A was born after the director of Film X\"), break the chain into its components. If the intermediate entity is unknown (e.g., who directed Film X), your query should focus on retrieving information about that intermediate entity directly.\n\n- **Important:** Rather than asking a natural language question (e.g., \"What is the birth date of the writer and director of Anatomy 2?\"), formulate your query as a search-engine-style query that includes the key entity names and relevant terms that would appear in a document containing the answer. For example, use queries like \"stefan ruzowitzky anatomy 2\" or \"anatomy 2 director writer\" — terms that would match relevant Wikipedia articles or reference documents.\n\n- Include specific names, titles, and identifying terms in your query. If the claim mentions a specific work (film, book, etc.), include its title. If a person is mentioned, include their name.\n\n- If the summary indicates that a specific entity (like a director, author, or creator) has not been identified, your query should aim to retrieve the document about the work itself (which likely names that entity) or directly name the entity if you can infer it.\n\n- **Critical: When the claim contains factual assertions about entities (e.g., titles, roles, nationalities, descriptions), always consider whether those assertions themselves need verification.** For example, if a claim says \"George IV King of Russia,\" you need to verify whether George IV was actually King of Russia. Generate queries that target the entity's own Wikipedia page or biographical information to confirm or deny such attributions. The claim may contain deliberate errors or misattributions that need to be caught.\n\n- **When a claim attributes a title, nationality, role, or description to a named person, generate a query specifically about that person to verify the attribution.** For instance, if the claim says \"X of Y country\" or \"X who held Y title,\" search for the person's name along with identifying terms to retrieve their biographical page. Use queries like \"George IV United Kingdom\" or \"George IV biography king\" to find the correct information about that person.\n\n- **Think about each distinct factual component of the claim separately.** If the claim makes multiple assertions (e.g., \"A replaced B\" AND \"C was king of D\"), consider which assertions are already verified by the summary and which still need evidence. Focus your query on the unverified or potentially incorrect parts.\n\n- Prefer concise, keyword-based queries over verbose natural language questions. Think about what terms would appear on a Wikipedia page or reference document that contains the needed evidence.\n\n- If the summary already confirms most of the claim but a specific detail (like a person's actual title or nationality) remains unverified or seems potentially incorrect, target your query at retrieving the authoritative source for that specific detail.\n\nProduce a `query` field that contains your search query.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "create_query_hop3.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `summary_1`, `summary_2`, produce the fields `query`.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Summary 2:",
+          "description": "${summary_2}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "summarize1.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `passages`, produce the fields `summary`.\n\nYour task is to analyze a claim and a set of passages, then produce a summary that identifies key entities, relationships, and facts from the passages that are relevant to verifying the claim. Your summary will be used to generate search queries to find additional evidence relevant to the claim.\n\n**Important guidelines:**\n\n1. **Identify all entities and connections:** Carefully analyze the claim to identify all entities mentioned, even if they are described indirectly (e.g., \"the singer of the live album X\" refers to a specific person you need to identify from the passages).\n\n2. **Bridge implicit references:** Claims often refer to entities indirectly. For example, \"the singer of 'Live at the Corner Hotel'\" means you need to find who performed that album. Look through the passages for any clues about the people, works, or entities mentioned in the claim, even if the connection isn't explicitly stated.\n\n3. **Extract all potentially relevant facts:** From the passages, extract any facts that could help verify any part of the claim. This includes names, dates, family/genus classifications, roles, awards, relationships between people and works, nationalities, band memberships, show appearances, etc.\n\n4. **Make inferential connections:** If the passages mention a person in any context, consider what that person is known for, what they studied, what bands they were in, or what they're associated with. If a passage mentions a genus or taxonomic family, note it. Try to connect these pieces of information to the claim.\n\n5. **Generate search-friendly entity descriptions:** For each key entity identified, include descriptive terms that would help distinguish them in a search. For example, if you identify \"Jeff Martin\" as the singer of a live album, include identifying details like nationality, profession, and associated bands (e.g., \"Jeff Martin Canadian musician,\" \"Jeff Martin The Armada\"). This is critical because many names are common and need disambiguating context for effective search queries.\n\n6. **Focus on generating useful search leads:** Your summary should contain enough specific information (names with disambiguating details, genus names, family names, show titles, character names, nationalities, professions, etc.) that it can guide the generation of effective search queries to find missing evidence. Think about what search terms would retrieve a Wikipedia article or other reference about each entity.\n\n7. **Do not simply dismiss claims as unsupported.** Instead, extract all available information and identify what connections need to be established. For instance, if E.B. Babcock is mentioned in passages about agricultural chemistry or botany, consider what botanical genus he is famous for studying (e.g., Crepis) and what family that genus belongs to (e.g., Asteraceae).\n\n8. **When passages seem insufficient:** If the passages don't directly address part of the claim, still extract whatever relevant information you can find and note what additional information would be needed. Identify the specific entities or facts that need to be looked up, and suggest search terms that include disambiguating context.\n\n9. **Include nationality and profession for people:** When identifying people from passages, always note their nationality and professional descriptors, as these are often essential for finding the correct person in searches (e.g., \"Jeff Martin Canadian singer/songwriter\" rather than just \"Jeff Martin\").\n\nProduce a concise summary that includes:\n- Key facts extracted from the passages relevant to the claim\n- Identified entities and their relationships, with disambiguating details (nationality, profession, associated works/bands)\n- Any inferred connections that bridge the claim to the passage content\n- Specific names, terms, or concepts that would be useful for finding additional evidence\n- Suggested search-friendly phrases for each key entity that needs further verification",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "summarize2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `context`, `passages`, produce the fields `summary`.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Context:",
+          "description": "${context}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "run_id": "hephaestus-ifbench-tfkaji",
+  "status": "running",
+  "total_cases": 294,
+  "completed_cases": 255,
+  "started_at": "2026-05-24T22:02:07.112402+00:00",
+  "updated_at": "2026-05-24T22:13:53.177898+00:00",
+  "avg_composite_score": 45.88235294117647,
+  "weighted_avg_score": null,
+  "score_breakdown_averages": {
+    "instruction_adherence": 45.88235294117647,
+    "instructions_total": 1.1529411764705881,
+    "instructions_followed": 0.5215686274509804
+  },
+  "failed_case_ids": [],
+  "in_flight_case_ids": [
+    "ifbench_test_0205",
+    "ifbench_test_0237",
+    "ifbench_test_0253",
+    "ifbench_test_0258",
+    "ifbench_test_0259"
+  ]
+}

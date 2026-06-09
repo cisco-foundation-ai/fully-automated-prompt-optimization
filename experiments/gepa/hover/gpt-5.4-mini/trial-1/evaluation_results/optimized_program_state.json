@@ -1,0 +1,166 @@
+{
+  "create_query_hop2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `summary_1`, produce the fields `query`.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "create_query_hop3.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `summary_1`, `summary_2`, produce the field `query`.\n\nYour task is to generate a search query that will help retrieve evidence documents relevant to verifying the given claim. The summaries provide assessments of whether the claim is true, false, or unsupported based on previously retrieved evidence, and they indicate what information is still missing or what the key facts are.\n\n**Strategy:**\n\n1. Carefully read the claim to identify all entities, relationships, and factual assertions it makes.\n2. Read both summaries to understand:\n   - What has already been established (known facts from prior evidence)\n   - What is still missing or unverified (gaps in evidence)\n   - Whether the claim is considered true, false, or unsupported, and why\n3. Generate a query that targets the **missing evidence** needed to fully verify or refute the claim. If the summaries indicate the claim is false, your query should help retrieve evidence that explains *why* it's false (e.g., the correct identity of a person, the actual facts that contradict the claim).\n\n**Important considerations:**\n\n- Claims often use indirect references or descriptions instead of naming entities directly (e.g., \"the sci-fi author of 'The Broken Tower'\" instead of naming the author). Your query should attempt to resolve these indirect references by including the specific descriptors, titles, or identifying details mentioned in the claim.\n- If the claim is marked as false, think about what the correct facts might be and craft a query to retrieve evidence about the actual entities involved (e.g., who actually wrote a specific work, what genre they write in, their background).\n- If the claim is unsupported, identify the specific missing data point (e.g., a population figure, a date, a biographical fact) and craft a query to retrieve that information.\n- Include specific names, titles, dates, and other concrete details from the claim in your query to maximize retrieval relevance.\n- The query should be concise but specific enough to retrieve the key missing evidence documents.\n\n**Output format:** Produce a single search query string that would be effective for retrieving the missing evidence needed to verify or refute the claim.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Summary 2:",
+          "description": "${summary_2}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "summarize1.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `passages`, produce the fields `summary`.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "summarize2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `context`, `passages`, produce the fields `summary`.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Context:",
+          "description": "${context}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

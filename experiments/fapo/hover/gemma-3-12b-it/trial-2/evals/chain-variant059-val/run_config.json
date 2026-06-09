@@ -1,0 +1,41 @@
+{
+  "run_id": "hephaestus-hover-tfni1z",
+  "tenant_id": "hover",
+  "provider": "litellm",
+  "provider_settings": {
+    "model": "bedrock/google.gemma-3-12b-it",
+    "timeout_seconds": 300,
+    "max_retries": 2,
+    "retry_backoff_seconds": 5,
+    "temperature": 1.0,
+    "top_p": 0.9,
+    "max_tokens": 16000
+  },
+  "dataset_path": "tenants/hover/datasets/datasets/val.jsonl",
+  "scoring_profile": {
+    "scorer": {
+      "module_path": "tenants/hover/code/scorers/hover_scorer.py",
+      "class_name": "Scorer"
+    }
+  },
+  "max_workers": 5,
+  "chain": {
+    "path": "tenants/hover/chains/multi_hop.py",
+    "fn": "build_chain",
+    "config": {
+      "prompt_paths": {
+        "summarize1": "tenants/hover/prompts/modules/summarize1/variant-034.md",
+        "query_hop2": "tenants/hover/prompts/modules/query_hop2/variant-034.md",
+        "summarize2": "tenants/hover/prompts/modules/summarize2/variant-048.md",
+        "query_hop3": "tenants/hover/prompts/modules/query_hop3/variant-034.md",
+        "summarize3": "tenants/hover/prompts/modules/summarize3/variant-017.md",
+        "query_hop4": "tenants/hover/prompts/modules/query_hop4/variant-017.md",
+        "query_hop5": "tenants/hover/prompts/modules/query_hop5/variant-026.md"
+      },
+      "retrieval_k": 75,
+      "multi_query_hop3": true,
+      "multi_query_hop5": true,
+      "bm25_data_dir": "tenants/hover/data/bm25"
+    }
+  }
+}

@@ -1,0 +1,1 @@
+2026-05-25T06:10:56+00:00 round=1 status="` XML tags from agent output to determine continuation\n- **Error handling**: Tracks error streak, aborts after 10 consecutive failures\n- **Prompting**: Round 1 uses initial prompt with goals; subsequent rounds use continuation prompt and read iteration-memory.jsonl\n\n**Invocation:**\n```bash\nscripts/optimize-loop.sh --tenant "

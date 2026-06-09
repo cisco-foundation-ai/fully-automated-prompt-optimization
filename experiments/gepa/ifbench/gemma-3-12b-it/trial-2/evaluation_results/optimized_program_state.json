@@ -1,0 +1,74 @@
+{
+  "generate_response_module.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Respond to the query by following ALL instructions contained within it, including any formatting requirements, structural constraints, or procedural directives (such as repeating the request, including titles in specific formats, using particular wrappers, etc.).\n\nPay careful attention to:\n1. Any explicit formatting instructions (e.g., \"Your answer must contain a title, wrapped in double angular brackets, such as <<poem of joy>>\")\n2. Any procedural instructions (e.g., \"First repeat the request word for word without change, then give your answer\")\n3. Any structural constraints on the response\n\nThese formatting and procedural instructions MUST be followed even if you decline to fulfill the primary content request for safety or ethical reasons. For example, if asked to write harmful content but the query also requires a title in double angular brackets, you should still include the title in your refusal response.\n\nProcess the query in this order:\n1. Identify ALL instructions and constraints in the query (both content-related and format-related)\n2. Determine your response to the content request\n3. Ensure your response satisfies every identified instruction and constraint",
+      "fields": [
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Response:",
+          "description": "${response}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "ensure_correct_response_module.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "You are tasked with evaluating and correcting a response to ensure it follows ALL constraints specified in the query. Your output should be the final corrected response that adheres to every instruction given.\n\nKey rules to follow:\n\n1. **Identify ALL constraints in the query.** These may include:\n   - Format constraints (e.g., \"First repeat the request word for word without change, then give your answer\")\n   - Language constraints (e.g., \"Your ENTIRE response should be in Italian language\")\n   - Stylistic constraints (e.g., \"words with all capital letters should appear at least/less than X times\")\n   - Content constraints (e.g., specific ways to structure the answer)\n\n2. **\"First repeat the request word for word without change\" constraint:** When this instruction appears, you MUST begin your response by repeating the original request exactly as written (word for word, character for character), BEFORE providing any answer. Important details:\n   - Do NOT say anything before the repeated request (no preamble, no \"Here is the request:\" etc.)\n   - The \"request you need to repeat\" does NOT include the meta-instruction about repeating itself (i.e., exclude sentences like \"First repeat the request word for word without change, then give your answer (1. do not say any words or characters before repeating the request; 2. the request you need to repeat does not include this sentence)\")\n   - After repeating the request, provide your answer\n\n3. **Language constraints:** If the response must be entirely in a specific language, ensure EVERYTHING (including the repeated request if applicable) is in that language. However, note the tension: if you must repeat the request word for word AND the request is in English, but the response must be in another language, you still need to repeat the request exactly as written (in its original language) since \"word for word without change\" takes precedence for the repetition portion. Then provide your answer in the required language.\n\n4. **Capital letter word constraints:** Count words that are ENTIRELY in capital letters (e.g., \"ALWAYS\", \"THE\", \"IT'S\"). Words in bold formatting that happen to be capitalized (like section headers) still count. Ensure the count meets the specified threshold (at least X times, or less than X times).\n\n5. **Verify mathematical/logical correctness:** When the query involves a math problem or logical reasoning, verify the solution is correct before including it.\n\n6. **Prioritize constraint compliance over response quality.** It is better to have a slightly less elegant response that follows all constraints than a beautiful response that violates any constraint.\n\nYour final response should be the complete, corrected response ready to be delivered to the user, with all constraints satisfied.",
+      "fields": [
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        },
+        {
+          "prefix": "Response:",
+          "description": "${response}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Final Response:",
+          "description": "${final_response}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  }
+}

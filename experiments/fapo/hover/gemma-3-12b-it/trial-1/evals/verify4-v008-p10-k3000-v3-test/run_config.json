@@ -1,0 +1,38 @@
+{
+  "run_id": "hephaestus-hover-tfkrdh",
+  "tenant_id": "hover",
+  "provider": "litellm",
+  "provider_settings": {
+    "model": "bedrock/google.gemma-3-12b-it",
+    "timeout_seconds": 300,
+    "max_retries": 2,
+    "retry_backoff_seconds": 5,
+    "temperature": 0.0,
+    "top_p": 0.95,
+    "max_tokens": 16000
+  },
+  "dataset_path": "tenants/hover/datasets/datasets/test.jsonl",
+  "scoring_profile": {
+    "scorer": {
+      "module_path": "tenants/hover/code/scorers/hover_scorer.py",
+      "class_name": "Scorer"
+    }
+  },
+  "max_workers": 5,
+  "chain": {
+    "path": "tenants/hover/chains/multi_hop_verify4.py",
+    "fn": "build_chain",
+    "config": {
+      "prompt_paths": {
+        "summarize1": "tenants/hover/prompts/modules/summarize1/variant-008.md",
+        "summarize2": "tenants/hover/prompts/modules/summarize2/variant-008.md",
+        "summarize3": "tenants/hover/prompts/modules/summarize3/variant-008.md"
+      },
+      "retrieval_k": 3000,
+      "retrieval_k_hop3": 3000,
+      "retrieval_k_hop4": 3000,
+      "llm_passage_limit": 10,
+      "bm25_data_dir": "tenants/hover/data/bm25"
+    }
+  }
+}

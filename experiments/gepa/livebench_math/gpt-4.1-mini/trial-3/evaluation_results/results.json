@@ -1,0 +1,13 @@
+{
+  "benchmark": "LiveBenchMathBench",
+  "program": "CoT",
+  "score": 61.42,
+  "cost": 0.0,
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "optimizer": "GEPA",
+  "optimizer_cost": 7.871428299999996,
+  "optimizer_input_tokens": 2259398,
+  "optimizer_output_tokens": 2440833,
+  "optimizer_program_scores": null
+}

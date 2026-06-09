@@ -1,0 +1,34 @@
+{
+  "run_id": "hephaestus-livebench-math-tfd9rx",
+  "tenant_id": "livebench_math",
+  "provider": "openai",
+  "provider_settings": {
+    "model": "gpt-4.1-mini",
+    "timeout_seconds": 300,
+    "max_retries": 2,
+    "retry_backoff_seconds": 5,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "max_tokens": 16000
+  },
+  "dataset_path": "tenants/livebench_math/datasets/datasets/val.jsonl",
+  "scoring_profile": {
+    "scorer": {
+      "module_path": "tenants/livebench_math/code/scorers/livebench_math_scorer.py",
+      "class_name": "Scorer"
+    }
+  },
+  "max_workers": null,
+  "chain": {
+    "path": "tenants/livebench_math/chains/solve_routed.py",
+    "fn": "build_chain",
+    "config": {
+      "prompt_paths": {
+        "olympiad": "tenants/livebench_math/prompts/variants/variant-016-olympiad.md",
+        "amps_hard": "tenants/livebench_math/prompts/variants/variant-017.md",
+        "math_comp": "tenants/livebench_math/prompts/variants/variant-005.md",
+        "default": "tenants/livebench_math/prompts/variants/variant-005.md"
+      }
+    }
+  }
+}

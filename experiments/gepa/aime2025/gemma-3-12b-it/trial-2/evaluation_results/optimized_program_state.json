@@ -1,0 +1,36 @@
+{
+  "predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Solve the given math competition problem step by step. Show your detailed reasoning, then provide the final answer.\n\nImportant guidelines:\n1. Work through the problem carefully and methodically. Double-check your arithmetic and algebra at each step.\n2. When you arrive at an equation or constraint, verify that your solution satisfies it before proceeding.\n3. If your first approach doesn't yield a clean answer, try alternative approaches rather than forcing a solution.\n4. For problems involving counting or combinatorics, be precise about what is being counted. For example, if counting sets B whose maximum element is k, the number of such sets is 2^(k-1) (since each element from 1 to k-1 can independently be included or excluded, and k must be included).\n5. For geometry problems involving circumscribed spheres/circles, use coordinate geometry or the circumradius formula, and verify your answer satisfies all constraints.\n6. When a problem requires finding a set of integers satisfying a sum condition, consider binary representations or systematic enumeration rather than guessing.\n7. Always verify your final answer makes sense in the context of the problem.\n8. For AIME-style problems, the answer is an integer between 000 and 999 inclusive.\n\nCritical problem-solving reminders:\n\n9. **Prime factorization arithmetic**: When computing products of factored numbers, carefully track each prime's exponent. Write out the full factorization of each factor and add exponents systematically. Double-check by verifying the total matches an independent calculation.\n\n10. **Constraint satisfaction**: When a problem states a fraction of a total (like \"adults made up 5/12 of the crowd\"), this means the total must be divisible by the denominator. When multiple such constraints exist, find values satisfying ALL divisibility conditions simultaneously.\n\n11. **Minimization/maximization problems**: Read carefully what quantity is being minimized or maximized. Check whether all constraints are satisfied (e.g., non-negativity of all variables, integrality, divisibility). A mathematically valid solution that violates a physical constraint (like having 0 people originally) is not valid.\n\n12. **Physical/contextual validity**: When a problem describes a real-world scenario (like people at a concert), ensure your answer makes physical sense. If the problem says \"a crowd of people\" was already present, there must have been a positive number of people initially. Don't accept degenerate solutions (like 0 people) unless the problem explicitly allows them.\n\n13. **Verify with substitution**: After finding your answer, substitute it back into ALL original conditions to confirm it works. This catches arithmetic errors and invalid solutions.\n\n14. **Sum of products factorization**: When computing sums like (sum of powers of 2)(sum of powers of 3)..., factor each sum into primes carefully. For geometric series sums, use the formula (r^n - 1)/(r - 1) and factor the result. Don't rush this step—it's where many errors occur.\n\n15. **Reading the question precisely**: Make sure you're answering exactly what's asked. If the problem asks for \"the minimum number of adults after the bus arrived,\" don't give the number before the bus arrived or some other quantity.\n\nProvide your final answer as just the number (no leading zeros needed unless the answer is 0). Format your response with:\n- A \"reasoning\" section showing your detailed work\n- An \"answer\" section with just the final numerical answer",
+      "fields": [
+        {
+          "prefix": "Problem:",
+          "description": "${problem}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Answer:",
+          "description": "${answer}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  }
+}

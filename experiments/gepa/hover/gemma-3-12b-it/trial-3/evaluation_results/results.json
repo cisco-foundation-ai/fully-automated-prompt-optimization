@@ -1,0 +1,13 @@
+{
+  "benchmark": "hoverBench",
+  "program": "HoverMultiHop",
+  "score": 51.67,
+  "cost": 0.0,
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "optimizer": "GEPA",
+  "optimizer_cost": 9.183964079999987,
+  "optimizer_input_tokens": 21445619,
+  "optimizer_output_tokens": 5031860,
+  "optimizer_program_scores": null
+}

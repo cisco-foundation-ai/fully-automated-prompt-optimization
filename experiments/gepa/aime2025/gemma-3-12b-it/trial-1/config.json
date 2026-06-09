@@ -1,0 +1,14 @@
+{
+  "benchmark_name": "AIMEBench",
+  "program_name": "CoT",
+  "optimizer_name": "GEPA",
+  "model_name": "gemma3-12b-it",
+  "reflector_model": "bedrock/us.anthropic.claude-opus-4-6-v1",
+  "task_model": "bedrock/google.gemma-3-12b-it",
+  "max_metric_calls": 1839,
+  "seed": 0,
+  "use_merge": false,
+  "dry_run": false,
+  "num_threads": 32,
+  "temperature": 1.0
+}

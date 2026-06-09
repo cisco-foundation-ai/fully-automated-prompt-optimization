@@ -1,0 +1,37 @@
+{
+  "predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Solve the question and provide the answer in the correct format.\n\nKey guidelines:\n\n1. **Math differentiation/integration problems**: Show your work step by step using the chain rule, product rule, etc. as appropriate. Present your final answer in a \\boxed{} environment. Make sure your answer is mathematically equivalent to standard forms.\n\n2. **Complete the square problems**: When completing the square, double-check your constant term calculations carefully. Be aware that the grading system checks for mathematical equivalence, so ensure your final simplified form is correct. If you get a fraction like -1377/(289√5), verify whether it simplifies further (e.g., -1377/289 might simplify, or the expression might be better written in a different equivalent form). Present your final answer in a \\boxed{} environment.\n\n3. **Formula matching problems**: You are given a solution with missing tags (<missing X>) and a list of expressions (<expression Y>). Match each expression to the appropriate missing tag.\n\n   **Critical strategy for formula matching:**\n   \n   - **Read the ENTIRE solution first** before making any assignments. Understand the full logical flow.\n   - **For each missing tag**, read the surrounding context very carefully. Ask: What type of mathematical object is needed here? (A definition? A condition? A formula? A set? A field?)\n   - **Match by mathematical role, not superficial similarity.** For example:\n     - If the text says \"we let <missing 1>\", it's defining a variable/constant (like ω = exp(2πi/n)), not a field or structure.\n     - If the text says \"vertices <missing 2>\", it needs a list of vertices.\n     - If the text says \"has signed area <missing 3>\", it needs an area formula (likely involving determinants or cross products).\n     - If the text says \"Rotate by <missing 4>\", it needs a rotation factor (like ω^{-k}).\n     - If the text says \"assume WLOG that <missing 5>\", it needs a simplifying assumption (like k=0).\n     - If the text says \"triangles with vertices <missing 6>\", it needs specific vertex labels.\n   \n   - **Pay close attention to the distinction between:**\n     - Definitions (T(a,b) := ...) vs. evaluations of those definitions\n     - Conditions (m | n, m < n, m ∤ n) vs. conclusions\n     - Number fields (K := Q(ω)) vs. rings of integers (O_K = Z[ω]) vs. the rational field (Q)\n     - Basis elements vs. basis labels\n   \n   - **For proof structure**, track the logical flow:\n     - \"Construction\" section: shows sufficiency (m | n works)\n     - \"Proof of necessity\" section: shows m must divide n\n     - In necessity proofs, the claim is usually about what fails when the condition doesn't hold (e.g., \"not an algebraic integer when m ∤ n\")\n   \n   - **When the text says \"is a number field whose ring of integers is known to be <missing>\"**, the answer should be the ring of integers (like O_K = Z[ω]), not the field itself.\n   \n   - **When the text says \"takes <missing> as a <missing>-basis of K\"**, the first missing is the actual basis elements (like (ω^{-1}, ω^0, ..., ω^{n-2})) and the second is the base ring/field (like Q).\n   \n   - **When the text says \"<missing> is the subset where each coefficient is integer\"**, this refers to the ring of integers O_K.\n   \n   - **Distinguish between the area of a single triangle T(a,b) and the total area S of a color class.** The total area S = (n/m) × (single triangle normalization).\n   \n   - **For \"each of the quantities <missing> is <missing> times an algebraic integer\"**: the quantities are the individual triangle areas T(a,b), and the multiplier is typically 1/(2i) or similar.\n   \n   - **Cross-check your assignments:** After making all assignments, substitute each expression back into the text and verify it reads correctly both grammatically and mathematically. Each expression should be used exactly once (unless the problem allows reuse).\n   \n   - **Use process of elimination:** If you're unsure about a particular slot, assign the ones you're confident about first, then use remaining expressions to fill uncertain slots.\n\n   Your final answer should be STRICTLY in the format:\n   \n   Answer: <comma separated list of numbers representing expression identifiers>\n\n4. **Multiple choice problems**: Solve the problem completely, identify the correct answer choice, and if instructed to repeat the letter, do so exactly as specified.\n\n5. **Computation problems (standard deviation, etc.)**: Show all work step by step. Present your final answer in a \\boxed{} environment with exact values (not decimal approximations unless specified).\n\n6. **General principles**:\n   - Read feedback from similar problems carefully to avoid repeating mistakes.\n   - When two expressions have identical LaTeX content but different identifiers, the ordering/position in the solution matters.\n   - Always verify your answer makes grammatical and mathematical sense when substituted back into the solution text.\n   - For boxed answers, ensure the mathematical content is correct and written in standard notation that automated systems can parse.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Answer:",
+          "description": "${answer}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

@@ -1,0 +1,162 @@
+{
+  "create_query_hop2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `summary_1`, produce the fields `query`.\n\nYou are generating a query for the **second hop** of a multi-hop retrieval system. Your goal is to help the system find additional relevant documents that were NOT already retrieved in the first hop.\n\n**Context:**\n- The `question` is a multi-hop question that requires information from multiple documents to answer.\n- The `summary_1` contains information synthesized from documents already retrieved in the first hop (using the original question directly).\n- Your `query` will be used to retrieve additional documents in the second hop.\n\n**Your task:**\n1. Analyze the `question` to understand what information is needed to fully answer it.\n2. Analyze `summary_1` to understand what information has already been retrieved.\n3. Identify the answer or key entities mentioned in `summary_1` that answer (or partially answer) the question.\n4. Generate a `query` that targets documents about related entities that are likely NOT yet retrieved — particularly other key people, places, or things connected to the answer entity.\n\n**Critical Insight from Experience:**\nThe first hop typically retrieves:\n- Documents about the \"bridge\" entity (e.g., a person's biography that connects them to a band, a glacier article that names who it's named after)\n- Sometimes the main answer entity's document as well\n\nThe second hop needs to retrieve documents about **other connected entities** that provide supporting or complementary information. These are often:\n- **Other prominent members** of a group/band/team (e.g., the lead singer's biography when the question is about the band)\n- **The location/place article** when the first hop retrieved a person's biography (e.g., \"Semaphore, South Australia\" suburb article when the first hop found \"Mark Harrity\")\n- **Related geographic or institutional articles** that contain additional confirming details\n\n**Strategy for Query Construction:**\n\n1. **Identify what's missing:** Think about what Wikipedia articles would be needed to fully verify the answer. If the first hop found a person → look for the place/organization article. If the first hop found an organization → look for key members' biographies.\n\n2. **For places/locations:** Use the place name + its geographic/administrative classification + key identifying features that would appear in the opening sentence of its Wikipedia article. Example: \"Semaphore suburb South Australia north-west Adelaide LeFevre Peninsula\" — matching the actual article text.\n\n3. **For people connected to the answer:** Use their full name + their primary role/profession + the key fact that connects them to the answer. Example: \"Dolores O'Riordan Irish singer songwriter Cranberries rock band reuniting 2009\" — targeting their biographical article.\n\n4. **For organizations/bands/teams:** Use the entity name + type + key historical events (formation, reunion, dissolution dates).\n\n**Query Format Rules:**\n- Your query should be a descriptive phrase or set of keywords, NOT a question.\n- Frame your query to **match the language likely found in the target document's opening paragraph**.\n- Include specific geographic, temporal, or categorical identifiers that appear in Wikipedia article introductions (e.g., \"suburb in the Australian state of South Australia,\" \"Irish musician and singer-songwriter,\" \"located on the Gulf St Vincent coastline\").\n- Avoid overly specific or narrow terms that might not appear in the target article. Instead, use the natural descriptive language of encyclopedia entries.\n\n**Examples of improved queries:**\n\n- Missing document is about a suburb: \"Semaphore suburb Australian state South Australia north-west Adelaide Gulf St Vincent coastline LeFevre Peninsula\" (matches the article's opening description)\n- Missing document is about a band member: \"Dolores O'Riordan Irish musician singer-songwriter rock band Cranberries\" (matches biographical article opening)\n- Missing document is about a glacier: \"Van Trump Glacier Mount Rainier southern flank Wilson Kautz\" (matches geographic article)\n\n**Key principle:** Think about what the opening 1-2 sentences of the missing Wikipedia article would say, and construct your query to match that text as closely as possible. Wikipedia articles for places typically start with \"[Name] is a [type] in [location] located [geographic details]...\" and for people typically start with \"[Name] is a [nationality] [profession] who [key achievement]...\"\n\n**When summary_1 already contains the complete answer and all relevant information appears retrieved:** Generate a query targeting the most likely missing supporting document — often the article about the answer entity itself (if the first hop found the \"context\" document) or about a closely related entity whose article would contain confirming details.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "final_answer.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `summary_1`, `summary_2`, produce the fields `answer`.\n\nYou are answering multi-hop trivia questions. These questions typically chain together facts about multiple entities. Your task is to carefully parse the question to determine exactly what is being asked, then use the summaries to find the answer.\n\nCRITICAL INSTRUCTIONS:\n\n1. **Parse the question structure carefully.** These questions often contain embedded clauses that describe entities but the actual question asks about something specific. Read the question multiple times to identify what is actually being asked for.\n\n2. **Identify what the question is asking for vs. what it is describing.** The question often describes Entity A to help you identify Entity B, but the answer should be Entity B (or vice versa). For example:\n   - \"This actor who starred in X appeared in THIS FILM?\" → The answer is the FILM, not the actor.\n   - \"X is a subsidiary of WHICH ORGANIZATION?\" → The answer is the organization, not X.\n   - \"What is the ORIGINAL FILM in the trilogy that included Y?\" → The answer is the original/first film in the trilogy, not the film Y appeared in.\n\n3. **Be skeptical of the summaries.** The summaries may contain incorrect reasoning or factual errors. They may misidentify relationships (e.g., claiming DirecTV is a subsidiary of Sirius XM when it's actually a subsidiary of AT&T). Use the summaries for factual details but do not blindly trust their conclusions.\n\n4. **Pay attention to specific qualifiers in the question:**\n   - \"original film\" = the first film in a series\n   - \"subsidiary of which organization\" = the parent company\n   - \"this [noun]\" or \"what [noun]\" = the answer should be that noun type (film, organization, person, etc.)\n\n5. **When the question asks about a specific entity type (film, organization, person, place), make sure your answer is of that type.** If the question asks \"appeared in this film?\" the answer should be a film title, not a person's name.\n\n6. **For questions with multiple entities connected by clauses:** Break down the question into its component parts. Identify which entity is being described (given as context) and which entity is being asked about (the actual answer).\n\n7. **Cross-reference information between both summaries** to extract factual details, but always return to the original question to ensure you're answering what was actually asked.\n\nProduce a `reasoning` field where you break down the question structure, identify exactly what is being asked, and then provide the `answer` field with your final answer.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Summary 2:",
+          "description": "${summary_2}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Answer:",
+          "description": "${answer}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "summarize1.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `passages`, produce the fields `summary`.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "summarize2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `context`, `passages`, produce the fields `summary`.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Context:",
+          "description": "${context}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  }
+}

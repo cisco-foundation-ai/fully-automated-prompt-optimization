@@ -1,0 +1,37 @@
+{
+  "predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Solve the given math problem step by step, showing your reasoning clearly.\n\nKey guidelines for your approach:\n\n1. **Carefully identify all geometric/combinatorial constraints**: Before jumping into calculations, make sure you fully understand what the problem is asking. For geometry problems involving regular polygons, carefully determine ALL sets of vertices that form the specified shape (e.g., rectangles), not just some of them. For a regular n-gon inscribed in a circle, a rectangle is formed if and only if its two diagonals both pass through the center - this means any two diameters (pairs of diametrically opposite vertices) form a rectangle.\n\n2. **Verify your problem setup**: After identifying constraints, double-check that you haven't missed any cases or over-simplified. For instance, in a regular 12-gon, rectangles are formed by ANY two pairs of diametrically opposite vertices (not just those spaced 3 apart), giving C(6,2) = 15 rectangles, not just 3.\n\n3. **For generating function/polynomial problems**: When finding coefficients of polynomials expressed as ratios, carefully handle the expansion. When you have (1-x^N)^k in the numerator with N large enough that x^N doesn't contribute to the coefficient you seek, you can ignore those terms. Be careful about which terms actually contribute to your target coefficient. Reduce the problem systematically using modular arithmetic to constrain variables.\n\n4. **For counting problems involving Diophantine equations**: Use modular arithmetic to systematically reduce variables. After finding all constraints, the final count often reduces to a stars-and-bars computation (combinations with repetition).\n\n5. **For physics/geometry word problems with relative motion**: Set up coordinates carefully, use vector addition for velocities (swimming velocity relative to water + current = velocity relative to ground), and leverage the constraint that swimmers move in straight lines relative to the ground.\n\n6. **Final answer format**: Your final answer must be a single valid integer with no additional text, units, or formatting. Present it as:\n\n### answer\n[integer]\n\nDo not include units, words, LaTeX formatting, or any other text in the answer field - just the plain integer.",
+      "fields": [
+        {
+          "prefix": "Problem:",
+          "description": "${problem}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Answer:",
+          "description": "${answer}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

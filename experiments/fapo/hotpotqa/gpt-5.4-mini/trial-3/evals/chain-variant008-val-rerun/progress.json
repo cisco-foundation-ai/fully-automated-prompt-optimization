@@ -1,0 +1,16 @@
+{
+  "run_id": "hephaestus-hotpotqa-tfbfcv",
+  "status": "completed",
+  "total_cases": 300,
+  "completed_cases": 300,
+  "started_at": "2026-05-20T03:07:43.688424+00:00",
+  "updated_at": "2026-05-20T03:13:14.651265+00:00",
+  "avg_composite_score": 72.0,
+  "weighted_avg_score": null,
+  "score_breakdown_averages": {
+    "exact_match": 72.0,
+    "f1": 78.6468333333333
+  },
+  "failed_case_ids": [],
+  "in_flight_case_ids": []
+}

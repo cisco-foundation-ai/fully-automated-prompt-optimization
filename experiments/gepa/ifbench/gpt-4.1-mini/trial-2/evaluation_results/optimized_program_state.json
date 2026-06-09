@@ -1,0 +1,76 @@
+{
+  "generate_response_module.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Respond to the query",
+      "fields": [
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Response:",
+          "description": "${response}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "ensure_correct_response_module.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "You are tasked with evaluating and potentially improving a response to a query that contains both a main question/request and specific formatting/content constraints.\n\nYour job:\n1. Carefully analyze the query to identify:\n   - The main question or request\n   - All formatting and content constraints (e.g., keyword restrictions, letter/word frequency limits, wrapping requirements, repetition instructions, sentence count minimums/maximums, capitalization rules)\n\n2. Check the provided response against ALL identified constraints by:\n   - Counting specific letters, words, or characters when frequency limits are specified (count carefully and precisely - do not estimate)\n   - Verifying formatting requirements (quotation marks, structure, ordering)\n   - Checking for forbidden keywords\n   - Ensuring any repetition requirements are met exactly\n   - Verifying sentence counts, word counts, or other quantitative constraints\n\n3. In your reasoning:\n   - List each constraint explicitly\n   - Verify compliance with each one, showing your counting work for quantitative constraints (e.g., count each occurrence of a letter individually)\n   - If the response violates any constraint, note which ones and how\n\n4. If the response meets ALL constraints, output it as your final_response unchanged.\n   If the response violates any constraint, revise it to comply with ALL constraints while preserving the quality and relevance of the answer, then output the revised version as your final_response.\n\nImportant notes:\n- When counting letters, count every individual occurrence in the entire response text (including within words)\n- \"Less than N times\" means the count must be 0 to N-1 (strictly fewer than N)\n- \"Words with all capital letters\" refers to words where every letter is capitalized (like \"THE\" or \"AND\"), not words that merely start with a capital letter\n- When asked to repeat a request \"word for word,\" reproduce it exactly without any preceding text\n- Be especially careful with letter-counting constraints as these are the most commonly failed requirements\n- If a query asks about harmful/unethical activities, the response should address the topic responsibly (e.g., in context of games, education, or by declining and explaining why)\n\nCRITICAL INSTRUCTION FOR \"REPEAT THE REQUEST\" CONSTRAINTS:\n\nWhen a query contains an instruction like \"First repeat the request word for word without change, then give your answer (1. do not say any words or characters before repeating the request; 2. the request you need to repeat does not include this sentence)\", you must handle it as follows:\n\n- The \"request\" that needs to be repeated is ONLY the main question/request portion of the query — everything BEFORE the \"First repeat the request word for word...\" instruction.\n- The instruction about repeating (starting with \"First repeat the request word for word without change...\") is NOT part of the request to be repeated.\n- The parenthetical clarifications \"(1. do not say any words or characters before repeating the request; 2. the request you need to repeat does not include this sentence)\" explicitly confirm that the repetition instruction itself should NOT be included in the repeated text.\n- The response must start immediately with the repeated request text — no introductory words, labels, or characters before it.\n- After the exact repetition, provide the answer to the question/request.\n\nExample of correct handling:\n- Query: \"What is 2+2? First repeat the request word for word without change, then give your answer (1. do not say any words or characters before repeating the request; 2. the request you need to repeat does not include this sentence)\"\n- Correct response starts with: \"What is 2+2?\" followed by the answer.\n- INCORRECT response would start with: \"What is 2+2? First repeat the request word for word without change, then give your answer (1. do not say any words or characters before repeating the request; 2. the request you need to repeat does not include this sentence)\" — this incorrectly includes the instruction as part of the repeated request.\n\nWhen determining where the \"request\" ends and the \"repeat instruction\" begins, look for the boundary phrase \"First repeat the request word for word without change\" — everything before this phrase is the request to be repeated; this phrase and everything after it is the meta-instruction and should NOT be repeated.\n\nIf the query has additional formatting constraints (like section markers, word counts, etc.) beyond the repetition requirement, ensure those are also satisfied in the answer portion that follows the repetition.\n\nEnsure the response is correct and adheres to the given constraints. Your response will be used as the final response.",
+      "fields": [
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        },
+        {
+          "prefix": "Response:",
+          "description": "${response}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Final Response:",
+          "description": "${final_response}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

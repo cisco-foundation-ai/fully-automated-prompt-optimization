@@ -1,0 +1,37 @@
+{
+  "predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Solve the given question and provide the answer in the correct format.\n\nFor multiple-choice math competition problems: Work through the problem step by step, determine the correct answer letter, then repeat that letter five times in a single string (e.g., BBBBB).\n\nFor open-ended math problems requesting an exact answer: Work through the problem step by step, compute the exact answer, and present it in LaTeX within a $\\boxed{}$ environment (e.g., $\\boxed{\\frac{2}{7}}$).\n\nFor formula-matching problems where you need to fill missing expressions in a solution: You are given a math problem, its solution with missing formulae marked as <missing X>, and a list of expressions with identifiers. Your task is to match each expression to the correct missing slot.\n\nKey strategies for all problem types:\n\n**General problem-solving:**\n1. Read the entire problem carefully before beginning calculations.\n2. Show all work step by step to minimize errors.\n3. Double-check arithmetic, especially when dealing with fractions, signs, and large numbers.\n4. Verify your final answer against the available answer choices (if applicable).\n\n**For multiple-choice problems:**\n- After solving, confirm your answer matches one of the given options.\n- If your computed answer doesn't match any option, recheck your work.\n- Your final answer must be exactly five repetitions of the correct letter (e.g., AAAAA, BBBBB, etc.).\n\n**For open-ended exact-answer problems:**\n- Pay careful attention to whether the problem asks for sample variance vs. population variance, or other similar distinctions.\n- For sample variance, divide by (n-1); for population variance, divide by n. Read the problem statement carefully.\n- Express answers as simplified fractions when the problem asks for an exact answer.\n- Make sure your final boxed answer is in a format that can be parsed correctly (simplified fractions, integers, expressions in standard notation).\n- Double-check fraction arithmetic by converting decimals back to fractions carefully.\n\n**For formula-matching problems:**\n1. Read the entire solution carefully to understand the logical flow before attempting to match.\n2. Each expression identifier should typically be used exactly once (unless the problem explicitly allows reuse). If you find yourself reusing an expression, reconsider your matching.\n3. Pay very close attention to the mathematical context surrounding each <missing X> tag:\n   - What type of object is expected (a number, an inequality, a set/tuple, a divisibility statement)?\n   - What role does it play grammatically in the sentence (subject, object, condition)?\n   - Does it need to be something that \"divides\" something else, or something being divided?\n4. Check dimensional/type consistency: if the text says \"divisors of the form <missing X>\", the expression should be a form/template for divisors. If it says \"since <missing X>\", it should be a fact or inequality that serves as justification.\n5. Work through the solution's logic sequentially, using process of elimination as you assign expressions.\n6. After making all assignments, re-read the solution with your substitutions to verify it makes logical and mathematical sense.\n7. Be especially careful with expressions that look similar (e.g., different powers of p, different tuples of divisors). The specific context determines which one fits.\n8. Your final answer should be a comma-separated list of expression identifiers corresponding to missing 1, missing 2, missing 3, etc.\n\n**Common pitfalls to avoid:**\n- Sign errors in polynomial analysis (carefully track negative signs through factoring).\n- Off-by-one errors when counting integers in a range (use inclusive/exclusive bounds correctly: from a to b inclusive gives b - a + 1 integers).\n- Forgetting edge cases (boundary values, special cases like n=1, x=0, etc.).\n- For variance calculations: be precise about whether to use n or n-1 in the denominator, and verify all squared deviation calculations.\n- When working with logarithms: remember domain restrictions (argument must be positive) and properties like log(n^2) = 2·log(n).\n\nYour final answer should be STRICTLY in the format specified by the question.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Answer:",
+          "description": "${answer}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

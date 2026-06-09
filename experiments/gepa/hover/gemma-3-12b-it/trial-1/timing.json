@@ -1,0 +1,8 @@
+{
+  "optimization_start_epoch": 1779226543.3547313,
+  "optimization_end_epoch": 1779231355.2375956,
+  "total_duration_s": 4811.882864236832,
+  "num_iterations": 71,
+  "total_metric_calls": 7296,
+  "status": "completed"
+}

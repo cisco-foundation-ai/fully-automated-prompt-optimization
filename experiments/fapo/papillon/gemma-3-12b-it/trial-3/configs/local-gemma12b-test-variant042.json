@@ -1,0 +1,43 @@
+{
+  "tenant_id": "papillon",
+  "provider": "litellm",
+  "provider_settings": {
+    "model": "bedrock/google.gemma-3-12b-it",
+    "timeout_seconds": 300,
+    "max_retries": 2,
+    "retry_backoff_seconds": 5,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "max_tokens": 16000
+  },
+  "dataset": {
+    "path": "tenants/papillon/datasets/datasets/val.jsonl"
+  },
+  "chain": {
+    "path": "tenants/papillon/chains/privacy_chain.py",
+    "fn": "build_chain",
+    "config": {
+      "prompt_paths": {
+        "redact_query": "tenants/papillon/prompts/modules/redact_query/variant-017.md",
+        "reconstruct_response": "tenants/papillon/prompts/modules/reconstruct_response/variant-030.md"
+      },
+      "untrusted_model": {
+        "provider": "litellm",
+        "model": "bedrock/google.gemma-3-12b-it",
+        "temperature": 0.65,
+        "max_tokens": 4096
+      }
+    }
+  },
+  "scoring_profile": {
+    "scorer": {
+      "module_path": "tenants/papillon/code/scorers/papillon_scorer.py",
+      "class_name": "Scorer"
+    },
+    "tenant_config": {
+      "judge_model": "bedrock/google.gemma-3-12b-it",
+      "judge_provider": "litellm"
+    }
+  },
+  "output_dir": "tenants/papillon/evals/tmp/chain-gemma-variant042"
+}

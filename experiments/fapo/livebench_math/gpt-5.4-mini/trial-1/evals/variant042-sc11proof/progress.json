@@ -1,0 +1,17 @@
+{
+  "run_id": "hephaestus-livebench-math-tfebbo",
+  "status": "running",
+  "total_cases": 121,
+  "completed_cases": 57,
+  "started_at": "2026-05-21T16:33:25.042416+00:00",
+  "updated_at": "2026-05-21T17:05:00.642789+00:00",
+  "avg_composite_score": 85.19610647462646,
+  "weighted_avg_score": null,
+  "score_breakdown_averages": {
+    "score": 85.19610647462646
+  },
+  "failed_case_ids": [],
+  "in_flight_case_ids": [
+    "63caf58f2145fb688623de0d064c3d8e52cb22f78ba7ab73fea9a83119475845"
+  ]
+}

@@ -1,0 +1,76 @@
+{
+  "generate_response_module.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Respond to the query by following ALL formatting and structural instructions specified within it. Pay careful attention to:\n\n1. **Repeating requests**: If the query asks you to \"repeat the request word for word without change, then give your answer,\" you must first reproduce the original query text exactly as written (excluding the meta-instruction about repeating itself, as specified), with no preceding words or characters, and then provide your answer after the repetition.\n\n2. **Keyword constraints**: If the query specifies keywords to include or exclude, strictly adhere to those constraints in your response.\n\n3. **Word/character limits**: If the query specifies a maximum or minimum word count, ensure your response falls within those bounds.\n\n4. **Formatting requirements**: If the query specifies a certain number of bullet points, capitalization rules (e.g., \"words with all capital letters should appear at least X times\"), or other structural requirements, follow them precisely.\n\n5. **Content refusals**: If the query asks you to generate harmful, illegal, or explicitly violent/sexual content involving real people, you should still refuse to generate that content. However, you must still comply with all formatting instructions (such as repeating the request, meeting capitalization requirements, respecting keyword exclusions, and word count limits) even while refusing. Structure your refusal to meet all the mechanical/formatting constraints.\n\n6. **Mathematical and factual problems**: Solve these accurately using appropriate methods. For trigonometric problems, use identities like sum-to-product, co-function identities, etc. Show your work in reasoning but provide a clean answer in the response.\n\n7. **Priority**: All explicit formatting and structural instructions in the query are mandatory. Never skip or ignore any of them, even if they seem contradictory to the content you're producing. Find a way to satisfy every constraint simultaneously.",
+      "fields": [
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Response:",
+          "description": "${response}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "ensure_correct_response_module.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "You are given a query (the original user request) and a response (an assistant's attempt to answer that query). Your job is to evaluate whether the response correctly satisfies ALL constraints specified in the query, and if not, produce a corrected final response that does.\n\nFollow these steps:\n\n1. **Analyze the query carefully.** Identify every constraint or instruction embedded in the query. These may include:\n   - Content requirements (e.g., \"write a HTML page that...\")\n   - Formatting constraints (e.g., \"First repeat the request word for word without change, then give your answer\")\n   - Keyword inclusion requirements (e.g., \"Include keywords ['beer', 'male', 'mortgage', 'surprise'] in the response\")\n   - Keyword exclusion requirements (e.g., \"Do not include keywords ['awareness', 'pain', 'principle', 'teach'] in the response\")\n   - Sentence/word count requirements (e.g., \"Your response should contain at least 13 sentences\")\n   - Letter/character frequency requirements (e.g., \"the letter a should appear at least 5 times\")\n   - Repetition instructions (e.g., \"First repeat the request word for word without change\")\n   - Any other explicit constraints\n\n2. **Evaluate the provided response** against each identified constraint. Determine which constraints are satisfied and which are not.\n\n3. **If the response already satisfies all constraints**, return it unchanged as your final_response.\n\n4. **If the response violates one or more constraints**, produce a corrected final_response that satisfies ALL constraints. When correcting:\n   - Preserve the useful content from the original response where possible.\n   - Add missing elements (e.g., missing keywords, missing repetition of the request).\n   - Remove prohibited elements (e.g., banned keywords).\n   - Adjust formatting, length, or structure as needed.\n\n5. **Important rules for specific constraint types:**\n   - **\"First repeat the request word for word without change\"**: The repeated portion should be ONLY the user's original request text. The meta-instruction about repeating (e.g., \"1. do not say any words or characters before repeating the request; 2. the request you need to repeat does not include this sentence\") should NOT be treated as part of the request to repeat. However, other constraints embedded in the query (like \"Include keywords [...]\") ARE part of the request to repeat since they are part of the original query text. Repeat the entire query exactly as written, excluding only the meta-instruction sentence about how to repeat.\n   - **Keyword inclusion**: Ensure the specified keywords appear somewhere in the response. They can be incorporated naturally into the content or added in a contextually reasonable way.\n   - **Keyword exclusion**: Ensure none of the banned keywords appear anywhere in the response.\n   - **Safety/ethics**: If the query asks for harmful, defamatory, or dangerous content (e.g., fabricating scandals about real people, instructions for harm), you should refuse to comply with the harmful portion while still following formatting constraints where possible. However, note that refusing to follow formatting constraints (like repeating the request) solely because the content is harmful is NOT correct behavior based on the feedback — you should still follow non-harmful formatting instructions even when refusing the harmful content request.\n\n6. **Output format**: Provide your reasoning first, then provide the final_response that should be used.",
+      "fields": [
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        },
+        {
+          "prefix": "Response:",
+          "description": "${response}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Final Response:",
+          "description": "${final_response}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

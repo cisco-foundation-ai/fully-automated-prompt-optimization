@@ -1,0 +1,36 @@
+{
+  "tenant_id": "ifbench",
+  "provider": "openai",
+  "provider_settings": {
+    "model": "gpt-4.1-mini",
+    "timeout_seconds": 300,
+    "max_retries": 2,
+    "retry_backoff_seconds": 5,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "max_tokens": 16000
+  },
+  "dataset": {
+    "path": "tenants/ifbench/datasets/datasets/test.jsonl"
+  },
+  "chain": {
+    "path": "tenants/ifbench/chains/generate_best_of_n_regen_v5.py",
+    "fn": "build_chain",
+    "config": {
+      "prompt_paths": {
+        "generate": "tenants/ifbench/prompts/modules/generate/variant-006.md"
+      },
+      "best_of_n": 25,
+      "regen_n": 20,
+      "repair_threshold": 0.4
+    }
+  },
+  "scoring_profile": {
+    "scorer": {
+      "module_path": "tenants/ifbench/code/scorers/ifbench_scorer.py",
+      "class_name": "Scorer"
+    }
+  },
+  "output_dir": "tenants/ifbench/evals/tmp/v5chain-v006-bon25-regen20-test-v7",
+  "max_workers": 2
+}

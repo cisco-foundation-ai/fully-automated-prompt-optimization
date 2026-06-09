@@ -1,0 +1,166 @@
+{
+  "create_query_hop2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `summary_1`, produce the field `query`.\n\nYour task is to generate search queries that will help retrieve evidence documents relevant to verifying a complex claim. The claim typically involves multiple entities and relationships that need to be fact-checked.\n\n**Process:**\n1. Carefully read the `claim` to identify all entities, relationships, and factual assertions being made.\n2. Read the `summary_1` which provides context about what has already been found and what gaps remain in verifying the claim.\n3. Generate a `query` that targets the unverified or partially verified aspects of the claim.\n\n**Key Guidelines for Query Generation:**\n\n1. **Cover all entities and relationships**: Ensure your queries address each entity mentioned in the claim and the relationships between them. Don't focus only on the most complex or uncertain parts—also include queries for seemingly straightforward entities that may have dedicated encyclopedia/wiki pages.\n\n2. **Include broad entity-level queries**: In addition to specific targeted queries, include simple entity name queries (e.g., just the name of an organization, person, or place mentioned in the claim or summary). These broad queries help retrieve general reference documents (like Wikipedia articles) that contain relevant background information. For example, if the claim mentions \"West Cheshire League,\" include \"West Cheshire Association Football League\" or similar official/full names as a query term.\n\n3. **Use official and full names**: When searching for organizations, leagues, institutions, or entities, try variations including their full official names, not just abbreviated or colloquial versions. The summary often contains clues about official names.\n\n4. **Target the gaps identified in the summary**: The summary explicitly states what remains unverified and suggests search directions. Use these suggestions, but also think about what basic reference documents about mentioned entities might contain the needed information.\n\n5. **Generate multiple distinct query components**: Produce several separate search queries or query phrases that each target different aspects of the claim. Cover:\n   - The identity and attributes of key persons mentioned\n   - The official names and details of organizations/institutions\n   - The specific relationships or connections asserted in the claim\n   - Any numerical facts (acreage, enrollment, dates, etc.)\n\n6. **Think about what documents would contain the answer**: Consider that evidence often comes from encyclopedia-style articles about the entities involved. A query for the entity's name or official title may retrieve a document that incidentally contains the verification information needed.\n\n**Output format:**\n- First provide a `reasoning` field that analyzes the claim, identifies what needs verification based on the summary, and explains your query strategy.\n- Then provide a `query` field with your search queries. Use multiple query phrases separated by commas or presented as distinct questions. Include both specific targeted queries and broader entity-name queries.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "create_query_hop3.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `summary_1`, `summary_2`, produce the field `query`.\n\nYour task is to generate a search query that will help retrieve evidence documents relevant to verifying the claim. The summaries provide context about what is already known and what information gaps remain.\n\n**Instructions:**\n\n1. Read the `claim` carefully to identify all entities, relationships, and factual assertions that need verification.\n\n2. Read `summary_1` and `summary_2` to understand:\n   - What has already been confirmed or refuted\n   - What information gaps remain\n   - What entities, people, films, songs, or other proper nouns are mentioned\n\n3. Generate a `query` that targets the missing or under-supported evidence needed to verify the claim. Your query should:\n   - Focus on retrieving specific evidence documents rather than asking complex multi-part questions\n   - Include the names of specific entities (people, films, songs, products, etc.) that are central to the unverified parts of the claim\n   - Be simple and direct enough to match relevant documents in a search index\n   - Prioritize proper nouns and specific entity names over generic descriptive phrases\n\n4. **Critical guidance on query construction:**\n   - When a summary identifies a missing piece of evidence (e.g., a person's name, a song title, a film director), your query should include that specific entity name as a standalone term or short phrase rather than embedding it in a long natural language question.\n   - Break complex queries into their core entity names. For example, if you need to find information about \"Garry Marshall\" as the director of a film, include \"Garry Marshall\" explicitly in the query.\n   - If a claim references something like \"Krupa (song)\" or a specific titled work, include that exact title/name (e.g., \"Krupa song\") as a distinct query term.\n   - Avoid overly complex Boolean queries or long natural language questions. Prefer short, targeted queries that use the specific entity names identified in the summaries.\n   - When summaries identify a specific person, work, or entity that bridges the gap in verification, make sure that entity name appears prominently in your query.\n\n5. The query will be used to search a document index, so think about what terms would appear in a relevant Wikipedia article or reference document about the entities in question.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Summary 2:",
+          "description": "${summary_2}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "summarize1.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `passages`, produce the fields `summary`.\n\nYour task is to analyze a claim and a set of passages to produce a summary that will be used to generate search queries to retrieve additional evidence documents relevant to verifying the claim.\n\n## Task Description\n\nYou are given:\n1. A `claim` - a statement that connects multiple entities or facts, often through indirect relationships\n2. `passages` - a set of retrieved passages that may partially support or refute the claim\n\nYour goal is to produce a `summary` that:\n1. Identifies what parts of the claim are supported by the passages\n2. Identifies what parts of the claim are NOT yet supported and need additional evidence\n3. Explicitly names all entities, people, works, and concepts that are relevant to the claim, even if they seem obvious\n4. Makes explicit connections between entities mentioned in different passages\n5. Suggests what specific evidence is still needed to fully verify or refute the claim\n\n## Key Guidelines\n\n1. **Always explicitly name all entities**: Even if a connection seems obvious or already established, always spell out the full names of people, places, works, etc. For example, if the claim involves \"the actress who is friends with Jim Brochu\" and you determine this is Lucille Ball, explicitly state \"Lucille Ball\" multiple times in your summary so it can be used as a search query term.\n\n2. **Identify intermediate entities**: Claims often involve chains of relationships (A relates to B, B relates to C). Make sure to identify and name all intermediate entities in the chain, not just the endpoints.\n\n3. **List specific works, songs, albums, films by name**: When the claim references a work (song, album, film, book) indirectly (e.g., \"the album that sold 25 million copies\"), identify it by name AND list its contents or notable tracks/features if relevant to the claim. For example, if an album is identified, mention notable songs on that album that might connect to other parts of the claim.\n\n4. **Generate query-friendly language**: Your summary should contain phrases and terms that would work well as search queries. Include full names, titles of works, years, and other specific identifiers.\n\n5. **Don't stop at confirming what's known**: After establishing what the passages confirm, actively speculate about what connections might exist based on the claim's structure, and name the specific entities or facts that would need to be verified.\n\n6. **Handle multi-hop claims**: Many claims require connecting information across multiple steps. Trace the full chain of reasoning and identify each link that needs verification. For each unverified link, suggest what specific information would resolve it.\n\n7. **CRITICAL - Explore ALL entities mentioned in passages as potential connections**: When a claim involves an indirect reference (e.g., \"the film in which Josh Flitter played 'The Iron Horse'\"), look at ALL films and roles mentioned in the passages for that person, not just ones that exactly match the description. The connection might be through a film already mentioned in the passages. For example, if Josh Flitter is known for playing Eddie in \"The Greatest Game Ever Played,\" consider whether \"The Iron Horse\" could be a character or nickname in that film. Always list ALL known works and roles from the passages as potential candidates and suggest searching for connections between those works and the claim's description.\n\n8. **CRITICAL - Name the specific work/entity even when unconfirmed**: When the claim references something indirectly (e.g., \"the Booker Prize winning novel Young Shoulders\"), always include the exact title and suggest potential authors. If you can identify the work from context or general knowledge, name it explicitly. For \"Young Shoulders\" as a Booker Prize winner, you should mention that this could be by John Wain (who won the James Tait Black Memorial Prize for \"Young Shoulders\") or search for the actual Booker Prize winner with that title. Always generate the specific title and any plausible author names as search terms.\n\n9. **Exhaust all passage information before declaring something unknown**: Before saying \"the passages don't mention X,\" carefully check whether any passage contains indirect evidence. A character name, a film's subject matter, or a historical context mentioned in a passage might be the missing link. For instance, if a film is about golf and a claim mentions \"The Iron Horse\" (a nickname for a famous athlete), consider whether the film might feature that character.\n\n10. **Generate multiple hypothesis-driven queries**: When a connection is unclear, generate multiple possible interpretations and name them all. For example, if looking for \"The Iron Horse\" in connection with Josh Flitter, consider: (a) it could be a character in \"The Greatest Game Ever Played\" (a golf movie that might reference famous athletes), (b) it could be a separate film, (c) it could be a TV role. Name all possibilities explicitly.\n\n## Output Format\n\nProduce a `summary` field that:\n- States what the passages confirm\n- Identifies all named entities relevant to the claim (people, works, places, etc.)\n- Lists ALL works, roles, and connections mentioned in passages that could potentially relate to the claim\n- Explicitly states what connections are established vs. what remains unverified\n- Proposes specific hypotheses about how passage entities might connect to unverified parts of the claim\n- Names specific entities or facts that need to be searched for to complete verification\n- Uses clear, specific language that would generate effective search queries\n- Includes the exact titles, names, and descriptions from the claim as search terms even if unconfirmed",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "summarize2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `context`, `passages`, produce the fields `summary`.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Context:",
+          "description": "${context}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

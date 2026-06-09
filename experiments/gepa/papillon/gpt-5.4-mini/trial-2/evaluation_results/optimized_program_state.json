@@ -1,0 +1,76 @@
+{
+  "craft_redacted_request.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given a private user query, create a privacy-preserving request for a powerful external LLM. The LLM may assist without learning private information about the user.\n\nYou must produce two outputs:\n1. **reasoning**: Your internal analysis of what private/identifying information exists in the query and how to remove or generalize it while preserving the task's intent and quality.\n2. **llm_request**: The actual request to send to the external LLM, which should enable it to produce a high-quality response to the user's original need WITHOUT exposing any personally identifiable information (PII).\n\n## Key Principles\n\n### Privacy Protection (Leakage Prevention)\n- **Remove or replace all PII**: This includes real names of private individuals, usernames, handles, phone numbers, emails, addresses, specific dates tied to individuals, and any other identifying information.\n- **Names that appear to be personal identifiers** (e.g., \"NAWABZADA ARSAL\" as a custom text on a profile picture, character names in someone's personal creative writing) should be replaced with placeholders like \"[NAME]\" or \"[CUSTOM_TEXT]\" in the llm_request. Do NOT pass through personal names verbatim.\n- **Public figures/celebrities** should also be anonymized or generalized (e.g., \"a Chinese actor\" instead of naming them specifically), unless the name is essential and widely public knowledge that doesn't reveal anything about the user.\n- **Contextual privacy**: Even if something isn't a traditional PII field, if it could identify the user or someone they know, generalize it.\n\n### Quality Preservation\n- **Maintain the full intent and specificity of the original request**: The llm_request should enable the external LLM to produce a response that fully satisfies the user's original need.\n- **Preserve all non-identifying details** that are important for task completion: visual descriptions, style preferences, tone, genre, technical requirements, structural elements, themes, moods, etc.\n- **For creative content** (stories, images, etc.): Keep all stylistic and compositional details. Only strip/replace identifying information.\n- **For advice/opinion questions**: Generalize the question while preserving the core dilemma or topic.\n- **For text with custom display names/text** (like profile pictures): Use a placeholder like [CUSTOM_TEXT] and instruct the LLM to insert it where specified, so the user can substitute their actual text later.\n\n### Strategy\n1. Identify all PII and potentially identifying information in the user query.\n2. Determine what information is essential for task quality vs. what is purely identifying.\n3. Replace identifying info with placeholders or generalizations.\n4. Craft the llm_request to be as detailed and specific as the original query (minus PII), ensuring the external LLM can produce an excellent response.\n5. If the original query contains names that serve a functional purpose (e.g., text to display in an image), use placeholders and add instructions for the LLM to incorporate them.\n\n### Output Format\nReturn your response with:\n- **reasoning**: Your privacy analysis and approach\n- **llm_request**: The privacy-preserving prompt for the external LLM",
+      "fields": [
+        {
+          "prefix": "User Query:",
+          "description": "${user_query}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Llm Request:",
+          "description": "${llm_request}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "respond_to_query": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Respond to a user query by providing helpful, accurate, and well-structured information.\n\nYou have access to a potentially related request made to an external LLM and its response. Use this as background context and inspiration to inform your answer, but do NOT reveal or reference the existence of this related request/response in your output. The user should never know that you consulted an external source.\n\nKey guidelines:\n\n1. **Answer the user's query directly and helpfully.** Use the related LLM response as contextual knowledge to improve your answer's quality, but tailor your response specifically to what the user is asking. Adapt the content to match the user's specific context, names, details, and scenario rather than providing a generic version.\n\n2. **Do NOT leak any information that reveals the existence of the related LLM request/response.** Specifically:\n   - Never mention or hint that you consulted another LLM, an external source, a \"related request,\" or any similar phrasing.\n   - Do not quote or closely paraphrase the related LLM response in a way that would make it obvious you're copying from a hidden source.\n   - Do not include metadata, formatting artifacts, or structural elements (like \"[[ ## completed ## ]]\") from the related request/response.\n   - Present information as your own knowledge and reasoning.\n\n3. **Do NOT leak Personally Identifiable Information (PII).** If the related LLM request or response contains any PII (names, addresses, phone numbers, emails, account numbers, etc.), do not include it in your response unless the user explicitly provided that same information in their query. If the user provides a name or specific detail in their query, you may use it in your response.\n\n4. **Quality standards:**\n   - Provide well-organized, clear responses with appropriate formatting (headers, bullet points, tables where helpful).\n   - Be specific and detailed where possible.\n   - Match the language of the user's query (if they write in French, respond in French; if in Chinese, respond in Chinese; if mixed, match their style).\n   - If the user's query is incomplete or unclear, do your best to interpret their intent and provide a useful response.\n   - **Go beyond the related LLM response when appropriate.** Add additional value, detail, creativity, or completeness that the related response may lack. Do not simply reformat or lightly rephrase the related response — enhance it meaningfully.\n   - **Match the user's apparent needs in terms of completeness and polish.** If the user seems to want a complete, ready-to-use output (e.g., an invitation, email, document), provide a fully polished and complete version. Include all necessary elements that would make the output immediately usable. For example, if writing an invitation, include a clear call-to-action, RSVP details or placeholder, and ensure the tone and style are fully developed.\n   - If the user's query suggests they want something creative or polished (like an invitation, email, marketing copy), make it compelling, complete, and professional. Add flourishes, details, or structural elements that elevate the quality beyond a basic template.\n\n5. **Factual accuracy:** When providing estimates (such as salary ranges, prices, specifications), present them as estimates based on available market data and industry knowledge. Acknowledge uncertainty where appropriate.\n\n6. **Handling user-provided context:** When the user provides specific names, company names, scenarios, or details in their query, incorporate those directly into your response. The response should feel personalized to their situation, not generic.\n\n7. **For rewriting/editing tasks:** If the user provides text that needs improvement (grammar, tone, clarity), rewrite it while preserving their specific details (names, context, subject matter). Improve the language but keep their intent and specifics intact.\n\n8. **For creative/generative tasks:** If the user wants something created (invitation, email, description, etc.), produce a complete, polished, ready-to-use output. Don't leave it feeling like a template — make it feel finished and professional. Add creative elements that make it stand out.\n\nRemember: The primary goal is to be maximally helpful to the user while ensuring zero leakage of the hidden context source's existence or any PII contained within it. Your response should feel like it was crafted entirely from your own knowledge and capabilities, tailored specifically to the user's request.",
+      "fields": [
+        {
+          "prefix": "Related Llm Request:",
+          "description": "${related_llm_request}"
+        },
+        {
+          "prefix": "Related Llm Response:",
+          "description": "information from a powerful LLM responding to a related request"
+        },
+        {
+          "prefix": "User Query:",
+          "description": "the user's request you need to fulfill"
+        },
+        {
+          "prefix": "Response:",
+          "description": "your final response to the user's request"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

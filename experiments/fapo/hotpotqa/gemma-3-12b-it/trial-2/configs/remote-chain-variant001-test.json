@@ -1,0 +1,38 @@
+{
+  "tenant_id": "hotpotqa",
+  "provider": "openai",
+  "provider_settings": {
+    "model": "gpt-4.1-mini",
+    "timeout_seconds": 300,
+    "max_retries": 2,
+    "retry_backoff_seconds": 5,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "max_tokens": 16000
+  },
+  "dataset": {
+    "path": "tenants/hotpotqa/datasets/datasets/test.jsonl"
+  },
+  "chain": {
+    "path": "tenants/hotpotqa/chains/multi_hop.py",
+    "fn": "build_chain",
+    "config": {
+      "prompt_paths": {
+        "generate_query_with_context": "tenants/hotpotqa/prompts/modules/generate_query_with_context/variant-001.md",
+        "summarize1": "tenants/hotpotqa/prompts/modules/summarize1/variant-001.md",
+        "summarize2": "tenants/hotpotqa/prompts/modules/summarize2/variant-001.md",
+        "generate_answer": "tenants/hotpotqa/prompts/modules/generate_answer/variant-001.md"
+      },
+      "retrieval_k": 7,
+      "bm25_data_dir": "tenants/hotpotqa/data/bm25"
+    }
+  },
+  "scoring_profile": {
+    "scorer": {
+      "module_path": "tenants/hotpotqa/code/scorers/hotpotqa_scorer.py",
+      "class_name": "Scorer"
+    }
+  },
+  "output_dir": "tenants/hotpotqa/evals/tmp/chain-remote-test",
+  "max_workers": 10
+}
