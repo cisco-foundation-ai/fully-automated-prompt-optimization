@@ -183,3 +183,10 @@ Return the following to the orchestrator:
 - `pass` — orchestrator proceeds to eval
 - `warn` — orchestrator reports warnings to user, proceeds to eval
 - `fail` — orchestrator passes issues back to the optimization agent for one revision attempt; if revision still fails, flag to user
+
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
