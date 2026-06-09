@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pytest
 
+from src.hephaestus.mcp.executor import MCPToolExecutor
 from src.hephaestus.mcp.manager import MCPServerManager
 from src.hephaestus.mcp.types import MCPConfig, MCPServerConfig
-from src.hephaestus.mcp.executor import MCPToolExecutor
 from src.hephaestus.providers.tool_types import ToolCall
 
 
