@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict
 
 from src.hephaestus.chains.nodes import build_node_context
 from src.hephaestus.engine.prompt_renderer import render_prompt
