@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import inspect
 import json
 import logging
 import time
@@ -145,7 +146,6 @@ def _ensure_chain(config: EvalConfig, provider: ProviderClient, mcp_manager=None
 
     # Try calling factory with mcp_manager parameter (new signature)
     # Fall back to legacy signature if it doesn't accept mcp_manager
-    import inspect
     sig = inspect.signature(factory)
     if "mcp_manager" in sig.parameters:
         return factory(provider, config.chain.config, mcp_manager=mcp_manager)
@@ -227,9 +227,18 @@ def _evaluate_single_case(
     total_tool_calls = len(tool_call_history)
     failed_tool_calls = sum(1 for tc in tool_call_history if tc.get("error"))
 
+    # Only pass tool_call_history to scorers that accept it. Legacy scorers
+    # override score_pipeline_case with the original signature (no
+    # tool_call_history param); passing it would raise TypeError.
+    score_kwargs: Dict[str, Any] = {"output_text": output_text}
+    sig = inspect.signature(scorer.score_pipeline_case)
+    if "tool_call_history" in sig.parameters or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    ):
+        score_kwargs["tool_call_history"] = tool_call_history
+
     score_payload = scorer.score_pipeline_case(
-        case, step_outputs, scoring_profile, output_text=output_text,
-        tool_call_history=tool_call_history,
+        case, step_outputs, scoring_profile, **score_kwargs,
     )
 
     composite_score, score_breakdown = validate_score_payload(score_payload)
@@ -286,7 +295,12 @@ def run_evaluation(config: EvalConfig) -> List[Dict]:
 
     try:
         provider = build_provider_client(config.provider, config.provider_settings)
-        chain = _ensure_chain(config, provider, mcp_manager=mcp_manager)
+        # Call with the legacy 2-arg form unless an MCP manager is active, so
+        # existing callers/overrides of _ensure_chain(config, provider) keep working.
+        if mcp_manager is not None:
+            chain = _ensure_chain(config, provider, mcp_manager=mcp_manager)
+        else:
+            chain = _ensure_chain(config, provider)
 
         tracker = ProgressTracker(Path(config.output_dir), total_cases=len(cases), run_id=run_id)
         max_workers = config.max_workers

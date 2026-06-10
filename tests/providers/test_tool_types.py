@@ -58,10 +58,19 @@ def test_generate_response_invalid_finish_reason():
         GenerateResponse(content="test", finish_reason="invalid")
 
 
-def test_generate_response_tool_calls_without_finish_reason():
-    """Test GenerateResponse validation: tool_calls requires finish_reason='tool_calls'."""
-    tool_calls = [ToolCall(id="call_1", name="test", arguments={})]
+def test_generate_response_tool_calls_finish_reason_requires_calls():
+    """finish_reason='tool_calls' requires a non-empty tool_calls list."""
     with pytest.raises(ValueError, match="finish_reason='tool_calls' requires"):
-        GenerateResponse(
-            content="", tool_calls=tool_calls, finish_reason="stop"
-        )
+        GenerateResponse(content="", tool_calls=None, finish_reason="tool_calls")
+
+
+def test_generate_response_tool_calls_with_stop_is_allowed():
+    """Carrying tool_calls alongside finish_reason='stop' is permitted.
+
+    The provider sets finish_reason directly from the API response, so we do
+    not force it to 'tool_calls' merely because tool_calls happen to be present.
+    """
+    tool_calls = [ToolCall(id="call_1", name="test", arguments={})]
+    resp = GenerateResponse(content="", tool_calls=tool_calls, finish_reason="stop")
+    assert resp.tool_calls == tool_calls
+    assert resp.finish_reason == "stop"
