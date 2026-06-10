@@ -9,6 +9,7 @@ This provides a proper MCP server with real protocol support.
 """
 
 import asyncio
+
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
