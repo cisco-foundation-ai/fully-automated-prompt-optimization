@@ -16,8 +16,6 @@ tenants/*/configs/**
 !tenants/mcp_example/configs/**
 !tenants/mcp_example/datasets/
 !tenants/mcp_example/datasets/**
-!tenants/mcp_example/evals/
-!tenants/mcp_example/evals/**
 !tenants/*/configs/.gitkeep
 !tenants/hotpotqa/configs/local-chain-variant001.json
 !tenants/hotpotqa/configs/remote-chain-variant001.json
