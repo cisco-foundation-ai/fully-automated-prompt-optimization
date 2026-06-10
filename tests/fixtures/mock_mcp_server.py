@@ -14,7 +14,6 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
-
 # Create server instance
 server = Server("mock-mcp-server")
 
