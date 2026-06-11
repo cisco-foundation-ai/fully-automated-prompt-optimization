@@ -37,8 +37,21 @@
   },
   "scoring_profile": {
     "scorer": {
-      "module_path": "tenants/mcp_example/code/scorers/task_scorer.py",
-      "class_name": "TaskScorer"
+      "module_path": "tenants/mcp_example/code/scorers/composite_scorer.py",
+      "class_name": "CompositeScorer"
+    },
+    "composite_weights": {
+      "answer_correct": 0.60,
+      "trajectory": 0.40
+    },
+    "judge": {
+      "provider": "openai",
+      "provider_settings": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.0,
+        "max_tokens": 256
+      },
+      "fallback_score": 50.0
     }
   },
   "output_dir": "tenants/mcp_example/evals/run-001",

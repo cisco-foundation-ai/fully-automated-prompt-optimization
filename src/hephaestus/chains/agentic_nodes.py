@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict
 
@@ -94,6 +95,10 @@ def make_agentic_node(
         messages = render_result.prompt_messages.copy()
         tool_call_history = list(state.get("tool_call_history", []))
         iterations = 0
+        # Monotonic per-case counter so scorers can reconstruct call ordering
+        # across iterations (the list order already implies this, but an
+        # explicit index survives any later filtering/reordering).
+        call_index = len(tool_call_history)
 
         while iterations < max_iterations:
             iterations += 1
@@ -129,7 +134,16 @@ def make_agentic_node(
                     f"{max_tool_calls_per_iteration}"
                 )
 
-            tool_results = executor.execute_batch(tool_calls_to_execute)
+            # Execute each call individually so per-call latency is captured.
+            # This is the same sequential semantics as execute_batch (which is
+            # itself a sequential loop) and preserves the per-case call limit.
+            tool_results = []
+            tool_latencies_ms = []
+            for tc in tool_calls_to_execute:
+                t_call = time.monotonic()
+                result = executor.execute(tc)
+                tool_latencies_ms.append(round((time.monotonic() - t_call) * 1000, 1))
+                tool_results.append(result)
 
             # Add assistant message with tool calls
             messages.append({
@@ -149,7 +163,9 @@ def make_agentic_node(
             })
 
             # Add tool results as messages and to history
-            for tc, result in zip(tool_calls_to_execute, tool_results):
+            for tc, result, latency_ms in zip(
+                tool_calls_to_execute, tool_results, tool_latencies_ms
+            ):
                 messages.append({
                     "role": "tool",
                     "tool_call_id": result.tool_call_id,
@@ -159,11 +175,20 @@ def make_agentic_node(
                 tool_call_history.append({
                     "tool": tc.name,
                     "arguments": tc.arguments,
+                    # Full tool output so LLM-judge / trajectory scorers can
+                    # inspect what the tool actually returned, not just its size.
+                    "result": result.content,
                     "result_length": len(result.content),
                     "error": result.error,
                     "iteration": iterations,
+                    "call_index": call_index,
+                    # The assistant's reasoning that produced this batch of
+                    # calls (same for all calls in one iteration).
+                    "llm_thought": response.content or "",
+                    "latency_ms": latency_ms,
                     "node": output_key,
                 })
+                call_index += 1
 
         # Max iterations reached without final answer
         diagnostics = list(state.get("diagnostics", []))

@@ -220,8 +220,10 @@ def score_pipeline_case(self, case, step_outputs, scoring_profile,
     # ... compare against case.expected["tools_used"], etc.
 ```
 
-See `tenants/mcp_example/code/scorers/task_scorer.py` for a full example that
-scores answer correctness, correct tool selection, and tool efficiency.
+See `tenants/mcp_example/code/scorers/` for a full example: a `TrajectoryScorer`
+(order/argument-aware tool checks), an `LLMJudgeScorer` (LLM-as-judge answer
+correctness), and a `CompositeScorer` that combines them with configurable
+weights.
 
 ### Step 5: Run it
 
