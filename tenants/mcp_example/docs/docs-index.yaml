@@ -1,0 +1,10 @@
+version: 1
+tenant_id: mcp_example
+canonical_docs:
+  tenant_profile: docs/tenant-profile.md
+  data_contract: docs/data-contract.md
+  prompt_contract: docs/prompt-contract.md
+  eval_operations: docs/eval-operations.md
+  iteration_playbook: docs/iteration-playbook.md
+  change_log: docs/change-log.md
+last_validated: 2026-06-11
