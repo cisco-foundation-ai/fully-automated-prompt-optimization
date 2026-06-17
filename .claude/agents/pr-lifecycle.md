@@ -1,3 +1,9 @@
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 ---
 name: pr-lifecycle
 description: >
@@ -121,9 +127,3 @@ Follow all rules in `docs/github-hygiene.md`. Additionally:
 - Never force-push to `main`
 - Do not merge — only prepare for merge
 - Stop and ask the user if rebase conflicts or persistent test failures occur
-
-<!--
-Copyright 2026 Cisco Systems, Inc. and its affiliates
-
-SPDX-License-Identifier: Apache-2.0
--->

@@ -1,3 +1,9 @@
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 ---
 name: k8s-manager
 description: >
@@ -141,10 +147,3 @@ Follow all rules from `CLAUDE.md`:
 - Never chain `cd` with `kubectl` — use single self-contained commands
 - Quote all user-provided values in shell commands
 - Prefer single commands over chained expressions (`&&`, `||`, `;`)
-
-
-<!--
-Copyright 2026 Cisco Systems, Inc. and its affiliates
-
-SPDX-License-Identifier: Apache-2.0
--->
