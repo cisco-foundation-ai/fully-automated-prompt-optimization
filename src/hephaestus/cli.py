@@ -19,6 +19,15 @@ def build_parser() -> argparse.ArgumentParser:
     progress_parser.add_argument("--output-dir", required=True, help="Output directory of the eval run")
     progress_parser.add_argument("--json", action="store_true", dest="json_output", help="Output raw JSON")
 
+    ui_parser = subparsers.add_parser("ui", help="Launch the local web UI to browse tenant outputs")
+    ui_parser.add_argument(
+        "--tenants-root",
+        default="tenants",
+        help="Path to the tenants directory (default: tenants)",
+    )
+    ui_parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
+    ui_parser.add_argument("--port", type=int, default=8765, help="Bind port (default: 8765)")
+
     customer_data_parser = subparsers.add_parser(
         "customer-data",
         help="Pull, push, or remove local customer data for a tenant",
@@ -105,6 +114,12 @@ def main() -> None:
                 f"Progress: {progress.completed_cases}/{progress.total_cases}  "
                 f"Avg score: {score_str}"
             )
+        return
+
+    if args.command == "ui":
+        from src.hephaestus.webui import serve
+
+        serve(Path(args.tenants_root), host=args.host, port=args.port)
         return
 
     if args.command == "customer-data":
