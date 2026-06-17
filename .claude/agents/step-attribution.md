@@ -1,3 +1,9 @@
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 ---
 name: step-attribution
 description: >
@@ -81,9 +87,3 @@ Return the following to the orchestrator:
   - `level`: `prompt` or `structural`
   - `confidence`: `high`, `medium`, or `low`
   - `suggested_fix`: one-sentence description of what change would address this cluster
-
-<!--
-Copyright 2026 Cisco Systems, Inc. and its affiliates
-
-SPDX-License-Identifier: Apache-2.0
--->

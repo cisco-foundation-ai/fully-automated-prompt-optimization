@@ -35,8 +35,8 @@ A tenant is a self-contained optimization project. You need four things: a datas
 **Chain** — a LangGraph pipeline that processes each case (`my_chain.py`):
 ```python
 from langgraph.graph import StateGraph, END
-from src.hephaestus.chains.types import ChainState
-from src.hephaestus.chains.nodes import make_llm_node
+from hephaestus.chains.types import ChainState
+from hephaestus.chains.nodes import make_llm_node
 
 def build_chain(provider, config):
     graph = StateGraph(ChainState)
@@ -52,7 +52,7 @@ def build_chain(provider, config):
 
 **Scorer** — compares chain output to expected answers (`my_scorer.py`):
 ```python
-from src.hephaestus.scoring.scorer import Scorer as BaseScorer
+from hephaestus.scoring.scorer import Scorer as BaseScorer
 
 class Scorer(BaseScorer):
     def validate_case(self, case, scoring_profile):
