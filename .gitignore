@@ -9,6 +9,9 @@ __pycache__/
 # Local-only operational artifacts (never checked in)
 tenants/*/evals/
 tenants/*/configs/**
+!tenants/mcp_example/
+!tenants/mcp_example/configs/
+!tenants/mcp_example/configs/**
 !tenants/*/configs/.gitkeep
 !tenants/hotpotqa/configs/local-chain-variant001.json
 !tenants/hotpotqa/configs/remote-chain-variant001.json
@@ -39,3 +42,4 @@ tenants/*/source_artifacts/*
 !tenants/*/source_artifacts/.gitkeep
 tenants/*/datasets/*
 !tenants/*/datasets/.gitkeep
+.DS_Store

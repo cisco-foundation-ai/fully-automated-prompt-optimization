@@ -99,6 +99,55 @@ def _detect_cascading_failures(
     return None
 
 
+def _detect_tool_failures(tool_history: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Detect if tool execution failures caused the chain to fail.
+
+    Args:
+        tool_history: List of tool call records with tool, arguments, error, etc.
+
+    Returns:
+        Dict with failed tool info, or None if no tool failures
+    """
+    if not tool_history:
+        return None
+
+    failed_tools = [tc for tc in tool_history if tc.get("error")]
+    if not failed_tools:
+        return None
+
+    # Return info about the first failed tool
+    first_failure = failed_tools[0]
+    return {
+        "tool": first_failure.get("tool", "unknown"),
+        "error": first_failure.get("error", ""),
+        "iteration": first_failure.get("iteration", 0),
+        "total_failures": len(failed_tools),
+    }
+
+
+def _classify_tool_error(error_message: str) -> str:
+    """Classify tool error by type.
+
+    Args:
+        error_message: Error message from tool execution
+
+    Returns:
+        Error category: "timeout", "not_found", "invalid_args", "permission", "other"
+    """
+    error_lower = error_message.lower()
+
+    if "timeout" in error_lower or "timed out" in error_lower:
+        return "timeout"
+    elif "not found" in error_lower or "unknown tool" in error_lower:
+        return "not_found"
+    elif "invalid" in error_lower or "missing" in error_lower or "required" in error_lower:
+        return "invalid_args"
+    elif "permission" in error_lower or "forbidden" in error_lower or "unauthorized" in error_lower:
+        return "permission"
+    else:
+        return "other"
+
+
 def _confidence_for_heuristic(
     heuristic: str, overlap: Optional[float] = None
 ) -> str:
@@ -159,6 +208,7 @@ def attribute_failures(
         step_outputs: Dict[str, str] = case.get("step_outputs", {})
         context: Dict[str, str] = case.get("context", {})
         expected_answer = case.get("expected_answer", context.get("answer", ""))
+        tool_history: List[Dict[str, Any]] = case.get("tool_call_history", [])
 
         if not step_outputs:
             _add_attribution(
@@ -167,6 +217,21 @@ def attribute_failures(
                 case_id,
                 heuristic="no_steps",
                 confidence="high",
+            )
+            continue
+
+        # Check for tool failures first (highest priority)
+        tool_failure_info = _detect_tool_failures(tool_history)
+        if tool_failure_info:
+            error_type = _classify_tool_error(tool_failure_info["error"])
+            _add_attribution(
+                attribution,
+                f"tool_{tool_failure_info['tool']}",
+                case_id,
+                heuristic=f"tool_failure_{error_type}",
+                confidence="high",
+                tool_failure=True,
+                tool_error_type=error_type,
             )
             continue
 
@@ -288,17 +353,21 @@ def summarize(attribution: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
         Dict with:
             - prompt_addressable: count of failures fixable by prompt changes
             - structural_addressable: count of failures fixable by structural changes
+            - tool_addressable: count of failures fixable by tool/MCP changes
             - format_failures: count of format-related failures
             - total_failures: total failure count
             - by_confidence: {high: N, medium: N, low: N}
             - by_retrieval_tier: {hit: N, partial: N, miss: N}
+            - tool_error_types: {timeout: N, not_found: N, invalid_args: N, ...}
     """
     prompt_count = 0
     structural_count = 0
+    tool_count = 0
     format_count = 0
     total_count = 0
     by_confidence: Dict[str, int] = {"high": 0, "medium": 0, "low": 0}
     by_retrieval_tier: Dict[str, int] = {"hit": 0, "partial": 0, "miss": 0}
+    tool_error_types: Dict[str, int] = {}
 
     for info in attribution.values():
         count = info["count"]
@@ -311,8 +380,15 @@ def summarize(attribution: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
             tier = info["retrieval_tier"]
             by_retrieval_tier[tier] = by_retrieval_tier.get(tier, 0) + count
 
+        # Track tool error types
+        if info.get("tool_failure"):
+            error_type = info.get("tool_error_type", "other")
+            tool_error_types[error_type] = tool_error_types.get(error_type, 0) + count
+
         # Classify by optimization level
-        if heuristic in ("retrieval_empty", "retrieval_overlap", "cascade"):
+        if heuristic.startswith("tool_failure_"):
+            tool_count += count
+        elif heuristic in ("retrieval_empty", "retrieval_overlap", "cascade"):
             structural_count += count
         elif heuristic == "cascade_downstream":
             pass  # Already counted via cascade root
@@ -328,10 +404,12 @@ def summarize(attribution: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     return {
         "prompt_addressable": prompt_count,
         "structural_addressable": structural_count,
+        "tool_addressable": tool_count,
         "format_failures": format_count,
         "total_failures": total_count,
         "by_confidence": by_confidence,
         "by_retrieval_tier": by_retrieval_tier,
+        "tool_error_types": tool_error_types,
     }
 
 
@@ -344,6 +422,8 @@ def _add_attribution(
     retrieval_tier: Optional[str] = None,
     cascade_root: Optional[str] = None,
     format_failure: bool = False,
+    tool_failure: bool = False,
+    tool_error_type: Optional[str] = None,
 ) -> None:
     """Add a failure attribution entry."""
     if step_name not in attribution:
@@ -359,6 +439,9 @@ def _add_attribution(
             attribution[step_name]["cascade_root"] = cascade_root
         if format_failure:
             attribution[step_name]["format_failures"] = 0
+        if tool_failure:
+            attribution[step_name]["tool_failure"] = True
+            attribution[step_name]["tool_error_type"] = tool_error_type
     attribution[step_name]["count"] += 1
     attribution[step_name]["case_ids"].append(case_id)
     if format_failure:

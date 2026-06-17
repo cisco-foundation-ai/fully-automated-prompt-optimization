@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import inspect
 import json
 import logging
 import time
@@ -16,6 +17,8 @@ from typing import Any, Dict, List
 
 from src.hephaestus.chains.loader import load_chain_factory
 from src.hephaestus.datasets.jsonl_loader import load_cases
+from src.hephaestus.mcp.manager import MCPServerManager
+from src.hephaestus.mcp.types import MCPConfig, MCPServerConfig
 from src.hephaestus.providers import build_provider_client
 from src.hephaestus.providers.base import ProviderClient
 from src.hephaestus.runs.io_utils import write_outputs
@@ -65,6 +68,31 @@ def load_eval_config(path: Path) -> EvalConfig:
         run_id = str(run_id)
         validate_run_id(run_id)
 
+    # Parse MCP configuration if present
+    mcp_config = None
+    if "mcp" in raw:
+        mcp_raw = raw["mcp"]
+        servers = []
+        for srv in mcp_raw.get("servers", []):
+            servers.append(
+                MCPServerConfig(
+                    name=srv["name"],
+                    command=srv["command"],
+                    args=srv.get("args", []),
+                    env=srv.get("env", {}),
+                    enabled=srv.get("enabled", True),
+                    timeout_seconds=srv.get("timeout_seconds", 30),
+                )
+            )
+
+        tool_exec = mcp_raw.get("tool_execution", {})
+        mcp_config = MCPConfig(
+            servers=servers,
+            max_iterations=tool_exec.get("max_iterations", 10),
+            max_tool_calls_per_iteration=tool_exec.get("max_tool_calls_per_iteration", 5),
+            timeout_seconds=tool_exec.get("timeout_seconds", 30),
+        )
+
     return EvalConfig(
         tenant_id=str(raw["tenant_id"]),
         provider=provider,
@@ -75,6 +103,7 @@ def load_eval_config(path: Path) -> EvalConfig:
         chain=chain_config,
         max_workers=max_workers,
         run_id=run_id,
+        mcp=mcp_config,
     )
 
 
@@ -102,10 +131,32 @@ def _validate_eval_paths(config: EvalConfig) -> None:
             )
 
 
-def _ensure_chain(config: EvalConfig, provider: ProviderClient) -> Any:
-    """Load a chain from the eval config."""
+def _ensure_chain(config: EvalConfig, provider: ProviderClient, mcp_manager=None) -> Any:
+    """Load a chain from the eval config.
+
+    Args:
+        config: Evaluation configuration
+        provider: LLM provider client
+        mcp_manager: Optional MCP server manager for agentic workflows
+
+    Returns:
+        Compiled LangGraph chain
+    """
     factory = load_chain_factory(config.chain.path, config.chain.fn)
-    return factory(provider, config.chain.config)
+
+    # Try calling factory with mcp_manager parameter (new signature)
+    # Fall back to legacy signature if it doesn't accept mcp_manager
+    sig = inspect.signature(factory)
+    if "mcp_manager" in sig.parameters:
+        return factory(provider, config.chain.config, mcp_manager=mcp_manager)
+    else:
+        # Legacy chain - no MCP support
+        if mcp_manager:
+            logger.warning(
+                f"Chain {config.chain.path} does not accept mcp_manager parameter. "
+                "MCP tools will not be available."
+            )
+        return factory(provider, config.chain.config)
 
 
 def _evaluate_single_case(
@@ -135,6 +186,7 @@ def _evaluate_single_case(
     step_timings: List[List] = []
     final_state = dict(initial_state)
     chain_set_output_text = False
+    tool_call_history = []
 
     try:
         t0 = time.monotonic()
@@ -170,8 +222,23 @@ def _evaluate_single_case(
     output_text = final_state.get("output_text", "")
     step_outputs = final_state.get("step_outputs", {})
 
+    # Extract tool call history if present (from agentic workflows)
+    tool_call_history = final_state.get("tool_call_history", [])
+    total_tool_calls = len(tool_call_history)
+    failed_tool_calls = sum(1 for tc in tool_call_history if tc.get("error"))
+
+    # Only pass tool_call_history to scorers that accept it. Legacy scorers
+    # override score_pipeline_case with the original signature (no
+    # tool_call_history param); passing it would raise TypeError.
+    score_kwargs: Dict[str, Any] = {"output_text": output_text}
+    sig = inspect.signature(scorer.score_pipeline_case)
+    if "tool_call_history" in sig.parameters or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    ):
+        score_kwargs["tool_call_history"] = tool_call_history
+
     score_payload = scorer.score_pipeline_case(
-        case, step_outputs, scoring_profile, output_text=output_text,
+        case, step_outputs, scoring_profile, **score_kwargs,
     )
 
     composite_score, score_breakdown = validate_score_payload(score_payload)
@@ -185,6 +252,9 @@ def _evaluate_single_case(
         output_text=output_text,
         step_outputs=step_outputs,
         step_timings=step_timings,
+        tool_call_history=tool_call_history if tool_call_history else None,
+        total_tool_calls=total_tool_calls,
+        failed_tool_calls=failed_tool_calls,
     )
 
 
@@ -212,12 +282,27 @@ def run_evaluation(config: EvalConfig) -> List[Dict]:
     for case in cases:
         scorer.validate_case(case, config.scoring_profile)
 
-    provider = build_provider_client(config.provider, config.provider_settings)
-    chain = _ensure_chain(config, provider)
-
-    tracker = ProgressTracker(Path(config.output_dir), total_cases=len(cases), run_id=run_id)
+    # Start MCP servers if configured
+    mcp_manager = None
+    if config.mcp:
+        logger.info("Starting MCP servers for agentic workflow support")
+        mcp_manager = MCPServerManager(config.tenant_id, config=config.mcp)
+        try:
+            mcp_manager.start_servers()
+        except Exception as e:
+            logger.error(f"Failed to start MCP servers: {e}")
+            raise
 
     try:
+        provider = build_provider_client(config.provider, config.provider_settings)
+        # Call with the legacy 2-arg form unless an MCP manager is active, so
+        # existing callers/overrides of _ensure_chain(config, provider) keep working.
+        if mcp_manager is not None:
+            chain = _ensure_chain(config, provider, mcp_manager=mcp_manager)
+        else:
+            chain = _ensure_chain(config, provider)
+
+        tracker = ProgressTracker(Path(config.output_dir), total_cases=len(cases), run_id=run_id)
         max_workers = config.max_workers
         if max_workers is not None and max_workers > 1:
             evaluate = partial(
@@ -265,3 +350,8 @@ def run_evaluation(config: EvalConfig) -> List[Dict]:
         # Mark as failed if any exception or interruption occurs
         tracker.mark_failed()
         raise
+    finally:
+        # Clean up MCP servers
+        if mcp_manager:
+            logger.info("Stopping MCP servers")
+            mcp_manager.stop_servers()
