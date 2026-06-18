@@ -180,15 +180,16 @@ class TenantStore:
         return total
 
     def _run_dirs(self, tenant_dir: Path) -> List[Path]:
-        found: List[Path] = []
+        found: set[Path] = set()
         for parent_name in _RUN_PARENT_DIRS:
             parent = tenant_dir / parent_name
             if not parent.is_dir():
                 continue
-            for run_dir in sorted(parent.iterdir()):
-                if run_dir.is_dir() and any((run_dir / m).exists() for m in _RUN_MARKERS):
-                    found.append(run_dir)
-        return found
+            for marker in _RUN_MARKERS:
+                for marker_path in parent.rglob(marker):
+                    if marker_path.is_file():
+                        found.add(marker_path.parent)
+        return sorted(found)
 
     def list_runs(self, tenant_id: str) -> List[Dict[str, Any]]:
         tenant_dir = self._tenant_dir(tenant_id)
