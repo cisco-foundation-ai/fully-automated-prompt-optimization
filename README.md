@@ -102,13 +102,24 @@ cat eval_output/summary.md
 
 ### 4. Optimize
 
-Open [Claude Code](https://docs.anthropic.com/en/docs/claude-code) in your project directory and run the optimization agent:
+Use Claude Code or Codex from your project directory.
+
+With [Claude Code](https://docs.anthropic.com/en/docs/claude-code), run the optimization agent:
 
 ```
 > /optimization
   → Tenant: my_project
   → Config: eval.json
   → Success criteria: composite_score >= 90
+```
+
+With Codex, ask it to run the FAPO optimization workflow:
+
+```
+Optimize eval quality for tenant "my_project".
+Config: eval.json
+Success criteria: composite_score >= 90
+Follow .codex/agents/optimization.md.
 ```
 
 The agent autonomously analyzes failures, creates improved prompt variants, evaluates them, and iterates until your target score is reached. See [Optimization loop](#optimization-loop) for the full details.
@@ -296,7 +307,9 @@ Evaluation tells you *how well* your chain performs. Optimization tells you *wha
 
 ### Running it
 
-The optimization loop is driven by [Claude Code](https://docs.anthropic.com/en/docs/claude-code) agents. From within your project directory:
+The optimization loop can be driven by Claude Code or Codex. Use the prompt set that matches the tool you are running: `.claude/` for Claude Code and `.codex/` for Codex.
+
+For [Claude Code](https://docs.anthropic.com/en/docs/claude-code), use the existing slash commands from within your project directory:
 
 ```
 # 1. Run a baseline eval first
@@ -311,7 +324,21 @@ The optimization loop is driven by [Claude Code](https://docs.anthropic.com/en/d
   → Success criteria: composite_score >= 80
 ```
 
-The `/optimization` agent takes over from there. It will:
+For Codex, provide the same tenant, config, and success criteria in the prompt:
+
+```
+Run the FAPO eval runner.
+Tenant: my_project
+Config: tenants/my_project/configs/eval.json
+Follow .codex/commands/eval-runner.md.
+
+Then optimize eval quality for tenant "my_project".
+Config: tenants/my_project/configs/eval.json
+Success criteria: composite_score >= 80
+Follow .codex/agents/optimization.md.
+```
+
+The optimization agent takes over from there. It will:
 1. Read the tenant's `docs/iteration-playbook.md` to understand what it's allowed to change (the **scope contract**)
 2. Run failure analysis on the eval results
 3. Create new prompt/parameter/chain variants targeting the top failure patterns
@@ -319,7 +346,7 @@ The `/optimization` agent takes over from there. It will:
 5. Run eval on the new variant and compare to the previous best
 6. Repeat until success criteria are met or all allowed optimization levels are exhausted
 
-The agent manages three internal subagents automatically — you don't invoke these directly:
+The workflow uses internal failure-analysis and review instructions automatically — you don't invoke these directly:
 - **step-attribution** — classifies failures by root cause after each eval
 - **variant-reviewer** — checks proposed variants for leakage, placeholder drift, and scope violations before eval
 
@@ -457,6 +484,20 @@ Scopes: `raw` (source artifacts), `derived` (processed datasets), `all`.
 
 ---
 
+## FAPO UI
+
+FAPO includes a local, read-only web UI called **FAPO Explorer** for browsing tenant artifacts after evals and optimization runs. It shows cross-tenant run summaries, per-case eval outputs, score breakdowns, prompt variants, datasets, iteration history, and tenant docs.
+
+Start it from the repository root:
+
+```bash
+python -m hephaestus.cli ui
+```
+
+By default, the UI serves `tenants/` at <http://127.0.0.1:8765/>. See [docs/web-ui.md](docs/web-ui.md) for options such as `--tenants-root`, `--host`, and `--port`.
+
+---
+
 ## Claude Code skills
 
 FAPO ships with [Claude Code](https://docs.anthropic.com/en/docs/claude-code) skills that automate common workflows. Run these as slash commands inside Claude Code:
@@ -481,6 +522,31 @@ These are invoked automatically by the optimization agent — you don't run them
 |----------|---------|
 | **Step Attribution** | Post-eval failure analysis. Classifies failures by root cause and optimization level. |
 | **Variant Reviewer** | Independent guardrail check on proposed variants (catches leakage, placeholder drift, scope violations). |
+
+---
+
+## Codex workflows
+
+FAPO also ships Codex prompt files for the same core optimization workflows. These are not Claude Code slash commands; use them only when working in Codex.
+
+### User-invocable workflows
+
+| Workflow | Codex prompt file | How to invoke |
+|----------|-------------------|---------------|
+| **Optimization** | `.codex/agents/optimization.md` | Ask Codex to optimize eval quality for a tenant and provide the eval config plus success criteria. |
+| **Eval Runner** | `.codex/commands/eval-runner.md` | Ask Codex to run an eval for a tenant config and summarize the output directory, score, and failures. |
+| **Synthetic Samples** | `.codex/commands/synthetic-samples.md` | Ask Codex to create synthetic examples for a tenant dataset. |
+| **Synthetic Pruner** | `.codex/commands/synthetic-pruner.md` | Ask Codex to validate and clean synthetic examples. |
+| **Reset Tenant** | `.codex/commands/reset-tenant.md` | Ask Codex to reset generated tenant optimization and eval artifacts. |
+
+### Internal Codex phases
+
+These are used by the Codex optimization workflow — you don't run them directly:
+
+| Phase | Codex prompt file | Purpose |
+|-------|-------------------|---------|
+| **Step Attribution** | `.codex/agents/step-attribution.md` | Post-eval failure analysis. Classifies failures by root cause and optimization level. |
+| **Variant Reviewer** | `.codex/agents/variant-reviewer.md` | Independent guardrail check on proposed variants before eval. |
 
 ---
 

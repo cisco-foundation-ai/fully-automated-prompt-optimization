@@ -10,27 +10,45 @@ SPDX-License-Identifier: Apache-2.0
 
 Architecture reference for the optimization system. The `optimization` agent drives the loop autonomously; this document describes the components it uses.
 
+Claude Code and Codex use parallel prompt sets. Users running Claude Code should continue to use the `.claude/` agents and commands. Users running Codex should use the matching `.codex/` agents and commands. The tenant playbooks, scope constraints, eval configs, iteration memory, and manual fallback workflow are shared unless a tool-specific prompt says otherwise.
+
 ## Architecture
 
 ### Orchestrator
 
-| Component | File | Role |
-|-----------|------|------|
-| Optimization Agent | `.claude/agents/optimization.md` | Goal-oriented optimizer — analyzes results, creates variants, runs evals, iterates until targets are met |
+| Component | Claude Code File | Codex File | Role |
+|-----------|------------------|------------|------|
+| Optimization Agent | `.claude/agents/optimization.md` | `.codex/agents/optimization.md` | Goal-oriented optimizer — analyzes results, creates variants, runs evals, iterates until targets are met |
 
 ### Execution Components
 
-| Component | File | Role |
-|-----------|------|------|
-| Variant Reviewer | `.claude/agents/variant-reviewer.md` | Independent guardrail check on proposed variants before eval |
-| Eval Runner | `.claude/commands/eval-runner.md` | Runs evaluations and returns score summaries |
+| Component | Claude Code File | Codex File | Role |
+|-----------|------------------|------------|------|
+| Step Attribution | `.claude/agents/step-attribution.md` | `.codex/agents/step-attribution.md` | Internal failure attribution phase after eval runs |
+| Variant Reviewer | `.claude/agents/variant-reviewer.md` | `.codex/agents/variant-reviewer.md` | Independent guardrail check on proposed variants before eval |
+| Eval Runner | `.claude/commands/eval-runner.md` | `.codex/commands/eval-runner.md` | Runs evaluations and returns score summaries |
 
 ### Data Tools
 
-| Component | File | Role |
-|-----------|------|------|
-| Synthetic Samples | `.claude/commands/synthetic-samples.md` | Creates synthetic examples for dataset augmentation |
-| Synthetic Pruner | `.claude/commands/synthetic-pruner.md` | Validates and cleans synthetic data |
+| Component | Claude Code File | Codex File | Role |
+|-----------|------------------|------------|------|
+| Synthetic Samples | `.claude/commands/synthetic-samples.md` | `.codex/commands/synthetic-samples.md` | Creates synthetic examples for dataset augmentation |
+| Synthetic Pruner | `.claude/commands/synthetic-pruner.md` | `.codex/commands/synthetic-pruner.md` | Validates and cleans synthetic data |
+
+### Operational Tools
+
+| Component | Claude Code File | Codex File | Role |
+|-----------|------------------|------------|------|
+| Reset Tenant | `.claude/commands/reset-tenant.md` | `.codex/commands/reset-tenant.md` | Resets generated tenant optimization and eval artifacts when explicitly requested |
+
+## Tool-Specific Usage
+
+Use the prompt set that matches the tool running the workflow:
+
+1. **Claude Code**: follow the existing `.claude/` agents and commands. Do not redirect Claude Code runs to `.codex/`; those prompts are written for Codex sessions.
+2. **Codex**: follow the matching `.codex/` agents and commands. For eval execution, use `.codex/commands/eval-runner.md` or run `python scripts/eval/run_eval_and_summarize.py --config tenants/<tenant_id>/configs/<config>.json`.
+3. **Automation wrappers**: `scripts/optimize-loop.sh` invokes Claude Code and should remain Claude Code-specific. Codex automation should use a separate wrapper or an explicit Codex session.
+4. **Shared behavior**: both tools must follow the tenant playbook, protect tenant source artifacts, write iteration memory under the tenant docs directory, and avoid committing unless the user asks.
 
 ## Iteration Memory
 
