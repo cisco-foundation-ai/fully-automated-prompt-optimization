@@ -61,16 +61,17 @@ Inside a tenant, content is organized into tabs:
 
 | Tab | Source | Contents |
 |---|---|---|
-| **Runs** | `evals/<run>/` (also probes `runs/`, `eval_outputs/`, `outputs/`) | Eval runs sorted newest-first, with status, completion, and composite score. Click a run for its config, progress, `summary.md`, and per-case table; click a case for its full output, score breakdown, tool calls, and joined ground truth. |
+| **Runs** | Any run directory under `evals/` (also probes `runs/`, `eval_outputs/`, `outputs/`) | Eval runs sorted newest-first, with status, completion, and composite score. Click a run for its config, progress, `summary.md`, and per-case table; click a case for its full output, score breakdown, tool calls, and joined ground truth. |
 | **Datasets** | `datasets/**/*.jsonl` | Dataset files with row counts; rows are viewable with offset/limit paging. |
 | **Iterations** | `docs/iteration-memory.jsonl` | The optimization iteration history recorded for the tenant. |
 | **Prompts** | `prompts/**/*.md` | Prompt variant markdown files, rendered as content. |
 | **Docs** | `README.md` + `docs/**/*.md` | The tenant README and tenant-specific markdown docs. |
 
-A run directory is recognized when it contains any of `results.jsonl`,
-`run_config.json`, `summary.md`, or `progress.json`. Per-case ground truth is
-joined from the run's dataset (via `run_config.json`'s `dataset_path`, falling
-back to the tenant's only dataset) by matching on `case_id`.
+A run directory is recognized recursively under the probed output roots when it
+contains any of `results.jsonl`, `run_config.json`, `summary.md`, or
+`progress.json`. Per-case ground truth is joined from the run's dataset (via
+`run_config.json`'s `dataset_path`, falling back to the tenant's only dataset)
+by matching on `case_id`.
 
 ## How it works
 
