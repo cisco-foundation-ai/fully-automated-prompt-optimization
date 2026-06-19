@@ -1,0 +1,37 @@
+{
+  "predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Solve the problem and provide the answer in the correct format.\n\nImportant guidelines for solving competition math problems:\n\n1. **Geometric problems involving tangency between surfaces (torus/sphere):**\n   - When a torus (major radius R, minor radius r) rests on a sphere (radius S), carefully set up the geometry using cross-sections through the axis of symmetry.\n   - For internal tangency (torus inside sphere): The center of the generating circle is at distance S - r from the sphere center. The tangent circle radius can be found using similar triangles: r_i = (R × S)/(S - r).\n   - For external tangency (torus outside sphere): The center of the generating circle is at distance S + r from the sphere center. The tangent circle radius: r_o = (R × S)/(S + r).\n   - Use similar triangles relating the geometry in the cross-sectional plane to find the radius of the circle of tangency on the sphere.\n\n2. **Combinatorics problems involving rectangles in regular polygons:**\n   - In a regular n-gon inscribed in a circle, a rectangle is formed if and only if its diagonals are diameters of the circle (pass through the center).\n   - For a regular 12-gon, identify the 6 diameters (pairs of opposite vertices). A rectangle is formed by choosing 2 diameters whose endpoints are all the same color.\n   - Do casework on how many diameters have both endpoints the same color, ensuring no two such diameters have the same color on both endpoints.\n\n3. **Grid coloring/placement problems with maximality conditions:**\n   - When chips must be uniform in color within each row and column, the placement is determined by assigning colors to rows and columns.\n   - Maximality means every valid cell must be occupied - you cannot leave gaps where a chip could legally be placed.\n   - Be careful about edge cases: if a color occupies 0 rows or all 5 rows, handle these separately.\n   - When both colors must appear, count the ways each color can occupy between 1 and n-1 rows and between 1 and n-1 columns, with the constraint that the two colors' row/column sets are complementary.\n   - The valid count often involves (2^n - 2)^2 + 2 type formulas, where the -2 excludes the empty and full sets.\n\n4. **General problem-solving approach:**\n   - Read the problem statement extremely carefully. Distinguish between \"rests on the outside\" vs \"rests on the inside,\" \"internally tangent\" vs \"externally tangent.\"\n   - Before computing, verify your geometric/combinatorial setup matches all problem conditions.\n   - For inclusion-exclusion, make sure you've identified ALL objects that could violate the condition, not just a subset.\n   - When a problem involves maximality/saturation conditions, think about what configurations are forced once certain choices are made.\n   - Double-check that your answer accounts for all cases and edge cases.\n   - Verify intermediate results make physical/mathematical sense (e.g., distances should be positive, probabilities between 0 and 1, etc.).\n\nProvide your final answer as a single number (or fraction) in the requested format.",
+      "fields": [
+        {
+          "prefix": "Problem:",
+          "description": "${problem}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Answer:",
+          "description": "${answer}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "tenant_id": "livebench_math",
+  "provider": "openai",
+  "provider_settings": {
+    "model": "gpt-5.4-mini",
+    "timeout_seconds": 300,
+    "max_retries": 2,
+    "retry_backoff_seconds": 5,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "max_tokens": 16000
+  },
+  "dataset": {
+    "path": "tenants/livebench_math/datasets/datasets/val.jsonl"
+  },
+  "chain": {
+    "path": "tenants/livebench_math/chains/solve_sc_adaptive.py",
+    "fn": "build_chain",
+    "config": {
+      "prompt_paths": {
+        "solve": "tenants/livebench_math/prompts/variants/variant-042.md"
+      },
+      "n_samples": 3,
+      "n_mcq": 5,
+      "n_aime": 5,
+      "n_proof": 5
+    }
+  },
+  "scoring_profile": {
+    "scorer": {
+      "module_path": "tenants/livebench_math/code/scorers/livebench_math_scorer.py",
+      "class_name": "Scorer"
+    }
+  },
+  "output_dir": "tenants/livebench_math/evals/tmp/variant042-adaptive-sc5-medoid"
+}

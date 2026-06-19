@@ -1,0 +1,13 @@
+{
+  "benchmark": "AIMEBench",
+  "program": "CoT",
+  "score": 40.67,
+  "cost": 0.0,
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "optimizer": "GEPA",
+  "optimizer_cost": 18.424789100000016,
+  "optimizer_input_tokens": 4065380,
+  "optimizer_output_tokens": 1660495,
+  "optimizer_program_scores": null
+}

@@ -1,0 +1,5 @@
+2026-05-24T23:35:27+00:00 round=1 status=error exit_code=143
+2026-05-24T23:49:42+00:00 round=2 status=error exit_code=137
+2026-05-25T03:56:39+00:00 round=3 status="no tag"
+2026-05-25T08:49:57+00:00 round=4 status=error exit_code=143
+2026-05-25T19:47:14+00:00 round=5 status="budget exhausted"

@@ -1,0 +1,24 @@
+# Evaluation Summary
+
+Total cases: 30
+
+## Composite Score
+- average: 50.00
+
+## Score Breakdown
+- exact_match: 50.00
+- llm_equiv: 50.00
+- predicted_answer: 2145.57
+
+## Step Timings
+
+| Step | Avg (s) | P50 (s) | P95 (s) |
+|------|---------|---------|---------|
+| solve | 119.443 | 54.486 | 233.106 |
+| **Total** | **119.443** | **54.486** | **233.106** |
+
+## Step Attribution
+
+| Step | Failure Count |
+|------|--------------|
+| output_text | 15 |

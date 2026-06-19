@@ -1,0 +1,14 @@
+{
+  "benchmark_name": "LiveBenchMathBench",
+  "program_name": "CoT",
+  "optimizer_name": "GEPA",
+  "model_name": "gpt-54-mini",
+  "reflector_model": "bedrock/us.anthropic.claude-opus-4-6-v1",
+  "task_model": "openai/gpt-5.4-mini",
+  "max_metric_calls": 1839,
+  "seed": 0,
+  "use_merge": false,
+  "dry_run": false,
+  "num_threads": 32,
+  "temperature": 1.0
+}

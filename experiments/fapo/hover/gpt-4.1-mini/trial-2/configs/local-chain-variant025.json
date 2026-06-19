@@ -1,0 +1,39 @@
+{
+  "tenant_id": "hover",
+  "provider": "openai",
+  "provider_settings": {
+    "model": "gpt-4.1-mini",
+    "timeout_seconds": 300,
+    "max_retries": 2,
+    "retry_backoff_seconds": 5,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "max_tokens": 16000
+  },
+  "dataset": {
+    "path": "tenants/hover/datasets/datasets/val.jsonl"
+  },
+  "chain": {
+    "path": "tenants/hover/chains/multi_hop.py",
+    "fn": "build_chain",
+    "config": {
+      "prompt_paths": {
+        "summarize1": "tenants/hover/prompts/modules/summarize1/variant-003.md",
+        "query_hop2": "tenants/hover/prompts/modules/query_hop2/variant-014.md",
+        "summarize2": "tenants/hover/prompts/modules/summarize2/variant-003.md",
+        "query_hop3": "tenants/hover/prompts/modules/query_hop3/variant-012.md"
+      },
+      "retrieval_k": 7,
+      "retrieval_k_hop3": 10,
+      "bm25_data_dir": "tenants/hover/data/bm25"
+    }
+  },
+  "scoring_profile": {
+    "scorer": {
+      "module_path": "tenants/hover/code/scorers/hover_scorer.py",
+      "class_name": "Scorer"
+    }
+  },
+  "output_dir": "tenants/hover/evals/tmp/variant025-val",
+  "max_workers": 5
+}

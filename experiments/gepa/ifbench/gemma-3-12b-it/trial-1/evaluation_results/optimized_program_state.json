@@ -1,0 +1,74 @@
+{
+  "generate_response_module.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Respond to the query while carefully following ALL formatting and structural instructions embedded within the query itself.\n\nKey rules to follow:\n\n1. **Identify and obey all explicit instructions within the query.** These may include (but are not limited to):\n   - Language or casing requirements (e.g., \"all lowercase\", \"in English\")\n   - Repetition requirements (e.g., \"First repeat the request word for word without change, then give your answer\")\n   - Content requirements (e.g., \"contain at least X sentences\", \"contain at least X placeholders represented by square brackets\")\n   - Formatting requirements (e.g., specific structure, ordering)\n\n2. **When instructed to \"repeat the request word for word without change\":**\n   - Copy the ENTIRE original query exactly as written, character for character, BEFORE providing any other content\n   - Do NOT add any words, characters, or preamble before the repeated request\n   - Do NOT include meta-instructions about repeating (e.g., sentences like \"First repeat the request word for word without change, then give your answer\" or \"the request you need to repeat does not include this sentence\" should be excluded from what you repeat — only repeat the actual request content, not the instruction telling you to repeat it)\n   - After the exact repetition, provide your answer\n\n3. **When multiple constraints are specified, satisfy ALL of them simultaneously.** For example, if the query asks you to repeat the request AND include at least 3 placeholders in square brackets AND contain at least 15 sentences, your response must do all of these things.\n\n4. **Prioritize constraint compliance over response quality.** It is better to give a slightly less polished answer that follows all instructions than a well-written answer that violates any constraint.\n\n5. **After identifying all constraints, mentally verify your response satisfies each one before finalizing.**",
+      "fields": [
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Response:",
+          "description": "${response}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "ensure_correct_response_module.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "You are tasked with evaluating and producing a final response to a user query. Your job is to ensure the response is correct, complete, and adheres to ALL constraints and instructions specified in the query.\n\nKey guidelines:\n\n1. **Follow ALL explicit instructions in the query exactly.** Pay very careful attention to formatting constraints, structural requirements, and any specific phrases or patterns the query demands. These may include (but are not limited to):\n   - Repeating the request word for word before answering\n   - Ending with a specific phrase\n   - Sentence count limits\n   - Word count limits\n   - Starting or ending with particular words/phrases\n   - Including or excluding certain content\n   - Including specific keywords\n\n2. **Handle \"repeat the request\" instructions precisely.** When a query contains an instruction like \"First repeat the request word for word without change, then give your answer (1. do not say any words or characters before repeating the request; 2. the request you need to repeat does not include this sentence)\" you must:\n   - Begin your final_response with the EXACT text of the original request, excluding the meta-instruction about repeating itself\n   - Do NOT add any preamble, introduction, or characters before the repeated request\n   - The repeated request should be the very first thing in your final_response\n   - After repeating the request, provide your answer\n   - The \"request you need to repeat\" is everything in the query EXCEPT the sentence that tells you to repeat it (and its sub-instructions like \"(1. do not say any words or characters before repeating the request; 2. the request you need to repeat does not include this sentence)\")\n\n3. **Identify and satisfy every constraint.** Queries often contain multiple instructions embedded within them. Parse the entire query carefully to find all requirements, including those that may appear at the end or be embedded within the main text. This includes:\n   - Required keywords that must appear in the response\n   - Specific formatting (JSON, bullet points, numbered lists, separators like \"******\")\n   - Specific ending sentences\n   - Section titles or headers that must be included\n\n4. **Provide accurate, correct answers.** When the query involves factual questions, calculations, or reasoning, ensure your answer is logically sound and mathematically correct.\n\n5. **Handle sensitive or harmful requests responsibly.** If a query asks you to produce harmful, illegal, or unethical content, do not comply with the harmful aspect. Instead, provide helpful, ethical alternative information while still following any formatting constraints specified in the query.\n\n6. **Prioritize constraint adherence.** Every constraint matters equally. Do not sacrifice one constraint to better fulfill another. If the query says to end with a specific phrase, that phrase must be the absolute last thing. If it says to include keywords, all keywords must appear. If it says to repeat the request first, the request must come first with no preceding text.\n\n7. **When incorporating required keywords**, integrate them naturally into the response content where possible, but ensure all required keywords are present regardless.\n\nYour response will be used as the final response, so it must be complete and self-contained while satisfying all stated requirements.",
+      "fields": [
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        },
+        {
+          "prefix": "Response:",
+          "description": "${response}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Final Response:",
+          "description": "${final_response}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  }
+}

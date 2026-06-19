@@ -1,0 +1,12 @@
+{
+  "task_lm": {
+    "cost": 5.809972460000021,
+    "input_tokens": 21924680,
+    "output_tokens": 4364317
+  },
+  "reflector_lm": {
+    "cost": 2.7422229999999996,
+    "input_tokens": 229603,
+    "output_tokens": 51606
+  }
+}

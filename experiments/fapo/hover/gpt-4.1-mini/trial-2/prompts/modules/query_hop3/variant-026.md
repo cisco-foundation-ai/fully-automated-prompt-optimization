@@ -1,0 +1,18 @@
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+System: You generate the THIRD and final Wikipedia search query for multi-hop claim verification.
+
+User: Claim: ${claim}
+
+Hop 1 findings: ${steps.summarize_hop1.output}
+Hop 2 findings: ${steps.summarize_hop2.output}
+
+You already searched for "${steps.query_hop2.output}" in hop 2. Now find the LAST missing entity.
+
+Look at proper nouns in the claim not yet in titles found above. If the claim refers to someone indirectly, use the facts above to find their actual name.
+
+Output ONLY the entity name (1-5 words):

@@ -1,0 +1,166 @@
+{
+  "create_query_hop2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `summary_1`, produce the fields `query`.\n\nYou are generating a search query for the **second hop** of a multi-hop retrieval system. Your goal is to help retrieve additional relevant documents that were NOT found in the first hop of retrieval.\n\n**Context:**\n- The `question` is a multi-hop question that requires information from multiple documents to answer.\n- The `summary_1` summarizes what was found (or not found) in the first hop of retrieval using the original question.\n- Your `query` will be used to retrieve additional documents in a second retrieval pass.\n\n**Strategy:**\n\n1. **Analyze the question** to identify the multi-hop structure. Multi-hop questions typically chain facts together (e.g., \"What is X of the person who did Y?\").\n\n2. **Analyze `summary_1`** to determine what information was already found in the first hop and what is still missing. The summary will often identify intermediate entities or facts that were retrieved, as well as gaps.\n\n3. **Identify the missing link.** Based on what was found in the first hop, determine what specific entity, event, or fact still needs to be retrieved. Often the first hop retrieves a document about one entity mentioned in the question, and the second hop needs to find a document about a connected entity or event.\n\n4. **Craft a targeted query** that:\n   - Focuses specifically on the missing information, NOT on re-retrieving what was already found.\n   - Uses specific names, dates, titles, or identifiers that were revealed or can be inferred from the first hop results (as described in `summary_1`).\n   - Is phrased to match the likely content/title of the target document. Think about what the missing document would actually say and use those terms.\n   - Avoids being too broad or too abstract. Be concrete and specific.\n\n5. **Key tips:**\n   - If the first hop identified a specific person, event, or work, use that as a pivot to search for the connected document. For example, if the question asks about an award ceremony venue and the first hop found the person/award, query for the specific edition of that award ceremony (e.g., \"65th Tony Awards\" rather than \"Tony Awards ceremony theatre\").\n   - If the first hop identified a person's name from context clues, search directly for that person's name or their most notable attribute.\n   - Use proper nouns, specific years, edition numbers, or other distinguishing identifiers when possible.\n   - Think about what the title or first sentence of the missing Wikipedia-style document would look like, and craft your query to match that language.\n   - If `summary_1` names specific people, works, or events that were found, consider what OTHER documents those entities would link to that contain the final answer.\n\n**Output format:**\n- Produce a `query` field containing a concise, targeted search query designed to retrieve the specific missing document(s) needed to answer the multi-hop question.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "final_answer.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `summary_1`, `summary_2`, produce the fields `answer`.\n\nYour task is to answer a question based on information provided in two summaries. Follow these guidelines:\n\n1. Compare both summaries to determine the answer to the question.\n2. If both summaries agree, use their shared answer.\n3. If one summary provides a specific answer and the other says the information is not available, prefer the summary with the specific answer.\n4. If the summaries conflict, use your best judgment based on the specificity and confidence of each summary.\n5. If BOTH summaries say the information is not available or not specified, you must still attempt to answer the question using your own knowledge. Do NOT answer \"not specified\" or \"not available\" — instead, provide your best factual answer based on what you know about the entities and events mentioned in the question and summaries.\n\nCRITICAL: Read the question extremely carefully. The question may ask about something very specific that requires careful parsing. Pay close attention to:\n- Temporal qualifiers (e.g., \"after 2008\", \"between X and Y\")\n- Specific sub-counts vs. totals (e.g., \"number of athletes\" vs. \"number of competitors in a specific sport\")\n- The exact entity or attribute being asked about (e.g., \"profession\" may expect the primary/most notable role, not all roles)\n- Distinctions between different categories mentioned in the summaries (e.g., athletes vs. officials, competitors vs. total delegation)\n\nKey rules for interpreting questions and summaries:\n\n1. **Parse questions for hidden constraints**: If a question asks about something \"between\" dates or \"after\" a certain event, carefully consider whether the summaries contain information that addresses that specific constraint. The answer may require subtraction, comparison, or filtering rather than simply restating a number from the summary.\n\n2. **Distinguish between totals and subsets**: When summaries mention multiple numbers (e.g., total delegation size, number of athletes, number of officials), carefully determine which number the question is actually asking about. If the question asks about athletes who \"competed between after X in Y event,\" it may be asking about a subset (e.g., those who competed in sports other than a specific one, or those beyond a certain count).\n\n3. **When a question asks about a \"profession\" or \"occupation\"**: Give the PRIMARY or most commonly cited profession. If someone is described as \"an investigative journalist and publisher,\" the primary profession is typically \"investigative journalist\" — the publishing role is secondary or a subset of their journalistic work. Choose the most fundamental/primary role unless the question specifically asks for all roles.\n\n4. **When questions involve counting with temporal constraints**: If a question asks \"how many X competed between after [year A] in [event B],\" carefully parse whether it's asking:\n   - The total number at event B (which occurred after year A)\n   - A difference between two events\n   - A specific subset of participants\n   Look for contextual clues in the summaries about delegation composition (e.g., \"three officials and four competitors participating in three different sports\") — the number of sports (three) might be the answer when asking about athletes who \"competed between\" events.\n\n5. **Prefer the most specific and primary answer**: When summaries list multiple attributes, roles, or descriptions, select the one that most directly and specifically answers the question. Don't concatenate multiple roles unless the question explicitly asks for all of them.\n\nImportant: Keep your answer concise and direct. Match the format that the question expects:\n- If the question asks for a number, respond with just the number (spelled out as a word if it's a small number like \"three\", \"four\", etc., matching common usage).\n- If the question asks for a year, respond with just the year.\n- If the question asks a yes/no question, respond with just \"yes\" or \"no.\"\n- For other factual questions, provide a brief, direct answer.\n\nCritical rules for answer formatting:\n- Do NOT add unnecessary elaboration, qualifications, or extra words to your answer.\n- The answer should be as short and precise as possible while being correct.\n- When the question asks \"how is X and Y related?\" or about the relationship between two things, identify the most specific shared category or relationship type.\n- When referring to named entities (people, places, organizations), use the most common short form of the name.\n- Strip unnecessary articles (\"The\"), suffixes (\"Football Club\" when just the team name suffices), and formal elaborations from your answers.\n- When the question asks about a relationship between two things that share a common category, answer with just that shared category word.\n\nKey rule about preserving important descriptors and dates:\n- When the answer refers to a specific historical event, include the year or date if it is commonly part of the event's name or if both summaries mention it.\n- When both summaries consistently include a specific qualifier as part of a name or event reference, include that qualifier in your answer.\n- However, do NOT add qualifiers that are not part of the standard name of the entity.\n\nKey rule about specificity of shared occupations/categories:\n- When the question asks what occupation or category two people/things share, prefer the MOST SPECIFIC correct shared category.\n- Use the singular form for occupations (e.g., \"novelist\" not \"novelists\")\n\nKey rule about using contextual clues from summaries:\n- Even when summaries say specific information is \"not specified,\" they often contain contextual clues that can help you identify the answer using your own knowledge.\n- Always cross-reference details mentioned in the summaries with your knowledge to provide the most accurate answer possible.\n\nKey rule about number formatting:\n- When the answer is a small number (1-10), consider whether the expected format is a numeral (\"4\") or a word (\"four\"/\"three\"). Generally, use the word form for small numbers unless the context clearly expects numerals.\n- Pay careful attention to what is actually being counted in the question vs. what numbers appear in the summaries. The correct answer may be a number that requires inference or calculation from the summaries rather than a number explicitly stated.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Summary 2:",
+          "description": "${summary_2}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Answer:",
+          "description": "${answer}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "summarize1.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `passages`, produce the fields `summary`.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "summarize2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `context`, `passages`, produce the fields `summary`.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Context:",
+          "description": "${context}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

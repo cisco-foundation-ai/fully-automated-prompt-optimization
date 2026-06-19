@@ -1,0 +1,5 @@
+2026-05-20T09:54:45+00:00 round=1 status="continuing"
+2026-05-20T11:55:00+00:00 round=2 status="continuing"
+2026-05-20T14:12:01+00:00 round=3 status=error exit_code=143
+2026-05-20T21:21:54+00:00 round=4 status="continuing"
+2026-05-20T22:56:24+00:00 round=5 status="budget exhausted"

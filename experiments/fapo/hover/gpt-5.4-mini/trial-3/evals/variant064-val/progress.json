@@ -1,0 +1,19 @@
+{
+  "run_id": "hephaestus-hover-tfl3fs",
+  "status": "completed",
+  "total_cases": 300,
+  "completed_cases": 300,
+  "started_at": "2026-05-25T08:26:16.769985+00:00",
+  "updated_at": "2026-05-25T08:44:13.341029+00:00",
+  "avg_composite_score": 69.0,
+  "weighted_avg_score": null,
+  "score_breakdown_averages": {
+    "recall": 69.0,
+    "partial_recall": 88.77777777777787,
+    "num_gold": 3.0,
+    "num_found": 2.6633333333333336,
+    "num_missing": 0.33666666666666667
+  },
+  "failed_case_ids": [],
+  "in_flight_case_ids": []
+}

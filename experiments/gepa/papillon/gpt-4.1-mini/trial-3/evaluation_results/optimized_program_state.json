@@ -1,0 +1,76 @@
+{
+  "craft_redacted_request.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given a private user query, create a privacy-preserving request for a powerful external LLM. The LLM may assist without learning private information about the user.\n\nYour task has two parts:\n1. **reasoning**: Analyze the user's query to understand what they need, identify any personally identifiable information (PII) or private details, and plan how to reformulate the request.\n2. **llm_request**: Write a reformulated request to send to the external LLM that preserves the utility/quality of the original query while minimizing leakage of private information.\n\n## Key Guidelines:\n\n### Identifying Private Information (PII)\nPrivate information includes but is not limited to:\n- Personal names, usernames, or identifiers (including names in code comments like \"© TZack88\", names in email greetings like \"Jason\", names in image text like \"NAWABZADA ARSAL\")\n- Specific institutional affiliations (universities, companies, organizations)\n- Locations, addresses, or geographic identifiers tied to the user\n- Account credentials, emails, phone numbers\n- Personal circumstances that could identify someone (e.g., military service, specific travel details)\n- Any information that could identify a specific individual or their affiliation\n- **Specific website URLs, domain names, or online platforms that could be linked to the user** (e.g., personal websites, niche platforms the user owns or operates, or any URL that could reveal browsing habits or affiliations)\n- **Specific place names, theme parks, events, or venues that could indicate the user's location or travel plans** (e.g., \"Epcot\", \"Walt Disney World\", specific festival names)\n\n### CRITICAL RULE: ALL Personal Names Must Be Removed or Replaced\n**Every personal name that appears in the query MUST be removed or replaced with a generic placeholder**, regardless of context. This includes:\n- Names of characters in creative writing prompts (e.g., \"David\", \"Clare\")\n- Names of email recipients or senders (e.g., \"Salar\", \"Waqas\", \"Jason\")\n- Names in code comments or attributions\n- Names in image descriptions\n- Names that appear to be fictional characters in a user's story/script request\n\n**Use placeholders like \"[Person A]\", \"[Person B]\", \"[Colleague 1]\", \"[Colleague 2]\", \"[Name]\", \"[Recipient]\", etc.**\n\nThe rationale: Even names that seem like fictional characters could be real people the user knows. The external LLM does not need the actual names to produce useful output—it can work with placeholders or generic names that differ from the originals.\n\n### CRITICAL RULE: Never Include the Original Text Verbatim\nWhen the user provides text to be rewritten, code to be analyzed, or content to be reformulated, **DO NOT copy the original text into the llm_request**. Instead:\n- Describe what the text contains and what the user wants done with it\n- Extract the structural and functional requirements\n- Replace all identifying details with placeholders or generic descriptions\n- Provide enough context for the LLM to generate a useful response without seeing the original verbatim text\n\n### CRITICAL RULE: URLs and Domain Names\n- **Specific URLs and domain names should be treated as potentially identifying information**, especially if they are niche, uncommon, or could be linked to the user's identity, business, or browsing behavior.\n- If the user asks about a specific website or URL, **generalize the request** by describing what the website does or what category it belongs to, rather than including the exact URL.\n- Exception: Only include a URL/domain if it is a **widely known, major platform** (e.g., Google, YouTube, Wikipedia, Amazon) AND including it is absolutely essential to answering the query correctly.\n- When in doubt, describe the website's purpose or category instead of naming it directly.\n\n### CRITICAL RULE: Location and Event Privacy\n- **Specific named locations, venues, theme parks, festivals, and events should be generalized** to prevent revealing the user's physical location, travel plans, or geographic identity.\n- Replace specific venue/event names with generic descriptions of what they are (e.g., \"a popular theme park's annual flower and garden festival\" instead of naming the specific park and event).\n- This applies even to well-known public places and events, as mentioning them can reveal the user's location or travel plans.\n\n### CRITICAL RULE: Company/Brand Names in User Content\n- If the user is asking about content **for their own company or brand**, the company/brand name should be replaced with a generic placeholder like \"[Company Name]\" or described generically (e.g., \"a luxury resale company specializing in celebrity belongings\").\n- If the company/brand is a **well-known third-party entity** that the user is asking about (not their own), it may be kept if essential to the query.\n- When in doubt about whether a brand/company belongs to the user, generalize it.\n\n### Quality vs. Privacy Trade-off\n- **Quality**: The reformulated request should enable the LLM to provide a response that fully addresses the user's needs. Do not strip away information that is essential to answering the query correctly.\n- **Privacy/Leakage**: Remove or generalize ALL private/identifying information. This includes names, usernames, personal circumstances, URLs/domains that could identify the user, and specific locations/events that could reveal the user's whereabouts.\n\n### Decision Framework for What to Keep vs. Remove:\n- **Personal names (ALL of them, including character names in creative prompts)**: ALWAYS remove or replace with placeholders like \"[Person A]\", \"[Person B]\", \"[Colleague 1]\", \"[Recipient]\", etc.\n- **Usernames/handles**: ALWAYS remove (e.g., \"© TZack88\" → remove or replace with generic attribution comment).\n- **URLs/domain names**: ALWAYS generalize unless they are major well-known platforms essential to the query. Describe the site's purpose instead.\n- **Specific locations, venues, theme parks, events**: ALWAYS generalize. Describe what they are rather than naming them.\n- **Personal circumstances**: Generalize (e.g., \"busy week with military travel\" → \"busy week\" or just \"delayed response\").\n- **Custom text for images/designs**: Replace specific names with placeholders like \"[CUSTOM NAME]\" or describe it as \"personalized text chosen by the user.\"\n- **Code functionality**: Describe what the code does rather than copying it verbatim if it contains identifying information. If the code has no PII except in comments/attribution, describe the code's purpose and structure, or reproduce it with identifying comments removed.\n- **Technical details essential to the task**: Keep these (e.g., programming language, framework, specific parameters, algorithms used).\n- **Public figures, artists, song titles, movie names, book titles**: These are public knowledge and can be kept as they don't identify the user. However, specific events or locations associated with them should still be generalized if they could reveal the user's location.\n- **Social media platform names** (Instagram, Twitter, etc.): These are major platforms and can be mentioned when the user is asking about creating content for them, as they are essential to the format/style of the response.\n- **Creative writing genre, tone, and themes**: Keep these as they are essential to the quality of the response. Describe the scenario, dynamics, and tone fully—just replace all names with placeholders.\n\n### Specific Patterns:\n\n- **Creative writing/script requests**: Describe the full scenario, character dynamics, tone, genre, and plot elements. Replace ALL character names with placeholders like \"[Person A]\", \"[Person B]\", \"[Colleague 1]\", etc. The LLM can generate appropriate names or use the placeholders. Preserve all details about the scene's content, tone, and desired elements—only the names need to change.\n\n- **Questions about specific websites/URLs**: Describe what the user wants to know and characterize the website by its function/category rather than by its exact URL.\n\n- **Email/letter rewriting requests**: Describe the email's purpose, tone, key points to convey, and structure WITHOUT including the original text. Remove all names (sender, recipient), personal circumstances, and identifying details.\n\n- **Code analysis/debugging requests**: If the code contains identifying information (author names, usernames in comments, specific API URLs), remove those before including the code, OR describe the code's structure and ask the question without the verbatim code.\n\n- **Image/design creation requests**: Replace any personal names or custom text with placeholders. Describe the visual concept fully but use \"[CUSTOM TEXT]\" or \"[USER'S NAME]\" instead of actual names.\n\n- **Social media post creation requests**: Keep the platform name (Instagram, Twitter, etc.) as it determines the format. Generalize the specific event/location/venue being posted about. Describe the type of content and desired tone.\n\n- **Content generation requests** (social media posts, emails, etc.): Describe what content is needed and its requirements without revealing identifying details about the user's specific location or plans.\n\n- **Translation/lyrics requests**: Public songs, artists, and their works are not PII. These can be referenced by name as they are publicly available creative works.\n\n- **Research/academic questions**: Generalize institutional affiliations and personal context while preserving the technical substance of the question.\n\n- **Corporate/business content requests**: Replace the user's company/brand name with a generic description of what the company does. Preserve all the substantive content requirements (themes, goals, messaging).\n\n### Output Format:\nProvide your response in two clearly labeled sections:\n- **reasoning**: Your analysis of the query, what's private, what's essential, and your strategy.\n- **llm_request**: The actual reformulated request to send to the external LLM.\n\n### Scoring:\nYour response will be evaluated on two dimensions (each scored 0-1):\n1. **Quality score**: How well the LLM can answer the user's actual need based on your reformulated request.\n2. **Leakage score**: How well private information is protected (1.0 = no leakage, 0.0 = full leakage).\n\nThe final score is the arithmetic mean of these two. Aim to maximize both simultaneously.\n\n### Important Reminders:\n- A leakage score of 0.0 means ALL private information was exposed. Even a single unredacted personal name, specific location name, URL, or identifying detail can cause a score of 0.0.\n- **Character names in creative writing prompts ARE considered private information.** They may refer to real people the user knows. ALWAYS replace them with placeholders.\n- Always err on the side of removing/generalizing identifying information.\n- The llm_request should NEVER contain: real personal names (including fictional character names from the user's prompt), usernames, handles, specific niche URLs/domains, specific named locations/venues/events that could reveal the user's whereabouts, or verbatim text that contains these.\n- You CAN preserve the functional/structural essence of any request without including identifying details.\n- When a user asks about a specific website, reformulate by describing the website's apparent purpose/category and ask the LLM to provide information about that type of service.\n- When a user mentions a specific location or event, describe it generically (e.g., \"a well-known theme park's seasonal festival\" rather than naming it).\n- Public figures, artists, song titles, and widely known cultural works are NOT private information and can be included when essential to the query.\n- Social media platform names (Instagram, Facebook, Twitter, etc.) can be included when the user is creating content for that platform, as the platform determines the format.\n- The key distinction: information that identifies THE USER or people they know (their location, plans, identity, affiliations, associates' names) must be removed. Information that is publicly available knowledge (artist names, platform names, general concepts) can be kept if essential.\n- For creative writing requests: preserve ALL details about genre, tone, themes, dynamics, plot, and scenario. ONLY replace the names. The quality of the creative output depends on preserving these details.",
+      "fields": [
+        {
+          "prefix": "User Query:",
+          "description": "${user_query}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Llm Request:",
+          "description": "${llm_request}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "respond_to_query": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Respond to a user query.\nFor inspiration, we found a potentially related request to a powerful external LLM and its response.",
+      "fields": [
+        {
+          "prefix": "Related Llm Request:",
+          "description": "${related_llm_request}"
+        },
+        {
+          "prefix": "Related Llm Response:",
+          "description": "information from a powerful LLM responding to a related request"
+        },
+        {
+          "prefix": "User Query:",
+          "description": "the user's request you need to fulfill"
+        },
+        {
+          "prefix": "Response:",
+          "description": "your final response to the user's request"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

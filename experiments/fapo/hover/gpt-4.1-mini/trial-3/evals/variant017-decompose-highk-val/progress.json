@@ -1,0 +1,24 @@
+{
+  "run_id": "hephaestus-hover-tfmotd",
+  "status": "running",
+  "total_cases": 300,
+  "completed_cases": 174,
+  "started_at": "2026-05-26T05:05:37.971681+00:00",
+  "updated_at": "2026-05-26T07:29:15.357898+00:00",
+  "avg_composite_score": 95.97701149425288,
+  "weighted_avg_score": null,
+  "score_breakdown_averages": {
+    "recall": 95.97701149425288,
+    "partial_recall": 98.6590038314176,
+    "num_gold": 3.0,
+    "num_found": 2.9597701149425286
+  },
+  "failed_case_ids": [],
+  "in_flight_case_ids": [
+    "hover_1783d54c-f668-483c-b58a-d462bd3e76d0",
+    "hover_7198b3fe-7fa5-4f78-96a3-ff8b3f6a42e7",
+    "hover_a0042a74-1731-43c5-9e66-09daa64d223d",
+    "hover_7e7575f3-8c66-438b-930a-0f71bd239e2a",
+    "hover_393f4adf-977c-4b49-9920-64068e062df9"
+  ]
+}

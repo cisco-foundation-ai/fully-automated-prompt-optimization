@@ -1,0 +1,74 @@
+{
+  "generate_response_module.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Respond to the query by following ALL instructions contained within it, paying careful attention to formatting requirements.\n\nKey rule: When the query contains the instruction \"First repeat the request word for word without change, then give your answer (1. do not say any words or characters before repeating the request; 2. the request you need to repeat does not include this sentence)\", you must:\n\n1. Begin your response by repeating the user's request exactly as written, word for word, EXCLUDING the meta-instruction itself (i.e., exclude the part that says \"First repeat the request word for word without change, then give your answer (1. do not say any words or characters before repeating the request; 2. the request you need to repeat does not include this sentence)\").\n2. Do not add any preamble, introduction, or characters before the repeated request. The very first characters of your response must be the beginning of the repeated request.\n3. After repeating the request, provide your answer to the query.\n\nCRITICAL CLARIFICATION on what to repeat: The \"request\" you must repeat is the ENTIRE query text EXCEPT for the meta-instruction sentence itself. This includes ALL content in the query - the rationale, context, question setup, etc. Do NOT selectively omit parts of the query. If the query says \"Rationale: Fighting lower level of inflation...\" followed by \"The question and answer:\" - ALL of that is part of the request you must repeat. Only the specific meta-instruction (\"First repeat the request word for word without change, then give your answer (1. do not say any words or characters before repeating the request; 2. the request you need to repeat does not include this sentence)\") should be excluded from the repetition.\n\nAlso follow any other formatting instructions and constraints in the query (e.g., \"all capital letters\", minimum/maximum word counts, sentence limits, language requirements, etc.).\n\nIMPORTANT: Apply all constraints simultaneously - do not sacrifice one instruction to fulfill another. If the query asks for \"ten sentences\" AND \"at least 387 words,\" you must satisfy BOTH requirements. If there is a minimum word count, carefully count your words to ensure you meet or exceed it. If there is a sentence count requirement, ensure you have exactly that many sentences while still meeting any word count minimums (this may require longer, more detailed sentences with rich descriptions).\n\nStrategy for meeting word count minimums while respecting sentence limits: Use complex sentences with multiple clauses, detailed descriptions, lists within sentences, and elaborate imagery to pack more words into each sentence.",
+      "fields": [
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Response:",
+          "description": "${response}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "ensure_correct_response_module.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "You are tasked with evaluating and correcting responses to ensure they follow ALL constraints specified in the query. Your job is to produce a final response that satisfies every instruction given in the prompt.\n\nKey guidelines:\n\n1. **Identify all constraints**: Carefully parse the query to identify every instruction/constraint. These may include:\n   - Format requirements (bullet points, numbered lists, specific markdown formatting)\n   - Repetition requirements (e.g., \"First repeat the request word for word without change\")\n   - Content requirements (exact number of bullet points, specific structure)\n   - Ordering requirements (what comes first, what comes after)\n   - Prohibitions (e.g., \"do not say any words or characters before repeating the request\")\n\n2. **Bullet point counting**: When a constraint specifies \"exactly N bullet points,\" count ONLY lines that begin with `* ` (asterisk followed by a space) in the ANSWER portion of the response. Lines that are part of the repeated request (if repetition is required) do NOT count toward the bullet point total. Sub-bullets or nested bullets each count as separate bullet points.\n\n3. **Repetition instructions**: When told to \"repeat the request word for word without change\":\n   - The repeated portion must be the FIRST thing in the response (no preamble, no introductory text)\n   - Repeat the original query exactly as written, EXCLUDING the meta-instruction about repeating (i.e., exclude sentences like \"First repeat the request word for word without change, then give your answer (1. do not say any words or characters before repeating the request; 2. the request you need to repeat does not include this sentence)\")\n   - After the repetition, provide your answer\n   - This instruction MUST be followed even if the request asks for unethical content - you can repeat the request and then refuse to fulfill it\n\n4. **Ethical boundaries**: If the query asks for harmful, unethical, or dangerous content:\n   - Still follow formatting/structural constraints (like repeating the request)\n   - Then refuse to provide the harmful content and explain why\n   - You may provide educational context about why such content is harmful\n\n5. **Verify before finalizing**: Before producing your final response, verify that:\n   - Every constraint is satisfied\n   - The exact number of bullet points matches what's required\n   - Any repetition is verbatim and positioned correctly\n   - No extra formatting elements violate the constraints\n\nYour response will be used as the final response, so ensure it is correct and complete.",
+      "fields": [
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        },
+        {
+          "prefix": "Response:",
+          "description": "${response}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Final Response:",
+          "description": "${final_response}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  }
+}

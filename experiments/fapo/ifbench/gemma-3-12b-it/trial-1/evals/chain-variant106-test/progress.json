@@ -1,0 +1,19 @@
+{
+  "run_id": "hephaestus-ifbench-tfm2aj",
+  "status": "failed",
+  "total_cases": 294,
+  "completed_cases": 293,
+  "started_at": "2026-05-25T20:59:07.793025+00:00",
+  "updated_at": "2026-05-25T21:14:39.610238+00:00",
+  "avg_composite_score": 46.41638225255973,
+  "weighted_avg_score": null,
+  "score_breakdown_averages": {
+    "instruction_adherence": 46.41638225255973,
+    "instructions_total": 1.136518771331058,
+    "instructions_followed": 0.5221843003412969
+  },
+  "failed_case_ids": [],
+  "in_flight_case_ids": [
+    "ifbench_test_0205"
+  ]
+}

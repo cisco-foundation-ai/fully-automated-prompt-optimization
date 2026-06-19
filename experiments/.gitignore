@@ -1,0 +1,30 @@
+# Defensive ignores for the curated experiments/ tree.
+#
+# The curated tree is built by selectively copying only small, high-signal
+# artifacts (see README.md). These rules are a safety net so that re-running a
+# build or dropping raw artifacts here can never accidentally commit the bulky
+# per-case outputs, binary dumps, verbose logs, or secrets that live in the
+# upstream un-curated result trees.
+
+# --- Bulk per-case outputs (kept only as renamed exemplars under samples/) ---
+results.jsonl
+*.results.jsonl
+metric_logs/
+generated_best_outputs_valset/
+instruction_proposer_inpouts.jsonl
+
+# --- Heavy / binary artifacts ---
+*.pkl
+*.bin
+run_log.txt
+run_log_stderr.txt
+*.stderr
+round-*.json
+
+# --- Secrets — never commit ---
+.env
+.envrc
+
+# --- But DO keep the curated format exemplars under samples/ ---
+!samples/
+!samples/**

@@ -1,0 +1,32 @@
+{
+  "tenant_id": "aime2025",
+  "provider": "openai",
+  "provider_settings": {
+    "model": "gpt-4.1-mini",
+    "timeout_seconds": 300,
+    "max_retries": 2,
+    "retry_backoff_seconds": 5,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "max_tokens": 16000
+  },
+  "dataset": {
+    "path": "tenants/aime2025/datasets/datasets/test.jsonl"
+  },
+  "chain": {
+    "path": "tenants/aime2025/chains/solve.py",
+    "fn": "build_chain",
+    "config": {
+      "prompt_paths": {
+        "solve": "tenants/aime2025/prompts/variants/variant-015.md"
+      }
+    }
+  },
+  "scoring_profile": {
+    "scorer": {
+      "module_path": "tenants/aime2025/code/scorers/aime_scorer.py",
+      "class_name": "Scorer"
+    }
+  },
+  "output_dir": "tenants/aime2025/evals/tmp/gpt41mini-test-variant015"
+}

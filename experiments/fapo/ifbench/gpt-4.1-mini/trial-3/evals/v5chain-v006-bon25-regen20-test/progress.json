@@ -1,0 +1,19 @@
+{
+  "run_id": "hephaestus-ifbench-tflr7q",
+  "status": "running",
+  "total_cases": 294,
+  "completed_cases": 293,
+  "started_at": "2026-05-25T16:59:51.167204+00:00",
+  "updated_at": "2026-05-25T19:15:20.290294+00:00",
+  "avg_composite_score": 82.08191126279864,
+  "weighted_avg_score": null,
+  "score_breakdown_averages": {
+    "instruction_adherence": 82.08191126279864,
+    "instructions_total": 1.1399317406143346,
+    "instructions_followed": 0.9215017064846417
+  },
+  "failed_case_ids": [],
+  "in_flight_case_ids": [
+    "ifbench_test_0275"
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Solve the given math question and provide your final answer in the correct format.\n\n**Formatting Rules:**\n\n1. **If the question asks you to put your answer in a \\boxed{}:** Put your final numerical or symbolic answer inside \\boxed{}, e.g., $\\boxed{5}$.\n\n2. **If the question is multiple-choice and asks you to duplicate a letter five times:** After solving the problem, identify the correct answer letter (A, B, C, D, or E), then write that letter repeated exactly five times as a single string (e.g., AAAAA, BBBBB, CCCCC, DDDDD, or EEEEE). This should be the very last thing you write.\n\n3. **General guidelines:**\n   - Show your reasoning/work clearly before giving the final answer.\n   - Make sure your final answer is unambiguous and appears as the last thing in your response.\n   - For multiple-choice questions, always end with the 5x repeated letter string on its own line.\n   - For non-multiple-choice questions, always end with the \\boxed{} answer.\n   - Do not wrap the repeated letter string in brackets, tags, or any other formatting — just write the five letters plainly (e.g., AAAAA).\n\n**Important Domain-Specific Notes:**\n\n4. **GCD/LCM with fractions:** When computing the greatest common divisor (GCD) or least common multiple (LCM) of a set that includes fractions, use the standard formulas:\n   - GCD of fractions: GCD(numerators) / LCM(denominators)\n   - LCM of fractions: LCM(numerators) / GCD(denominators)\n   \n   Do NOT assume all elements must be integers. The GCD of a set containing fractions can itself be a fraction. For example, GCD({a/b, c/d}) = GCD(a,c) / LCM(b,d). Work with the actual values given, converting each number to a fraction if needed (e.g., an integer n = n/1).\n\n5. **Formula matching / fill-in-the-blank problems:** When given a solution with missing tags (<missing 1>, <missing 2>, etc.) and a list of candidate expressions, carefully match each expression to the correct missing slot by:\n   - Reading the surrounding context of each missing tag very carefully to understand what mathematical object or statement is needed there.\n   - Considering the logical flow of the proof/solution — what must come before and after each missing slot.\n   - Checking that each expression is used exactly once (unless the problem allows reuse).\n   - Not defaulting to sequential assignment (expression 1 → missing 1, etc.) — the mapping is typically non-trivial.\n   - Verifying your assignments make mathematical sense in context (e.g., divisibility statements, inequalities, set descriptions should be grammatically and logically correct in their positions).\n\n6. **Matrix determinants:** For an n×n matrix, use standard determinant formulas (e.g., for 2×2: ad - bc).\n\n7. **Sign conventions:** When computing GCD, the result is always non-negative. The GCD of negative numbers is the same as the GCD of their absolute values.\n\n8. **Final answer format:** Make sure your final answer matches what the problem asks for. If the answer is a fraction, write it as a fraction (e.g., \\boxed{\\frac{1}{7}}). Do not round or convert to decimals unless explicitly asked.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Answer:",
+          "description": "${answer}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  }
+}

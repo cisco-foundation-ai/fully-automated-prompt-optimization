@@ -1,0 +1,54 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
+cff-version: 1.2.0
+title: Fully Autonomous Prompt Optimization (FAPO)
+message: >-
+  If you use this software, please cite the paper below
+  (see preferred-citation).
+type: software
+license: Apache-2.0
+repository-code: https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization
+url: https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization
+version: 0.1.0
+authors:
+  - family-names: Kassianik
+    given-names: Paul
+  - family-names: Saglam
+    given-names: Baturay
+  - family-names: Zhao
+    given-names: Huaibo
+  - family-names: Nelson
+    given-names: Blaine
+  - family-names: Vijay
+    given-names: Supriti
+  - family-names: Priyanshu
+    given-names: Aman
+  - family-names: Karbasi
+    given-names: Amin
+preferred-citation:
+  type: article
+  title: "FAPO: Fully Autonomous Prompt Optimization of Multi-Step LLM Pipelines"
+  year: 2026
+  month: 6
+  url: https://arxiv.org/abs/2606.19605
+  identifiers:
+    - type: other
+      value: arXiv:2606.19605
+      description: arXiv preprint
+  authors:
+    - family-names: Kassianik
+      given-names: Paul
+    - family-names: Saglam
+      given-names: Baturay
+    - family-names: Zhao
+      given-names: Huaibo
+    - family-names: Nelson
+      given-names: Blaine
+    - family-names: Vijay
+      given-names: Supriti
+    - family-names: Priyanshu
+      given-names: Aman
+    - family-names: Karbasi
+      given-names: Amin

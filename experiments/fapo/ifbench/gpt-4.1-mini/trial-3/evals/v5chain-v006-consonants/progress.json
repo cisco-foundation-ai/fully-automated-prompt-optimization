@@ -1,0 +1,17 @@
+{
+  "run_id": "hephaestus-ifbench-tfm54c",
+  "status": "completed",
+  "total_cases": 15,
+  "completed_cases": 15,
+  "started_at": "2026-05-25T22:00:12.961802+00:00",
+  "updated_at": "2026-05-25T22:18:46.663220+00:00",
+  "avg_composite_score": 43.333333333333336,
+  "weighted_avg_score": null,
+  "score_breakdown_averages": {
+    "instruction_adherence": 43.333333333333336,
+    "instructions_total": 1.6,
+    "instructions_followed": 0.6666666666666666
+  },
+  "failed_case_ids": [],
+  "in_flight_case_ids": []
+}

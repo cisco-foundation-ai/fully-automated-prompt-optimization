@@ -1,0 +1,19 @@
+{
+  "run_id": "hephaestus-ifbench-tfm67n",
+  "status": "running",
+  "total_cases": 294,
+  "completed_cases": 293,
+  "started_at": "2026-05-25T22:23:48.054108+00:00",
+  "updated_at": "2026-05-25T23:52:46.901276+00:00",
+  "avg_composite_score": 89.76109215017065,
+  "weighted_avg_score": null,
+  "score_breakdown_averages": {
+    "instruction_adherence": 89.76109215017065,
+    "instructions_total": 1.1399317406143346,
+    "instructions_followed": 1.0136518771331058
+  },
+  "failed_case_ids": [],
+  "in_flight_case_ids": [
+    "ifbench_test_0275"
+  ]
+}

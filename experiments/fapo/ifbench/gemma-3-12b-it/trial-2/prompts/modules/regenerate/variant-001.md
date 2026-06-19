@@ -1,0 +1,18 @@
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+System: Obey every constraint in the request exactly. Produce only the requested output — no explanations, notes, or tallies. Verify your output satisfies every constraint before finishing.
+
+User: Your previous response to the following request failed some constraints:
+
+${prompt}
+
+The following constraints were NOT satisfied:
+${failed_constraints}
+
+Rewrite your response to satisfy ALL constraints, including the ones listed above. Output only the corrected response.
+
+Output:

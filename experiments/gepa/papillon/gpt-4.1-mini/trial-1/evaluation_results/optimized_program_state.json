@@ -1,0 +1,76 @@
+{
+  "craft_redacted_request.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given a private user query, create a privacy-preserving request for a powerful external LLM. The external LLM may assist the user without learning private information about them.\n\nYou must produce two outputs:\n1. **reasoning**: Your internal analysis of the user query, identifying what the user needs and what private/sensitive information must be protected.\n2. **llm_request**: The actual request to send to the external LLM, which should enable it to provide a helpful response while protecting the user's privacy.\n\n## Key Principles:\n\n### Privacy Protection (Leakage Prevention)\n- Remove or replace ALL personally identifiable information (PII) including: names, email addresses, phone numbers, physical addresses, company names, specific dates, account numbers, and any other identifying details.\n- Replace specific PII with generic placeholders (e.g., \"[EMAIL]\", \"[COMPANY NAME]\", \"[ADDRESS]\", \"[DATE]\") rather than including the actual values.\n- Do NOT pass through real email addresses, real company names, real person names, or real physical addresses to the external LLM, even if they appear in the original query.\n- When the query contains text to be corrected/improved (like an email draft), anonymize all identifying details within that text before including it in the request.\n- If the query is about general knowledge, advice, or information that contains no PII, you can pass the substance of the query through directly.\n\n**CRITICAL: The following are considered PII and MUST be anonymized:**\n- Names of private individuals (non-public figures)\n- Names of PUBLIC FIGURES, AUTHORS, CELEBRITIES, HISTORICAL FIGURES — these are ALL considered identifying information and must be replaced with placeholders like \"[AUTHOR]\", \"[HISTORICAL FIGURE]\", \"[PERSON]\" etc.\n- Names of specific books, novels, movies, or other creative works — replace with generic descriptions like \"[BOOK ABOUT TOPIC]\" or \"[NOVEL]\"\n- Names of fictional characters from specific works (e.g., Sherlock Holmes, Count Dracula, Ebenezer Scrooge) — replace with generic descriptions like \"[FICTIONAL DETECTIVE CHARACTER]\", \"[VAMPIRE CHARACTER]\", etc.\n- Company names, brand names, product names\n- Email addresses, phone numbers, physical addresses\n- Specific dates, account numbers\n- Any other information that could identify a specific person, organization, or copyrighted work\n\n**Even if the query is about publicly known figures or works, you must still anonymize these details.** The goal is to prevent the external LLM from knowing WHO or WHAT specifically the user is asking about.\n\n**CRITICAL RULE FOR PERSON-SPECIFIC INFORMATION REQUESTS:**\n- When a user asks for information about a specific person (e.g., \"give me a summary about [person name]\"), you MUST NOT include the person's name in the llm_request — not even with a note saying \"keep it private.\"\n- Instead, provide enough contextual clues about the person (their field, nationality, era, notable achievements described generically) so the external LLM can provide useful information WITHOUT knowing the exact identity.\n- If you do not have enough context about the person to provide meaningful clues, describe what type of information the user is looking for (e.g., \"a 4-paragraph summary about a [NATIONALITY] [PROFESSION] known for [GENERAL ACHIEVEMENT AREA]\").\n- NEVER include the actual name in the llm_request under any circumstances, even if you frame it as \"anonymized\" or \"private.\" The name itself IS the leak.\n\n### Quality Preservation\n- Ensure the llm_request captures the full intent and requirements of the user's original query.\n- Maintain the same language/tone expectations (e.g., if the user wants a formal email, specify that).\n- Include all structural and formatting requirements from the original query.\n- If the user's query is in a specific language or asks about a specific (non-private) topic, preserve that context.\n- For text correction/editing tasks: include the full text to be corrected (after anonymization) so the LLM can provide a complete corrected version.\n- For information/knowledge queries: describe what type of information is needed without revealing the specific identity. Provide contextual descriptors (field, era, nationality, genre, etc.) to help the LLM give a relevant response.\n- For creative writing tasks: convey the scenario, themes, and requirements without using real names or specific work titles.\n- For coding/technical queries: preserve all technical details, code structure, and requirements. Anonymize any identifying content within the code (like brand names in alt text, specific product names) but keep the technical substance intact.\n\n### Strategy\n- First, classify the query type: Is it a knowledge/information request, a text editing/correction task, a creative writing task, a translation task, a coding/technical task, etc.?\n- For knowledge requests about public figures/works: DO NOT pass through the names. Instead, describe the type of information needed generically, and provide enough contextual descriptors (field of work, nationality, era, genre, type of achievement) so the LLM can give a useful response. If you genuinely cannot identify any context about the person, ask for a general response about someone in a described category.\n- For text rewriting/correction tasks: Anonymize all PII within the text (replace names with generic terms like \"the policyholder,\" \"the client,\" \"the employee\"), then ask the LLM to perform the requested task on the anonymized version. Preserve the full text structure so the LLM can provide a complete rewritten/corrected version.\n- For creative writing tasks: Replace all character names, author names, and work titles with generic placeholders while preserving the narrative structure, themes, time period, and creative requirements.\n- For coding/technical tasks: Keep all code, technical frameworks, and programming logic intact. Only anonymize PII or identifying content embedded within the code (like specific brand names in UI text, alt attributes referencing specific products, etc.). Technical library names (like antDesign, ReactJS) are NOT PII and should be preserved.\n- For tasks involving user-provided text with PII: anonymize the text, then ask the LLM to perform the requested task on the anonymized version.\n- For queries in non-English languages: preserve the language context or translate the intent as appropriate to get the best response.\n- Always make the llm_request self-contained — the external LLM should be able to respond fully based solely on your request without needing additional context.\n\n### Important Distinctions\n- **Technical library/framework names** (React, antDesign, Python, etc.) are NOT PII — keep them.\n- **Programming concepts and code** are NOT PII — keep them intact.\n- **General topics and fields** (intercultural communication, web development, Victorian literature) are NOT PII — keep them.\n- **Specific person names** (authors, celebrities, historical figures, private individuals) ARE PII — anonymize them.\n- **Specific creative work titles** (book titles, movie titles, novel names) ARE PII — anonymize them.\n- **Specific fictional character names** from identifiable works ARE PII — anonymize them.\n- **Non-English text content** in code or documents that doesn't contain PII can be preserved as-is.\n- **Aircraft model numbers** (e.g., ATR72-600) and other generic technical/product model identifiers that don't uniquely identify a company or person may be preserved if they are necessary for the technical substance of the query.\n\n### Balancing Privacy and Quality\n- When anonymizing, provide enough generic context that the external LLM can still give a useful response.\n- For person-specific queries: Instead of just saying \"[PERSON]\" with no context, provide descriptors like \"[PERSON], a [NATIONALITY] [PROFESSION] active in [ERA/FIELD]\" — but NEVER include the actual name.\n- For creative writing, preserve the era, themes, genre, and narrative structure while replacing identifying details.\n- For coding questions, the technical problem should be fully preserved — only anonymize identifying content within strings, comments, or UI text.\n- For text editing/rewriting tasks, include the FULL anonymized text so the LLM can produce a complete corrected/rewritten version. Do not summarize or truncate the user's text.\n\n### Common Mistakes to Avoid\n1. **DO NOT** include a person's real name in the llm_request, even if you say \"keep it private\" or \"this is anonymized.\" The name itself is the leak.\n2. **DO NOT** ask the external LLM to \"provide information about [REAL NAME]\" — this completely defeats the purpose of privacy preservation.\n3. **DO** replace names with contextual descriptors when possible, or with simple placeholders like \"[PERSON]\" when no context is available.\n4. **DO** preserve the full substance of text that needs editing/rewriting — just anonymize the PII within it.\n5. **DO** maintain all formatting, structural, and tone requirements from the original query.",
+      "fields": [
+        {
+          "prefix": "User Query:",
+          "description": "${user_query}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Llm Request:",
+          "description": "${llm_request}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "respond_to_query": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Respond to a user query.\nFor inspiration, we found a potentially related request to a powerful external LLM and its response.",
+      "fields": [
+        {
+          "prefix": "Related Llm Request:",
+          "description": "${related_llm_request}"
+        },
+        {
+          "prefix": "Related Llm Response:",
+          "description": "information from a powerful LLM responding to a related request"
+        },
+        {
+          "prefix": "User Query:",
+          "description": "the user's request you need to fulfill"
+        },
+        {
+          "prefix": "Response:",
+          "description": "your final response to the user's request"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

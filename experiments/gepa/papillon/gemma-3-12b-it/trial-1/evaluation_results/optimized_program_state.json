@@ -1,0 +1,74 @@
+{
+  "craft_redacted_request.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given a private user query, create a privacy-preserving request for a powerful external LLM. The LLM may assist without learning private information about the user.\n\nYour task has two components:\n1. **reasoning**: Explain your thought process for how to preserve privacy while still getting useful information from the external LLM.\n2. **llm_request**: The actual request you will send to the external LLM.\n\n## Key Principles\n\n### Privacy Preservation (Leakage Score)\n- Remove ALL personally identifiable information (PII) from the llm_request, including:\n  - Names of people (both the user and anyone mentioned)\n  - Email addresses, phone numbers, physical addresses\n  - Company names, specific project names\n  - URLs, endpoints, API keys\n  - Any other identifying details\n- Replace specific identifiers with generic placeholders or descriptions when needed\n- Do NOT include the user's original query verbatim if it contains PII\n\n### Quality Preservation (Quality Score)\n- The llm_request must still be useful enough to get a response that answers the user's original question\n- Preserve the core intent and technical substance of the query\n- Include enough context for the LLM to provide a helpful answer\n- Do NOT over-sanitize to the point where the request becomes too vague or loses its meaning\n\n## Strategy\n\n1. Analyze the user query to identify:\n   - The core question or task being asked\n   - Any PII or sensitive information present\n   - What information is necessary vs. unnecessary for the LLM to answer\n\n2. For factual/informational queries about public figures or public knowledge:\n   - These may seem safe, but still avoid framing them as coming from a specific user\n   - Generalize the request while keeping it answerable\n   - If the query is about a well-known public figure/work, you may reference them but consider whether the query itself reveals user interests that should be protected\n\n3. For translation/language queries:\n   - Only send the text that needs translation, not surrounding context that contains PII\n   - Strip out names, business details, and other identifying information from the text to be translated\n   - If the surrounding context is needed for accurate translation, anonymize it\n\n4. For code/technical queries:\n   - Remove specific URLs, endpoints, API keys, and service names\n   - Replace them with generic placeholders (e.g., \"ENDPOINT_URL\", \"API_ENDPOINT\")\n   - Preserve the technical structure and logic of the question\n   - Keep the code patterns and architecture intact while anonymizing specific services\n\n5. For business/professional queries:\n   - Remove all names, company references, and specific business details\n   - Preserve the general business question or scenario\n\n## Output Format\n\nProvide your response in two parts:\n- **reasoning**: Your analysis of what PII exists and how to handle it\n- **llm_request**: The sanitized request to send to the external LLM\n\n## Important Notes\n- The quality score and leakage score are equally weighted (arithmetic mean)\n- A perfect leakage score (1.00) means NO PII was leaked\n- A perfect quality score (1.00) means the request fully preserves the ability to answer the user's question\n- When in doubt, err on the side of privacy, but never make the request so vague it becomes unanswerable\n- For code adaptation tasks, replace ALL specific URLs/endpoints with placeholders like [ENDPOINT_URL] or [WEBSOCKET_URL] and describe what needs to be done generically",
+      "fields": [
+        {
+          "prefix": "User Query:",
+          "description": "${user_query}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Llm Request:",
+          "description": "${llm_request}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "respond_to_query": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Respond to a user query by providing a helpful, accurate, and complete response.\n\nFor inspiration, you are provided with a potentially related request to a powerful external LLM and its response. Use this as context and reference material, but tailor your response specifically to the user's actual query.\n\nKey guidelines:\n\n1. **Quality**: Provide a high-quality response that directly addresses the user's specific query. The related LLM request/response pair is provided as inspiration and context, but your response should be customized to match exactly what the user is asking for. Pay close attention to specific details in the user's query (file names, variable names, specific data, formatting requirements, etc.) and ensure your response matches those details precisely.\n\n2. **Privacy/PII Protection**: Do NOT leak any personally identifiable information (PII). If the related LLM response contains placeholder text like \"[Anchor Name]\" or similar, keep those as placeholders. Do not invent or include real names, addresses, phone numbers, or other PII that wasn't explicitly provided in the user's query.\n\n3. **Accuracy and Completeness**: \n   - For code tasks: Ensure the code is complete, compiles/runs correctly, and produces the expected output as specified in the user's query. Pay special attention to output formatting, file names, and logic correctness.\n   - For summarization/analysis tasks: Cover all key points from the source material without adding unsupported claims.\n   - For creative writing tasks: Follow the user's specific scenario, characters, and requirements closely.\n\n4. **Adaptation Strategy**: The related LLM request/response gives you a template or approach, but you must adapt it to the user's specific requirements. Key differences between the related request and the user's actual query should be identified and addressed. The user's query takes priority over the related LLM content whenever there are conflicts.\n\n5. **Output Format**: Match the format and style that the user's query implies or explicitly requests. If the user provides expected output, ensure your response would produce that exact output.",
+      "fields": [
+        {
+          "prefix": "Related Llm Request:",
+          "description": "${related_llm_request}"
+        },
+        {
+          "prefix": "Related Llm Response:",
+          "description": "information from a powerful LLM responding to a related request"
+        },
+        {
+          "prefix": "User Query:",
+          "description": "the user's request you need to fulfill"
+        },
+        {
+          "prefix": "Response:",
+          "description": "your final response to the user's request"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  }
+}

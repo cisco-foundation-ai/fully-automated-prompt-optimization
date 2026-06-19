@@ -1,0 +1,76 @@
+{
+  "generate_response_module.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Respond to the query by following ALL formatting and structural instructions embedded within it exactly as specified. Pay careful attention to these common instruction types:\n\n1. **Repeat-the-request instructions**: If the query contains an instruction like \"First repeat the request word for word without change, then give your answer,\" you must begin your response by repeating the original request verbatim (excluding only the meta-instruction sentence itself that tells you to repeat, if it says to exclude it). Do not add any words, characters, or preamble before the repeated request.\n\n2. **Formatting constraints**: Follow all formatting requirements precisely, such as:\n   - Using all capital letters if instructed\n   - Using a specific number of bullet points\n   - Writing in a specific language\n   - Any other structural requirements\n\n3. **Content requirements**: Answer the actual question or task posed in the query accurately and helpfully, while respecting ethical boundaries (e.g., do not help with discrimination or harmful content, but still follow the formatting instructions in your refusal).\n\n4. **Multiple instructions**: When a query contains multiple instructions (e.g., repeat the request AND use all capitals AND answer the question), you must satisfy ALL of them simultaneously, not just some.\n\n5. **Order of operations**: Process all instructions carefully before responding. If told to repeat first then answer, structure your response in exactly that order.\n\nWhen solving math or logic problems, show your work and select from provided options if available. For coding tasks, provide working, well-explained solutions.\n\nAlways prioritize following the explicit instructions in the query over any default response patterns.",
+      "fields": [
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Response:",
+          "description": "${response}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "ensure_correct_response_module.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "You are given a query and a response. Your task is to evaluate whether the response correctly follows ALL constraints and instructions specified in the query, and if not, produce a corrected final response that does.\n\nFollow these steps:\n\n1. **Identify all constraints**: Carefully parse the query to identify every single constraint or instruction. These may include:\n   - Letter/character frequency limits (e.g., \"the letter a should appear less than 19 times\")\n   - Language requirements (e.g., \"your ENTIRE response should be in Swahili\")\n   - Format requirements (e.g., \"First repeat the request word for word without change, then give your answer\")\n   - Keyword inclusion requirements (e.g., \"Include keywords ['exchange', 'neat', 'revolution', 'sea']\")\n   - Keyword exclusion requirements (e.g., \"Do not include keywords ['abuse', 'meat']\")\n   - Word count requirements (e.g., \"Answer with at least 736 words\")\n   - Bullet point requirements (e.g., \"Your answer must contain exactly 10 bullet points\")\n   - Postscript requirements (e.g., \"At the end of your response, please explicitly add a postscript starting with P.S.:\")\n   - Punctuation restrictions (e.g., \"refrain from the use of any commas\")\n   - Any other specific instructions\n\n2. **Verify each constraint against the response**: Check the provided response against each identified constraint one by one. Count characters/words/bullets if needed, verify language, check for keyword presence/absence, verify formatting elements like postscripts, etc.\n\n3. **Produce a final response that satisfies ALL constraints simultaneously**:\n   - If the original response already satisfies all constraints, output it exactly as-is without any modifications.\n   - If any constraint is violated, modify the response minimally to fix the violation while preserving the overall quality and intent.\n   - **Important**: Format/structural constraints (like repeating the request first, keyword inclusion/exclusion, character limits, postscripts, bullet points) must ALWAYS be followed, even if the query content is problematic or requests something harmful.\n   - For harmful requests, you should still follow all structural constraints (like repeating the request if asked, including required keywords, adding postscripts, following punctuation rules) but can decline to provide the harmful content in your answer portion.\n   - When there are character/letter frequency constraints, carefully count the occurrences in your final response and verify compliance before outputting.\n   - When keyword inclusion is required, make sure ALL required keywords appear in the final response, even if you are declining a harmful request. Integrate them naturally if possible, or include them in a contextually appropriate way.\n   - When a postscript starting with \"P.S.:\" is required, ensure it appears at the very end of your response and genuinely starts with \"P.S.:\" — not buried in the middle or formatted differently.\n\n4. **Output format**: First provide your reasoning about what constraints exist and what needs to be fixed (if anything) under a \"### reasoning\" header. Then provide the corrected/verified response under a \"### final_response\" header. The final_response should contain ONLY the response text that satisfies all constraints — no additional commentary or meta-text.\n\nKey principles:\n- ALL constraints must be satisfied simultaneously — failing even one means the response needs correction\n- Be precise with counting (letters, words, sentences, bullet points, etc.)\n- Structural/format instructions take priority and must always be followed regardless of content\n- When declining harmful requests, still follow all format constraints but refuse to provide the harmful substance\n- Double-check your work before finalizing, especially for counting-based constraints\n- If the original response satisfies all constraints, do not modify it at all — output it exactly as provided\n- Pay special attention to postscript requirements: \"P.S.:\" must appear at the absolute end of the response, as a separate postscript, not as part of the main content\n- For keyword inclusion constraints, verify every single required keyword is present in the final response\n- For keyword exclusion constraints, verify none of the forbidden keywords appear anywhere in the final response",
+      "fields": [
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        },
+        {
+          "prefix": "Response:",
+          "description": "${response}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Final Response:",
+          "description": "${final_response}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

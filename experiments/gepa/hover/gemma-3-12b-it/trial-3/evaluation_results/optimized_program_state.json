@@ -1,0 +1,162 @@
+{
+  "create_query_hop2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `summary_1`, produce the fields `query`.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "create_query_hop3.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `summary_1`, `summary_2`, produce the field `query`.\n\nYour task is to generate a search query that can retrieve evidence documents relevant to verifying the claim. The summaries provide context about what information is relevant to the claim.\n\n**Instructions:**\n\n1. Analyze the `claim` to identify the key factual assertions that need verification.\n2. Read both `summary_1` and `summary_2` to understand what entities, facts, and relationships are relevant to the claim.\n3. Generate a `query` that would help retrieve evidence documents supporting or refuting the claim.\n\n**Key guidelines for query generation:**\n\n- Your query should cover ALL key entities and concepts mentioned in the claim and summaries, not just the most obvious ones.\n- If the claim involves a comparison or relationship between two entities (e.g., \"X was formed before Y\"), make sure your query addresses BOTH entities, not just one of them.\n- If the claim mentions a specific named entity (like a band name, person, video series, etc.), include that entity's name in your query, especially if it appears in the summaries as a key piece of evidence.\n- Think about what specific evidence documents would need to be retrieved to verify each part of the claim. Your query should be able to surface those documents.\n- Consider that evidence might be spread across multiple documents — one for each entity or fact mentioned in the claim. Your query should be broad enough to help retrieve all relevant documents.\n- If the summaries mention specific proper nouns, titles, or names that are central to verifying the claim, include them in your query even if they seem redundant with other parts of the query.\n\n**Strategy:** After drafting your query, check whether each key entity and factual assertion from the claim and summaries would plausibly be found in documents retrieved by your query. If any key entity or concept would be missed, revise your query to include it.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Summary 2:",
+          "description": "${summary_2}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "summarize1.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `passages`, produce the fields `summary`.\n\nYour task is to generate a summary that will be used to create search queries to retrieve evidence documents relevant to verifying the claim. The summary should synthesize information from the provided passages and explicitly identify key entities, relationships, and facts that need further verification.\n\n**Important guidelines:**\n\n1. **Extract and name all key entities from the claim and passages:** Identify every entity mentioned in the claim (people, places, organizations, publications, dates, etc.) and explicitly name them in your summary, even if they are not directly discussed in the passages. If the claim refers to something indirectly (e.g., \"the place where X got his Ph.D.\" or \"the newspaper which placed Y 30th\"), resolve the reference using the passages and explicitly state the entity name (e.g., \"University of Florida\" or \"Guitar World\").\n\n2. **Resolve indirect references:** When the claim uses descriptive phrases instead of proper names, use the passages to identify what those phrases refer to, and include both the descriptive phrase AND the resolved proper name in your summary. This is critical for enabling downstream query generation.\n\n3. **Identify what needs verification:** For each component of the claim, note what information is confirmed by the passages and what still requires external evidence. Explicitly mention entities that are not covered in the passages but are referenced in the claim, as these will need to be searched for separately.\n\n4. **Include factual details that enable connections:** Include specific details like founding dates, locations, publication types (magazine vs. newspaper), institutional affiliations, and other attributes that help connect entities to each other and to the claim's assertions.\n\n5. **Do not omit entities just because they lack passage support:** If the claim mentions \"Golf Digest\" or \"University of Florida\" and the passages don't discuss them, still include these entities prominently in your summary with a note that they require further evidence retrieval.\n\n6. **State the nature of each entity when relevant to the claim:** If the claim makes a distinction (e.g., \"magazine\" vs. \"newspaper\"), and the passages reveal what type of publication something is, state this explicitly (e.g., \"Guitar World is a magazine, not a newspaper\").\n\nThe goal is to produce a summary that, when used to generate search queries, will successfully retrieve all evidence documents needed to verify every aspect of the claim.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "summarize2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `context`, `passages`, produce the fields `summary`.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Context:",
+          "description": "${context}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  }
+}

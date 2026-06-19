@@ -1,0 +1,166 @@
+{
+  "create_query_hop2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `summary_1`, produce the fields `query`.\n\nYou are generating a search query for the **second hop** of a multi-hop document retrieval system. Your goal is to retrieve documents that were NOT found in the first hop but are necessary to answer the original multi-hop question.\n\n**Context:**\n- The `question` is a multi-hop question requiring information from multiple documents.\n- The `summary_1` summarizes what was found in the first hop of retrieval and identifies what information is still missing.\n- Your `query` should target the missing information identified in the summary.\n\n**Instructions:**\n\n1. Read the `question` and `summary_1` carefully.\n2. Identify what entity or fact is still missing based on the summary.\n3. Generate a `query` that is optimized to retrieve the specific Wikipedia-style document about the missing entity or topic.\n\n**Key guidelines for query generation:**\n\n- **Use the entity name directly as the primary query term.** The retrieval system works best when the query closely matches the title or opening sentence of the target document. For example, if you need to find information about \"Roger Ailes,\" your query should prominently feature \"Roger Ailes\" as a simple lookup rather than a complex natural language question.\n- **Prefer short, entity-focused queries** over long, complex questions. A query like \"Roger Ailes\" or \"Roger Ailes biography\" will outperform \"Find the birth date or birth year of Roger Ailes\" because the target document likely begins with the entity name.\n- **If the summary already contains enough information to answer the question**, generate a query targeting the key answer entity or a closely related confirmatory document. Use the entity name directly.\n- **Avoid restating the full original question** as your query. Instead, focus on the specific missing piece identified in the summary.\n- **Include key identifying details** from the summary that can help disambiguate the entity (e.g., \"Albie Hecht CEO Worldwide Biggies\" rather than just \"Worldwide Biggies CEO\").\n\n**Critical strategy for disambiguating entities and finding the right document:**\n\n- Wikipedia-style documents often have disambiguation markers in parentheses in their titles, such as \"Boomerang (Southeast Asia)\" or \"Springfield (Illinois)\". When the entity you're looking for could have multiple variants or regional versions, **include a regional or contextual qualifier** in your query.\n- **Think about what specific variant of the entity is relevant to the question.** For example, if the question is about a TV channel that operates in Africa, and the channel is \"Boomerang,\" don't just search \"Boomerang\" — instead search for a specific regional variant like \"Boomerang television channel Turner Broadcasting\" or \"Boomerang cable satellite television channel\" to match the opening description of the target document.\n- **Use descriptive terms from the domain** that would appear in the target document's opening sentence. For TV channels, include terms like \"cable and satellite television channel\" along with known ownership details. For sports teams, include the sport and league. For people, include their profession or notable role.\n- **When the target document might be about a regional variant of a global brand**, consider that the document title may reference a different region than expected (e.g., a document about \"Boomerang (Southeast Asia)\" might contain ownership information applicable to all regional variants of Boomerang). Include terms that would match the document's content rather than just the exact regional variant you expect.\n\n**Examples of good vs. bad queries:**\n- Missing document about \"Roger Ailes\" → Good: \"Roger Ailes\" or \"Roger Ailes Fox News founder\" → Bad: \"Find the birth date or birth year of Roger Ailes\"\n- Missing document about \"Worldwide Biggies\" → Good: \"Worldwide Biggies Albie Hecht\" or \"Albie Hecht Worldwide Biggies CEO\" → Bad: \"Who is the CEO of Worldwide Biggies, and have they produced any musical game shows?\"\n- Missing document about Boomerang TV channel ownership → Good: \"Boomerang cable satellite television channel Turner Broadcasting\" or \"Boomerang television channel owned Turner\" → Bad: \"Boomerang\" (too generic, may retrieve wrong document)\n- All documents already found → Good: Use the key answer entity name directly → Bad: Restating the original question\n\n**Additional tips:**\n- If the missing information is about ownership, parentage, or attribution of an entity, include both the entity name AND terms describing its nature (e.g., \"television channel,\" \"company,\" \"football team\") to help match the target document's introductory description.\n- Consider that the retrieval system indexes Wikipedia-style documents where the first sentence typically states what the entity IS and who owns/operates it. Craft your query to match that pattern.\n- When a simple entity name query might be too ambiguous (matching many possible documents), add 2-3 descriptive terms that would appear in the target document's first paragraph.\n\nThink step by step about what document is missing, what its likely title and opening sentence would look like, then produce a concise query optimized to match that document.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "final_answer.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `summary_1`, `summary_2`, produce the fields `answer`.\n\nYour task is to answer the question based on the information provided in the summaries, but you must be critical and careful about the accuracy of the summaries. The summaries may contain errors or may not fully address what the question is actually asking.\n\nKey guidelines:\n\n1. **Read the question very carefully.** Pay close attention to exactly what is being asked. For example:\n   - If a question asks about \"the first game of the [X] video game series,\" consider whether it's asking about the first game in the broader franchise/series (not just a specific sub-series title).\n   - If a question asks about \"nationality,\" be precise. \"British\" and \"English\" are not the same thing. If someone is specifically English (from England), the answer should be \"English\" rather than the broader \"British.\"\n   - If a question asks \"proposed cuts to what?\" the answer should be the thing being cut (e.g., \"Medicare\"), not \"Medicare cuts.\" The question is asking what was being cut, not what the cuts were called.\n\n2. **Be concise in your answer.** Provide only the essential information requested. If the question is a yes/no question, answer with just \"yes\" or \"no\" (lowercase). Do not add unnecessary elaboration or restate the question in your answer.\n\n3. **Match your answer format to what the question asks.** \n   - If the question asks \"cuts to what?\" answer with the thing being cut (e.g., \"Medicare\"), not \"Medicare cuts.\"\n   - If the question asks \"what bank?\" answer with the bank name (e.g., \"Medici Bank\").\n   - If the question asks \"what record company?\" answer with the company name (e.g., \"RCA Victor\").\n   - Strip your answer down to the minimal phrase that directly answers the question. Avoid appending extra words that merely restate part of the question.\n\n4. **Do not blindly trust the summaries.** The summaries may:\n   - Misinterpret the scope of the question\n   - Use imprecise terminology (e.g., \"British\" instead of \"English\")\n   - Agree with each other but still both be wrong\n   - Provide correct information but frame it in a way that doesn't precisely answer the question\n   - Confuse \"where something is located\" with \"where something originated\" — these are fundamentally different questions\n   - Conflate the location of a building/entity with the origin of its architectural style, movement, or tradition\n\n5. **Use your own knowledge to verify and correct** the information in the summaries when possible. If both summaries agree but the answer seems potentially imprecise or incorrect based on what you know, prefer the more precise or accurate answer.\n\n6. **Handle multi-hop questions carefully.** Many questions require chaining facts together (e.g., identifying a person by their title, then finding information about that person's ancestor). Verify each link in the chain using both the summaries and your own knowledge. Common multi-hop patterns include:\n   - Identifying an entity (e.g., a church in front of a palace), then asking about a property of that entity (e.g., its architectural style), then asking about the ORIGIN of that property (e.g., where that style originated)\n   - The summaries often correctly identify the intermediate entity but then fail on the final hop, especially when the final hop requires knowledge about origins, inventors, or historical development\n   - When a question asks where a style/movement/technique \"originated,\" do NOT answer with where the specific instance is located. Instead, answer with where that style/movement/technique was FIRST DEVELOPED. For example:\n     * Renaissance architecture originated in Florence (not wherever a specific Renaissance building happens to be)\n     * Gothic architecture originated in France (not wherever a specific Gothic building is)\n     * Baroque music originated in Italy (not wherever a specific Baroque piece was performed)\n\n7. **Distinguish between location and origin.** This is critical:\n   - \"Where is X located?\" → Answer with the location of X\n   - \"Where did X's style originate?\" → Answer with where that style was first developed, which is often a completely different place from where X is located\n   - If a church in Bologna has a Renaissance facade, and the question asks where that architectural style originated, the answer is Florence (where Renaissance architecture was developed), NOT Bologna (where the church happens to be)\n\n8. **Answer format:** Keep answers short and direct. Single words, numbers, or brief phrases are preferred over full sentences. Never include explanations or qualifications in your answer.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Summary 2:",
+          "description": "${summary_2}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Answer:",
+          "description": "${answer}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "summarize1.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "You are the first-hop **summarization module** in a multi-hop QA system. Your job is to distill the most critical information from the top retrieved passages in response to an initial question.\n\nGiven the fields `question` and `passages`, produce the fields `summary`.\n\nYour summary must serve two purposes:\n1. **Enable the creation of a focused, effective follow-up query** (for the second hop of retrieval).\n2. **Provide a strong foundation for the answer generation module** (later stages depend on what you include here).\n\n## Guidelines:\n\n1. **Extract and preserve key facts from relevant passages**: Include specific names, dates, descriptions, relationships, and any details that directly address the question. Do not over-compress—retain the critical sentences or phrases from passages that contain answer-relevant information.\n\n2. **Identify and prominently highlight bridging entities and concepts**: If the question involves multiple entities or requires connecting information across documents, explicitly name any bridging entities (people, teams, organizations, works, places) that could serve as the subject of a second-hop retrieval query. For example, if a passage says a person \"plays for Team X\" and the question asks about Team X's league, make \"Team X\" extremely prominent in your summary as the bridging entity that needs further retrieval.\n\n3. **Signal what information is still needed with specificity**: Clearly state what has been established from the passages AND what specific entity or fact needs to be looked up next. Frame this as a concrete retrieval target (e.g., \"The next retrieval should focus on [Entity Name] to determine [specific missing fact].\"). This directly enables the query generation module to produce an effective second-hop query.\n\n4. **Do not rely on external knowledge**: Base your summary strictly on what is present in the provided passages. If information about an entity is not in the passages, note that it is missing rather than filling it in from general knowledge.\n\n5. **Include direct quotes or near-verbatim key phrases** from the most relevant passages when they contain critical factual claims (e.g., definitions, descriptions, dates, titles). This ensures precision for downstream modules.\n\n6. **Structure your summary to be informative, not just conclusive**: Rather than only stating a final answer, include the supporting evidence and context. Present both the direct answer (if available from passages) and the surrounding details that establish why it's correct and what else might need to be verified or retrieved.\n\n7. **When multiple passages are relevant**, synthesize information from all of them, showing how they connect to each other and to the question.\n\n8. **When no passages are directly relevant to the question**, identify which passages are closest to being useful and extract any partial clues (names, concepts, relationships) that might help bridge to the answer. Suggest specific entities or concepts that should be searched for in the next hop based on the question's requirements. Do not simply state \"no relevant information found\"—always try to provide actionable direction for the next retrieval step.\n\n9. **Prioritize the chain of reasoning**: Multi-hop questions typically require connecting Entity A → Entity B → Fact about Entity B. Your summary should clearly establish whatever links in this chain are available from the current passages, and explicitly identify the next link that needs to be found. For example:\n   - If you know Person X is associated with Organization Y (from passages), state this clearly and note that information about Organization Y (e.g., its classification, location, or other attributes) is what's needed next.\n   - If the question asks about a political party's candidate and their sports career, identify both the political connection and the sports connection as targets.\n\n10. **Include full context for bridging entities**: When a bridging entity is identified, include all available descriptive information about it from the passages (full name, location, type, any qualifiers) so that the follow-up query can be as specific as possible.\n\n## Output Format:\n\nProduce a `summary` field that contains a concise but information-rich synthesis of the retrieved passages as they relate to the question. The summary should typically be 2-5 sentences, including:\n- Key facts extracted from relevant passages (with direct quotes where possible)\n- Clear identification of bridging entities with all available context\n- Explicit statement of what has been established vs. what specific entity/fact needs to be retrieved next\n- A suggested focus for the next retrieval step (e.g., \"Further retrieval should target [Entity Name] to find [specific information needed].\")",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "summarize2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `question`, `context`, `passages`, produce the fields `summary`.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Context:",
+          "description": "${context}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-4.1-mini-2025-04-14",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

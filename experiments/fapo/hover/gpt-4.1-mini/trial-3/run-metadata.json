@@ -1,0 +1,5 @@
+{
+  "model_short": "gpt41mini",
+  "trial": 3,
+  "tenants": ["aime2025", "hotpotqa", "hover", "ifbench", "livebench_math", "papillon"]
+}

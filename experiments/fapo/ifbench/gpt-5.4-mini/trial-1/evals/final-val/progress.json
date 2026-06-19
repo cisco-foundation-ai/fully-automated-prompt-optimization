@@ -1,0 +1,17 @@
+{
+  "run_id": "hephaestus-ifbench-tfknfg",
+  "status": "completed",
+  "total_cases": 300,
+  "completed_cases": 300,
+  "started_at": "2026-05-25T02:40:28.968812+00:00",
+  "updated_at": "2026-05-25T02:42:17.899442+00:00",
+  "avg_composite_score": 92.33333333333333,
+  "weighted_avg_score": null,
+  "score_breakdown_averages": {
+    "instruction_adherence": 92.33333333333333,
+    "instructions_total": 1.4733333333333334,
+    "instructions_followed": 1.33
+  },
+  "failed_case_ids": [],
+  "in_flight_case_ids": []
+}

@@ -1,0 +1,162 @@
+{
+  "create_query_hop2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `summary_1`, produce the fields `query`.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "create_query_hop3.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `summary_1`, `summary_2`, produce the field `query`.\n\nYour task is to generate a search query that will help retrieve evidence documents relevant to verifying or refuting the claim. The summaries provide context about what has already been found or analyzed regarding the claim.\n\n**Key Guidelines:**\n\n1. **Focus on retrieving specific evidence:** Your query should be designed to find documents that contain key factual information needed to verify the claim. Think about what specific documents, articles, or passages would contain the relevant evidence.\n\n2. **Use specific entity names and titles:** When the claim or summaries mention specific works (books, films, etc.) or people, include those exact names in your query. For example, if a claim mentions a book title, include that title in the query.\n\n3. **Bridge the gap between the claim and missing evidence:** The summaries often reveal what information is still missing or what connections haven't been established. Your query should target that missing information. Think about:\n   - What specific person, place, or thing is the claim about?\n   - What factual relationships does the claim assert?\n   - What named entities (people, works, places) would appear in a relevant evidence document?\n\n4. **Prefer queries that include proper nouns and specific titles:** Rather than asking general questions (e.g., \"What was X's most renowned role?\"), include the specific entities mentioned in the claim that would appear in relevant documents (e.g., \"Planes Trains and Automobiles John Candy Dell Griffith\" or \"Richard Ford The Lay of the Land\").\n\n5. **Think about what a relevant evidence document would contain:** Consider what words and phrases would actually appear in a Wikipedia article, news article, or reference document that contains the evidence needed. Use those terms in your query.\n\n6. **When the claim makes connections between entities:** If the claim connects two things (e.g., an author and a book, an actor and a role), make sure your query includes terms from both sides of that connection, especially the specific names that might not be obvious from the summaries alone.\n\n7. **Use the summaries to identify what needs further verification:** If the summaries indicate that certain facts couldn't be confirmed or that certain connections are incorrect, craft your query to find the correct information. If a summary corrects a claim (e.g., identifying the actual film for a role), include terms related to the correct information.\n\nProduce a single query that maximizes the chance of retrieving the most relevant evidence document(s) for verifying the claim.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Summary 2:",
+          "description": "${summary_2}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "summarize1.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `passages`, produce the fields `summary`.\n\nYour task is to analyze a claim and a set of passages to produce a summary that connects the claim to relevant evidence. The summary will be used to generate queries to retrieve evidence relevant to verifying the claim.\n\n**Key Instructions:**\n\n1. **Identify all entities mentioned or implied in the claim.** The claim typically involves multiple entities (people, bands, places, albums, songs, etc.) connected by relationships. Make sure every entity referenced in the claim is explicitly named in your summary.\n\n2. **Use the passages to resolve any ambiguous or indirect references in the claim.** The claim may use descriptions like \"an American rock band,\" \"a lead vocalist,\" or \"one other\" instead of proper names. Use the passages to identify the specific entities being referenced and state them explicitly by name in your summary.\n\n3. **Expand abbreviations and provide full names.** If the claim uses abbreviations (e.g., \"NMIO\"), use the passages to identify the full name (e.g., \"National Maritime College of Ireland\") and include BOTH the abbreviation and the full name in your summary.\n\n4. **Name every key entity explicitly.** Each person, band, place, album, song, or organization that is relevant to verifying the claim should be mentioned by its proper name in the summary. Do not rely on descriptions alone (e.g., don't just say \"the lead vocalist\" — say \"Amy Lee, the lead vocalist of Evanescence\").\n\n5. **Include connecting entities that bridge the claim to the evidence.** Sometimes the claim references something indirectly (e.g., \"My Animal\" by a band). If the passages help identify the band or related entities, name them. If the passages don't directly mention an entity from the claim but mention related entities (e.g., other works by the same band/person), use that information to infer and name the connecting entity.\n\n6. **Be comprehensive in listing relevant facts from the passages.** Include specific details like dates, numbers, locations, album counts, career timelines, and relationships between entities that help verify the claim.\n\n7. **When the passages don't fully resolve a reference in the claim, still attempt to identify the entity** based on partial matches or contextual clues from the passages, and state your reasoning clearly.\n\nThe goal is to produce a summary that, when used as a basis for search queries, would successfully retrieve Wikipedia-style articles for ALL key entities involved in the claim. Every proper noun and named entity relevant to the claim's verification should appear in your summary.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "summarize2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `context`, `passages`, produce the fields `summary`.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Context:",
+          "description": "${context}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  }
+}

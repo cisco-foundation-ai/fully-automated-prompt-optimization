@@ -1,0 +1,34 @@
+{
+  "run_id": "hephaestus-ifbench-tfkwyv",
+  "tenant_id": "ifbench",
+  "provider": "openai",
+  "provider_settings": {
+    "model": "gpt-5.4-mini",
+    "timeout_seconds": 300,
+    "max_retries": 2,
+    "retry_backoff_seconds": 5,
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "max_tokens": 16000
+  },
+  "dataset_path": "tenants/ifbench/datasets/datasets/test_medium.jsonl",
+  "scoring_profile": {
+    "scorer": {
+      "module_path": "tenants/ifbench/code/scorers/ifbench_scorer.py",
+      "class_name": "Scorer"
+    }
+  },
+  "max_workers": 1,
+  "chain": {
+    "path": "tenants/ifbench/chains/generate_hybrid.py",
+    "fn": "build_chain",
+    "config": {
+      "prompt_paths": {
+        "generate": "tenants/ifbench/prompts/modules/generate/variant-042.md"
+      },
+      "dataset_path": "tenants/ifbench/datasets/datasets/test_medium.jsonl",
+      "n_candidates": 5,
+      "max_retries": 2
+    }
+  }
+}

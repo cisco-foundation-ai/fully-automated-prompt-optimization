@@ -1,0 +1,166 @@
+{
+  "create_query_hop2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `summary_1`, produce the fields `query`.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "create_query_hop3.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `summary_1`, `summary_2`, produce the fields `query`.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Summary 1:",
+          "description": "${summary_1}"
+        },
+        {
+          "prefix": "Summary 2:",
+          "description": "${summary_2}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "summarize1.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `passages`, produce the fields `summary`.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "summarize2.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given the fields `claim`, `context`, `passages`, produce the fields `summary`.\n\nYour task is to generate a summary that captures the key connections and evidence relevant to verifying the claim. The summary will be used to generate search queries to find additional evidence documents, so it must highlight specific entities, facts, and relationships that bridge the claim to verifiable information.\n\n**Critical Instructions:**\n\n1. **Identify and name all relevant entities explicitly.** When passages mention specific films, people, places, shows, or other named entities that are relevant to the claim, always include their names in your summary—even if the connection to the claim is not yet fully established.\n\n2. **Make inferential connections explicit.** If the passages provide partial information that could connect to the claim (e.g., a film title that might be Oscar-winning, an actor who appeared in a film with someone), state those connections explicitly in your summary. For example:\n   - If a passage mentions an actor appeared in a specific film with a person named in the claim, name both the actor AND the film.\n   - If a passage mentions a location associated with an entity in the claim, name both the location and the entity.\n\n3. **Bridge gaps between the claim and the passages.** The claim may reference entities indirectly (e.g., \"the town where X railway station was located\" or \"the actor who starred in an Oscar-winning film with Y\"). Your summary should:\n   - Identify which specific entity the claim is referring to based on the passages.\n   - Name that entity explicitly so queries can be generated to find more information about it.\n   - Include any intermediate entities or facts that connect the claim's description to the identified entity.\n\n4. **When evidence is insufficient, still extract and state what IS known.** Even if the passages don't fully verify the claim, identify and name all specific entities, films, people, distances, or facts from the passages that are relevant. For example:\n   - If the claim mentions \"an Oscar-winning film with Amber Tamblyn\" and a passage lists her films (like \"127 Hours\"), mention \"127 Hours\" by name in your summary as a candidate Oscar-winning film, and mention any co-stars if identifiable.\n   - If the claim mentions \"the town where X station was located\" and a passage identifies that town, name the town and any associated facts (like the station itself).\n\n5. **Include all named entities from passages that could serve as search terms** for finding the missing evidence needed to verify or refute the claim.\n\n6. **Be specific about factual details.** Include exact numbers, distances, dates, and names rather than vague references. If the claim states \"four miles\" but the passage says \"two miles,\" state both explicitly.\n\n7. **Actively hypothesize about unverified connections and suggest specific search directions.** When the claim references an entity indirectly and you have a list of candidates from the passages, don't just list them—actively reason about which candidate is most likely the correct one and why. For each candidate, suggest what additional information would need to be found to confirm or deny the connection. For example:\n   - If the claim says \"the star of Thick as Thieves\" appeared in a 1971 film, and the passage lists Bob Hoskins, John Thaw, and Pat Ashton as stars of Thick as Thieves, explicitly state for EACH actor what other films they are known for or might have appeared in, and whether any of them could plausibly appear in the 1971 film \"To Catch a Spy.\" Mention any other films or works associated with each candidate that might help verify the connection.\n   - If a claim references \"the electropop group who recorded Get Sharp,\" identify the group (The Limousines) and then explicitly state their origin city/state and any other identifying details that would help find evidence about them.\n\n8. **For each unresolved connection, explicitly name what needs to be searched.** Don't just say \"the link is not established\"—instead say something like \"To verify this, one would need to search for Pat Ashton's filmography to see if she appeared in To Catch a Spy\" or \"Search for The Limousines origin location to confirm they are from California.\"\n\n9. **Consider all possible interpretations of ambiguous references in the claim.** If \"Thick as Thieves\" could refer to a TV series (1974) or a film (2009), discuss both and their respective casts. If a claim references \"a star,\" consider that it might refer to any cast member, not just the lead.\n\n10. **Mention related works, collaborations, and career connections.** If two entities (e.g., Dick Clement and a cast member) have worked together on multiple projects, mention all known collaborations as they may be relevant to establishing the connection the claim asserts. If an actor from one project is known to have appeared in films of a similar era or genre as another project mentioned in the claim, note this explicitly.\n\n**Format:** Produce a concise but thorough summary that includes the key factual connections, names all relevant entities, highlights any discrepancies or gaps between the claim and the evidence in the passages, and explicitly suggests what additional searches would help resolve unverified connections.",
+      "fields": [
+        {
+          "prefix": "Claim:",
+          "description": "${claim}"
+        },
+        {
+          "prefix": "Context:",
+          "description": "${context}"
+        },
+        {
+          "prefix": "Passages:",
+          "description": "${passages}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "${summary}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

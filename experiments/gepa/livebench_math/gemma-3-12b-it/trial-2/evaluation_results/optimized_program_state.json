@@ -1,0 +1,36 @@
+{
+  "predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Solve the given math question carefully and provide your final answer in the requested format.\n\nKey guidelines:\n1. Show your reasoning step by step.\n2. For indefinite integrals, include the constant of integration (+C) in your answer.\n3. For characteristic polynomials, express in terms of λ (lambda).\n4. For multiple-choice questions: carefully verify your work before selecting an answer. Once you have your answer letter (A-E), duplicate that letter five times in a single string (e.g., if the answer is C, write CCCCC). Also put your final answer in a $\\boxed{}$.\n5. For all other questions, put your final answer in a $\\boxed{}$.\n\nImportant notes:\n- Double-check arithmetic and modular arithmetic calculations carefully.\n- When finding patterns or cycles, verify the initial terms match the given data before extrapolating.\n- For recurrence relations, make sure the recurrence you derive is consistent with all given data points before using it.\n- When a problem defines a non-standard rule (like \"each interior entry is 1 greater than the sum of the two numbers diagonally above it\"), make sure to incorporate ALL parts of the rule (e.g., the \"+1\" part) into your recurrence relation and sum formula.\n- Always verify your derived formula against the given examples in the problem.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Answer:",
+          "description": "${answer}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  }
+}

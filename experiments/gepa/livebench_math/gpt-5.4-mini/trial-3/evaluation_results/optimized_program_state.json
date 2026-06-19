@@ -1,0 +1,37 @@
+{
+  "predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Solve the question and provide the answer in the correct format.\n\nImportant guidelines:\n\n1. **Careful Computation**: Double-check all arithmetic and algebraic calculations. Verify your work step by step before finalizing your answer. Common errors include sign mistakes, incorrect determinant expansions, and differentiation/integration errors. For matrix problems, carefully compute each cofactor and verify each arithmetic operation with fractions.\n\n2. **Characteristic Polynomials**: When computing characteristic polynomials, use det(A - λI) and be very careful with the expansion. Do NOT switch between monic and non-monic conventions — keep the polynomial exactly as it comes from det(A - λI). The leading term should be (-λ)^n for an n×n matrix (i.e., (-1)^n λ^n). Do not multiply by -1 to make it monic unless explicitly asked.\n   - For 3×3 matrices, expand carefully using cofactor expansion along a row or column.\n   - When dealing with fractions, keep exact fractional arithmetic throughout. Do not round or approximate.\n   - After computing the determinant, verify by checking:\n     * The trace: the coefficient of (-1)^(n-1) λ^(n-1) should equal the trace of A.\n     * The determinant: the constant term should equal det(A).\n     * The sum of all 2×2 principal minors gives the coefficient of λ (with appropriate sign).\n   - Specifically for a 3×3 matrix with characteristic polynomial -λ³ + (tr A)λ² - (sum of 2×2 principal minors)λ + det(A):\n     * tr(A) = a₁₁ + a₂₂ + a₃₃\n     * Sum of 2×2 principal minors = M₁₁ + M₂₂ + M₃₃ where M_{ii} is the determinant of the 2×2 matrix obtained by deleting row i and column i.\n     * det(A) is the full 3×3 determinant.\n   - IMPORTANT: The sign pattern is: p(λ) = -λ³ + (trace)λ² - (sum of cofactors)λ + det(A). Be extremely careful with the sign of the λ coefficient — it should be NEGATIVE times the sum of the 2×2 principal minors. Verify this by substituting λ=0 to confirm you get det(A).\n\n3. **Fraction Arithmetic**: When working with matrices containing fractions (especially with denominator 7, 49, 343, etc.), be meticulous:\n   - Write out each multiplication and addition explicitly.\n   - Cross-check intermediate results.\n   - The final polynomial coefficients will typically have denominators that are powers of the original denominator.\n   - Verify your answer by plugging in a specific value of λ (like λ=0 to check det(A), or λ=1) and comparing with direct computation.\n\n4. **Indefinite Integrals**: When computing antiderivatives, always verify your answer by differentiating it back. Make sure all constant factors are correct. Include \"+C\" in your displayed work but note that the system may parse just the function part without the constant.\n\n5. **Multiple Choice Questions**: When the problem asks you to repeat a letter five times (e.g., \"FFFFF\"), provide exactly that format as your final answer.\n\n6. **Answer Formatting**: \n   - Put your final answer in \\boxed{} when requested.\n   - Use LaTeX notation as specified in the problem.\n   - For multiple choice with the 5x letter repetition instruction, just provide the five repeated letters (e.g., AAAAA).\n   - Make sure the mathematical expression inside \\boxed{} is in a standard form that a computer algebra system can parse.\n   - For characteristic polynomials, write in the form: -λ^3 + (a)λ^2 + (b)λ + c where a, b, c are exact fractions.\n\n7. **Verification**: Before submitting, re-read the problem to ensure you're answering what was asked, in the format that was requested. If the problem specifies a variable (like λ), use that variable in your answer.\n\n8. **GCD of Sets Including Fractions**: When computing the GCD of a set that includes fractions, the GCD is defined as gcd(numerators) / lcm(denominators). For example, gcd(a/b, c/d) = gcd(a,c) / lcm(b,d). Do NOT assume the GCD must be an integer — it can be a fraction. Express the answer as a fraction if needed.\n\n9. **Formula Matching Problems** (where you match expressions to missing tags in a solution):\n   - These problems require you to carefully read the mathematical context surrounding each <missing X> tag.\n   - Each expression from the list is used EXACTLY ONCE. Do not reuse expression identifiers.\n   - Pay very close attention to:\n     * What mathematical object is expected (a cell coordinate, an equation, a condition, a path, etc.)\n     * The grammatical and mathematical role of the missing piece (is it a subject, an equation, a path description, a condition?)\n     * Dimensional consistency (if surrounding text discusses coordinates, the missing piece should be a coordinate or path; if it discusses conditions, it should be an inequality or equation)\n     * The logical flow of the proof — what has been established before and what needs to come next\n   - Strategy: First, identify the \"easy\" matches where context makes the answer unambiguous. Then use process of elimination for harder ones.\n   - Cross-check: After making all assignments, verify that each expression ID is used exactly once. If you have duplicates, something is wrong — revisit those assignments.\n   - Common pitfalls: \n     * Don't confuse similar-looking expressions (e.g., (3,i-1) vs (3,i+1))\n     * Pay attention to whether a missing tag needs a full path vs. a single cell vs. a condition\n     * Read the sentence structure carefully — \"from <missing X> to <missing Y>\" means X is a starting point and Y is an ending point\n     * When the text says \"Note that <missing X> is a factor of <missing Y>\", X should be a polynomial/expression and Y should be another polynomial/expression that X divides\n   - After your initial assignment, re-read the entire solution with your choices filled in to check if it makes coherent mathematical sense.\n\n10. **General Problem-Solving**: \n    - For mathematical proofs or competition problems, understand the full logical structure before attempting to fill in details.\n    - When uncertain between two options, consider which one makes the surrounding sentences grammatically and mathematically correct.\n    - Pay attention to variable naming conventions used in the problem.\n\n11. **Critical Verification Steps for Characteristic Polynomials**:\n    - After computing your characteristic polynomial p(λ), verify:\n      * p(0) = det(A) — compute det(A) independently and check.\n      * The coefficient of λ² equals trace(A) (for 3×3 with leading term -λ³).\n      * If possible, verify p(eigenvalue) = 0 for any easily identifiable eigenvalue.\n    - If your verification fails, redo the calculation from scratch rather than trying to patch errors.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "${question}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Answer:",
+          "description": "${answer}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

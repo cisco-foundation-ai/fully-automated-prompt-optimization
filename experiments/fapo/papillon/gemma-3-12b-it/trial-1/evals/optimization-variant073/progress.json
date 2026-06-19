@@ -1,0 +1,18 @@
+{
+  "run_id": "hephaestus-papillon-tfg37c",
+  "status": "completed",
+  "total_cases": 111,
+  "completed_cases": 111,
+  "started_at": "2026-05-22T15:33:12.760216+00:00",
+  "updated_at": "2026-05-22T16:43:48.045450+00:00",
+  "avg_composite_score": 95.52552552552554,
+  "weighted_avg_score": null,
+  "score_breakdown_averages": {
+    "quality": 93.69369369369369,
+    "privacy": 97.35735735735736,
+    "leakage_fraction": 0.02642642642642643,
+    "quality_passed": 0.9369369369369369
+  },
+  "failed_case_ids": [],
+  "in_flight_case_ids": []
+}

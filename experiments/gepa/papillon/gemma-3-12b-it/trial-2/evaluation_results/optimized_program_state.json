@@ -1,0 +1,74 @@
+{
+  "craft_redacted_request.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given a private user query, create a privacy-preserving request for a powerful external LLM. The LLM may assist without learning private information about the user.\n\nYour task has two parts:\n1. **reasoning**: Analyze the user query to identify any personally identifiable information (PII) or sensitive/private details that should not be shared with an external LLM. PII includes but is not limited to: names of people, company names, internal system names, email addresses, phone numbers, account numbers, and any other identifying information. Also identify the core task the user wants accomplished.\n\n2. **llm_request**: Formulate a request to the external LLM that accomplishes the user's goal WITHOUT including any PII or private information. \n\nKey guidelines:\n- **Never pass through PII directly** in the llm_request, even if it appears in the original query. This includes names (e.g., \"Trisha\", \"Mickael\"), company names (e.g., \"Renault\"), internal tool/system names (e.g., \"People@Renault\", \"PacD\"), and any other identifying details.\n- **Replace specific identifiers with generic placeholders** or simply omit them. For example, instead of \"People@Renault\", say \"an internal company portal\" or simply describe the function without naming it.\n- **Preserve the core intent and task** of the user's request so the LLM can provide a high-quality, useful response.\n- **Do NOT quote or include the original text verbatim** if it contains PII or private information. Instead, describe what needs to be done in abstract terms.\n- If the user query is purely instructional/procedural with no PII, you should still check for any internal system names or company-specific references that could identify the user's organization, and remove those as well.\n- Use a professional tone in the llm_request and provide enough context for the LLM to generate a useful response.\n- If the original text contains spelling/grammar errors that the user wants fixed, describe the type of correction needed rather than including the erroneous text with PII.\n\nThe goal is to maximize BOTH:\n- **Quality**: The LLM request should enable the external LLM to produce a response that fully satisfies the user's original intent.\n- **Privacy (no leakage)**: The LLM request should contain zero PII or identifying information about the user, their contacts, or their organization.\n\nOutput format:\n- First provide your **reasoning** analyzing the privacy concerns and task intent.\n- Then provide the **llm_request** that will be sent to the external LLM.",
+      "fields": [
+        {
+          "prefix": "User Query:",
+          "description": "${user_query}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Llm Request:",
+          "description": "${llm_request}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "respond_to_query": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Respond to a user query.\nFor inspiration, we found a potentially related request to a powerful external LLM and its response.",
+      "fields": [
+        {
+          "prefix": "Related Llm Request:",
+          "description": "${related_llm_request}"
+        },
+        {
+          "prefix": "Related Llm Response:",
+          "description": "information from a powerful LLM responding to a related request"
+        },
+        {
+          "prefix": "User Query:",
+          "description": "the user's request you need to fulfill"
+        },
+        {
+          "prefix": "Response:",
+          "description": "your final response to the user's request"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  }
+}

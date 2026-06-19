@@ -1,0 +1,13 @@
+{
+  "benchmark": "HotpotQABench",
+  "program": "HotpotMultiHop",
+  "score": 62.33,
+  "cost": 0.0,
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "optimizer": "GEPA",
+  "optimizer_cost": 7.3809570300000225,
+  "optimizer_input_tokens": 18503640,
+  "optimizer_output_tokens": 2104039,
+  "optimizer_program_scores": null
+}

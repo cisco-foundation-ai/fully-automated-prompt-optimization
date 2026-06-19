@@ -1,0 +1,18 @@
+{
+  "run_id": "hephaestus-papillon-tfdewl",
+  "status": "completed",
+  "total_cases": 111,
+  "completed_cases": 111,
+  "started_at": "2026-05-21T04:53:10.091059+00:00",
+  "updated_at": "2026-05-21T05:48:57.002911+00:00",
+  "avg_composite_score": 96.04354354354355,
+  "weighted_avg_score": null,
+  "score_breakdown_averages": {
+    "quality": 97.29729729729729,
+    "privacy": 94.78978978978978,
+    "leakage_fraction": 0.0521021021021021,
+    "quality_passed": 0.972972972972973
+  },
+  "failed_case_ids": [],
+  "in_flight_case_ids": []
+}

@@ -1,0 +1,13 @@
+{
+  "benchmark": "Papillon",
+  "program": "PAPILLON",
+  "score": 86.6,
+  "cost": 0.0,
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "optimizer": "GEPA",
+  "optimizer_cost": 8.996392700000005,
+  "optimizer_input_tokens": 7190193,
+  "optimizer_output_tokens": 2120863,
+  "optimizer_program_scores": null
+}

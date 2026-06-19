@@ -1,0 +1,31 @@
+{
+  "run_id": "hephaestus-aime2025-tfc8ju",
+  "tenant_id": "aime2025",
+  "provider": "litellm",
+  "provider_settings": {
+    "model": "bedrock/google.gemma-3-12b-it",
+    "timeout_seconds": 300,
+    "max_retries": 2,
+    "retry_backoff_seconds": 5,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "max_tokens": 16000
+  },
+  "dataset_path": "tenants/aime2025/datasets/datasets/test.jsonl",
+  "scoring_profile": {
+    "scorer": {
+      "module_path": "tenants/aime2025/code/scorers/aime_scorer.py",
+      "class_name": "Scorer"
+    }
+  },
+  "max_workers": null,
+  "chain": {
+    "path": "tenants/aime2025/chains/solve.py",
+    "fn": "build_chain",
+    "config": {
+      "prompt_paths": {
+        "solve": "tenants/aime2025/prompts/variants/variant-001.md"
+      }
+    }
+  }
+}

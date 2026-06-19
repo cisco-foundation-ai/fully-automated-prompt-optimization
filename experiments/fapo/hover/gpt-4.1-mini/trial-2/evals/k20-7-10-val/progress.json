@@ -1,0 +1,18 @@
+{
+  "run_id": "hephaestus-hover-tfl8gw",
+  "status": "completed",
+  "total_cases": 300,
+  "completed_cases": 300,
+  "started_at": "2026-05-25T10:14:57.071974+00:00",
+  "updated_at": "2026-05-25T10:24:59.262549+00:00",
+  "avg_composite_score": 60.0,
+  "weighted_avg_score": null,
+  "score_breakdown_averages": {
+    "recall": 60.0,
+    "partial_recall": 84.22222222222231,
+    "num_gold": 3.0,
+    "num_found": 2.526666666666667
+  },
+  "failed_case_ids": [],
+  "in_flight_case_ids": []
+}

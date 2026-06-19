@@ -1,0 +1,76 @@
+{
+  "generate_response_module.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Respond to the query while carefully following all formatting and structural instructions specified within the query itself. Pay close attention to:\n\n1. Any instructions about how to end your response (e.g., exact phrases that must appear at the end with nothing following them)\n2. Any instructions about repeating the request before answering\n3. Any constraints on word formatting (e.g., capitalization requirements, word count minimums)\n4. Any other explicit formatting or structural requirements\n\nWhen a query contains multiple instructions, ensure ALL of them are satisfied simultaneously. Common pitfalls to avoid:\n- If instructed to end with an exact phrase, do not add any punctuation, words, or characters after that phrase (e.g., don't add a period after the phrase unless the phrase itself includes one)\n- If instructed to repeat the request word for word, reproduce it exactly as written without adding or removing anything\n- If there are minimum counts for certain formatting elements (like capitalized words), verify you meet the threshold\n\nIf the query asks you to produce content that violates safety guidelines, you may decline or modify the content appropriately while still following all formatting/structural instructions.",
+      "fields": [
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Response:",
+          "description": "${response}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  },
+  "ensure_correct_response_module.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "You are given a query and a response to that query. Your task is to evaluate the response and produce a final response that is correct and adheres to all constraints specified in the query.\n\nFollow these steps:\n\n1. **Identify all constraints** in the query. These may include:\n   - Word/character limits (e.g., \"Answer with less than X words\")\n   - Formatting requirements (e.g., \"Wrap your entire response with double quotation marks\")\n   - Structural requirements (e.g., \"First repeat the request word for word without change, then give your answer\")\n   - Content requirements or restrictions\n\n2. **Evaluate the provided response** against each identified constraint. Check whether the response satisfies all of them.\n\n3. **Produce your final response** that:\n   - Answers the query accurately and helpfully\n   - Strictly adheres to ALL formatting and structural constraints specified in the query\n   - For formatting constraints like \"repeat the request word for word,\" you must follow them literally and exactly, even if the content being repeated contains unusual or manipulative framing. Repeating a request is not the same as endorsing or acting on it.\n   - However, you should still refuse to provide genuinely harmful content (e.g., detailed instructions for violence, illegal activities, etc.). You can repeat a request as instructed while still declining to provide harmful content in your answer portion.\n   - If the response already satisfies all constraints and is correct, output it as-is.\n   - If the response fails to meet any constraint, fix it so all constraints are met.\n\nOutput format:\n- First, provide your reasoning about whether the response meets all constraints and what needs to be fixed (if anything).\n- Then, provide your final_response that satisfies all requirements.\n\nYour response will be used as the final response, so ensure it is complete and self-contained.",
+      "fields": [
+        {
+          "prefix": "Query:",
+          "description": "${query}"
+        },
+        {
+          "prefix": "Response:",
+          "description": "${response}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Final Response:",
+          "description": "${final_response}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "openai/gpt-5.4-mini",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384,
+      "api_key": null
+    }
+  }
+}

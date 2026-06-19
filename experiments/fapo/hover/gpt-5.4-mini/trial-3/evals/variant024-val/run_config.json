@@ -1,0 +1,37 @@
+{
+  "run_id": "hephaestus-hover-tfkg0b",
+  "tenant_id": "hover",
+  "provider": "openai",
+  "provider_settings": {
+    "model": "gpt-5.4-mini",
+    "timeout_seconds": 300,
+    "max_retries": 2,
+    "retry_backoff_seconds": 5,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "max_tokens": 16000
+  },
+  "dataset_path": "tenants/hover/datasets/datasets/val.jsonl",
+  "scoring_profile": {
+    "scorer": {
+      "module_path": "tenants/hover/code/scorers/hover_scorer.py",
+      "class_name": "Scorer"
+    }
+  },
+  "max_workers": 5,
+  "chain": {
+    "path": "tenants/hover/chains/multi_hop.py",
+    "fn": "build_chain",
+    "config": {
+      "prompt_paths": {
+        "summarize1": "tenants/hover/prompts/modules/summarize1/variant-003.md",
+        "query_hop2": "tenants/hover/prompts/modules/query_hop2/variant-003.md",
+        "summarize2": "tenants/hover/prompts/modules/summarize2/variant-001.md",
+        "query_hop3": "tenants/hover/prompts/modules/query_hop3/variant-003.md"
+      },
+      "retrieval_k": 15,
+      "retrieval_k_hop3": 20,
+      "bm25_data_dir": "tenants/hover/data/bm25"
+    }
+  }
+}

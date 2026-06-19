@@ -1,0 +1,17 @@
+{
+  "run_id": "hephaestus-aime2025-tfbci8",
+  "status": "completed",
+  "total_cases": 90,
+  "completed_cases": 90,
+  "started_at": "2026-05-20T02:06:09.135984+00:00",
+  "updated_at": "2026-05-20T02:13:40.709975+00:00",
+  "avg_composite_score": 34.44444444444444,
+  "weighted_avg_score": null,
+  "score_breakdown_averages": {
+    "exact_match": 34.44444444444444,
+    "llm_equiv": 34.44444444444444,
+    "predicted_answer": 132.3
+  },
+  "failed_case_ids": [],
+  "in_flight_case_ids": []
+}

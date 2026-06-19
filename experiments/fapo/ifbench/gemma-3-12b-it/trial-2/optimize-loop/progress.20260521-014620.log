@@ -1,0 +1,4 @@
+2026-05-21T11:38:04+00:00 round=1 status="continuing"
+2026-05-21T12:25:12+00:00 round=2 status=error exit_code=143
+2026-05-21T12:58:38+00:00 round=3 status=error exit_code=143
+2026-05-21T13:20:14+00:00 round=4 status=error exit_code=143

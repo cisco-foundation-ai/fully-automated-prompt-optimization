@@ -8,10 +8,29 @@ SPDX-License-Identifier: Apache-2.0
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/actions/workflows/ci.yml/badge.svg)](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/actions/workflows/ci.yml)
+[![arXiv](https://img.shields.io/badge/arXiv-2606.19605-b31b1b.svg)](https://arxiv.org/abs/2606.19605)
 
-An optimization framework for LLM-powered chains. Iteratively improve prompts, parameters, and chain architecture using built-in evaluation, failure analysis, and a structured variant system.
+An optimization framework for multi-step LLM pipelines. FAPO uses [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as an autonomous optimizer that iteratively improves prompts, parameters, and chain architecture — guided by built-in evaluation, step-level failure analysis, and a structured variant system.
 
 FAPO provides the full loop: **evaluate** a chain against a dataset, **analyze** what went wrong using step attribution, **create** a better variant, and **measure** whether it improved. The evaluation infrastructure exists to drive and measure optimization — not as an end in itself.
+
+## Why pipeline-aware optimization
+
+Multi-step LLM pipelines fail through interactions among retrieval, reasoning, and formatting steps, so optimizing the *prompt* alone can miss the real bottleneck. FAPO treats a pipeline as an **inspectable workflow**: instead of scoring only the final answer, it records every intermediate step output, then localizes each failure to a prompt, an upstream evidence source (such as retrieval), or the chain structure itself. It edits prompts when failures are prompt-addressable, and **escalates** to chain parameters or chain structure when attribution shows that prompts alone can no longer help.
+
+Concretely, FAPO is a reusable evaluation engine (`src/hephaestus/`), a set of isolated tenant workspaces (`tenants/<id>/`), [LangGraph](https://langchain-ai.github.io/langgraph/) to represent each pipeline as a stateful graph, and Claude Code as the optimization orchestrator. The orchestrator is a layer **separate from the task model being optimized** — see [The optimizer vs. the task model](#the-optimizer-vs-the-task-model).
+
+### How FAPO relates to GEPA
+
+FAPO's baseline is **GEPA**, a prompt optimizer. FAPO builds on GEPA's evaluation setup but widens the action space and changes how candidates are chosen:
+
+| | GEPA (baseline) | FAPO |
+|---|---|---|
+| **Action space** | Instruction string inside a **fixed** chain | Prompt text **+** chain parameters **+** chain structure |
+| **Search** | Evolutionary search (MIPROv2-Heavy) over prompts | Attribution-driven scoped edits, escalating only when evidence requires it |
+| **Failure signal** | Final-score feedback | Step-level attribution over recorded intermediate outputs |
+
+When the two are compared, both start from the same pipeline and the same baseline prompts; the only difference is the optimizer. FAPO does **not** depend on GEPA or DSPy as libraries — they are points of comparison, and some tenants merely reuse DSPy-style prompt *text* for parity. For benchmark results across six tasks and three task models, see the FAPO paper.
 
 ## Quick start
 
@@ -27,7 +46,7 @@ pip install -e ".[mcp]"
 
 ### 2. Set up a tenant
 
-A tenant is a self-contained optimization project. You need four things: a dataset, a chain, a scorer, and a config that wires them together.
+A tenant is a self-contained optimization project. You need four entities: a dataset, a chain, a scorer, and a config that wires them together.
 
 **Dataset** — a JSONL file with test cases (`my_dataset.jsonl`):
 ```json
@@ -102,9 +121,9 @@ cat eval_output/summary.md
 
 ### 4. Optimize
 
-Use Claude Code or Codex from your project directory.
+Run the optimization loop with [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or Codex from your project directory.
 
-With [Claude Code](https://docs.anthropic.com/en/docs/claude-code), run the optimization agent:
+With Claude Code, run the optimization agent:
 
 ```
 > /optimization
@@ -124,38 +143,43 @@ Follow .codex/agents/optimization.md.
 
 The agent autonomously analyzes failures, creates improved prompt variants, evaluates them, and iterates until your target score is reached. See [Optimization loop](#optimization-loop) for the full details.
 
+> **Note:** `/optimization` runs inside Claude Code, which acts as the optimizer. The model it optimizes is whatever you set under `provider` / `provider_settings.model` (here, GPT-4o) — the two are independent.
+
 ---
 
 ## How it works
 
-The core workflow is an **optimization loop** — evaluate, analyze failures, create a better variant, repeat:
+The core workflow is an **optimization loop**. Each pass runs the same six stages — the labels below are reused throughout this README:
 
 ```
-  ┌───────────────────────────────────────────────────────────────┐
-  │                       OPTIMIZATION LOOP                       │
-  │                                                               │
-  │  Dataset ──> Chain ──> Scorer ──> Results                     │
-  │  (JSONL)     (LangGraph)          (summary.md, results.jsonl) │
-  │                                       │                       │
-  │                                       ▼                       │
-  │                               Step attribution                │
-  │                         (classify failure causes)             │
-  │                                       │                       │
-  │                                       ▼                       │
-  │                            Create new variant                 │
-  │                     (prompt / parameter / chain)              │
-  │                                       │                       │
-  │                                       ▼                       │
-  │           ┌── Accept ◄── Compare to previous best             │
-  │           │                      │                            │
-  │           ▼                 Reject ──┐                        │
-  │      Update best                     │                        │
-  │           │                          │                        │
-  │           └───────────► Next cycle ◄─┘                        │
-  └───────────────────────────────────────────────────────────────┘
+      ┌────────────────────────────────────────────────┐
+      │                 OPTIMIZATION LOOP              │
+      └────────────────────────────────────────────────┘
+
+  1. Evaluate    Dataset ─> Chain ─> Scorer ─> Results
+                 (JSONL)    (LangGraph)        (summary.md, results.jsonl)
+                      │
+                      ▼
+  2. Attribute   classify failures by pipeline step and fix type
+                      │
+                      ▼
+  3. Propose     generate one scoped variant (prompt / parameter / chain)
+                      │
+                      ▼
+  4. Review      independent guardrail check (scope, leakage, placeholders)
+                      │
+                      ▼
+  5. Compare     re-run the variant; compare to the previous best
+                      │
+                      ▼
+  6. Iterate or escalate
+                 keep improved variants; iterate at this level, or
+                 escalate to the next level when attribution requires it
+                      │
+                      └──────────► back to step 1 (next cycle)
 ```
 
-You wire them together with a **config file** and run `python -m hephaestus.cli eval --config <config>.json`. Once you have results, use failure analysis and the variant system to iterate.
+You wire the dataset, chain, and scorer together with a **config file** and run `python -m hephaestus.cli eval --config <config>.json` to perform a single **Evaluate** stage. The remaining stages are driven by the Claude Code optimizer (see [Optimization loop](#optimization-loop)). A separate reviewer checks every proposed change before it is re-evaluated, and accepted variants are compared on aggregate validation scores only.
 
 ---
 
@@ -222,6 +246,19 @@ def build_chain(provider, config):
 
 Later nodes can reference earlier outputs in their prompts using `${steps.summarize.output}`.
 
+### Chain state
+
+Every chain operates on a shared **state** with four protocol fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `context` | `Dict[str, str]` | Input from the dataset case (`case.context`) |
+| `output_text` | `str` | The final output, read by the scorer |
+| `step_outputs` | `Dict[str, str]` | Intermediate outputs, **keyed by node name** |
+| `diagnostics` | `List[str]` | Debug traces and warnings (e.g. missing placeholders) |
+
+`make_llm_node` ties this together: it merges `context` with prior `step_outputs` (exposed under keys like `steps.<name>.output`), renders the `${...}` placeholders, splits the `System:` / `User:` sections into chat messages, calls `provider.generate`, and writes its result into both `output_text` and `step_outputs[output_key]`. Because every node writes a **named** output, the pipeline is inspectable as a sequence of intermediate artifacts rather than a single opaque final string — this is what makes step attribution possible.
+
 ### Prompt templates
 
 Prompts are Markdown files with a simple format:
@@ -245,7 +282,7 @@ A scorer compares the chain output to the expected answer. Implement the `Scorer
 
 ```python
 # my_scorer.py
-from hephaestus.scoring.scorer import Scorer as BaseScorer
+from src.hephaestus.scoring.scorer import Scorer as BaseScorer
 
 class Scorer(BaseScorer):
     def validate_case(self, case, scoring_profile):
@@ -269,9 +306,9 @@ class Scorer(BaseScorer):
         }
 ```
 
-The engine calls `validate_case` (to catch bad data early) then `score_case` for each test case, and aggregates the results.
+The engine calls `validate_case` (to catch bad data early) then `score_case` for each test case, and aggregates the results. Every scorer must return a finite `composite_score` in `[0, 100]` plus a numeric `score_breakdown` — the breakdown can expose as many task-specific metrics as you like (exact match, F1, format validity, …) while `composite_score` stays the single objective the optimizer drives.
 
-For multi-step chains, you can also implement `score_pipeline_case` to score based on intermediate step outputs, not just the final output.
+**Pipeline-aware scoring.** Because each node writes a named output into `step_outputs` (see [Chain state](#chain-state)), a scorer for a multi-step chain can override `score_pipeline_case(case, step_outputs, scoring_profile, output_text)` and score against intermediate outputs, not just the final string. The default implementation simply scores `output_text`; the HotpotQA scorer, for example, scores the `answer` step explicitly. This is what lets optimization reason about *where* in the pipeline a case went wrong.
 
 ### Providers
 
@@ -279,7 +316,7 @@ FAPO supports three LLM providers out of the box:
 
 | Provider | Config value | Auth env variable | Notes |
 |----------|-------------|-------------------|-------|
-| **OpenAI** | `"openai"` | `OPENAI_API_KEY` | GPT-4o, GPT-4.1, o1/o3 reasoning models |
+| **OpenAI** | `"openai"` | `OPENAI_API_KEY` | GPT models |
 | **Baseten** | `"baseten"` | `BASETEN_API_KEY` | Custom model deployments |
 | **SageMaker** | `"sagemaker"` | Configurable via `api_key_env` | AWS-hosted endpoints |
 
@@ -305,11 +342,20 @@ Provider settings go in the config file:
 
 Evaluation tells you *how well* your chain performs. Optimization tells you *what to change* to make it better. FAPO includes a structured optimization loop that works at three levels of increasing cost. (For the full architecture, see [docs/processes/prompt-iteration-loop.md](docs/processes/prompt-iteration-loop.md).)
 
+### The optimizer vs. the task model
+
+FAPO has two models, and keeping them straight avoids most confusion:
+
+- **The optimizer** is Claude Code. It reads the playbook, runs evals, dispatches subagents, writes variants, compares results, and decides when to escalate. It never appears in your config.
+- **The task model** is whatever you set under `provider` / `provider_settings.model` (e.g. `gpt-4o`, `gemma-3-12b`). It is the model *being optimized*, reached through a small `ProviderClient.generate(messages)` interface.
+
+The two are independent — you can optimize a Gemma pipeline using Claude as the optimizer. Only the task model changes when you swap providers; the optimization machinery stays the same.
+
 ### Running it
 
-The optimization loop can be driven by Claude Code or Codex. Use the prompt set that matches the tool you are running: `.claude/` for Claude Code and `.codex/` for Codex.
+The optimization loop can be driven by [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or Codex. Use the prompt set that matches the tool you are running: `.claude/` for Claude Code and `.codex/` for Codex.
 
-For [Claude Code](https://docs.anthropic.com/en/docs/claude-code), use the existing slash commands from within your project directory:
+For Claude Code, use the slash commands from within your project directory:
 
 ```
 # 1. Run a baseline eval first
@@ -338,7 +384,7 @@ Success criteria: composite_score >= 80
 Follow .codex/agents/optimization.md.
 ```
 
-The optimization agent takes over from there. It will:
+The `/optimization` agent takes over from there. It will:
 1. Read the tenant's `docs/iteration-playbook.md` to understand what it's allowed to change (the **scope contract**)
 2. Run failure analysis on the eval results
 3. Create new prompt/parameter/chain variants targeting the top failure patterns
@@ -346,7 +392,7 @@ The optimization agent takes over from there. It will:
 5. Run eval on the new variant and compare to the previous best
 6. Repeat until success criteria are met or all allowed optimization levels are exhausted
 
-The workflow uses internal failure-analysis and review instructions automatically — you don't invoke these directly:
+The `/optimization` agent is the orchestrator; it manages two internal subagents automatically — you don't invoke these directly:
 - **step-attribution** — classifies failures by root cause after each eval
 - **variant-reviewer** — checks proposed variants for leakage, placeholder drift, and scope violations before eval
 
@@ -360,13 +406,13 @@ You can also run evals and optimization steps manually via the CLI (see [CLI ref
 | **Parameter** (medium cost) | Config values only | Change `retrieval_k` from 7 to 10, or `temperature` from 1.0 to 0.5 |
 | **Structural** (highest cost) | Chain topology / new nodes | Add a self-reflection node, switch from linear to ReAct pattern |
 
-The system works through these levels in order. When performance plateaus at one level, it escalates to the next.
+The system follows a **prompt-first policy**: it prefers prompt changes when the evidence is ambiguous, and escalates to parameters or structure only after prompt-level search has exposed a bottleneck that prompts can't fix. This is the "prefer the smallest useful change" principle — cheaper levels first, and a higher level only when attribution justifies it.
 
 ### Step attribution (failure analysis)
 
-After an eval run, step attribution automatically classifies each failure by root cause:
+After an eval run, step attribution classifies each failure by root cause. It runs in **two phases**: first a fast, deterministic pass of rule-based heuristics over the recorded `step_outputs`, then deeper LLM analysis on the cases the heuristics can't classify confidently. The heuristics cover categories such as:
 
-- **Retrieval failures** — the retrieval step returned empty or irrelevant content
+- **Retrieval failures** — a retrieval step returned empty content, or its output overlaps the query too little (scored as hit / partial / miss)
 - **Cascading failures** — an early step produced empty output, causing everything downstream to fail
 - **Format failures** — the correct answer is in the output but surrounded by extra text the scorer can't parse
 - **Reasoning failures** — all inputs were good but the model reached the wrong conclusion
@@ -375,7 +421,7 @@ Each failure is also tagged by which optimization level can address it:
 - Format and reasoning failures → **prompt-addressable**
 - Retrieval and cascade failures → **structural-addressable**
 
-This tells you where to focus effort before you start writing new variants.
+This partition tells the optimizer (and you) where to focus before writing new variants — and it is what signals when a level is exhausted and escalation is warranted. The deterministic table appears automatically in each run's `summary.md`.
 
 ### Prompt variants
 
@@ -425,6 +471,17 @@ Each tenant tracks optimization history in two places:
 **`docs/change-log.md`** — human-readable narrative of what changed and why.
 
 Together these prevent rework (you won't re-try something that already failed) and provide an audit trail of how scores improved over time.
+
+### Guardrails
+
+Autonomous optimization can overfit or drift out of scope, so FAPO bounds every loop with four guardrails:
+
+1. **Split access controls** — the optimizer sees individual *training* cases; validation and test expose **aggregate scores only**. Candidates are accepted on validation, never by inspecting test cases.
+2. **Scope constraints** — the tenant's `iteration-playbook.md` defines which optimization levels are allowed and which are forbidden. The optimizer and the variant-reviewer enforce this **independently**.
+3. **Iteration memory** — a structured log of variants, scores, and exhaustion reasons (see [Tracking what you tried](#tracking-what-you-tried) above).
+4. **Variant immutability** — every attempt, accepted or rejected, becomes a new numbered file; structural variants are cloned, never edited in place.
+
+This isolation is a **workspace boundary** — enforced by directory layout, config-local paths, and independent reviewer validation — not an operating-system sandbox.
 
 ### Example: optimizing a multi-hop QA chain
 
@@ -500,28 +557,37 @@ By default, the UI serves `tenants/` at <http://127.0.0.1:8765/>. See [docs/web-
 
 ## Claude Code skills
 
-FAPO ships with [Claude Code](https://docs.anthropic.com/en/docs/claude-code) skills that automate common workflows. Run these as slash commands inside Claude Code:
+FAPO ships as a set of [Claude Code](https://docs.anthropic.com/en/docs/claude-code) agents and commands. The optimization *method* is the three core agents; the rest support evaluation, data augmentation, and repository operations around them.
 
-### User-invocable skills
+### Core optimization agents
 
-| Skill | Command | What it does |
-|-------|---------|-------------|
-| **Optimization** | `/optimization` | Autonomous optimization loop — analyzes failures, creates variants, runs evals, iterates until target score is reached. See [Optimization loop](#optimization-loop). |
-| **Eval Runner** | `/eval-runner` | Runs a tenant evaluation and returns a score summary. |
-| **Synthetic Samples** | `/synthetic-samples` | Creates realistic synthetic test cases to augment eval datasets with edge cases. |
-| **Synthetic Pruner** | `/synthetic-pruner` | Prunes noncompliant synthetic examples and normalizes placeholder data. |
-| **Reset Tenant** | `/reset-tenant` | Resets a tenant to baseline (variant-001), removing all optimization artifacts. |
-| **PR Lifecycle** | `/pr-lifecycle` | Creates, self-reviews, simplifies, and addresses review comments on a PR until it's merge-ready. |
-| **K8s Manager** | `/k8s-manager` | Inspects K8s resources, tracks usage, cleans up stale pods, and launches eval workloads. |
+These three agents are the optimization loop. You invoke `/optimization`; it dispatches the other two automatically.
 
-### Internal subagents
+| Agent | Command | Role |
+|-------|---------|------|
+| **Optimization** | `/optimization` | Orchestrator. Reads the playbook, emits the scope contract, creates variants, runs evals, records outcomes, and manages level transitions. See [Optimization loop](#optimization-loop). |
+| **Step Attribution** | *(dispatched)* | Post-eval failure analysis — classifies failures by root cause and recommends the next optimization level. |
+| **Variant Reviewer** | *(dispatched)* | Independent guardrail check on proposed variants (catches leakage, placeholder drift, scope violations). |
 
-These are invoked automatically by the optimization agent — you don't run them directly:
+### Supporting commands
 
-| Subagent | Purpose |
-|----------|---------|
-| **Step Attribution** | Post-eval failure analysis. Classifies failures by root cause and optimization level. |
-| **Variant Reviewer** | Independent guardrail check on proposed variants (catches leakage, placeholder drift, scope violations). |
+| Command | What it does |
+|---------|-------------|
+| `/eval-runner` | Runs a tenant evaluation and returns a score summary plus the output directory. |
+| `/synthetic-samples` | Creates realistic synthetic test cases to augment eval datasets with edge cases. |
+| `/synthetic-pruner` | Prunes noncompliant synthetic examples and normalizes placeholder data. |
+| `/reset-tenant` | Resets a tenant to baseline (variant-001), removing optimization artifacts from the working tree (history is preserved). |
+
+`CLAUDE.md` at the repo root provides repository-wide guidance (project purpose, eval workflow, code style, tenant data-safety rules) that all of the above respect.
+
+### Repository operations
+
+Not part of the optimization method — general repo tooling that happens to ship as Claude Code agents:
+
+| Command | What it does |
+|---------|-------------|
+| `/pr-lifecycle` | Creates, self-reviews, simplifies, and addresses review comments on a PR until it's merge-ready. |
+| `/k8s-manager` | Inspects K8s resources, tracks usage, cleans up stale pods, and launches eval workloads. |
 
 ---
 
@@ -644,7 +710,7 @@ Full config schema with all fields (see [docs/config-schema.md](docs/config-sche
 | Field | Required | Description |
 |-------|----------|-------------|
 | `tenant_id` | yes | Tenant identifier |
-| `provider` | yes | `"openai"`, `"baseten"`, or `"sagemaker"` |
+| `provider` | yes | `"openai"`, `"baseten"` (alias `"base10"`), or `"sagemaker"` |
 | `provider_settings` | no | Model name, temperature, timeouts, retries |
 | `dataset.path` | yes | Path to JSONL dataset |
 | `chain.path` | yes | Path to chain module |
@@ -663,7 +729,6 @@ Full config schema with all fields (see [docs/config-schema.md](docs/config-sche
 - Python 3.10+
 - Core: `openai`, `langgraph`, `requests`, `datasets`, `pytest`
 - Optional extras:
-  - `pip install -e ".[mcp]"` — MCP integration for agentic workflows
   - `pip install -e ".[hotpotqa]"` — BM25 retrieval dependencies
   - `pip install -e ".[cti_rcm]"` — [FAITH](https://github.com/cisco-foundation-ai/faith) test harness for CTI benchmarks
   - `pip install -e ".[local-models]"` — Local model support (llama-cpp)
@@ -690,6 +755,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code style, commit
 
 ## Further reading
 
+The companion paper is the canonical reference for the concepts, the GEPA comparison, and benchmark results — see [Citation](#citation) for the full reference and BibTeX entry. The repository docs below cover implementation and contribution details.
+
 | Document | Description |
 |----------|-------------|
 | [docs/architecture.md](docs/architecture.md) | System architecture and evaluation pipeline overview |
@@ -704,8 +771,29 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code style, commit
 
 ---
 
+## Citation
+
+**FAPO: Fully Autonomous Prompt Optimization of Multi-Step LLM Pipelines**<br>
+Paul Kassianik, Baturay Saglam, Huaibo Zhao, Blaine Nelson, Supriti Vijay, Aman Priyanshu, Amin Karbasi · [arXiv:2606.19605](https://arxiv.org/abs/2606.19605)
+
+If you use FAPO in your research, please cite the paper:
+
+```bibtex
+@misc{kassianik2026fapofullyautonomousprompt,
+      title={FAPO: Fully Autonomous Prompt Optimization of Multi-Step LLM Pipelines},
+      author={Paul Kassianik and Baturay Saglam and Huaibo Zhao and Blaine Nelson and Supriti Vijay and Aman Priyanshu and Amin Karbasi},
+      year={2026},
+      eprint={2606.19605},
+      archivePrefix={arXiv},
+      primaryClass={cs.SE},
+      url={https://arxiv.org/abs/2606.19605},
+}
+```
+
+---
+
 ## License
 
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
-Copyright 2025 Cisco Systems, Inc. and/or its affiliates.
+Copyright 2026 Cisco Systems, Inc. and/or its affiliates.

@@ -1,0 +1,13 @@
+{
+  "benchmark": "IFBench",
+  "program": "IFBenchCoT2StageProgram",
+  "score": 48.13,
+  "cost": 0.0,
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "optimizer": "GEPA",
+  "optimizer_cost": 15.563747799999966,
+  "optimizer_input_tokens": 3195444,
+  "optimizer_output_tokens": 993467,
+  "optimizer_program_scores": null
+}

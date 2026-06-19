@@ -1,0 +1,74 @@
+{
+  "craft_redacted_request.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Given a private user query, create a privacy-preserving request for a powerful external LLM. The LLM may assist without learning private information about the user.\n\nYour task has two outputs:\n1. **reasoning**: Your thought process about how to handle the query while preserving privacy.\n2. **llm_request**: The actual request you will send to the external LLM.\n\n## Critical Rules for Privacy Preservation\n\n**You must remove or generalize ALL personally identifiable information (PII) from the llm_request, including but not limited to:**\n- Names of people (e.g., \"Fatima\", \"Jason\", the user's name, spouse's name, children's names)\n- Specific postcodes/zip codes\n- IP addresses, passwords, authentication credentials, usernames\n- Military service or other occupation details that could identify someone\n- Specific personal circumstances that could be identifying\n- References to specific documents belonging to the user (e.g., \"my W-2s\")\n- Any detail that narrows down who the user is\n\n**Key principle**: The llm_request should be written as a GENERAL request that could have come from anyone. It should NOT contain the user's original text verbatim if that text contains PII or identifying details.\n\n## Strategy for Different Query Types\n\n### For information lookup queries (e.g., \"what is the pH of water in [location]\"):\n- You may keep general geographic references (e.g., county, region, city) but remove highly specific identifiers like postcodes or street addresses\n- Ask for general information about the topic AND how to find location-specific data\n- This approach preserves utility while removing the user's exact location\n\n### For content creation/rewriting queries (e.g., \"rewrite this email\"):\n- Do NOT pass the original text verbatim to the LLM if it contains PII\n- Instead, describe the STRUCTURE and PURPOSE of what needs to be written\n- Provide a sanitized/anonymized version of the content if examples are needed\n- Replace all names, personal details, and identifying circumstances with generic placeholders or remove them entirely\n\n### For business/planning queries:\n- Keep the domain-specific details (type of business, products, general location context)\n- Remove anything that identifies the specific person planning the business\n- Frame the request as general research rather than a personal plan\n\n### For technical/command queries (e.g., \"write me a command for X\"):\n- Remove specific credentials, IP addresses, usernames, passwords\n- Keep the technical structure and parameters needed (e.g., protocol versions, encryption types)\n- Ask for a general template or example with placeholder values\n- Ensure the response will be directly usable by the user (they can substitute their own values)\n\n### For web scraping/extraction queries:\n- The LLM cannot access external URLs or browse the web. Do NOT simply instruct it to visit a URL or paste content that you don't have.\n- If the user asks to extract information from a webpage, provide the URL to the LLM and ask it to explain how to extract the information (e.g., using tools, scripts, or manual methods), OR if the URL itself is not PII, you may include it and ask the LLM to provide guidance on extracting the requested data from that page.\n- If the URL contains no PII (it's a public resource), you CAN include it in the request since the LLM may have knowledge of the page's content or structure.\n- Focus on making the request actionable — the user needs a useful answer, not just a template.\n\n### For simple greetings or conversational queries:\n- Remove any names or identifying information\n- Keep the conversational intent intact\n\n## Quality Guidelines\n\n- **The llm_request must enable the LLM to provide a response that FULLY addresses the user's original need.** This is critical.\n- Do not over-generalize to the point where the response would be useless or require significant additional work from the user.\n- Maintain the specific domain details, technical requirements, and context needed for a good answer.\n- If the user asks about a specific city or region, you may reference that city/region (this is not PII) — but remove postcodes, street addresses, or other granular location identifiers.\n- Ensure the request is well-structured and clear.\n- If the user's query requires access to external resources (URLs, files), acknowledge this limitation and frame the request in a way that still produces a useful response (e.g., ask for methods to accomplish the task, or include the URL if it's public and non-identifying).\n- The LLM's response should be directly usable by the user with minimal additional effort.\n\n## Important Notes on Feasibility\n\n- The external LLM cannot browse the internet, access URLs, or retrieve live data. If the user's request requires web access, reframe the request to either:\n  1. Ask the LLM what it knows about the resource (if it's a well-known public page)\n  2. Ask for instructions/scripts on how to extract the desired information\n  3. Ask for the information directly if the LLM might have it in its training data\n- Never create a request that requires pasting content you don't have access to (e.g., \"[Paste content here]\" placeholders that won't be filled)\n\n## Scoring\n\nYour response is evaluated on two dimensions equally weighted:\n1. **Quality (0-1)**: Does the llm_request enable the LLM to provide a response that fully addresses the user's original need? A score of 0 means the response would be completely useless to the user.\n2. **Leakage (0-1)**: Does the llm_request successfully avoid revealing PII? (1 = no leakage, 0 = significant leakage)\n\nThe final score is the arithmetic mean of these two scores. Aim to maximize both simultaneously.\n\n## Output Format\n\nProvide your response with:\n- **reasoning**: Explain what PII or identifying information exists in the query, how you plan to remove/generalize it, and how you'll maintain utility.\n- **llm_request**: The privacy-preserving request to send to the external LLM.",
+      "fields": [
+        {
+          "prefix": "User Query:",
+          "description": "${user_query}"
+        },
+        {
+          "prefix": "Reasoning: Let's think step by step in order to",
+          "description": "${reasoning}"
+        },
+        {
+          "prefix": "Llm Request:",
+          "description": "${llm_request}"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  },
+  "respond_to_query": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Respond to a user query by providing a helpful, relevant answer.\n\nFor context, you may be provided with a potentially related request to an external LLM and its response. Use this as inspiration and reference material, but adapt your response to directly address the user's actual query.\n\n## Key Guidelines:\n\n### 1. Quality\n- Provide a substantive, helpful response that directly addresses what the user is asking.\n- If the user's query is a template or form with empty fields (no actual data values), acknowledge this clearly. Do NOT fabricate or invent data that doesn't exist in the input. Instead, explain what the template appears to be for and offer to help once actual data is provided.\n- If the user provides actual content or a clear question, give a thorough, well-structured response drawing on the related LLM response for inspiration on format and content.\n- Adapt the language, tone, and style to match the user's query (e.g., if the user writes in Croatian, respond in Croatian).\n- **Critically important: Read the user's query carefully to determine what they are actually asking for.** If they ask for a \"title\" or a specific deliverable, provide exactly that — not a summary, analysis, or unrelated commentary. Match your response type precisely to what is requested.\n- When the user asks for something specific (e.g., \"suggest a title,\" \"write a headline,\" \"give me a name for this\"), provide that specific thing directly and concisely. You may offer a few options or brief explanation, but the primary response must be the requested deliverable.\n\n### 2. Privacy and PII Protection (Leakage Prevention)\n- NEVER reveal, repeat, or reference any private/personal identifying information (PII) that may appear in the related LLM request but NOT in the user's query. This includes:\n  - Real names of private individuals\n  - Personal characteristics, identity details, or biographical information about real people\n  - Relationship details, medical information, or other sensitive personal data\n  - Any information that could identify a specific real person\n- If the related LLM request contains personal details about someone (e.g., gender identity, relationships, fears, physical descriptions, personal history), do NOT include these in your response unless the user explicitly mentions them in their own query.\n- For fictional character profiles or creative writing: only incorporate character traits and details that the user themselves has provided in their query. Do not leak details from the related LLM request that the user didn't mention.\n- When the user provides their own PII in their query (e.g., their name, email, phone number for a resume they're asking you to create), you may use that information as they've explicitly shared it for that purpose.\n\n### 3. Handling Empty/Template Inputs\n- If the user's query appears to be a blank template or form with headers but no actual data values, respond by:\n  - Acknowledging that the template appears to have no data filled in\n  - Describing what the template seems designed to track\n  - Offering to help process the data once it's provided\n  - Do NOT return zeros or empty placeholder values as if they were real data\n\n### 4. Response Format\n- Match the complexity and format of your response to the user's needs\n- Use structured formatting (headers, bullet points, numbered lists) when appropriate\n- Be concise but thorough\n- When the user provides detailed content (like a story chapter, document, or extensive text) and asks for something specific about it (like a title), focus on delivering that specific request rather than summarizing or analyzing the entire content unless asked to do so\n\n### 5. Using the Related LLM Response\n- The related LLM request/response pair provides context about the general domain and format expected\n- Use it as a structural and content guide, but always prioritize the user's specific details and requirements\n- If the user provides specific names, dates, products, companies, or other details, use those exact details — do not substitute with generic placeholders from the related LLM response\n- Enhance the response with relevant domain knowledge where appropriate, but ensure all specific claims align with what the user has provided",
+      "fields": [
+        {
+          "prefix": "Related Llm Request:",
+          "description": "${related_llm_request}"
+        },
+        {
+          "prefix": "Related Llm Response:",
+          "description": "information from a powerful LLM responding to a related request"
+        },
+        {
+          "prefix": "User Query:",
+          "description": "the user's request you need to fulfill"
+        },
+        {
+          "prefix": "Response:",
+          "description": "your final response to the user's request"
+        }
+      ]
+    },
+    "lm": {
+      "model": "bedrock/google.gemma-3-12b-it",
+      "model_type": "chat",
+      "cache": true,
+      "cache_in_memory": true,
+      "num_retries": 5,
+      "finetuning_model": null,
+      "launch_kwargs": {},
+      "train_kwargs": {},
+      "temperature": 1.0,
+      "max_tokens": 16384
+    }
+  }
+}

@@ -1,0 +1,18 @@
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
+System: You generate a single search query to find a Wikipedia article. Output only the query text, nothing else.
+
+User: Claim: ${claim}
+
+Summary of evidence found so far: ${steps.summarize_hop1.output}
+
+Based on the claim and evidence above, identify an entity mentioned in the claim that has NOT yet been found. Generate a short search query containing that entity's exact name followed by one or two distinguishing terms from its Wikipedia opening paragraph.
+
+Format: use the entity's Wikipedia article title. For disambiguation, include the qualifier in parentheses: (film), (TV series), (band), (book), (album), (song).
+
+FORBIDDEN words: Wikipedia, article, page, encyclopedia.
+Do not output any explanation or reasoning. Output only the search query (3-6 words). Never output placeholder text like {claim}.
