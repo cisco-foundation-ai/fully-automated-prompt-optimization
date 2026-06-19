@@ -25,8 +25,23 @@ COPYRIGHT_LINE = "Copyright 2026 Cisco Systems, Inc. and its affiliates"
 SPDX_LINE = "SPDX-License-Identifier: Apache-2.0"
 
 
+def _is_generated_experiment_output(path: Path) -> bool:
+    """Return True for machine-generated experiment artifacts under an
+    ``experiments/.../evals/`` directory (e.g. eval-runner ``summary.md`` files).
+
+    These are reference data — the verbatim output of evaluation and
+    optimization runs — not licensed source, so they are exempt from the
+    header requirement. Hand-authored docs elsewhere under ``experiments/``
+    (such as ``experiments/README.md``) are still checked.
+    """
+    parts = path.parts
+    return "experiments" in parts and "evals" in parts
+
+
 def _should_skip(path: Path) -> bool:
-    return any(part in SKIP_DIRS for part in path.parts)
+    if any(part in SKIP_DIRS for part in path.parts):
+        return True
+    return _is_generated_experiment_output(path)
 
 
 def _has_header(path: Path) -> bool:
