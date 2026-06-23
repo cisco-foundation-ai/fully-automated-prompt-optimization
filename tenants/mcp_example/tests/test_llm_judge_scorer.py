@@ -55,6 +55,7 @@ def test_judge_parses_clean_json(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert result["composite_score"] == 100.0
     assert result["score_breakdown"]["answer_correct"] == 100.0
+    assert result["diagnostics"] == ["judge[100]: correct"]
     assert len(fake.calls) == 1
 
 
@@ -143,6 +144,7 @@ def test_composite_combines_trajectory_and_judge(monkeypatch: pytest.MonkeyPatch
     # child sub-metrics flattened with prefixes
     assert "traj_tool_selection" in bd
     assert "judge_answer_correct" in bd
+    assert result["diagnostics"] == ["judge[100]: correct"]
     assert result["composite_score"] == pytest.approx(100.0)
 
 

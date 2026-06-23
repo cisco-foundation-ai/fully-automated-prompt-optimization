@@ -449,6 +449,11 @@ async function renderCase(index) {
   const gt = d.ground_truth || {};
   const expected = gt.expected;
   const breakdown = c.score_breakdown || {};
+  const allDiags = c.diagnostics || [];
+  // The LLM judge emits its rationale as a diagnostic prefixed "judge[":
+  // surface those distinctly from any other (chain) diagnostics.
+  const judgeDiags = allDiags.filter(x => /^judge\[/.test(x));
+  const otherDiags = allDiags.filter(x => !/^judge\[/.test(x));
   const tools = c.tool_call_history || [];
   const expTraj = (expected && expected.expected_trajectory) || [];
   const ctx = gt.context;
@@ -469,10 +474,13 @@ async function renderCase(index) {
           <tr><td>${esc(k)}</td>
           <td class="score ${k.includes('chars')?'':scoreClass(v)}">${typeof v==='number'?v.toFixed(2):esc(v)}</td></tr>`).join('')}</table>
       </div>
-      <div class="card"><h3>Diagnostics</h3>
-        <pre>${esc((c.diagnostics||[]).join('\n') || '(none)')}</pre>
+      <div class="card"><h3>LLM judge rationale</h3>
+        <pre>${esc(judgeDiags.join('\n') || '(none)')}</pre>
       </div>
     </div>
+    ${otherDiags.length ? `<div class="card"><h3>Diagnostics</h3>
+      <pre>${esc(otherDiags.join('\n'))}</pre>
+    </div>` : ''}
     <div class="card"><h3>Ground truth ${gt.dataset ? `<span class="muted" style="font-weight:400;font-size:11px">· ${esc(gt.dataset)}</span>` : ''}</h3>
       ${expected ? `<pre>${esc(JSON.stringify(expected, null, 2))}</pre>`
         : `<div class="muted">No matching dataset row found${gt.dataset ? '' : ' (dataset not available locally)'}.</div>`}

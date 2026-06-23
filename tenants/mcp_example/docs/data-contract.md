@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 # Data Contract
 
 ## Dataset Inventory
-- `datasets/tool_tasks.jsonl` — 30 cases mixing tool-use tasks (echo, add, multi-step) with reasoning tasks the agent should answer without tools.
+- `datasets/tool_tasks.jsonl` — 20 cases mixing tool-use tasks (echo, add, multi-step) with reasoning tasks the agent should answer without tools.
 
 ## Case Schema
 ```json
@@ -16,7 +16,7 @@ SPDX-License-Identifier: Apache-2.0
   "task_type": "tool_use | reasoning",
   "context": {"task": "<natural-language instruction>"},
   "expected": {
-    "answer_contains": "<substring used as the LLM judge's reference answer>",
+    "answer_contains": "<reference answer used by the LLM judge>",
     "tools_used": ["echo" | "add", "..."],
     "expected_trajectory": [
       {"tool": "add", "arguments": {"a": 100, "b": 234}},
@@ -31,7 +31,7 @@ SPDX-License-Identifier: Apache-2.0
 - `task_type`:
   - `tool_use` — the agent is expected to call one or more tools (`tools_used` non-empty).
   - `reasoning` — the agent should answer directly (`tools_used` is `[]`, `expected_trajectory` is `[]`).
-- `expected.answer_contains` — the reference answer handed to the LLM judge. The judge grades whether the agent's final answer is correct relative to this reference (it is no longer a literal substring check).
+- `expected.answer_contains` — the reference answer handed to the LLM judge. The judge grades whether the agent's final answer is correct relative to this reference; it is not a literal substring check.
 - `expected.tools_used` — the set of tool names that should fire (order not enforced). Used as the fallback when `expected_trajectory` is absent.
 - `expected.expected_trajectory` — **the preferred, ordered specification** of tool calls. A list of `{"tool", "arguments"}` steps in the order they should occur. Drives ordering and argument scoring:
   - `tool` (required) — the tool name for this step.
@@ -45,7 +45,8 @@ SPDX-License-Identifier: Apache-2.0
   - `answer_correct` (60%) — LLM-as-judge grade of the final answer vs. `expected.answer_contains` (`code/scorers/llm_judge_scorer.py`).
   - `trajectory` (40%) — deterministic tool-trajectory score (`code/scorers/trajectory_scorer.py`).
 - The trajectory sub-score is itself a blend of `tool_selection` (35%), `call_ordering` (20%), `argument_correctness` (30%), and `non_redundancy` (15%).
-- `score_breakdown` keys: `answer_correct`, `trajectory`, plus flattened child metrics prefixed `traj_*` (e.g. `traj_tool_selection`) and `judge_*`.
+- `score_breakdown` keys: `answer_correct`, `trajectory`, `traj_tool_selection`, `traj_call_ordering`, `traj_argument_correctness`, `traj_non_redundancy`, `judge_answer_correct`, and `judge_judge_reason_chars`.
+- `diagnostics` includes the agent node summary plus the LLM judge rationale as `judge[<score>]: <reason>`.
 
 ## Dataset Update Procedure
 - The dataset is static and committed locally (no GCS backing for this demo tenant).

@@ -106,3 +106,20 @@ def validate_score_payload(payload: Dict[str, Any]) -> tuple[float, Dict[str, fl
         score_breakdown[name] = _coerce_breakdown_value(value, f"score_breakdown.{name}")
 
     return composite_score, score_breakdown
+
+
+def extract_score_diagnostics(payload: Dict[str, Any]) -> list[str]:
+    """Pull a scorer's optional free-text ``diagnostics`` out of its payload.
+
+    Unlike ``score_breakdown`` (numeric only), ``diagnostics`` carries human-
+    readable notes — e.g. an LLM judge's rationale — so they survive into the
+    persisted case result. Returns an empty list when the key is absent.
+    """
+    raw = payload.get("diagnostics")
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [raw]
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError("score_breakdown 'diagnostics' must be a string or list of strings")
+    return [str(item) for item in raw]
