@@ -30,8 +30,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
   #app { display: grid; grid-template-columns: 240px 1fr; height: 100vh; }
   #sidebar { background: var(--panel); border-right: 1px solid var(--border);
     overflow-y: auto; padding: 16px 0; }
-  #sidebar h1 { font-size: 15px; margin: 0 16px 4px; letter-spacing: .5px; }
-  #sidebar .sub { font-size: 11px; color: var(--muted); margin: 0 16px 16px; }
+  .brand { display: flex; align-items: center; gap: 10px; margin: 0 16px 16px;
+    color: var(--text); cursor: pointer; }
+  .brand-logo { width: 36px; height: 36px; border-radius: 8px; object-fit: cover; flex: none;
+    border: 1px solid var(--border); background: var(--panel-2); }
+  .brand h1 { font-size: 15px; margin: 0 0 2px; letter-spacing: .5px; line-height: 1.15; }
+  .brand .sub { font-size: 11px; color: var(--muted); margin: 0; }
+  .brand:hover h1 { color: var(--accent); }
   .tenant { padding: 10px 16px; cursor: pointer; border-left: 3px solid transparent; }
   .tenant:hover { background: var(--panel-2); }
   .tenant.active { background: var(--panel-2); border-left-color: var(--accent); }
@@ -97,7 +102,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .md blockquote { border-left: 3px solid var(--border); margin: 12px 0; padding: 2px 14px;
     color: var(--muted); }
   #home-link { cursor: pointer; }
-  #home-link:hover { color: var(--accent); }
   .ms { position: relative; display: inline-block; }
   .ms-btn { background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
     border-radius: 7px; padding: 7px 12px; font-size: 13px; cursor: pointer; min-width: 200px;
@@ -176,17 +180,23 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <body>
 <div id="app">
   <div id="sidebar">
-    <h1 id="home-link" title="Back to dashboard">⚒ FAPO Explorer</h1>
-    <div class="sub">tenant outputs &amp; iterations</div>
+    <div id="home-link" class="brand" title="Back to dashboard" role="button" tabindex="0">
+      <img class="brand-logo" src="/assets/fapo-explorer-logo.webp" alt="" aria-hidden="true" />
+      <div>
+        <h1>FAPO Explorer</h1>
+        <div class="sub">tenant outputs &amp; iterations</div>
+      </div>
+    </div>
     <div id="tenant-list"></div>
   </div>
   <div id="main"></div>
 </div>
 <script>
-const S = { tenant: null, tab: 'runs', run: null };
+const S = { tenant: null, tab: 'runs', run: null, caseIndex: null };
 // Dashboard tenant filter: null = not yet initialized (treated as "all"),
 // otherwise a Set of selected tenant ids. allTenants is the full universe.
 const DASH = { allTenants: [], selected: null, open: false };
+const AUTO = { intervalMs: 5000, refreshing: false, inFlight: false, timer: null };
 
 function scoreClass(v) {
   if (v === null || v === undefined) return '';
@@ -206,6 +216,9 @@ async function api(path) {
 }
 const el = (id) => document.getElementById(id);
 const main = () => el('main');
+function showLoading(target, html) {
+  if (!AUTO.refreshing) target.innerHTML = html;
+}
 
 async function loadTenants() {
   const tenants = await api('/api/tenants');
@@ -214,21 +227,23 @@ async function loadTenants() {
   box.innerHTML = tenants.map(t => `
     <div class="tenant" data-id="${esc(t.tenant_id)}">
       <div class="name">${esc(t.tenant_id)}</div>
-      <div class="meta">${t.run_count} runs · ${t.iteration_count} iters · ${t.prompt_count} prompts · ${t.dataset_count} datasets · ${t.doc_count} docs</div>
+      <div class="meta">${t.run_count} runs · ${t.iteration_count} iters · ${t.prompt_count} prompts · ${t.config_count} configs · ${t.dataset_count} datasets · ${t.doc_count} docs</div>
     </div>`).join('');
-  box.querySelectorAll('.tenant').forEach(node =>
-    node.onclick = () => selectTenant(node.dataset.id));
+  box.querySelectorAll('.tenant').forEach(node => {
+    node.classList.toggle('active', node.dataset.id === S.tenant);
+    node.onclick = () => selectTenant(node.dataset.id);
+  });
 }
 
 function selectTenant(id) {
-  S.tenant = id; S.run = null; S.tab = 'runs'; DASH.open = false;
+  S.tenant = id; S.run = null; S.caseIndex = null; S.tab = 'runs'; DASH.open = false;
   document.querySelectorAll('.tenant').forEach(n =>
     n.classList.toggle('active', n.dataset.id === id));
   renderTabs();
 }
 
 function goHome() {
-  S.tenant = null; S.run = null;
+  S.tenant = null; S.run = null; S.caseIndex = null;
   document.querySelectorAll('.tenant').forEach(n => n.classList.remove('active'));
   renderDashboard();
 }
@@ -253,10 +268,16 @@ function msLabel() {
 }
 
 async function renderDashboard() {
-  main().innerHTML = '<div class="muted">Loading dashboard…</div>';
+  showLoading(main(), '<div class="muted">Loading dashboard…</div>');
   let o;
   try { o = await api('/api/overview' + dashFilterQuery()); }
-  catch (e) { main().innerHTML = '<div class="empty">Failed to load: '+esc(e.message)+'</div>'; return; }
+  catch (e) {
+    if (!AUTO.refreshing) {
+      main().innerHTML = '<div class="empty">Failed to load: '+esc(e.message)+'</div>';
+      return;
+    }
+    throw e;
+  }
   // Initialize the filter universe on first load; default = all selected.
   DASH.allTenants = o.all_tenants || [];
   if (DASH.selected === null) DASH.selected = new Set(DASH.allTenants);
@@ -323,7 +344,7 @@ async function renderDashboard() {
           ${lr ? `<div class="ring" style="--p:${Math.max(0,Math.min(100,sc||0))};--ring-c:${scoreColorVar(sc)}">
             <span>${fmtScore(sc)}</span></div>` : ''}
         </div>
-        <div class="counts">${tc.run_count} runs · ${tc.variant_count} variants · ${tc.prompt_count} prompts · ${tc.dataset_count} datasets</div>
+        <div class="counts">${tc.run_count} runs · ${tc.variant_count} variants · ${tc.prompt_count} prompts · ${tc.config_count} configs · ${tc.dataset_count} datasets</div>
         <div class="latest">${lr
           ? `<span class="dot ${esc(lr.status||'unknown')}"></span> latest: <b>${esc(lr.name)}</b>
              <span class="muted">· ${esc(lr.model||'—')} · ${esc((lr.updated_at||'').replace('T',' ').slice(0,16))}</span>`
@@ -356,11 +377,11 @@ async function renderDashboard() {
   el('ms-none').onclick = () => { DASH.selected = new Set(); reloadDashboardKeepingOpen(); };
 
   main().querySelectorAll('.chart-col').forEach(node =>
-    node.onclick = () => { selectTenant(node.dataset.id); S.run = node.dataset.run; renderRunDetail(); });
+    node.onclick = () => { selectTenant(node.dataset.id); S.run = node.dataset.run; S.caseIndex = null; renderRunDetail(); });
   main().querySelectorAll('.tcard').forEach(node =>
     node.onclick = () => selectTenant(node.dataset.id));
   main().querySelectorAll('.recent-row').forEach(node =>
-    node.onclick = () => { selectTenant(node.dataset.id); S.run = node.dataset.run; renderRunDetail(); });
+    node.onclick = () => { selectTenant(node.dataset.id); S.run = node.dataset.run; S.caseIndex = null; renderRunDetail(); });
 }
 
 // Re-fetch + re-render the dashboard while keeping the dropdown open so the
@@ -371,23 +392,34 @@ function reloadDashboardKeepingOpen() {
 }
 
 function renderTabs() {
-  const tabs = ['runs', 'datasets', 'iterations', 'prompts', 'docs'];
+  const tabs = [
+    ['runs', 'Runs'],
+    ['datasets', 'Datasets'],
+    ['iterations', 'Iterations'],
+    ['prompts', 'Prompts'],
+    ['config', 'Config'],
+    ['docs', 'Docs'],
+  ];
   main().innerHTML = `
-    <div class="tabs">${tabs.map(t =>
-      `<div class="tab ${t===S.tab?'active':''}" data-tab="${t}">${t}</div>`).join('')}</div>
+    <div class="tabs">${tabs.map(([id, label]) =>
+      `<div class="tab ${id===S.tab?'active':''}" data-tab="${id}">${label}</div>`).join('')}</div>
     <div id="view"></div>`;
   main().querySelectorAll('.tab').forEach(node =>
-    node.onclick = () => { S.tab = node.dataset.tab; S.run = null; renderTabs(); });
-  if (S.tab === 'runs') S.run ? renderRunDetail() : renderRuns();
+    node.onclick = () => { S.tab = node.dataset.tab; S.run = null; S.caseIndex = null; renderTabs(); });
+  if (S.tab === 'runs') {
+    if (S.run && S.caseIndex !== null) renderCase(S.caseIndex);
+    else S.run ? renderRunDetail() : renderRuns();
+  }
   else if (S.tab === 'datasets') renderDatasets();
   else if (S.tab === 'iterations') renderIterations();
   else if (S.tab === 'prompts') renderPrompts();
+  else if (S.tab === 'config') renderConfig();
   else renderDocs();
 }
 
 async function renderRuns() {
   const view = el('view');
-  view.innerHTML = '<div class="muted">Loading runs…</div>';
+  showLoading(view, '<div class="muted">Loading runs…</div>');
   const runs = await api(`/api/tenants/${S.tenant}/runs`);
   if (!runs.length) { view.innerHTML = '<div class="empty">No eval runs for this tenant.</div>'; return; }
   view.innerHTML = `<table><thead><tr>
@@ -402,12 +434,13 @@ async function renderRuns() {
         <td class="muted">${esc((r.updated_at||'').replace('T',' ').slice(0,19))}</td>
       </tr>`).join('')}</tbody></table>`;
   view.querySelectorAll('tr.clickable').forEach(node =>
-    node.onclick = () => { S.run = node.dataset.run; renderRunDetail(); });
+    node.onclick = () => { S.run = node.dataset.run; S.caseIndex = null; renderRunDetail(); });
 }
 
 async function renderRunDetail() {
+  S.caseIndex = null;
   const view = el('view');
-  view.innerHTML = '<div class="muted">Loading run…</div>';
+  showLoading(view, '<div class="muted">Loading run…</div>');
   const d = await api(`/api/tenants/${S.tenant}/runs/${encodeURIComponent(S.run)}`);
   const cfg = d.run_config || {}; const ps = cfg.provider_settings || {};
   const cases = d.cases || [];
@@ -442,8 +475,9 @@ async function renderRunDetail() {
 }
 
 async function renderCase(index) {
+  S.caseIndex = index;
   const view = el('view');
-  view.innerHTML = '<div class="muted">Loading case…</div>';
+  showLoading(view, '<div class="muted">Loading case…</div>');
   const d = await api(`/api/tenants/${S.tenant}/runs/${encodeURIComponent(S.run)}/cases/${index}`);
   const c = d.case || {};
   const gt = d.ground_truth || {};
@@ -506,12 +540,12 @@ async function renderCase(index) {
       </div>
     </div>
     <div class="card"><h3>Output</h3><pre>${esc(c.output_text || '(empty)')}</pre></div>`;
-  el('back').onclick = () => renderRunDetail();
+  el('back').onclick = () => { S.caseIndex = null; renderRunDetail(); };
 }
 
 async function renderIterations() {
   const view = el('view');
-  view.innerHTML = '<div class="muted">Loading iterations…</div>';
+  showLoading(view, '<div class="muted">Loading iterations…</div>');
   const rows = await api(`/api/tenants/${S.tenant}/iterations`);
   if (!rows.length) { view.innerHTML = '<div class="empty">No iteration history.</div>'; return; }
   view.innerHTML = rows.map(renderIterationCard).join('');
@@ -529,6 +563,8 @@ const ITER_SCORE_KEYS = ['final_score', 'composite', 'composite_score', 'score',
 const ITER_NOTE_KEYS = ['notes', 'note', 'description', 'hypothesis'];
 const ITER_HEADER_KEYS = new Set([...ITER_LABEL_KEYS, ...ITER_DATE_KEYS,
   ...ITER_SCORE_KEYS, ...ITER_NOTE_KEYS, 'level', '_index']);
+const PROMPT = { path: null };
+const CONFIG = { path: null };
 
 function firstKey(obj, keys) {
   for (const k of keys) if (obj[k] != null && obj[k] !== '') return obj[k];
@@ -576,9 +612,10 @@ function renderIterationCard(r) {
 
 async function renderPrompts() {
   const view = el('view');
-  view.innerHTML = '<div class="muted">Loading prompts…</div>';
+  showLoading(view, '<div class="muted">Loading prompts…</div>');
   const prompts = await api(`/api/tenants/${S.tenant}/prompts`);
   if (!prompts.length) { view.innerHTML = '<div class="empty">No prompts found.</div>'; return; }
+  if (!prompts.some(p => p.path === PROMPT.path)) PROMPT.path = null;
   view.innerHTML = `
     <table><thead><tr><th>Prompt file</th><th>Size</th></tr></thead><tbody>
     ${prompts.map(p => `<tr class="clickable" data-path="${esc(p.path)}">
@@ -587,23 +624,65 @@ async function renderPrompts() {
     <div id="prompt-view"></div>`;
   view.querySelectorAll('tr.clickable').forEach(node =>
     node.onclick = async () => {
-      const d = await api(`/api/tenants/${S.tenant}/prompt?path=${encodeURIComponent(node.dataset.path)}`);
-      el('prompt-view').innerHTML =
-        `<div class="card"><h3>${esc(node.dataset.path)}</h3><pre>${esc(d.content||'')}</pre></div>`;
+      PROMPT.path = node.dataset.path;
+      await loadPromptBody();
       el('prompt-view').scrollIntoView({behavior:'smooth'});
     });
+  if (PROMPT.path) await loadPromptBody();
+}
+
+async function loadPromptBody() {
+  const box = el('prompt-view');
+  if (!box || !PROMPT.path) return;
+  showLoading(box, '<div class="muted">Loading prompt…</div>');
+  const d = await api(`/api/tenants/${S.tenant}/prompt?path=${encodeURIComponent(PROMPT.path)}`);
+  box.innerHTML =
+    `<div class="card"><h3>${esc(PROMPT.path)}</h3><pre>${esc(d.content||'')}</pre></div>`;
+}
+
+async function renderConfig() {
+  const view = el('view');
+  showLoading(view, '<div class="muted">Loading config files…</div>');
+  const configs = await api(`/api/tenants/${S.tenant}/configs`);
+  if (!configs.length) {
+    CONFIG.path = null;
+    view.innerHTML = '<div class="empty">No config files found.</div>';
+    return;
+  }
+  if (!configs.some(c => c.path === CONFIG.path)) CONFIG.path = configs[0].path;
+  view.innerHTML = `<div class="docs-layout">
+    <div class="doc-list">${configs.map(c => `
+      <div class="doc-item ${c.path===CONFIG.path?'active':''}" data-path="${esc(c.path)}">
+        <div><b>${esc(c.name)}</b></div>
+        <div class="path">${esc(c.path)} · ${c.bytes} B</div>
+      </div>`).join('')}</div>
+    <div class="card"><div id="config-body"></div></div>
+  </div>`;
+  view.querySelectorAll('.doc-item').forEach(node =>
+    node.onclick = () => { CONFIG.path = node.dataset.path; renderConfig(); });
+  await loadConfigBody();
+}
+
+async function loadConfigBody() {
+  const body = el('config-body');
+  if (!body || !CONFIG.path) return;
+  showLoading(body, '<div class="muted">Loading…</div>');
+  const d = await api(`/api/tenants/${S.tenant}/config?path=${encodeURIComponent(CONFIG.path)}`);
+  body.innerHTML = `<pre>${esc(d.content || '')}</pre>`;
 }
 
 const DS = { path: null, offset: 0, limit: 50 };
 
 async function renderDatasets() {
   const view = el('view');
-  view.innerHTML = '<div class="muted">Loading datasets…</div>';
+  showLoading(view, '<div class="muted">Loading datasets…</div>');
   const datasets = await api(`/api/tenants/${S.tenant}/datasets`);
   if (!datasets.length) {
+    DS.path = null;
     view.innerHTML = '<div class="empty">No datasets found. (datasets/*.jsonl are gitignored — pull tenant data first.)</div>';
     return;
   }
+  if (!datasets.some(ds => ds.path === DS.path)) DS.path = null;
   view.innerHTML = `
     <table><thead><tr><th>Dataset file</th><th>Rows</th><th>Size</th></tr></thead><tbody>
     ${datasets.map(ds => `<tr class="clickable" data-path="${esc(ds.path)}">
@@ -612,11 +691,13 @@ async function renderDatasets() {
     <div id="dataset-view"></div>`;
   view.querySelectorAll('tr.clickable').forEach(node =>
     node.onclick = () => { DS.path = node.dataset.path; DS.offset = 0; renderDatasetRows(); });
+  if (DS.path) await renderDatasetRows();
 }
 
 async function renderDatasetRows() {
   const box = el('dataset-view');
-  box.innerHTML = '<div class="muted">Loading rows…</div>';
+  if (!box || !DS.path) return;
+  showLoading(box, '<div class="muted">Loading rows…</div>');
   const d = await api(`/api/tenants/${S.tenant}/dataset?path=${encodeURIComponent(DS.path)}&offset=${DS.offset}&limit=${DS.limit}`);
   const rows = d.rows || [];
   const end = Math.min(d.offset + DS.limit, d.total);
@@ -694,7 +775,7 @@ const DOC = { path: null };
 
 async function renderDocs() {
   const view = el('view');
-  view.innerHTML = '<div class="muted">Loading docs…</div>';
+  showLoading(view, '<div class="muted">Loading docs…</div>');
   const docs = await api(`/api/tenants/${S.tenant}/docs`);
   if (!docs.length) { view.innerHTML = '<div class="empty">No docs found for this tenant.</div>'; return; }
   if (!docs.some(d => d.path === DOC.path)) DOC.path = docs[0].path;
@@ -707,24 +788,76 @@ async function renderDocs() {
   </div>`;
   view.querySelectorAll('.doc-item').forEach(node =>
     node.onclick = () => { DOC.path = node.dataset.path; renderDocs(); });
-  loadDocBody();
+  await loadDocBody();
 }
 
 async function loadDocBody() {
   const body = el('doc-body');
   if (!body) return;
-  body.innerHTML = '<div class="muted">Loading…</div>';
+  showLoading(body, '<div class="muted">Loading…</div>');
   const d = await api(`/api/tenants/${S.tenant}/doc?path=${encodeURIComponent(DOC.path)}`);
   body.innerHTML = renderMarkdown(d.content || '');
 }
 
-el('home-link').onclick = goHome;
+async function renderCurrentView() {
+  if (!S.tenant) return renderDashboard();
+  if (!el('view')) { renderTabs(); return; }
+  if (S.tab === 'runs') {
+    if (S.run && S.caseIndex !== null) return renderCase(S.caseIndex);
+    if (S.run) return renderRunDetail();
+    return renderRuns();
+  }
+  if (S.tab === 'datasets') return renderDatasets();
+  if (S.tab === 'iterations') return renderIterations();
+  if (S.tab === 'prompts') return renderPrompts();
+  if (S.tab === 'config') return renderConfig();
+  return renderDocs();
+}
+
+function shouldSkipAutoRefresh() {
+  if (DASH.open || document.hidden) return true;
+  const active = document.activeElement;
+  if (!active) return false;
+  const editingTags = new Set(['INPUT', 'SELECT', 'TEXTAREA']);
+  return editingTags.has(active.tagName);
+}
+
+async function autoRefresh() {
+  if (AUTO.inFlight || shouldSkipAutoRefresh()) return;
+  AUTO.inFlight = true;
+  AUTO.refreshing = true;
+  const scrollTop = main().scrollTop;
+  try {
+    await loadTenants();
+    await renderCurrentView();
+    main().scrollTop = scrollTop;
+  } catch (e) {
+    console.warn('Auto-refresh failed:', e);
+  } finally {
+    AUTO.refreshing = false;
+    AUTO.inFlight = false;
+  }
+}
+
+function startAutoRefresh() {
+  if (!AUTO.timer) AUTO.timer = window.setInterval(autoRefresh, AUTO.intervalMs);
+}
+
+const homeLink = el('home-link');
+homeLink.onclick = goHome;
+homeLink.onkeydown = (e) => {
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    goHome();
+  }
+};
 // Close the tenant dropdown when clicking outside it.
 document.addEventListener('click', () => {
   if (DASH.open) { DASH.open = false; const p = el('ms-panel'); if (p) p.classList.add('hidden'); }
 });
 loadTenants()
   .then(renderDashboard)
+  .then(startAutoRefresh)
   .catch(e => el('tenant-list').innerHTML = '<div class="sub">Error: '+esc(e.message)+'</div>');
 </script>
 </body>
