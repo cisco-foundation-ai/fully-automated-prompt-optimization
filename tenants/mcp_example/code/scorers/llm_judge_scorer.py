@@ -108,6 +108,9 @@ class LLMJudgeScorer(BaseScorer):
                 # numeric breakdown; the full text rides along in diagnostics.
                 "judge_reason_chars": float(len(reason)),
             },
+            # Free-text rationale, persisted into the case result's diagnostics
+            # so the judge's reasoning is visible in the evaluation results.
+            "diagnostics": [f"judge[{score:.0f}]: {reason}"],
         }
 
     # --- helpers --------------------------------------------------------

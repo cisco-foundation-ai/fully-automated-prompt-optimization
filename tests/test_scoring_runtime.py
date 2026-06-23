@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from src.hephaestus.scoring.runtime import load_tenant_scorer, validate_score_payload
+from src.hephaestus.scoring.runtime import (
+    extract_score_diagnostics,
+    load_tenant_scorer,
+    validate_score_payload,
+)
 
 
 def test_load_tenant_scorer_requires_scorer_object():
@@ -418,3 +422,22 @@ def test_validate_score_payload_allows_breakdown_above_100():
         {"composite_score": 95.0, "score_breakdown": {"points_earned": 190, "points_possible": 200}}
     )
     assert score_breakdown == {"points_earned": 190.0, "points_possible": 200.0}
+
+
+def test_extract_score_diagnostics_absent_returns_empty():
+    assert extract_score_diagnostics({"composite_score": 100.0, "score_breakdown": {}}) == []
+
+
+def test_extract_score_diagnostics_wraps_string():
+    assert extract_score_diagnostics({"diagnostics": "judge[100]: correct"}) == [
+        "judge[100]: correct"
+    ]
+
+
+def test_extract_score_diagnostics_coerces_list_items():
+    assert extract_score_diagnostics({"diagnostics": ["a", 2]}) == ["a", "2"]
+
+
+def test_extract_score_diagnostics_rejects_non_sequence():
+    with pytest.raises(ValueError, match="diagnostics"):
+        extract_score_diagnostics({"diagnostics": {"reason": "x"}})

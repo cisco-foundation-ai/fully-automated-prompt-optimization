@@ -39,7 +39,7 @@ The evaluation tests the agent's ability to:
 
 - `chains/react_agent.py` - ReAct agent with MCP tools
 - `prompts/modules/agent/variant-001.md` - Agent system prompt
-- `datasets/tool_tasks.jsonl` - 30 tool-use and reasoning tasks
+- `datasets/tool_tasks.jsonl` - 20 tool-use and reasoning tasks
 - `code/scorers/composite_scorer.py` - Weighted scorer combining LLM-as-judge answer correctness + trajectory
 - `code/scorers/trajectory_scorer.py` - Deterministic order/argument-aware tool-trajectory scorer
 - `code/scorers/llm_judge_scorer.py` - LLM-as-judge answer-correctness scorer

@@ -7,8 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 # Prompt Contract
 
 ## Output Format Contract
-- The agent must emit its final answer after an `Answer:` marker so the scorer's `answer_present` check passes.
-- The final answer must contain the expected substring for the case (e.g. the computed sum, or the echoed message).
+- The agent should emit its final answer after an `Answer:` marker so the final response is unambiguous in `output_text`.
+- The final answer must be correct relative to the case's `expected.answer_contains` reference (e.g. the computed sum, or the echoed message).
 - Intermediate reasoning and tool calls are allowed and expected; only the final answer is scored for correctness.
 
 ## Decision Policy

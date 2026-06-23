@@ -24,7 +24,11 @@ from src.hephaestus.providers.base import ProviderClient
 from src.hephaestus.runs.io_utils import write_outputs
 from src.hephaestus.runs.progress import ProgressTracker
 from src.hephaestus.runs.run_id import generate_run_id, validate_run_id
-from src.hephaestus.scoring.runtime import load_tenant_scorer, validate_score_payload
+from src.hephaestus.scoring.runtime import (
+    extract_score_diagnostics,
+    load_tenant_scorer,
+    validate_score_payload,
+)
 from src.hephaestus.scoring.scorer import Scorer
 from src.hephaestus.types import ChainConfig, EvalCase, EvalCaseResult, EvalConfig
 
@@ -243,10 +247,15 @@ def _evaluate_single_case(
 
     composite_score, score_breakdown = validate_score_payload(score_payload)
 
+    # Merge the chain's diagnostics with any free-text notes the scorer emits
+    # (e.g. an LLM judge's rationale) so they persist into the case result.
+    diagnostics = list(final_state.get("diagnostics", []))
+    diagnostics.extend(extract_score_diagnostics(score_payload))
+
     return EvalCaseResult(
         case_id=case.case_id,
         task_type=case.task_type,
-        diagnostics=final_state.get("diagnostics", []),
+        diagnostics=diagnostics,
         score_breakdown=score_breakdown,
         composite_score=composite_score,
         output_text=output_text,

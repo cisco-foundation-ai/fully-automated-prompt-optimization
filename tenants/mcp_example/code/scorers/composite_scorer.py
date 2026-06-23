@@ -95,9 +95,18 @@ class CompositeScorer(BaseScorer):
         for key, val in judged["score_breakdown"].items():
             breakdown[f"judge_{key}"] = val
 
+        # Propagate free-text diagnostics (e.g. the LLM judge's rationale) from
+        # the child scorers so they persist into the evaluation results.
+        diagnostics: List[str] = []
+        for child in (judged, traj):
+            child_diags = child.get("diagnostics")
+            if child_diags:
+                diagnostics.extend(child_diags)
+
         return {
             "composite_score": composite,
             "score_breakdown": breakdown,
+            "diagnostics": diagnostics,
         }
 
     @staticmethod

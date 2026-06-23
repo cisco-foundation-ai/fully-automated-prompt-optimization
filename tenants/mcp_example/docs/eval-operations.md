@@ -13,8 +13,8 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Scorers
 - `code/scorers/trajectory_scorer.py` (`TrajectoryScorer`) — deterministic, order- and argument-aware. Reads an optional ordered `expected_trajectory` (`[{"tool", "arguments"}]`) from `case.expected`, falling back to `tools_used` when absent. Scores tool selection, call ordering, argument correctness, and non-redundancy.
-- `code/scorers/llm_judge_scorer.py` (`LLMJudgeScorer`) — LangSmith-style LLM-as-judge for answer correctness. Configured via `scoring_profile.judge` (`provider`, `provider_settings`, `rubric`, `fallback_score`). A failed/unparseable judge call degrades to `fallback_score` with a diagnostic — it never crashes the run.
-- `code/scorers/composite_scorer.py` (`CompositeScorer`) — **the default scorer**. Weighted aggregate of judge (`answer_correct`, 60%) + `trajectory` (40%). Weights configurable via `scoring_profile.composite_weights` (normalized; need not sum to 1.0). Child sub-metrics are flattened into `score_breakdown` with `traj_`/`judge_` prefixes.
+- `code/scorers/llm_judge_scorer.py` (`LLMJudgeScorer`) — LangSmith-style LLM-as-judge for answer correctness. Configured via `scoring_profile.judge` (`provider`, `provider_settings`, `rubric`, `fallback_score`). A failed/unparseable judge call degrades to `fallback_score` with a diagnostic — it never crashes the run. The judge rationale is persisted in case `diagnostics` as `judge[<score>]: <reason>`.
+- `code/scorers/composite_scorer.py` (`CompositeScorer`) — **the default scorer**. Weighted aggregate of judge (`answer_correct`, 60%) + `trajectory` (40%). Weights configurable via `scoring_profile.composite_weights` (normalized; need not sum to 1.0). Child sub-metrics are flattened into `score_breakdown` as `traj_tool_selection`, `traj_call_ordering`, `traj_argument_correctness`, `traj_non_redundancy`, `judge_answer_correct`, and `judge_judge_reason_chars`.
 
 ### Enriched tool-call trace
 Each `tool_call_history` entry now also carries `result` (full tool output), `latency_ms`, `call_index` (per-case monotonic order), and `llm_thought` (the assistant reasoning that produced the call). Existing fields (`tool`, `arguments`, `result_length`, `error`, `iteration`, `node`) are unchanged, so legacy scorers keep working.
@@ -26,7 +26,7 @@ Each `tool_call_history` entry now also carries `result` (full tool output), `la
 - Integration tests for the MCP layer: `pytest -m integration tests/integration/test_mcp_integration.py -v`
 
 ## Success Criteria
-- Composite score >= 80% across all 30 cases.
+- Composite score >= 80% across all 20 cases.
 - Tool-use cases call the expected tools (visible in `tool_call_history`); reasoning cases call no tools.
 - No "Exceeded max_tool_calls limit" errors during a normal run (limit is per-case = `max_iterations * max_tool_calls_per_iteration`).
 - MCP server starts, discovers 3 tools (`echo`, `add`, `fail`), and shuts down cleanly.
@@ -41,5 +41,5 @@ Each `tool_call_history` entry now also carries `result` (full tool output), `la
 
 ## Output Management
 - Eval outputs are written to `evals/<run_id>/` and are local-only (gitignored via `tenants/*/evals/`).
-- Each run produces `summary.md`, `results.jsonl` (with `tool_call_history`), `run_config.json`, and `progress.json`.
+- Each run produces `summary.md`, `results.jsonl` (with `tool_call_history` and scorer `diagnostics`), `run_config.json`, and `progress.json`.
 - Material findings are summarized in `docs/change-log.md`.
