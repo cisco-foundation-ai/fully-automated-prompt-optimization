@@ -4,7 +4,7 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Fully Autonomous Prompt Optimization (FAPO)
+# Fully Automated Prompt Optimization (FAPO)
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/actions/workflows/ci.yml/badge.svg)](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/actions/workflows/ci.yml)
@@ -773,14 +773,14 @@ The companion paper is the canonical reference for the concepts, the GEPA compar
 
 ## Citation
 
-**FAPO: Fully Autonomous Prompt Optimization of Multi-Step LLM Pipelines**<br>
+**FAPO: Fully Automated Prompt Optimization of Multi-Step LLM Pipelines**<br>
 Paul Kassianik, Baturay Saglam, Huaibo Zhao, Blaine Nelson, Supriti Vijay, Aman Priyanshu, Amin Karbasi · [arXiv:2606.19605](https://arxiv.org/abs/2606.19605)
 
 If you use FAPO in your research, please cite the paper:
 
 ```bibtex
 @misc{kassianik2026fapofullyautonomousprompt,
-      title={FAPO: Fully Autonomous Prompt Optimization of Multi-Step LLM Pipelines},
+      title={FAPO: Fully Automated Prompt Optimization of Multi-Step LLM Pipelines},
       author={Paul Kassianik and Baturay Saglam and Huaibo Zhao and Blaine Nelson and Supriti Vijay and Aman Priyanshu and Amin Karbasi},
       year={2026},
       eprint={2606.19605},
