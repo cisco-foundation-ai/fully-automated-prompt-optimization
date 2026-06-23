@@ -28,6 +28,10 @@ _RUN_PARENT_DIRS = ("evals", "runs", "eval_outputs", "outputs")
 # A directory is treated as an eval run if it contains at least one of these.
 _RUN_MARKERS = ("results.jsonl", "run_config.json", "summary.md", "progress.json")
 
+# Tenants historically use ``configs/``; support ``config/`` as an alias for
+# local projects that use the singular spelling.
+_CONFIG_DIRS = ("config", "configs")
+
 
 def _read_json(path: Path) -> Optional[Any]:
     try:
@@ -39,7 +43,7 @@ def _read_json(path: Path) -> Optional[Any]:
 def _read_text(path: Path) -> Optional[str]:
     try:
         return path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
 
 
@@ -100,6 +104,7 @@ class TenantStore:
                     "iteration_count": len(iterations),
                     "prompt_count": len(self._prompt_paths(tenant_dir)),
                     "dataset_count": len(self._dataset_paths(tenant_dir)),
+                    "config_count": len(self._config_paths(tenant_dir)),
                     "doc_count": len(self._doc_paths(tenant_dir)),
                     "has_readme": (tenant_dir / "README.md").exists(),
                 }
@@ -147,6 +152,7 @@ class TenantStore:
                     "iteration_count": tenant["iteration_count"],
                     "variant_count": variant_count,
                     "prompt_count": tenant["prompt_count"],
+                    "config_count": tenant["config_count"],
                     "dataset_count": tenant["dataset_count"],
                     "doc_count": tenant["doc_count"],
                     "latest_run": latest,
@@ -439,6 +445,47 @@ class TenantStore:
         if path.suffix != ".md" or not path.is_file():
             return None
         return {"path": prompt_rel, "content": _read_text(path)}
+
+    # -- configs ---------------------------------------------------------
+
+    def _config_paths(self, tenant_dir: Path) -> List[Path]:
+        paths: List[Path] = []
+        for dirname in _CONFIG_DIRS:
+            config_dir = tenant_dir / dirname
+            if config_dir.is_dir():
+                paths.extend(
+                    p for p in config_dir.rglob("*") if p.is_file() and not p.name.startswith(".")
+                )
+        return sorted(paths)
+
+    def list_configs(self, tenant_id: str) -> List[Dict[str, Any]]:
+        tenant_dir = self._tenant_dir(tenant_id)
+        if tenant_dir is None:
+            return []
+        configs: List[Dict[str, Any]] = []
+        for path in self._config_paths(tenant_dir):
+            rel = path.relative_to(tenant_dir).as_posix()
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            configs.append({"path": rel, "name": path.name, "bytes": size})
+        return configs
+
+    def get_config(self, tenant_id: str, config_rel: str) -> Optional[Dict[str, Any]]:
+        tenant_dir = self._tenant_dir(tenant_id)
+        if tenant_dir is None:
+            return None
+        path = (tenant_dir / config_rel).resolve()
+        if tenant_dir not in path.parents:
+            return None  # traversal guard
+        config_dirs = [(tenant_dir / dirname).resolve() for dirname in _CONFIG_DIRS]
+        in_config_dir = any(
+            config_dir in path.parents or path.parent == config_dir for config_dir in config_dirs
+        )
+        if not in_config_dir or not path.is_file():
+            return None
+        return {"path": config_rel, "content": _read_text(path)}
 
     # -- docs ------------------------------------------------------------
 

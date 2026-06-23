@@ -18,6 +18,8 @@ Routes:
     GET /api/tenants/<t>/iterations                -> iteration history
     GET /api/tenants/<t>/prompts                   -> [prompt files]
     GET /api/tenants/<t>/prompt?path=<rel>         -> prompt content
+    GET /api/tenants/<t>/configs                   -> [config files]
+    GET /api/tenants/<t>/config?path=<rel>         -> config content
     GET /api/tenants/<t>/datasets                  -> [dataset files]
     GET /api/tenants/<t>/dataset?path=<rel>&offset=&limit=  -> dataset rows
     GET /api/tenants/<t>/docs                       -> [doc files]
@@ -35,6 +37,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 from src.hephaestus.webui.data import TenantStore
 from src.hephaestus.webui.frontend import INDEX_HTML
 
+_LOGO_PATH = Path(__file__).with_name("assets") / "fapo-explorer-logo.webp"
+
 
 class _Handler(BaseHTTPRequestHandler):
     store: TenantStore  # injected via factory below
@@ -48,18 +52,18 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 (http.server API)
         parsed = urlparse(self.path)
         path = parsed.path
-        query = parse_qs(parsed.query)
+        query = _parse_query(parsed.query)
 
         if path in ("/", "/index.html"):
             self._send_html(INDEX_HTML)
             return
 
+        if path == "/assets/fapo-explorer-logo.webp":
+            self._send_file(_LOGO_PATH, "image/webp")
+            return
+
         if path == "/api/overview":
-            raw = (query.get("tenants") or [None])[0]
-            tenant_ids = None
-            if raw is not None:
-                tenant_ids = [t for t in raw.split(",") if t]
-            self._send_json(self.store.overview(tenant_ids))
+            self._send_json(self.store.overview(_overview_tenant_ids(query)))
             return
 
         if path == "/api/tenants":
@@ -86,6 +90,8 @@ class _Handler(BaseHTTPRequestHandler):
             ("/api/tenants/{tenant}/iterations", _Handler._route_iterations),
             ("/api/tenants/{tenant}/prompts", _Handler._route_prompts),
             ("/api/tenants/{tenant}/prompt", _Handler._route_prompt),
+            ("/api/tenants/{tenant}/configs", _Handler._route_configs),
+            ("/api/tenants/{tenant}/config", _Handler._route_config),
             ("/api/tenants/{tenant}/datasets", _Handler._route_datasets),
             ("/api/tenants/{tenant}/dataset", _Handler._route_dataset),
             ("/api/tenants/{tenant}/docs", _Handler._route_docs),
@@ -122,6 +128,17 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "missing path"}, status=400)
             return
         data = self.store.get_prompt(params["tenant"], unquote(rel))
+        self._send_json_or_404(data)
+
+    def _route_configs(self, params: Dict[str, str], query: Dict[str, List[str]]) -> None:
+        self._send_json(self.store.list_configs(params["tenant"]))
+
+    def _route_config(self, params: Dict[str, str], query: Dict[str, List[str]]) -> None:
+        rel = (query.get("path") or [""])[0]
+        if not rel:
+            self._send_json({"error": "missing path"}, status=400)
+            return
+        data = self.store.get_config(params["tenant"], unquote(rel))
         self._send_json_or_404(data)
 
     def _route_datasets(self, params: Dict[str, str], query: Dict[str, List[str]]) -> None:
@@ -172,6 +189,19 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_file(self, path: Path, content_type: str) -> None:
+        try:
+            body = path.read_bytes()
+        except OSError:
+            self._send_json({"error": "not found"}, status=404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=3600")
+        self.end_headers()
+        self.wfile.write(body)
+
 
 def _int_param(query: Dict[str, List[str]], name: str, default: int) -> int:
     raw = (query.get(name) or [None])[0]
@@ -181,6 +211,17 @@ def _int_param(query: Dict[str, List[str]], name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def _parse_query(raw_query: str) -> Dict[str, List[str]]:
+    return parse_qs(raw_query, keep_blank_values=True)
+
+
+def _overview_tenant_ids(query: Dict[str, List[str]]) -> List[str] | None:
+    if "tenants" not in query:
+        return None
+    raw = query.get("tenants", [""])[0]
+    return [tenant_id for tenant_id in raw.split(",") if tenant_id]
 
 
 def _match(pattern: str, path: str) -> Dict[str, str] | None:

@@ -65,6 +65,7 @@ Inside a tenant, content is organized into tabs:
 | **Datasets** | `datasets/**/*.jsonl` | Dataset files with row counts; rows are viewable with offset/limit paging. |
 | **Iterations** | `docs/iteration-memory.jsonl` | The optimization iteration history recorded for the tenant. |
 | **Prompts** | `prompts/**/*.md` | Prompt variant markdown files, rendered as content. |
+| **Config** | `config/**/*` and `configs/**/*` | Tenant configuration files, rendered as raw text. |
 | **Docs** | `README.md` + `docs/**/*.md` | The tenant README and tenant-specific markdown docs. |
 
 A run directory is recognized recursively under the probed output roots when it
@@ -100,6 +101,8 @@ The frontend is backed by these read-only endpoints (useful for scripting too):
 | `GET /api/tenants/<t>/iterations` | Iteration history |
 | `GET /api/tenants/<t>/prompts` | Prompt files |
 | `GET /api/tenants/<t>/prompt?path=<rel>` | Prompt content |
+| `GET /api/tenants/<t>/configs` | Config files |
+| `GET /api/tenants/<t>/config?path=<rel>` | Config content |
 | `GET /api/tenants/<t>/datasets` | Dataset files |
 | `GET /api/tenants/<t>/dataset?path=<rel>&offset=&limit=` | Dataset rows (paged) |
 | `GET /api/tenants/<t>/docs` | Doc files |

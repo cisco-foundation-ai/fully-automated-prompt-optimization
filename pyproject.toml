@@ -51,3 +51,6 @@ known-first-party = ["hephaestus", "src"]
 
 [tool.setuptools.packages.find]
 include = ["hephaestus*", "src*"]
+
+[tool.setuptools.package-data]
+"src.hephaestus.webui" = ["assets/*"]

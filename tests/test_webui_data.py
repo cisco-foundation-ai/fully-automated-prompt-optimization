@@ -80,3 +80,26 @@ def test_get_run_supports_nested_run_dir(tmp_path: Path) -> None:
             "score_breakdown": {},
         }
     ]
+
+
+def test_list_and_get_configs_support_config_and_configs_dirs(tmp_path: Path) -> None:
+    tenants = tmp_path / "tenants"
+    tenant = tenants / "demo"
+    tenant.mkdir(parents=True)
+    (tenant / "__init__.py").write_text("", encoding="utf-8")
+    (tenant / "config" / "local.json").parent.mkdir()
+    (tenant / "config" / "local.json").write_text('{"name":"local"}\n', encoding="utf-8")
+    (tenant / "configs" / "nested").mkdir(parents=True)
+    (tenant / "configs" / "nested" / "train.json").write_text('{"split":"train"}\n', encoding="utf-8")
+
+    store = TenantStore(tenants)
+
+    assert store.list_configs("demo") == [
+        {"path": "config/local.json", "name": "local.json", "bytes": 17},
+        {"path": "configs/nested/train.json", "name": "train.json", "bytes": 18},
+    ]
+    assert store.get_config("demo", "configs/nested/train.json") == {
+        "path": "configs/nested/train.json",
+        "content": '{"split":"train"}\n',
+    }
+    assert store.get_config("demo", "README.md") is None
