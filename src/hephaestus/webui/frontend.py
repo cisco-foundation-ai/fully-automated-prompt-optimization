@@ -55,6 +55,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
     letter-spacing: .4px; }
   tr.clickable { cursor: pointer; }
   tr.clickable:hover td { background: var(--panel-2); }
+  tr.clickable.active td { background: var(--panel-2); }
+  tr.clickable.active td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
   .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px;
     background: var(--panel-2); border: 1px solid var(--border); }
   .score { font-family: var(--mono); font-weight: 600; }
@@ -65,6 +67,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
   pre { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
     padding: 12px; overflow-x: auto; font-family: var(--mono); font-size: 12px;
     white-space: pre-wrap; word-break: break-word; line-height: 1.5; margin: 0; }
+  .tok-key { color: #79c0ff; }
+  .tok-str { color: #7ee787; }
+  .tok-num { color: #f0883e; }
+  .tok-bool { color: #d2a8ff; }
+  .tok-null { color: var(--muted); font-style: italic; }
+  .tok-punct { color: var(--muted); }
   .muted { color: var(--muted); }
   .empty { color: var(--muted); padding: 40px; text-align: center; }
   a.back { color: var(--accent); cursor: pointer; font-size: 13px; }
@@ -77,6 +85,38 @@ INDEX_HTML = r"""<!DOCTYPE html>
     border-bottom: 1px dashed var(--border); }
   .crumb { font-size: 13px; color: var(--muted); margin-bottom: 14px; }
   .crumb a { color: var(--accent); cursor: pointer; }
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable:hover { color: var(--text); }
+  th.sortable .arrow { opacity: .5; font-size: 9px; margin-left: 3px; }
+  .filter-box { margin-bottom: 12px; }
+  .filter-box input { background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 5px; padding: 6px 10px;
+    font-size: 13px; width: 260px; max-width: 100%; }
+  .filter-box input:focus { outline: none; border-color: var(--accent); }
+  .filter-count { color: var(--muted); font-size: 12px; margin-left: 10px; }
+  .pre-wrap { position: relative; }
+  .copy-btn { position: absolute; top: 6px; right: 6px; padding: 3px 9px;
+    font-size: 11px; opacity: 0; transition: opacity .12s; z-index: 1; }
+  .pre-wrap:hover .copy-btn { opacity: 1; }
+  .copy-btn.copied { color: var(--good); border-color: var(--good); }
+  .case-nav { display: flex; gap: 8px; align-items: center; margin-left: auto; }
+  .case-nav .hint { color: var(--muted); font-size: 11px; }
+  .tool.t-match { border-left: 3px solid var(--good); padding-left: 8px; }
+  .tool.t-mismatch { border-left: 3px solid var(--warn); padding-left: 8px; }
+  .tool.t-missing { border-left: 3px solid var(--bad); padding-left: 8px; opacity: .85; }
+  .tool.t-extra { border-left: 3px solid var(--accent); padding-left: 8px; }
+  .traj-tag { font-size: 10px; text-transform: uppercase; letter-spacing: .4px;
+    margin-left: 6px; font-weight: 600; }
+  .traj-tag.match { color: var(--good); } .traj-tag.mismatch { color: var(--warn); }
+  .traj-tag.missing { color: var(--bad); } .traj-tag.extra { color: var(--accent); }
+  .traj-legend { font-size: 11px; color: var(--muted); margin-bottom: 8px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .traj-legend span::before { content: '■'; margin-right: 4px; }
+  .traj-legend .l-match::before { color: var(--good); }
+  .traj-legend .l-mismatch::before { color: var(--warn); }
+  .traj-legend .l-missing::before { color: var(--bad); }
+  .traj-legend .l-extra::before { color: var(--accent); }
+  .traj-row { margin-bottom: 4px; }
+  .traj-empty { color: var(--border); font-family: var(--mono); font-size: 12px; padding: 6px 0; }
   details { border-bottom: 1px solid var(--border); padding: 8px 0; }
   summary { cursor: pointer; font-size: 13px; }
   details pre { margin-top: 8px; }
@@ -192,7 +232,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   <div id="main"></div>
 </div>
 <script>
-const S = { tenant: null, tab: 'runs', run: null, caseIndex: null };
+const S = { tenant: null, tab: 'runs', run: null, caseIndex: null, caseOrder: [] };
 // Dashboard tenant filter: null = not yet initialized (treated as "all"),
 // otherwise a Set of selected tenant ids. allTenants is the full universe.
 const DASH = { allTenants: [], selected: null, open: false };
@@ -205,9 +245,73 @@ function scoreClass(v) {
 function fmtScore(v) {
   return (v === null || v === undefined) ? '–' : Number(v).toFixed(1);
 }
+// Filter text persists by input id so auto-refresh re-renders don't lose it.
+const FILTERS = {};
+// HTML for a filter input above a table; pre-filled from the persisted value.
+function filterBox(id, placeholder) {
+  return `<div class="filter-box">
+    <input id="${id}" type="text" placeholder="${esc(placeholder)}" autocomplete="off"
+      value="${esc(FILTERS[id] || '')}">
+    <span class="filter-count" id="${id}-count"></span>
+  </div>`;
+}
+// Live-filter table rows by their text content (case-insensitive substring).
+// The query is stored in FILTERS[inputId] and re-applied after every render.
+function wireTableFilter(inputId, tableSelector) {
+  const input = el(inputId), count = el(inputId + '-count');
+  if (!input) return;
+  const rows = () => Array.from(document.querySelectorAll(tableSelector + ' tbody tr'));
+  const apply = () => {
+    const q = input.value.trim().toLowerCase();
+    FILTERS[inputId] = input.value;
+    const all = rows(); let shown = 0;
+    all.forEach(tr => {
+      const hit = !q || tr.textContent.toLowerCase().includes(q);
+      tr.style.display = hit ? '' : 'none';
+      if (hit) shown++;
+    });
+    if (count) count.textContent = q ? `${shown} of ${all.length}` : '';
+  };
+  input.oninput = apply;
+  apply(); // restore filtering immediately on (re-)render
+}
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"]/g, c =>
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+// Syntax-highlight JSON: tokenize the pretty-printed string and wrap each token
+// in a class span. Falls back to a plain escaped string if parsing fails.
+function hljson(text) {
+  let pretty;
+  try { pretty = JSON.stringify(JSON.parse(text), null, 2); }
+  catch (e) { return esc(text); }
+  const re = /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false)\b|\bnull\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+  return pretty.replace(re, (m, str, colon, bool) => {
+    if (str !== undefined) {
+      const cls = colon ? 'tok-key' : 'tok-str';
+      return `<span class="${cls}">${esc(str)}</span>${colon ? '<span class="tok-punct">'+esc(colon)+'</span>' : ''}`;
+    }
+    if (bool !== undefined) return `<span class="tok-bool">${m}</span>`;
+    if (m === 'null') return `<span class="tok-null">null</span>`;
+    return `<span class="tok-num">${m}</span>`;
+  });
+}
+// Wrap a <pre> with a hover copy button. `inner` is the (already-escaped/
+// highlighted) HTML to show; `raw` is the plain text placed on the clipboard.
+function copyablePre(inner, raw, attrs) {
+  return `<div class="pre-wrap">
+    <button class="copy-btn" type="button" data-copy="${esc(raw)}">Copy</button>
+    <pre${attrs ? ' ' + attrs : ''}>${inner}</pre>
+  </div>`;
+}
+// Render JSON content into a copyable <pre>, highlighting if it parses.
+function jsonPre(text, attrs) {
+  return copyablePre(hljson(text), String(text == null ? '' : text), attrs);
+}
+// Render plain text into a copyable <pre>.
+function textPre(text, attrs) {
+  const raw = String(text == null ? '' : text);
+  return copyablePre(esc(raw), raw, attrs);
 }
 async function api(path) {
   const r = await fetch(path);
@@ -245,6 +349,7 @@ function selectTenant(id) {
 function goHome() {
   S.tenant = null; S.run = null; S.caseIndex = null;
   document.querySelectorAll('.tenant').forEach(n => n.classList.remove('active'));
+  syncHash();
   renderDashboard();
 }
 
@@ -406,6 +511,7 @@ function renderTabs() {
     <div id="view"></div>`;
   main().querySelectorAll('.tab').forEach(node =>
     node.onclick = () => { S.tab = node.dataset.tab; S.run = null; S.caseIndex = null; renderTabs(); });
+  syncHash();
   if (S.tab === 'runs') {
     if (S.run && S.caseIndex !== null) renderCase(S.caseIndex);
     else S.run ? renderRunDetail() : renderRuns();
@@ -422,7 +528,8 @@ async function renderRuns() {
   showLoading(view, '<div class="muted">Loading runs…</div>');
   const runs = await api(`/api/tenants/${S.tenant}/runs`);
   if (!runs.length) { view.innerHTML = '<div class="empty">No eval runs for this tenant.</div>'; return; }
-  view.innerHTML = `<table><thead><tr>
+  view.innerHTML = `${filterBox('runs-filter', 'Filter runs by name, model, status…')}
+    <table id="runs-table"><thead><tr>
       <th>Run</th><th>Status</th><th>Model</th><th>Cases</th><th>Avg score</th><th>Updated</th>
     </tr></thead><tbody>${runs.map(r => `
       <tr class="clickable" data-run="${esc(r.run_dir)}">
@@ -435,10 +542,12 @@ async function renderRuns() {
       </tr>`).join('')}</tbody></table>`;
   view.querySelectorAll('tr.clickable').forEach(node =>
     node.onclick = () => { S.run = node.dataset.run; S.caseIndex = null; renderRunDetail(); });
+  wireTableFilter('runs-filter', '#runs-table');
 }
 
 async function renderRunDetail() {
   S.caseIndex = null;
+  syncHash();
   const view = el('view');
   showLoading(view, '<div class="muted">Loading run…</div>');
   const d = await api(`/api/tenants/${S.tenant}/runs/${encodeURIComponent(S.run)}`);
@@ -454,28 +563,118 @@ async function renderRunDetail() {
         <div class="kv"><b>chain:</b> ${esc((cfg.chain||{}).path||'—')}</div>
       </div>
       <div class="card"><h3>Summary</h3>
-        <pre style="max-height:180px;overflow:auto">${esc(d.summary_md||'(no summary.md)')}</pre>
+        <div class="md" style="max-height:180px;overflow:auto">${d.summary_md ? renderMarkdown(d.summary_md) : '<span class="muted">(no summary.md)</span>'}</div>
       </div>
     </div>
     <div class="card"><h3>Cases (${cases.length})</h3>
-      <table><thead><tr><th>#</th><th>Case</th><th>Type</th><th>Composite</th><th></th><th>Tools</th></tr></thead>
-      <tbody>${cases.map(c => `
-        <tr class="clickable" data-idx="${c.index}">
-          <td class="muted">${c.index}</td>
-          <td>${esc(c.case_id)}</td>
-          <td><span class="pill">${esc(c.task_type||'—')}</span></td>
-          <td class="score ${scoreClass(c.composite_score)}">${fmtScore(c.composite_score)}</td>
-          <td><div class="barwrap"><div class="bar" style="width:${Math.max(0,Math.min(100,c.composite_score||0))}%"></div></div></td>
-          <td class="muted">${c.total_tool_calls ?? 0}${c.failed_tool_calls ? ' ('+c.failed_tool_calls+' failed)' : ''}</td>
-        </tr>`).join('')}</tbody></table>
+      ${filterBox('cases-filter', 'Filter cases by id or type…')}
+      <div id="cases-table-wrap"></div>
     </div>`;
   el('back').onclick = () => { S.run = null; renderTabs(); };
-  view.querySelectorAll('tr.clickable').forEach(node =>
-    node.onclick = () => renderCase(parseInt(node.dataset.idx, 10)));
+  CASES.rows = cases;
+  renderCasesTable();
 }
+
+// Cases table state: the raw rows plus the active sort column/direction.
+const CASES = { rows: [], sortKey: null, sortDir: 1 };
+const CASE_COLS = [
+  { key: 'index', label: '#', get: c => c.index, num: true },
+  { key: 'case_id', label: 'Case', get: c => c.case_id },
+  { key: 'task_type', label: 'Type', get: c => c.task_type || '' },
+  { key: 'composite_score', label: 'Composite', get: c => c.composite_score, num: true },
+  { key: 'total_tool_calls', label: 'Tools', get: c => c.total_tool_calls ?? 0, num: true },
+];
+
+function sortedCases() {
+  const rows = CASES.rows.slice();
+  if (!CASES.sortKey) return rows;
+  const col = CASE_COLS.find(c => c.key === CASES.sortKey);
+  if (!col) return rows;
+  rows.sort((a, b) => {
+    let va = col.get(a), vb = col.get(b);
+    if (col.num) { va = va == null ? -Infinity : va; vb = vb == null ? -Infinity : vb; return (va - vb) * CASES.sortDir; }
+    return String(va).localeCompare(String(vb)) * CASES.sortDir;
+  });
+  return rows;
+}
+
+function renderCasesTable() {
+  const wrap = el('cases-table-wrap');
+  if (!wrap) return;
+  const rows = sortedCases();
+  // Remember the visible order so prev/next case navigation follows the sort.
+  S.caseOrder = rows.map(c => c.index);
+  const arrow = (k) => CASES.sortKey === k ? `<span class="arrow">${CASES.sortDir > 0 ? '▲' : '▼'}</span>` : '<span class="arrow">↕</span>';
+  wrap.innerHTML = `<table id="cases-table"><thead><tr>
+      ${CASE_COLS.map(c => `<th class="sortable" data-key="${c.key}">${c.label}${arrow(c.key)}</th>`).join('')}
+      <th></th>
+    </tr></thead><tbody>${rows.map(c => `
+      <tr class="clickable" data-idx="${c.index}">
+        <td class="muted">${c.index}</td>
+        <td>${esc(c.case_id)}</td>
+        <td><span class="pill">${esc(c.task_type||'—')}</span></td>
+        <td class="score ${scoreClass(c.composite_score)}">${fmtScore(c.composite_score)}</td>
+        <td class="muted">${c.total_tool_calls ?? 0}${c.failed_tool_calls ? ' ('+c.failed_tool_calls+' failed)' : ''}</td>
+        <td><div class="barwrap"><div class="bar" style="width:${Math.max(0,Math.min(100,c.composite_score||0))}%"></div></div></td>
+      </tr>`).join('')}</tbody></table>`;
+  wrap.querySelectorAll('th.sortable').forEach(th =>
+    th.onclick = () => {
+      const k = th.dataset.key;
+      // Toggle direction when re-clicking the same column; default depends on type.
+      if (CASES.sortKey === k) CASES.sortDir = -CASES.sortDir;
+      else { CASES.sortKey = k; CASES.sortDir = 1; }
+      renderCasesTable();
+    });
+  wrap.querySelectorAll('tr.clickable').forEach(node =>
+    node.onclick = () => renderCase(parseInt(node.dataset.idx, 10)));
+  wireTableFilter('cases-filter', '#cases-table');
+}
+
+// Move to the previous/next case following the current (possibly sorted) order.
+function navCase(delta) {
+  const order = S.caseOrder || [];
+  const pos = order.indexOf(S.caseIndex);
+  if (pos === -1) return;
+  const next = pos + delta;
+  if (next < 0 || next >= order.length) return;
+  renderCase(order[next]);
+}
+
+// Align expected vs actual tool sequences with an LCS over tool names, so
+// matched calls line up and gaps reveal missing (expected-only) / extra
+// (actual-only) steps. Returns rows of {exp, act, status}.
+function alignTrajectory(expTraj, tools) {
+  const n = expTraj.length, m = tools.length;
+  const dp = Array.from({length: n + 1}, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--)
+      dp[i][j] = (expTraj[i].tool === tools[j].tool)
+        ? dp[i + 1][j + 1] + 1
+        : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const rows = []; let i = 0, j = 0;
+  const sameArgs = (a, b) =>
+    JSON.stringify(a && a.arguments || {}) === JSON.stringify(b && b.arguments || {});
+  while (i < n && j < m) {
+    if (expTraj[i].tool === tools[j].tool) {
+      rows.push({ exp: expTraj[i], act: tools[j],
+        status: sameArgs(expTraj[i], tools[j]) ? 'match' : 'mismatch' });
+      i++; j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      rows.push({ exp: expTraj[i], act: null, status: 'missing' }); i++;
+    } else {
+      rows.push({ exp: null, act: tools[j], status: 'extra' }); j++;
+    }
+  }
+  while (i < n) rows.push({ exp: expTraj[i++], act: null, status: 'missing' });
+  while (j < m) rows.push({ exp: null, act: tools[j++], status: 'extra' });
+  return rows;
+}
+
+const TRAJ_TAG = { match: 'match', mismatch: 'args≠', missing: 'missing', extra: 'extra' };
 
 async function renderCase(index) {
   S.caseIndex = index;
+  syncHash();
   const view = el('view');
   showLoading(view, '<div class="muted">Loading case…</div>');
   const d = await api(`/api/tenants/${S.tenant}/runs/${encodeURIComponent(S.run)}/cases/${index}`);
@@ -490,15 +689,25 @@ async function renderCase(index) {
   const otherDiags = allDiags.filter(x => !/^judge\[/.test(x));
   const tools = c.tool_call_history || [];
   const expTraj = (expected && expected.expected_trajectory) || [];
+  const trajRows = alignTrajectory(expTraj, tools);
   const ctx = gt.context;
   const meta = gt.metadata;
   const ctxEntries = ctx && typeof ctx === 'object' ? Object.entries(ctx) : [];
+  const pos = (S.caseOrder || []).indexOf(index);
+  const hasPrev = pos > 0, hasNext = pos !== -1 && pos < S.caseOrder.length - 1;
   view.innerHTML = `
-    <div class="crumb"><a id="back">← run</a> / case ${esc(c.case_id)} (#${index})</div>
+    <div class="crumb" style="display:flex;align-items:center">
+      <span><a id="back">← run</a> / case ${esc(c.case_id)} (#${index})</span>
+      <span class="case-nav">
+        ${pos !== -1 ? `<span class="hint">${pos + 1} of ${S.caseOrder.length}</span>` : ''}
+        <button id="case-prev" ${hasPrev ? '' : 'disabled'} title="Previous case (k / ←)">← prev</button>
+        <button id="case-next" ${hasNext ? '' : 'disabled'} title="Next case (j / →)">next →</button>
+      </span>
+    </div>
     <div class="card"><h3>Input ${gt.dataset ? `<span class="muted" style="font-weight:400;font-size:11px">· ${esc(gt.dataset)}</span>` : ''}</h3>
       ${ctxEntries.length ? ctxEntries.map(([k,v]) => `
         <div class="kv" style="margin-bottom:8px"><b>${esc(k)}</b>
-        <pre style="margin-top:4px">${esc(typeof v==='string'?v:JSON.stringify(v,null,2))}</pre></div>`).join('')
+        ${typeof v==='string' ? textPre(v, 'style="margin-top:4px"') : jsonPre(JSON.stringify(v,null,2), 'style="margin-top:4px"')}</div>`).join('')
         : `<div class="muted">No input found${gt.dataset ? ' for this case_id' : ' (dataset not available locally)'}.</div>`}
       ${meta && Object.keys(meta).length ? `<div class="kv muted" style="margin-top:6px">metadata: ${esc(JSON.stringify(meta))}</div>` : ''}
     </div>
@@ -509,38 +718,46 @@ async function renderCase(index) {
           <td class="score ${k.includes('chars')?'':scoreClass(v)}">${typeof v==='number'?v.toFixed(2):esc(v)}</td></tr>`).join('')}</table>
       </div>
       <div class="card"><h3>LLM judge rationale</h3>
-        <pre>${esc(judgeDiags.join('\n') || '(none)')}</pre>
+        ${textPre(judgeDiags.join('\n') || '(none)')}
       </div>
     </div>
     ${otherDiags.length ? `<div class="card"><h3>Diagnostics</h3>
-      <pre>${esc(otherDiags.join('\n'))}</pre>
+      ${textPre(otherDiags.join('\n'))}
     </div>` : ''}
     <div class="card"><h3>Ground truth ${gt.dataset ? `<span class="muted" style="font-weight:400;font-size:11px">· ${esc(gt.dataset)}</span>` : ''}</h3>
-      ${expected ? `<pre>${esc(JSON.stringify(expected, null, 2))}</pre>`
+      ${expected ? jsonPre(JSON.stringify(expected, null, 2))
         : `<div class="muted">No matching dataset row found${gt.dataset ? '' : ' (dataset not available locally)'}.</div>`}
     </div>
     <div class="card"><h3>Trajectory: expected vs actual</h3>
-      <div class="grid2">
-        <div>
-          <div class="kv muted" style="margin-bottom:6px">Expected (${expTraj.length})</div>
-          ${expTraj.length ? expTraj.map(t => `
-            <div class="tool"><b>${esc(t.tool)}</b>
-            <div class="muted">${esc(JSON.stringify(t.arguments||{}))}</div></div>`).join('')
-            : '<div class="muted">—</div>'}
-        </div>
-        <div>
-          <div class="kv muted" style="margin-bottom:6px">Actual (${tools.length})</div>
-          ${tools.length ? tools.map((t,i) => {
-            const exp = expTraj[i];
-            const match = exp && exp.tool === t.tool;
-            return `<div class="tool"><b class="${exp?(match?'s-good':'s-bad'):''}">${esc(t.tool)}</b>${t.error?' <span class="s-bad">ERROR</span>':''}
-            <div class="muted">${esc(JSON.stringify(t.arguments||{}))}</div></div>`;
-          }).join('') : '<div class="muted">No tool calls.</div>'}
-        </div>
+      ${(expTraj.length || tools.length) ? `
+      <div class="traj-legend">
+        <span class="l-match">match</span>
+        <span class="l-mismatch">same tool, different args</span>
+        <span class="l-missing">missing (expected, not called)</span>
+        <span class="l-extra">extra (called, not expected)</span>
       </div>
+      <div class="grid2">
+        <div><div class="kv muted" style="margin-bottom:6px">Expected (${expTraj.length})</div>
+          ${trajRows.map(r => r.exp
+            ? `<div class="tool traj-row t-${r.status}"><b>${esc(r.exp.tool)}</b>
+               <span class="traj-tag ${r.status}">${esc(TRAJ_TAG[r.status])}</span>
+               <div class="muted">${esc(JSON.stringify(r.exp.arguments||{}))}</div></div>`
+            : `<div class="traj-empty">· (no expected step)</div>`).join('')}
+        </div>
+        <div><div class="kv muted" style="margin-bottom:6px">Actual (${tools.length})</div>
+          ${trajRows.map(r => r.act
+            ? `<div class="tool traj-row t-${r.status}"><b>${esc(r.act.tool)}</b>${r.act.error?' <span class="s-bad">ERROR</span>':''}
+               <span class="traj-tag ${r.status}">${esc(TRAJ_TAG[r.status])}</span>
+               <div class="muted">${esc(JSON.stringify(r.act.arguments||{}))}</div></div>`
+            : `<div class="traj-empty">· (no actual call)</div>`).join('')}
+        </div>
+      </div>` : '<div class="muted">No trajectory data.</div>'}
     </div>
-    <div class="card"><h3>Output</h3><pre>${esc(c.output_text || '(empty)')}</pre></div>`;
+    <div class="card"><h3>Output</h3>${textPre(c.output_text || '(empty)')}</div>`;
   el('back').onclick = () => { S.caseIndex = null; renderRunDetail(); };
+  const prevBtn = el('case-prev'), nextBtn = el('case-next');
+  if (prevBtn) prevBtn.onclick = () => navCase(-1);
+  if (nextBtn) nextBtn.onclick = () => navCase(1);
 }
 
 async function renderIterations() {
@@ -616,18 +833,27 @@ async function renderPrompts() {
   const prompts = await api(`/api/tenants/${S.tenant}/prompts`);
   if (!prompts.length) { view.innerHTML = '<div class="empty">No prompts found.</div>'; return; }
   if (!prompts.some(p => p.path === PROMPT.path)) PROMPT.path = null;
-  view.innerHTML = `
-    <table><thead><tr><th>Prompt file</th><th>Size</th></tr></thead><tbody>
-    ${prompts.map(p => `<tr class="clickable" data-path="${esc(p.path)}">
+  view.innerHTML = `${filterBox('prompts-filter', 'Filter prompt files…')}
+    <table id="prompts-table"><thead><tr><th>Prompt file</th><th>Size</th></tr></thead><tbody>
+    ${prompts.map(p => `<tr class="clickable ${p.path===PROMPT.path?'active':''}" data-path="${esc(p.path)}">
       <td><b>${esc(p.name)}</b><div class="muted" style="font-size:11px">${esc(p.path)}</div></td>
       <td class="muted">${p.bytes} B</td></tr>`).join('')}</tbody></table>
     <div id="prompt-view"></div>`;
   view.querySelectorAll('tr.clickable').forEach(node =>
     node.onclick = async () => {
-      PROMPT.path = node.dataset.path;
-      await loadPromptBody();
-      el('prompt-view').scrollIntoView({behavior:'smooth'});
+      const path = node.dataset.path;
+      // Toggle: clicking the already-open prompt file collapses it.
+      PROMPT.path = (PROMPT.path === path) ? null : path;
+      view.querySelectorAll('tr.clickable').forEach(n =>
+        n.classList.toggle('active', n.dataset.path === PROMPT.path));
+      if (PROMPT.path) {
+        await loadPromptBody();
+        el('prompt-view').scrollIntoView({behavior:'smooth'});
+      } else {
+        el('prompt-view').innerHTML = '';
+      }
     });
+  wireTableFilter('prompts-filter', '#prompts-table');
   if (PROMPT.path) await loadPromptBody();
 }
 
@@ -637,7 +863,7 @@ async function loadPromptBody() {
   showLoading(box, '<div class="muted">Loading prompt…</div>');
   const d = await api(`/api/tenants/${S.tenant}/prompt?path=${encodeURIComponent(PROMPT.path)}`);
   box.innerHTML =
-    `<div class="card"><h3>${esc(PROMPT.path)}</h3><pre>${esc(d.content||'')}</pre></div>`;
+    `<div class="card"><h3>${esc(PROMPT.path)}</h3>${textPre(d.content||'')}</div>`;
 }
 
 async function renderConfig() {
@@ -668,10 +894,10 @@ async function loadConfigBody() {
   if (!body || !CONFIG.path) return;
   showLoading(body, '<div class="muted">Loading…</div>');
   const d = await api(`/api/tenants/${S.tenant}/config?path=${encodeURIComponent(CONFIG.path)}`);
-  body.innerHTML = `<pre>${esc(d.content || '')}</pre>`;
+  body.innerHTML = jsonPre(d.content || '');
 }
 
-const DS = { path: null, offset: 0, limit: 50 };
+const DS = { path: null, offset: 0, limit: 50, open: new Set() };
 
 async function renderDatasets() {
   const view = el('view');
@@ -683,14 +909,23 @@ async function renderDatasets() {
     return;
   }
   if (!datasets.some(ds => ds.path === DS.path)) DS.path = null;
-  view.innerHTML = `
-    <table><thead><tr><th>Dataset file</th><th>Rows</th><th>Size</th></tr></thead><tbody>
-    ${datasets.map(ds => `<tr class="clickable" data-path="${esc(ds.path)}">
+  view.innerHTML = `${filterBox('datasets-filter', 'Filter dataset files…')}
+    <table id="datasets-table"><thead><tr><th>Dataset file</th><th>Rows</th><th>Size</th></tr></thead><tbody>
+    ${datasets.map(ds => `<tr class="clickable ${ds.path===DS.path?'active':''}" data-path="${esc(ds.path)}">
       <td><b>${esc(ds.name)}</b><div class="muted" style="font-size:11px">${esc(ds.path)}</div></td>
       <td>${ds.row_count}</td><td class="muted">${ds.bytes} B</td></tr>`).join('')}</tbody></table>
     <div id="dataset-view"></div>`;
   view.querySelectorAll('tr.clickable').forEach(node =>
-    node.onclick = () => { DS.path = node.dataset.path; DS.offset = 0; renderDatasetRows(); });
+    node.onclick = () => {
+      const path = node.dataset.path;
+      // Toggle: clicking the already-open dataset file collapses it.
+      DS.path = (DS.path === path) ? null : path;
+      DS.offset = 0; DS.open.clear();
+      view.querySelectorAll('tr.clickable').forEach(n =>
+        n.classList.toggle('active', n.dataset.path === DS.path));
+      if (DS.path) renderDatasetRows(); else el('dataset-view').innerHTML = '';
+    });
+  wireTableFilter('datasets-filter', '#datasets-table');
   if (DS.path) await renderDatasetRows();
 }
 
@@ -708,15 +943,25 @@ async function renderDatasetRows() {
         <button id="ds-prev" ${d.offset<=0?'disabled':''}>← prev</button>
         <button id="ds-next" ${end>=d.total?'disabled':''}>next →</button>
       </div>
-      ${rows.map((r,i) => `
-        <details><summary><b>${esc(r.case_id ?? (d.offset+i))}</b>
+      ${rows.map((r,i) => {
+        const key = String(r.case_id ?? (d.offset+i));
+        return `
+        <details data-key="${esc(key)}" ${DS.open.has(key)?'open':''}><summary><b>${esc(key)}</b>
           ${r.task_type||r.scenario_type ? `<span class="pill" style="margin-left:8px">${esc(r.task_type||r.scenario_type)}</span>` : ''}</summary>
-          <pre>${esc(JSON.stringify(r, null, 2))}</pre>
-        </details>`).join('')}
+          ${jsonPre(JSON.stringify(r, null, 2))}
+        </details>`;
+      }).join('')}
     </div>`;
+  // Persist expand/collapse state so auto-refresh re-renders don't close open rows.
+  box.querySelectorAll('details[data-key]').forEach(node => {
+    node.ontoggle = () => {
+      const key = node.dataset.key;
+      if (node.open) DS.open.add(key); else DS.open.delete(key);
+    };
+  });
   const prev = el('ds-prev'), next = el('ds-next');
-  if (prev) prev.onclick = () => { DS.offset = Math.max(0, DS.offset - DS.limit); renderDatasetRows(); };
-  if (next) next.onclick = () => { DS.offset = DS.offset + DS.limit; renderDatasetRows(); };
+  if (prev) prev.onclick = () => { DS.offset = Math.max(0, DS.offset - DS.limit); DS.open.clear(); renderDatasetRows(); };
+  if (next) next.onclick = () => { DS.offset = DS.offset + DS.limit; DS.open.clear(); renderDatasetRows(); };
 }
 
 // Minimal, safe markdown renderer: HTML-escape first, then apply a small
@@ -843,6 +1088,38 @@ function startAutoRefresh() {
   if (!AUTO.timer) AUTO.timer = window.setInterval(autoRefresh, AUTO.intervalMs);
 }
 
+// ---- Deep-linkable URL state ----------------------------------------------
+// Encode the current location (tenant / tab / run / case) in the URL hash so
+// reload, bookmark, back/forward, and share all restore the same view.
+let HASH_WRITING = false;
+function syncHash() {
+  const p = new URLSearchParams();
+  if (S.tenant) p.set('t', S.tenant);
+  if (S.tenant && S.tab && S.tab !== 'runs') p.set('tab', S.tab);
+  if (S.run) p.set('run', S.run);
+  if (S.caseIndex !== null) p.set('case', String(S.caseIndex));
+  const next = p.toString();
+  if (next === location.hash.slice(1)) return;
+  HASH_WRITING = true;
+  location.hash = next;
+  // hashchange fires async; clear the guard on the next tick.
+  window.setTimeout(() => { HASH_WRITING = false; }, 0);
+}
+async function applyHash() {
+  const p = new URLSearchParams(location.hash.slice(1));
+  const tenant = p.get('t');
+  S.tenant = tenant || null;
+  S.tab = p.get('tab') || 'runs';
+  S.run = p.get('run') || null;
+  const cs = p.get('case');
+  S.caseIndex = (cs !== null && cs !== '') ? parseInt(cs, 10) : null;
+  document.querySelectorAll('.tenant').forEach(n =>
+    n.classList.toggle('active', n.dataset.id === S.tenant));
+  if (!S.tenant) return renderDashboard();
+  renderTabs();
+}
+window.addEventListener('hashchange', () => { if (!HASH_WRITING) applyHash(); });
+
 const homeLink = el('home-link');
 homeLink.onclick = goHome;
 homeLink.onkeydown = (e) => {
@@ -855,8 +1132,29 @@ homeLink.onkeydown = (e) => {
 document.addEventListener('click', () => {
   if (DASH.open) { DASH.open = false; const p = el('ms-panel'); if (p) p.classList.add('hidden'); }
 });
+// Delegated copy-to-clipboard for any .copy-btn (config, ground truth, prompt,
+// diagnostics, dataset rows, output, etc.).
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest && e.target.closest('.copy-btn');
+  if (!btn) return;
+  e.stopPropagation();
+  try {
+    await navigator.clipboard.writeText(btn.dataset.copy || '');
+    const prev = btn.textContent;
+    btn.textContent = 'Copied'; btn.classList.add('copied');
+    window.setTimeout(() => { btn.textContent = prev; btn.classList.remove('copied'); }, 1200);
+  } catch (err) { console.warn('Copy failed:', err); }
+});
+// Keyboard navigation between cases (j/k or arrow keys) while viewing a case.
+document.addEventListener('keydown', (e) => {
+  if (S.caseIndex === null || S.run === null) return;
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+  if (e.key === 'j' || e.key === 'ArrowRight') { e.preventDefault(); navCase(1); }
+  else if (e.key === 'k' || e.key === 'ArrowLeft') { e.preventDefault(); navCase(-1); }
+});
 loadTenants()
-  .then(renderDashboard)
+  .then(() => location.hash.slice(1) ? applyHash() : renderDashboard())
   .then(startAutoRefresh)
   .catch(e => el('tenant-list').innerHTML = '<div class="sub">Error: '+esc(e.message)+'</div>');
 </script>
