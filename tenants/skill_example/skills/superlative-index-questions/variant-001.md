@@ -13,3 +13,9 @@ Why the drill-in is always required:
 - This holds even when the listing shows the metric as uniform, small, or zero. A listed event count of 0 (or equal counts across indexes) does NOT mean the drill-in is pointless: you still call `splunk_get_index_info` on a candidate to confirm the count and to obtain the index's data description, then answer by naming the leading index (stating any tie) and describing its contents from the detail. The reasoning "the counts are all zero, so there is no need to check further" is explicitly wrong — always perform the drill-in call first, then answer.
 
 **Always designate a leading item, even under a tie.** Your answer must LEAD with a specific named index — never reply that "there is none" or "all are equal so none is the highest". If the primary metric is tied (e.g. several indexes share the same size or zero event count), break the tie with a secondary signal from the detail (larger configured max size, then name order) and lead with that index, while noting the underlying values are currently equal. Then describe what that leading index contains (from its detail / its well-known role, e.g. `_internal` holds Splunk's own operational logs).
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
