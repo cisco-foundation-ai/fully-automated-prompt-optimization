@@ -40,7 +40,7 @@ attribution = attribute_failures(Path(eval_results_path))
 summary = summarize(attribution)
 ```
 
-Record the initial partition: `summary["prompt_addressable"]` vs `summary["structural_addressable"]`.
+Record the initial partition: `summary["prompt_addressable"]` vs `summary["structural_addressable"]` vs `summary["tool_addressable"]`. Note that `summary["skill_addressable"]` mirrors `prompt_addressable`: prompt and skill are co-equal textual levels addressing the same reasoning/format failures. Surface skill as an addressable level whenever the tenant has skill files (`tenants/<tenant_id>/skills/`) and `chain.config.optimization_target` includes `skill` or `both`.
 
 ### Phase 2 — LLM-Based Deep Analysis
 
@@ -64,7 +64,7 @@ Group attributed failures into actionable clusters:
 
 1. **Group by failure pattern** — not just by step name, but by the nature of the failure (e.g., "multi-entity queries miss second entity", "answer includes explanation preamble")
 2. **Label each cluster** with a concise, descriptive name
-3. **Assign optimization level** — prompt or structural — based on what type of change would address it
+3. **Assign optimization level** — prompt, skill, or structural — based on what type of change would address it. For textual (reasoning/format) clusters in skill-enabled tenants, mark them as addressable by the textual level (prompt and/or skill) and, where natural, note whether a reusable procedure (skill) or the base scaffold (prompt) is the better owner.
 4. **Estimate ceiling** — for each level, estimate max score achievable by fixing only that level's failures
 
 ## Output Contract
@@ -78,7 +78,7 @@ Return the following to the orchestrator:
   - `label`: descriptive cluster name (e.g., "retrieval misses on multi-entity queries")
   - `count`: number of cases in the cluster
   - `case_ids`: list of representative case IDs (up to 5)
-  - `level`: `prompt` or `structural`
+  - `level`: `prompt`, `skill`, or `structural` (use `prompt`/`skill` for textual clusters per the tenant's `optimization_target`)
   - `confidence`: `high`, `medium`, or `low`
   - `suggested_fix`: one-sentence description of what change would address this cluster
 

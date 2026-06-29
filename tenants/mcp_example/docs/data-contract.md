@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 # Data Contract
 
 ## Dataset Inventory
-- `datasets/tool_tasks.jsonl` — 20 cases mixing tool-use tasks (echo, add, multi-step) with reasoning tasks the agent should answer without tools.
+- `datasets/tool_tasks.jsonl` — cases mixing tool-use tasks (echo, add, multi-step) with reasoning tasks the agent should answer without tools.
 
 ## Case Schema
 ```json

@@ -20,8 +20,8 @@ run_evaluation(config)
 ## Overview
 
 FAPO has two layers:
-1. Core (`src/hephaestus`): dataset loading, prompt rendering, provider invocation, scoring, and eval run output writing.
-2. Tenant (`tenants/<tenant_id>`): prompt variants, tenant conversion code, local data caches, and run outputs.
+1. Core (`src/hephaestus`): dataset loading, prompt rendering, skill loading, provider invocation, scoring, and eval run output writing.
+2. Tenant (`tenants/<tenant_id>`): prompt variants, agent skill files (for agentic tenants), tenant conversion code, local data caches, and run outputs.
 
 Customer raw and derived artifacts are managed through `python -m hephaestus.cli customer-data` and
 stored canonically in GCS. Local tenant runtime assumes datasets are already in unified JSONL format.
@@ -69,6 +69,8 @@ Chain authors can extend the state with additional domain-specific fields.
 | `src/hephaestus/chains/types.py` | `ChainState` TypedDict |
 | `src/hephaestus/chains/loader.py` | Dynamic import of chain factory functions from tenant `.py` files |
 | `src/hephaestus/chains/nodes.py` | `make_llm_node` and `build_node_context` utilities for LLM-calling nodes |
+| `src/hephaestus/chains/agentic_nodes.py` | `make_agentic_node` — ReAct tool-calling node with MCP support and runtime skill injection |
+| `src/hephaestus/engine/skills.py` | Skill file loading + runtime `<available_skills>` context-message injection (agentic tenants) |
 | `src/hephaestus/types.py` | `ChainConfig` dataclass and `EvalConfig.chain` field |
 
 ### Scoring

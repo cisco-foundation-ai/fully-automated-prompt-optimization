@@ -42,10 +42,22 @@ The factory function signature must be:
 def build_chain(provider: ProviderClient, config: Dict[str, Any]) -> CompiledGraph
 ```
 
+### `chain.config` conventions
+
+`chain.config` is an arbitrary dict, but the engine and optimizer recognize a few conventional keys:
+
+| Key | Type | Description |
+|---|---|---|
+| `prompt_paths` | object | Maps each chain step name to its prompt variant file |
+| `skill_paths` | array | Skill files to load for an **agentic** tenant. Their bodies are injected at the agentic layer as a runtime `<available_skills>` context message (not inlined into the prompt). Omit for non-skill tenants. |
+| `optimization_target` | string | `"prompt"`, `"skill"`, or `"both"` (default `"both"`). Selects which textual artifacts the optimizer iterates. `"skill"`/`"both"` with `skill_paths` set requires an `mcp` section (validated at config load). |
+
 ### Validation rules
 
 - `chain` is required — configs without it raise `ValueError`
 - `chain.path` must be non-empty
+- every `chain.config.prompt_paths` / `chain.config.skill_paths` file must exist
+- `optimization_target` must be one of `prompt` / `skill` / `both`; using `skill` / `both` with `skill_paths` requires a configured `mcp` server (skills are agentic-only)
 
 ## Provider Settings
 

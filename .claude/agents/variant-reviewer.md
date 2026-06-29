@@ -15,7 +15,7 @@ You independently review a proposed variant before it goes to eval. You run with
 ## Inputs
 
 You receive the following from the orchestrator:
-- **variant_type**: `prompt` or `chain`
+- **variant_type**: `prompt`, `skill`, or `chain`
 - **New variant path**: the proposed variant file
 - **Previous variant path** (prompt) / **Baseline chain path** (chain): the file it was derived from
 - **Eval config path**: the config JSON (to resolve scoring profile, chain path, and parameters)
@@ -79,7 +79,9 @@ Verify no content was copied from other tenants:
 
 Severity: **block** if found.
 
-### Prompt-Specific Checks (variant_type = prompt)
+### Prompt-Specific Checks (variant_type = prompt or skill)
+
+> Skills are a textual artifact co-equal with prompts, so checks 5–7 apply to `skill` variants as well as `prompt` variants. For `skill` variants, also run the Skill-Specific Checks below.
 
 #### 5. No Example-Specific Hints
 
@@ -105,6 +107,32 @@ Cross-reference the diff with the failure analysis. Flag if:
 - Changes touch sections unrelated to the identified failure pattern
 
 Severity: **warn** if unfocused.
+
+### Skill-Specific Checks (variant_type = skill)
+
+#### 7a. Frontmatter Integrity
+
+Verify the skill file's YAML frontmatter:
+- `name` is present and matches the skill's directory name (`skills/<skill-name>/`)
+- `description` is present and accurately reflects the (possibly revised) body — the agent relies on it to know when the skill applies
+- Frontmatter was not dropped or corrupted relative to the previous variant
+
+Severity: **block** if `name`/`description` are missing or `name` no longer matches the directory.
+
+#### 7b. No Placeholder Introduction
+
+Skill bodies are injected verbatim into the runtime `<available_skills>` context message. Verify the skill body introduces **no** `${...}` placeholders (it is not rendered against the case context).
+
+Severity: **block** if a placeholder is introduced.
+
+#### 7c. Skill Path & Scope
+
+Verify:
+- The new skill file lives under `tenants/<tenant_id>/skills/<skill-name>/variant-NNN.md` (cloned to a new variant, not edited in place)
+- The eval config's `chain.config.skill_paths` points at the new variant, and `optimization_target` includes `skill` or `both`
+- The tenant is agentic (an `mcp` section is configured) — skills are only supported for agentic chains
+
+Severity: **block** if the path/target/agentic requirements are not met.
 
 ### Chain-Specific Checks (variant_type = chain)
 

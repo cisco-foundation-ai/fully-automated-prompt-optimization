@@ -8,7 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 
 The FAPO Web UI (the **FAPO Explorer**) is a local, read-only dashboard for
 browsing the artifacts a tenant accumulates during optimization: eval runs,
-per-case outputs, iteration history, prompt variants, datasets, and tenant docs.
+per-case outputs, iteration history, prompt variants and agent skills, datasets,
+and tenant docs.
 
 It is intentionally zero-dependency — the server is built on Python's standard
 library `http.server`, and the frontend is a single self-contained HTML
@@ -64,7 +65,7 @@ Inside a tenant, content is organized into tabs:
 | **Runs** | Any run directory under `evals/` (also probes `runs/`, `eval_outputs/`, `outputs/`) | Eval runs sorted newest-first, with status, completion, and composite score. A search box filters the run list. Click a run for its config, a Markdown-rendered `summary.md`, and a sortable/filterable per-case table; click a case for its full output, score breakdown, tool calls with an aligned expected-vs-actual trajectory diff, and joined ground truth. |
 | **Datasets** | `datasets/**/*.jsonl` | Dataset files with row counts; click a file to expand its rows (offset/limit paging), click again to collapse. The open file is highlighted, and individual rows stay expanded across auto-refresh. JSON is syntax-highlighted. A search box filters the file list. |
 | **Iterations** | `docs/iteration-memory.jsonl` | The optimization iteration history recorded for the tenant. |
-| **Prompts** | `prompts/**/*.md` | Prompt variant files. Click a file to expand its content, click again to collapse; the open file is highlighted. A search box filters the file list. |
+| **Prompts** | `prompts/**/*.md` and `skills/**/*.md` | Prompt variant files, plus agent **skill** files (for agentic tenants) grouped into their own section. Each entry is tagged by kind (prompt/skill) and group (its parent directory). Click a file to expand its content, click again to collapse; the open file is highlighted. A search box filters the combined list. |
 | **Config** | `config/**/*` and `configs/**/*` | Tenant configuration files, with JSON syntax-highlighted. |
 | **Docs** | `README.md` + `docs/**/*.md` | The tenant README and tenant-specific markdown docs. |
 
@@ -132,8 +133,8 @@ The frontend is backed by these read-only endpoints (useful for scripting too):
 | `GET /api/tenants/<t>/runs/<run>` | Run detail + case list |
 | `GET /api/tenants/<t>/runs/<run>/cases/<i>` | Single case detail |
 | `GET /api/tenants/<t>/iterations` | Iteration history |
-| `GET /api/tenants/<t>/prompts` | Prompt files |
-| `GET /api/tenants/<t>/prompt?path=<rel>` | Prompt content |
+| `GET /api/tenants/<t>/prompts` | Prompt **and** skill files (each tagged with `kind` and `group`) |
+| `GET /api/tenants/<t>/prompt?path=<rel>` | Prompt or skill content (serves the `prompts/` and `skills/` subtrees) |
 | `GET /api/tenants/<t>/configs` | Config files |
 | `GET /api/tenants/<t>/config?path=<rel>` | Config content |
 | `GET /api/tenants/<t>/datasets` | Dataset files |

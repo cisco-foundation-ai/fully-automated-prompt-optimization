@@ -30,7 +30,8 @@ If required input is missing in an interactive Codex session, ask before proceed
 4. Cheapest viable level first. Prefer prompt changes on ties, then parameter changes, then structural changes, unless the scope contract or attribution evidence says otherwise.
 5. Optimize against train split only. Use validation/test only for cross-validation when the playbook requires it.
 6. Always branch from the current best variant. Do not diverge from older or parallel failed variants unless the user asks for an experiment.
-7. Do not commit. Leave commits to the user.
+7. Prompt and skill are co-equal textual levels. Some agentic tenants carry skill files (`tenants/<tenant_id>/skills/<skill-name>/variant-NNN.md`) — reusable procedural knowledge loaded at the agentic layer (injected into the conversation as a runtime `<available_skills>` context message, not inlined into the authored prompt), gated by `chain.config.optimization_target` (`prompt` | `skill` | `both`, default `both`). When both prompt and skill files are available, optimize both: treat them as one textual surface and route each textual-failure cluster to whichever artifact owns the concern (broad scaffold/format → base prompt; reusable task-specific procedure → a skill). Narrow to one artifact only when the task or `optimization_target` says so. Skills apply only to agentic (MCP-enabled) chains; if a tenant has no skill files, ignore this level and proceed as before.
+8. Do not commit. Leave commits to the user.
 
 ## Workflow
 
@@ -38,7 +39,7 @@ If required input is missing in an interactive Codex session, ask before proceed
 2. Emit the scope contract before modifying any files.
 3. Establish or locate a baseline eval result. If no result exists, run the configured eval.
 4. Run failure attribution using `.codex/agents/step-attribution.md`.
-5. Select the allowed optimization level with the most addressable failures.
+5. Select the allowed optimization level with the most addressable failures. Treat prompt and skill as one textual level (`skill_addressable` mirrors `prompt_addressable`); when `optimization_target` is `both` and both artifacts exist, iterate both.
 6. Create exactly one focused variant at a time.
 7. Review the variant using `.codex/agents/variant-reviewer.md`. In a single-agent Codex run, perform this as a fresh-eyes checklist phase before eval.
 8. Run eval on the variant.
@@ -53,6 +54,17 @@ If required input is missing in an interactive Codex session, ask before proceed
 - Preserve `${placeholder}` names. Added placeholders must be provided by the chain.
 - Match the scorer's output expectations exactly.
 - Create a separate eval config for each variant.
+
+## Skill Variant Rules
+
+Skill files (`tenants/<tenant_id>/skills/<skill-name>/variant-NNN.md`) follow the same rules as prompts — they are textual. Additionally:
+
+- One skill captures a single reusable, general procedure (how to handle a class of questions, how to sequence tools) — never case-specific logic.
+- Preserve YAML frontmatter (`name` must match the skill directory; refine `description` whenever you refine the body — the agent uses it to decide when the skill applies).
+- Do not introduce `${...}` placeholders in skill bodies; they are injected verbatim into the runtime `<available_skills>` context message.
+- Point the eval config's `chain.config.skill_paths` at the new skill variant; do not inline skill content back into the base prompt.
+- Clone to a new variant file; never edit a skill variant in place.
+- Only create/iterate skills for agentic (MCP-enabled) tenants whose `optimization_target` includes `skill` or `both`. When `optimization_target` is `both` and both artifacts exist, iterate prompt and skill as one textual level.
 
 ## Parameter Variant Rules
 

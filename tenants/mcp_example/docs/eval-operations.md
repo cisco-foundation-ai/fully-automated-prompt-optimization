@@ -26,7 +26,7 @@ Each `tool_call_history` entry now also carries `result` (full tool output), `la
 - Integration tests for the MCP layer: `pytest -m integration tests/integration/test_mcp_integration.py -v`
 
 ## Success Criteria
-- Composite score >= 80% across all 20 cases.
+- Composite score >= 80% across all cases.
 - Tool-use cases call the expected tools (visible in `tool_call_history`); reasoning cases call no tools.
 - No "Exceeded max_tool_calls limit" errors during a normal run (limit is per-case = `max_iterations * max_tool_calls_per_iteration`).
 - MCP server starts, discovers 3 tools (`echo`, `add`, `fail`), and shuts down cleanly.

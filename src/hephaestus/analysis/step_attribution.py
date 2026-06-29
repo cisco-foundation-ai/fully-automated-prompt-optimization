@@ -352,6 +352,11 @@ def summarize(attribution: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     Returns:
         Dict with:
             - prompt_addressable: count of failures fixable by prompt changes
+            - skill_addressable: count of failures fixable by skill changes. Skills
+              and prompts are co-equal textual levels addressing the same class of
+              reasoning/format failures, so this mirrors prompt_addressable. The
+              optimization agent decides — per its task scope — whether to fix a
+              textual failure via prompt edits, skill edits, or both.
             - structural_addressable: count of failures fixable by structural changes
             - tool_addressable: count of failures fixable by tool/MCP changes
             - format_failures: count of format-related failures
@@ -403,6 +408,9 @@ def summarize(attribution: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
 
     return {
         "prompt_addressable": prompt_count,
+        # Skills are a co-equal textual level: the same reasoning/format failures
+        # that prompt edits address can also be addressed by skill edits.
+        "skill_addressable": prompt_count,
         "structural_addressable": structural_count,
         "tool_addressable": tool_count,
         "format_failures": format_count,

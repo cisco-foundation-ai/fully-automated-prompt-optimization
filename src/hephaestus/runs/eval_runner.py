@@ -134,6 +134,33 @@ def _validate_eval_paths(config: EvalConfig) -> None:
                 "Check chain.config.prompt_paths in your eval config."
             )
 
+    for skill_path_str in config.chain.config.get("skill_paths", []) or []:
+        skill_path = Path(skill_path_str)
+        if not skill_path.exists():
+            raise FileNotFoundError(
+                f"Skill file not found: {skill_path}. "
+                "Check chain.config.skill_paths in your eval config."
+            )
+
+    # optimization_target selects which textual artifacts the optimization agent
+    # iterates on. "skill"/"both" only make sense for agentic chains (skills tell
+    # the agent how to wield its tools), so require an MCP section for those.
+    target = config.chain.config.get("optimization_target", "both")
+    if target not in ("prompt", "skill", "both"):
+        raise ValueError(
+            f"Invalid chain.config.optimization_target: {target!r}. "
+            "Expected one of: 'prompt', 'skill', 'both'."
+        )
+    if target in ("skill", "both") and config.chain.config.get("skill_paths"):
+        has_mcp = bool(config.mcp and getattr(config.mcp, "servers", None))
+        if not has_mcp:
+            raise ValueError(
+                "chain.config.optimization_target includes skills but no MCP "
+                "servers are configured. Skill optimization is only supported "
+                "for agentic (MCP-enabled) chains. Set optimization_target to "
+                "'prompt' or add an mcp section."
+            )
+
 
 def _ensure_chain(config: EvalConfig, provider: ProviderClient, mcp_manager=None) -> Any:
     """Load a chain from the eval config.

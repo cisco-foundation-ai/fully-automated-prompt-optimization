@@ -18,12 +18,12 @@ Demonstrate and test MCP integration with agentic workflows. This tenant is prim
 
 ## Iteration Loop
 1. Follow the global iteration loop from `docs/processes/prompt-iteration-loop.md`.
-2. Optimize the single `agent` prompt module over `tool_tasks.jsonl` (20 cases). All cases are treated as training data — there is no train/val/test split for this demo tenant.
+2. Optimize the single `agent` prompt module over `tool_tasks.jsonl`. All cases are treated as training data — there is no train/val/test split for this demo tenant.
 3. After each prompt change, re-run the full eval and compare composite score and `score_breakdown` (especially `trajectory`, `traj_tool_selection`, `traj_call_ordering`, `traj_argument_correctness`, and `answer_correct`) against the previous best.
 4. Iterate until success criteria are met.
 
 ## Success Criteria
-- Composite score >= 80% across all 20 cases.
+- Composite score >= 80% across all cases.
 - Tool-use tasks call the expected tools (verified via `tool_call_history`).
 - No hallucinated calculations (arithmetic must go through the `add` tool).
 - Reasoning tasks answered directly, with no tool calls.
@@ -68,11 +68,11 @@ The optimization agent may only modify prompt template files. It must not:
 4. **Loop failures**: agent gets stuck retrying after a tool error
 
 ## Stop Criteria
-- Composite score >= 80% sustained across the full 20-case set, OR
+- Composite score >= 80% sustained across the full case set, OR
 - Three consecutive prompt variants show no improvement (plateau) after exhausting tool-selection, formatting, and stopping-criteria techniques.
 
 ## Regression Prevention
-- Run the full 20-case eval after every prompt change — never accept a variant on a partial run.
+- Run the full eval after every prompt change — never accept a variant on a partial run.
 - Compare composite score and per-check breakdown against the previous best before accepting a new variant.
 - Watch trajectory sub-metrics specifically: a higher composite score that comes with degraded `traj_tool_selection`, `traj_call_ordering`, or `traj_argument_correctness` is a regression, not a win.
 

@@ -10,7 +10,7 @@ SPDX-License-Identifier: Apache-2.0
 [![CI](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/actions/workflows/ci.yml/badge.svg)](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/actions/workflows/ci.yml)
 [![arXiv](https://img.shields.io/badge/arXiv-2606.19605-b31b1b.svg)](https://arxiv.org/abs/2606.19605)
 
-An optimization framework for multi-step LLM pipelines. FAPO uses [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as an autonomous optimizer that iteratively improves prompts, parameters, and chain architecture — guided by built-in evaluation, step-level failure analysis, and a structured variant system.
+An optimization framework for multi-step LLM pipelines. FAPO uses [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as an autonomous optimizer that iteratively improves prompts, agent skills, parameters, and chain architecture — guided by built-in evaluation, step-level failure analysis, and a structured variant system.
 
 FAPO provides the full loop: **evaluate** a chain against a dataset, **analyze** what went wrong using step attribution, **create** a better variant, and **measure** whether it improved. The evaluation infrastructure exists to drive and measure optimization — not as an end in itself.
 
@@ -26,7 +26,7 @@ FAPO's baseline is **GEPA**, a prompt optimizer. FAPO builds on GEPA's evaluatio
 
 | | GEPA (baseline) | FAPO |
 |---|---|---|
-| **Action space** | Instruction string inside a **fixed** chain | Prompt text **+** chain parameters **+** chain structure |
+| **Action space** | Instruction string inside a **fixed** chain | Prompt text **+** agent skills **+** chain parameters **+** chain structure |
 | **Search** | Evolutionary search (MIPROv2-Heavy) over prompts | Attribution-driven scoped edits, escalating only when evidence requires it |
 | **Failure signal** | Final-score feedback | Step-level attribution over recorded intermediate outputs |
 
@@ -163,7 +163,7 @@ The core workflow is an **optimization loop**. Each pass runs the same six stage
   2. Attribute   classify failures by pipeline step and fix type
                       │
                       ▼
-  3. Propose     generate one scoped variant (prompt / parameter / chain)
+  3. Propose     generate one scoped variant (prompt / skill / parameter / chain)
                       │
                       ▼
   4. Review      independent guardrail check (scope, leakage, placeholders)
@@ -276,6 +276,34 @@ Context: ${steps.retrieve.output}
 - `${steps.<node_name>.output}` is replaced by the output of a previous chain node
 - Missing variables are logged as diagnostics (not hard errors)
 
+### Skills
+
+**Skills** are reusable units of procedural knowledge for **agentic** (tool-using) tenants — e.g. "how to handle a ranking question" or "how to sequence these tools". They live as markdown files at `tenants/<tenant_id>/skills/<skill-name>/variant-NNN.md`, each with YAML frontmatter (`name`, `description`) and a body of instructions, and are optimized exactly like prompts (clone-to-new-variant, eval, attribution, review).
+
+A skill is **loaded at the agentic layer**: the chain node injects the configured skills into the conversation as a distinct `<available_skills>` context message right after the system prompt — mimicking an agent that discovered and loaded skills into its environment, rather than inlining them into the authored prompt template. The skills stay fully in context for every model call (deterministic), keeping the base prompt lean while the reusable know-how is factored out and iterated independently.
+
+Skills are opt-in per tenant via two `chain.config` fields:
+
+```json
+{
+  "chain": {
+    "config": {
+      "prompt_paths": { "agent": "tenants/my_project/prompts/modules/agent/variant-001.md" },
+      "skill_paths": [
+        "tenants/my_project/skills/ranking-questions/variant-001.md",
+        "tenants/my_project/skills/answer-formatting/variant-001.md"
+      ],
+      "optimization_target": "both"
+    }
+  }
+}
+```
+
+- **`skill_paths`** — the skill files to load (injected in order). Omit it and the tenant behaves exactly as before; skills are a no-op.
+- **`optimization_target`** — `"prompt"`, `"skill"`, or `"both"` (default `"both"`). Selects which textual artifacts the optimizer iterates. When set to `"skill"` or `"both"`, the tenant must be agentic (an `mcp` section configured); the eval runner validates this.
+
+Prompt and skill are **co-equal textual levels**: when both are available the optimizer treats them as one textual surface, routing each failure cluster to whichever artifact owns it (broad scaffold/format → base prompt; reusable task-specific procedure → a skill). See `tenants/skill_example/` for a complete worked example. In the **FAPO Explorer** UI, skills appear under the **Prompts** tab in their own section.
+
 ### Scorers
 
 A scorer compares the chain output to the expected answer. Implement the `Scorer` base class:
@@ -340,7 +368,7 @@ Provider settings go in the config file:
 
 ## Optimization loop
 
-Evaluation tells you *how well* your chain performs. Optimization tells you *what to change* to make it better. FAPO includes a structured optimization loop that works at three levels of increasing cost. (For the full architecture, see [docs/processes/prompt-iteration-loop.md](docs/processes/prompt-iteration-loop.md).)
+Evaluation tells you *how well* your chain performs. Optimization tells you *what to change* to make it better. FAPO includes a structured optimization loop that works at levels of increasing cost — from textual edits (prompt and agent skills) up through chain parameters and chain structure. (For the full architecture, see [docs/processes/prompt-iteration-loop.md](docs/processes/prompt-iteration-loop.md).)
 
 ### The optimizer vs. the task model
 
@@ -387,7 +415,7 @@ Follow .codex/agents/optimization.md.
 The `/optimization` agent takes over from there. It will:
 1. Read the tenant's `docs/iteration-playbook.md` to understand what it's allowed to change (the **scope contract**)
 2. Run failure analysis on the eval results
-3. Create new prompt/parameter/chain variants targeting the top failure patterns
+3. Create new prompt/skill/parameter/chain variants targeting the top failure patterns
 4. Validate each variant through an independent guardrail review
 5. Run eval on the new variant and compare to the previous best
 6. Repeat until success criteria are met or all allowed optimization levels are exhausted
@@ -398,15 +426,18 @@ The `/optimization` agent is the orchestrator; it manages two internal subagents
 
 You can also run evals and optimization steps manually via the CLI (see [CLI reference](#cli-reference) below), but the agent handles the full loop autonomously.
 
-### The three optimization levels
+### The optimization levels
 
 | Level | What changes | Example |
 |-------|-------------|---------|
 | **Prompt** (lowest cost) | Prompt template text only | Add "answer in one word" to reduce verbosity |
+| **Skill** (lowest cost) | Agent skill file text only (agentic tenants) | Refine a reusable "how to handle ranking questions" procedure |
 | **Parameter** (medium cost) | Config values only | Change `retrieval_k` from 7 to 10, or `temperature` from 1.0 to 0.5 |
 | **Structural** (highest cost) | Chain topology / new nodes | Add a self-reflection node, switch from linear to ReAct pattern |
 
-The system follows a **prompt-first policy**: it prefers prompt changes when the evidence is ambiguous, and escalates to parameters or structure only after prompt-level search has exposed a bottleneck that prompts can't fix. This is the "prefer the smallest useful change" principle — cheaper levels first, and a higher level only when attribution justifies it.
+Prompt and **skill** are co-equal *textual* levels — both edit instruction text and carry the same cost. Skills apply only to agentic (tool-using) tenants; see [Skills](#skills) below.
+
+The system follows a **prompt-first policy**: it prefers textual changes (prompt and/or skill) when the evidence is ambiguous, and escalates to parameters or structure only after textual search has exposed a bottleneck that text can't fix. This is the "prefer the smallest useful change" principle — cheaper levels first, and a higher level only when attribution justifies it.
 
 ### Step attribution (failure analysis)
 
@@ -418,7 +449,7 @@ After an eval run, step attribution classifies each failure by root cause. It ru
 - **Reasoning failures** — all inputs were good but the model reached the wrong conclusion
 
 Each failure is also tagged by which optimization level can address it:
-- Format and reasoning failures → **prompt-addressable**
+- Format and reasoning failures → **textual** (prompt-addressable, and skill-addressable on agentic tenants)
 - Retrieval and cascade failures → **structural-addressable**
 
 This partition tells the optimizer (and you) where to focus before writing new variants — and it is what signals when a level is exhausted and escalation is warranted. The deterministic table appears automatically in each run's `summary.md`.
@@ -543,7 +574,7 @@ Scopes: `raw` (source artifacts), `derived` (processed datasets), `all`.
 
 ## FAPO UI
 
-FAPO includes a local, read-only web UI called **FAPO Explorer** for browsing tenant artifacts after evals and optimization runs. It shows cross-tenant run summaries, per-case eval outputs, score breakdowns, prompt variants, datasets, iteration history, and tenant docs. It refreshes live as runs progress, supports shareable URLs, sortable/filterable case tables, expected-vs-actual trajectory diffs, JSON syntax highlighting, and Markdown-rendered summaries.
+FAPO includes a local, read-only web UI called **FAPO Explorer** for browsing tenant artifacts after evals and optimization runs. It shows cross-tenant run summaries, per-case eval outputs, score breakdowns, prompt variants (and agent skills, under the Prompts tab), datasets, iteration history, and tenant docs. It refreshes live as runs progress, supports shareable URLs, sortable/filterable case tables, expected-vs-actual trajectory diffs, JSON syntax highlighting, and Markdown-rendered summaries.
 
 Start it from the repository root:
 
@@ -634,6 +665,7 @@ hephaestus/
 │   └── <tenant_id>/
 │       ├── chains/        #   Chain definitions
 │       ├── prompts/       #   Prompt templates (with variants)
+│       ├── skills/        #   Agent skill files (agentic tenants; optional)
 │       ├── datasets/      #   Local dataset cache
 │       ├── code/          #   Scorers, data processors, utilities
 │       ├── configs/       #   Eval config files

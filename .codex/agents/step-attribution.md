@@ -28,14 +28,14 @@ summary = summarize(attribution)
 ```
 
 3. For low-confidence cases, inspect the actual step outputs and scorer requirements.
-4. Classify failures into prompt-addressable and structural-addressable clusters. Parameter-addressable failures may be called out separately when retrieval depth, model settings, or other config knobs are the likely cause.
-5. Recommend the cheapest allowed level that can address the largest cluster.
+4. Classify failures into prompt-addressable and structural-addressable clusters. Parameter-addressable failures may be called out separately when retrieval depth, model settings, or other config knobs are the likely cause. `summary["skill_addressable"]` mirrors `prompt_addressable` — prompt and skill are co-equal textual levels for the same reasoning/format failures; surface skill as an addressable level when the tenant has skill files (`tenants/<tenant_id>/skills/`) and `chain.config.optimization_target` includes `skill` or `both`.
+5. Recommend the cheapest allowed level that can address the largest cluster. For textual clusters in skill-enabled tenants, note whether a reusable procedure (skill) or the base scaffold (prompt) is the better owner.
 
 ## Output
 
 Return:
 
-- `level_partition`: counts and clusters for prompt, parameter when applicable, and structural
+- `level_partition`: counts and clusters for prompt, skill (when the tenant is skill-enabled), parameter when applicable, and structural
 - `recommended_level`
 - `ceiling_estimate`
-- `clusters`: label, count, representative case IDs, level, confidence, and suggested fix
+- `clusters`: label, count, representative case IDs, level (`prompt`/`skill`/`parameter`/`structural`), confidence, and suggested fix
