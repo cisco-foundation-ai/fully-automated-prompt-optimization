@@ -1,0 +1,70 @@
+{
+  "tenant_id": "skill_example",
+  "provider": "openai",
+  "provider_settings": {
+    "model": "gpt-4o",
+    "temperature": 0.0,
+    "max_tokens": 2048
+  },
+  "mcp": {
+    "servers": [
+      {
+        "name": "splunk",
+        "command": "sh",
+        "args": [
+          "-c",
+          "exec npx -y mcp-remote \"$SPLUNK_MCP_URL\" --header \"Authorization: Bearer $SPLUNK_MCP_TOKEN\""
+        ],
+        "env": {},
+        "enabled": true,
+        "timeout_seconds": 60
+      }
+    ],
+    "tool_execution": {
+      "max_iterations": 10,
+      "max_tool_calls_per_iteration": 5,
+      "timeout_seconds": 60
+    }
+  },
+  "dataset": {
+    "path": "tenants/skill_example/datasets/splunk_ops_tasks.jsonl"
+  },
+  "chain": {
+    "path": "tenants/skill_example/chains/react_agent.py",
+    "fn": "build_chain",
+    "config": {
+      "prompt_paths": {
+        "agent": "tenants/skill_example/prompts/modules/agent/variant-001.md"
+      },
+      "skill_paths": [
+        "tenants/skill_example/skills/tool-selection/variant-001.md",
+        "tenants/skill_example/skills/superlative-index-questions/variant-001.md",
+        "tenants/skill_example/skills/spl-search/variant-001.md",
+        "tenants/skill_example/skills/answer-formatting/variant-001.md"
+      ],
+      "optimization_target": "both",
+      "max_iterations": 10,
+      "max_tool_calls_per_iteration": 5
+    }
+  },
+  "scoring_profile": {
+    "scorer": {
+      "module_path": "tenants/skill_example/code/scorers/composite_scorer.py",
+      "class_name": "CompositeScorer"
+    },
+    "composite_weights": {
+      "trajectory": 0.60,
+      "answer_correct": 0.40
+    },
+    "judge": {
+      "provider": "openai",
+      "provider_settings": {
+        "model": "gpt-5.5",
+        "max_tokens": 1024
+      },
+      "fallback_score": 50.0
+    }
+  },
+  "output_dir": "tenants/skill_example/evals/run-001",
+  "run_id": "hephaestus-skill_example-001"
+}
