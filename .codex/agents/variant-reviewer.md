@@ -6,11 +6,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # FAPO Variant Review Phase for Codex
 
-Use this as a fresh-eyes checklist before evaluating a new prompt, parameter, or chain variant.
+Use this as a fresh-eyes checklist before evaluating a new prompt, skill, parameter, or chain variant.
 
 ## Inputs
 
-- `variant_type`: `prompt`, `parameter`, or `chain`
+- `variant_type`: `prompt`, `skill`, `parameter`, or `chain`
 - New variant path or config path
 - Previous variant path or baseline chain path
 - Eval config path
@@ -27,11 +27,18 @@ Universal:
 - Tenant isolation: no paths, examples, imports, or labels from other tenants.
 - Scope compliance: file changes are allowed by the tenant playbook.
 
-Prompt-specific:
+Prompt-specific (also applies to skill variants — skills are textual):
 
 - No train examples in prompts.
 - No overly narrow hints that only help one eval example.
 - The edit addresses a single failure pattern where possible.
+
+Skill-specific:
+
+- Frontmatter intact: `name` matches the skill directory; `description` reflects the (possibly revised) body.
+- No `${...}` placeholders introduced in the skill body (it is injected verbatim into the runtime `<available_skills>` context message).
+- New file lives at `tenants/<tenant_id>/skills/<skill-name>/variant-NNN.md` (cloned, not edited in place); the eval config's `chain.config.skill_paths` points at it and `optimization_target` includes `skill` or `both`.
+- Tenant is agentic (an `mcp` section is configured) — skills are only supported for agentic chains.
 
 Parameter-specific:
 

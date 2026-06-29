@@ -6,8 +6,9 @@
 
 Walks ``tenants/<tenant_id>/`` and surfaces the artifacts a user wants to
 navigate: eval runs (``evals/<run>/``), iteration history
-(``docs/iteration-memory.jsonl``), prompt variants (``prompts/**/*.md``), and
-per-case eval outputs (``results.jsonl``).
+(``docs/iteration-memory.jsonl``), prompt and skill variants
+(``prompts/**/*.md`` and ``skills/**/*.md``), and per-case eval outputs
+(``results.jsonl``).
 
 Nothing here mutates tenant data. Paths are resolved relative to the tenants
 root and validated to stay inside it, so the HTTP layer cannot read arbitrary
@@ -31,6 +32,12 @@ _RUN_MARKERS = ("results.jsonl", "run_config.json", "summary.md", "progress.json
 # Tenants historically use ``configs/``; support ``config/`` as an alias for
 # local projects that use the singular spelling.
 _CONFIG_DIRS = ("config", "configs")
+
+# Editable text assets surfaced under the Prompts tab. Each entry maps a tenant
+# subdirectory to the ``kind`` tag reported for files found beneath it. Prompts
+# and skills are both optimizable markdown, so they live together here. Adding a
+# new asset subtree is just a new entry — discovery is otherwise path-agnostic.
+_PROMPT_ASSET_DIRS = (("prompts", "prompt"), ("skills", "skill"))
 
 
 def _read_json(path: Path) -> Optional[Any]:
@@ -408,13 +415,44 @@ class TenantStore:
             row.setdefault("_index", i)
         return rows
 
-    # -- prompts ---------------------------------------------------------
+    # -- prompts & skills ------------------------------------------------
 
     def _prompt_paths(self, tenant_dir: Path) -> List[Path]:
-        prompts_dir = tenant_dir / "prompts"
-        if not prompts_dir.is_dir():
-            return []
-        return sorted(p for p in prompts_dir.rglob("*.md") if p.is_file())
+        """All editable text assets (prompts + skills) as markdown paths.
+
+        Scans each configured asset subtree (``prompts/``, ``skills/``) for
+        ``*.md``. Path-agnostic within a subtree: any nesting depth is fine.
+        """
+        paths: List[Path] = []
+        for dirname, _kind in _PROMPT_ASSET_DIRS:
+            asset_dir = tenant_dir / dirname
+            if not asset_dir.is_dir():
+                continue
+            paths.extend(p for p in asset_dir.rglob("*.md") if p.is_file())
+        return sorted(paths)
+
+    @staticmethod
+    def _asset_kind(tenant_dir: Path, path: Path) -> str:
+        """Tag a path by which asset subtree it lives under (prompt/skill)."""
+        rel_parts = path.relative_to(tenant_dir).parts
+        top = rel_parts[0] if rel_parts else ""
+        for dirname, kind in _PROMPT_ASSET_DIRS:
+            if top == dirname:
+                return kind
+        return "prompt"
+
+    @staticmethod
+    def _asset_group(tenant_dir: Path, path: Path) -> str:
+        """Group label for an asset: its immediate parent directory name.
+
+        For ``prompts/modules/agent/variant-001.md`` this is ``agent``; for
+        ``skills/superlative-index-questions/variant-001.md`` it is the skill
+        name. Falls back to the subtree name for a file sitting directly in it.
+        """
+        rel_parts = path.relative_to(tenant_dir).parts
+        if len(rel_parts) >= 2:
+            return rel_parts[-2]
+        return rel_parts[0] if rel_parts else ""
 
     def list_prompts(self, tenant_id: str) -> List[Dict[str, Any]]:
         tenant_dir = self._tenant_dir(tenant_id)
@@ -427,7 +465,15 @@ class TenantStore:
                 size = path.stat().st_size
             except OSError:
                 size = 0
-            prompts.append({"path": rel, "name": path.name, "bytes": size})
+            prompts.append(
+                {
+                    "path": rel,
+                    "name": path.name,
+                    "bytes": size,
+                    "kind": self._asset_kind(tenant_dir, path),
+                    "group": self._asset_group(tenant_dir, path),
+                }
+            )
         return prompts
 
     def get_prompt(self, tenant_id: str, prompt_rel: str) -> Optional[Dict[str, Any]]:
@@ -437,14 +483,23 @@ class TenantStore:
         path = (tenant_dir / prompt_rel).resolve()
         if tenant_dir not in path.parents:
             return None  # traversal guard
-        # Only serve markdown prompts under the prompts/ subtree.
-        if (tenant_dir / "prompts").resolve() not in path.parents and path.parent != (
-            tenant_dir / "prompts"
-        ).resolve():
+        # Only serve markdown under a known asset subtree (prompts/ or skills/).
+        in_asset_dir = False
+        for dirname, _kind in _PROMPT_ASSET_DIRS:
+            asset_dir = (tenant_dir / dirname).resolve()
+            if asset_dir in path.parents or path.parent == asset_dir:
+                in_asset_dir = True
+                break
+        if not in_asset_dir:
             return None
         if path.suffix != ".md" or not path.is_file():
             return None
-        return {"path": prompt_rel, "content": _read_text(path)}
+        return {
+            "path": prompt_rel,
+            "content": _read_text(path),
+            "kind": self._asset_kind(tenant_dir, path),
+            "group": self._asset_group(tenant_dir, path),
+        }
 
     # -- configs ---------------------------------------------------------
 

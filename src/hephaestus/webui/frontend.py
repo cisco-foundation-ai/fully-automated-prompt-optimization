@@ -781,7 +781,7 @@ const ITER_NOTE_KEYS = ['notes', 'note', 'description', 'hypothesis'];
 const ITER_HEADER_KEYS = new Set([...ITER_LABEL_KEYS, ...ITER_DATE_KEYS,
   ...ITER_SCORE_KEYS, ...ITER_NOTE_KEYS, 'level', '_index']);
 const PROMPT = { path: null };
-const CONFIG = { path: null };
+const CONFIG = { path: null, sig: null };
 
 function firstKey(obj, keys) {
   for (const k of keys) if (obj[k] != null && obj[k] !== '') return obj[k];
@@ -827,22 +827,46 @@ function renderIterationCard(r) {
     </div>`;
 }
 
+// Asset "kind" -> section heading shown in the Prompts tab. Unknown kinds fall
+// back to a title-cased label so new asset types appear without a code change.
+const ASSET_KIND_LABELS = { prompt: 'Prompts', skill: 'Skills' };
+function assetKindLabel(kind) {
+  if (ASSET_KIND_LABELS[kind]) return ASSET_KIND_LABELS[kind];
+  if (!kind) return 'Other';
+  return kind.charAt(0).toUpperCase() + kind.slice(1) + 's';
+}
+
 async function renderPrompts() {
   const view = el('view');
   showLoading(view, '<div class="muted">Loading prompts…</div>');
   const prompts = await api(`/api/tenants/${S.tenant}/prompts`);
-  if (!prompts.length) { view.innerHTML = '<div class="empty">No prompts found.</div>'; return; }
+  if (!prompts.length) { view.innerHTML = '<div class="empty">No prompts or skills found.</div>'; return; }
   if (!prompts.some(p => p.path === PROMPT.path)) PROMPT.path = null;
-  view.innerHTML = `${filterBox('prompts-filter', 'Filter prompt files…')}
-    <table id="prompts-table"><thead><tr><th>Prompt file</th><th>Size</th></tr></thead><tbody>
-    ${prompts.map(p => `<tr class="clickable ${p.path===PROMPT.path?'active':''}" data-path="${esc(p.path)}">
-      <td><b>${esc(p.name)}</b><div class="muted" style="font-size:11px">${esc(p.path)}</div></td>
-      <td class="muted">${p.bytes} B</td></tr>`).join('')}</tbody></table>
+
+  // Group by kind (prompt/skill/…), preserving first-seen order so the layout
+  // is driven by the data, not hardcoded paths.
+  const order = [];
+  const byKind = {};
+  for (const p of prompts) {
+    const k = p.kind || 'prompt';
+    if (!byKind[k]) { byKind[k] = []; order.push(k); }
+    byKind[k].push(p);
+  }
+  const row = p => `<tr class="clickable ${p.path===PROMPT.path?'active':''}" data-path="${esc(p.path)}">
+      <td><b>${esc(p.name)}</b>${p.group ? ` <span class="pill">${esc(p.group)}</span>` : ''}
+        <div class="muted" style="font-size:11px">${esc(p.path)}</div></td>
+      <td class="muted">${p.bytes} B</td></tr>`;
+  const section = k => `<h3 style="margin:18px 0 6px">${esc(assetKindLabel(k))} <span class="muted" style="font-weight:400">· ${byKind[k].length}</span></h3>
+    <table class="prompts-table"><thead><tr><th>${esc(assetKindLabel(k))} file</th><th>Size</th></tr></thead>
+    <tbody>${byKind[k].map(row).join('')}</tbody></table>`;
+
+  view.innerHTML = `${filterBox('prompts-filter', 'Filter prompt & skill files…')}
+    <div id="prompts-tables">${order.map(section).join('')}</div>
     <div id="prompt-view"></div>`;
   view.querySelectorAll('tr.clickable').forEach(node =>
     node.onclick = async () => {
       const path = node.dataset.path;
-      // Toggle: clicking the already-open prompt file collapses it.
+      // Toggle: clicking the already-open file collapses it.
       PROMPT.path = (PROMPT.path === path) ? null : path;
       view.querySelectorAll('tr.clickable').forEach(n =>
         n.classList.toggle('active', n.dataset.path === PROMPT.path));
@@ -853,7 +877,7 @@ async function renderPrompts() {
         el('prompt-view').innerHTML = '';
       }
     });
-  wireTableFilter('prompts-filter', '#prompts-table');
+  wireTableFilter('prompts-filter', '#prompts-tables');
   if (PROMPT.path) await loadPromptBody();
 }
 
@@ -871,30 +895,30 @@ async function renderConfig() {
   showLoading(view, '<div class="muted">Loading config files…</div>');
   const configs = await api(`/api/tenants/${S.tenant}/configs`);
   if (!configs.length) {
-    CONFIG.path = null;
+    CONFIG.path = null; CONFIG.sig = null;
     view.innerHTML = '<div class="empty">No config files found.</div>';
     return;
   }
   if (!configs.some(c => c.path === CONFIG.path)) CONFIG.path = configs[0].path;
-  view.innerHTML = `<div class="docs-layout">
-    <div class="doc-list">${configs.map(c => `
-      <div class="doc-item ${c.path===CONFIG.path?'active':''}" data-path="${esc(c.path)}">
-        <div><b>${esc(c.name)}</b></div>
-        <div class="path">${esc(c.path)} · ${c.bytes} B</div>
-      </div>`).join('')}</div>
-    <div class="card"><div id="config-body"></div></div>
-  </div>`;
-  view.querySelectorAll('.doc-item').forEach(node =>
-    node.onclick = () => { CONFIG.path = node.dataset.path; renderConfig(); });
-  await loadConfigBody();
-}
-
-async function loadConfigBody() {
-  const body = el('config-body');
-  if (!body || !CONFIG.path) return;
-  showLoading(body, '<div class="muted">Loading…</div>');
+  // Fetch the body before any DOM teardown so the swap is atomic (see renderDocs).
   const d = await api(`/api/tenants/${S.tenant}/config?path=${encodeURIComponent(CONFIG.path)}`);
-  body.innerHTML = jsonPre(d.content || '');
+  const bodyHtml = jsonPre(d.content || '');
+  // Only rebuild the layout shell when the file list or selection changed.
+  const sig = configs.map(c => c.path + ':' + c.bytes).join('|') + '@' + CONFIG.path;
+  if (sig !== CONFIG.sig || !el('config-body')) {
+    view.innerHTML = `<div class="docs-layout">
+      <div class="doc-list">${configs.map(c => `
+        <div class="doc-item ${c.path===CONFIG.path?'active':''}" data-path="${esc(c.path)}">
+          <div><b>${esc(c.name)}</b></div>
+          <div class="path">${esc(c.path)} · ${c.bytes} B</div>
+        </div>`).join('')}</div>
+      <div class="card"><div id="config-body"></div></div>
+    </div>`;
+    view.querySelectorAll('.doc-item').forEach(node =>
+      node.onclick = () => { CONFIG.path = node.dataset.path; renderConfig(); });
+    CONFIG.sig = sig;
+  }
+  el('config-body').innerHTML = bodyHtml;
 }
 
 const DS = { path: null, offset: 0, limit: 50, open: new Set() };
@@ -1016,32 +1040,35 @@ function renderMarkdown(src) {
   return html;
 }
 
-const DOC = { path: null };
+const DOC = { path: null, sig: null };
 
 async function renderDocs() {
   const view = el('view');
   showLoading(view, '<div class="muted">Loading docs…</div>');
   const docs = await api(`/api/tenants/${S.tenant}/docs`);
-  if (!docs.length) { view.innerHTML = '<div class="empty">No docs found for this tenant.</div>'; return; }
+  if (!docs.length) { DOC.sig = null; view.innerHTML = '<div class="empty">No docs found for this tenant.</div>'; return; }
   if (!docs.some(d => d.path === DOC.path)) DOC.path = docs[0].path;
-  view.innerHTML = `<div class="docs-layout">
-    <div class="doc-list">${docs.map(d => `
-      <div class="doc-item ${d.path===DOC.path?'active':''}" data-path="${esc(d.path)}">
-        <div><b>${esc(d.name)}</b></div><div class="path">${esc(d.path)}</div>
-      </div>`).join('')}</div>
-    <div class="card"><div id="doc-body" class="md"></div></div>
-  </div>`;
-  view.querySelectorAll('.doc-item').forEach(node =>
-    node.onclick = () => { DOC.path = node.dataset.path; renderDocs(); });
-  await loadDocBody();
-}
-
-async function loadDocBody() {
-  const body = el('doc-body');
-  if (!body) return;
-  showLoading(body, '<div class="muted">Loading…</div>');
+  // Fetch the body before any DOM teardown so the swap is atomic — auto-refresh
+  // ticks never expose an empty #doc-body between the two round-trips.
   const d = await api(`/api/tenants/${S.tenant}/doc?path=${encodeURIComponent(DOC.path)}`);
-  body.innerHTML = renderMarkdown(d.content || '');
+  const bodyHtml = renderMarkdown(d.content || '');
+  // Only rebuild the layout shell when the doc list or selection actually
+  // changed; a plain auto-refresh leaves the shell intact and just updates the
+  // body, so there is no flicker.
+  const sig = docs.map(x => x.path).join('|') + '@' + DOC.path;
+  if (sig !== DOC.sig || !el('doc-body')) {
+    view.innerHTML = `<div class="docs-layout">
+      <div class="doc-list">${docs.map(x => `
+        <div class="doc-item ${x.path===DOC.path?'active':''}" data-path="${esc(x.path)}">
+          <div><b>${esc(x.name)}</b></div><div class="path">${esc(x.path)}</div>
+        </div>`).join('')}</div>
+      <div class="card"><div id="doc-body" class="md"></div></div>
+    </div>`;
+    view.querySelectorAll('.doc-item').forEach(node =>
+      node.onclick = () => { DOC.path = node.dataset.path; renderDocs(); });
+    DOC.sig = sig;
+  }
+  el('doc-body').innerHTML = bodyHtml;
 }
 
 async function renderCurrentView() {

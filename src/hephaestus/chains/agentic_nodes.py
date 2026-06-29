@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict
 
 from src.hephaestus.chains.nodes import build_node_context
 from src.hephaestus.engine.prompt_renderer import render_prompt
+from src.hephaestus.engine.skills import build_skills_message, inject_skills_message
 from src.hephaestus.mcp.executor import MCPToolExecutor
 from src.hephaestus.mcp.manager import MCPServerManager
 from src.hephaestus.mcp.schema_converter import convert_mcp_tools_to_openai
@@ -29,6 +30,7 @@ def make_agentic_node(
     output_key: str = "output_text",
     max_iterations: int = 10,
     max_tool_calls_per_iteration: int = 5,
+    skills_text: str = "",
 ) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
     """Create a LangGraph node that supports iterative tool use (ReAct pattern).
 
@@ -52,6 +54,11 @@ def make_agentic_node(
         output_key: Key to store final output in step_outputs
         max_iterations: Maximum ReAct loop iterations (safety limit)
         max_tool_calls_per_iteration: Maximum parallel tool calls per iteration
+        skills_text: Pre-rendered skills block. When non-empty, it is injected at
+            runtime as a distinct ``<available_skills>`` context message right
+            after the system prompt — mimicking an agent that loaded skills into
+            its environment — rather than baked into the authored prompt. Empty
+            by default, so chains without skills are unaffected.
 
     Returns:
         A callable(state) -> state_update suitable for StateGraph.add_node()
@@ -68,6 +75,10 @@ def make_agentic_node(
         )
     """
     template_text = prompt_template_path.read_text(encoding="utf-8")
+    # Skills are loaded at the agentic layer: build the runtime context message
+    # once at build time (skills are static for the run) and inject it into the
+    # conversation per case. None when no skills are configured.
+    skills_message = build_skills_message(skills_text)
     tools = mcp_manager.list_tools()
     tool_schemas = convert_mcp_tools_to_openai(tools) if tools else None
 
@@ -92,7 +103,11 @@ def make_agentic_node(
         # max_workers > 1.
         executor = MCPToolExecutor(mcp_manager, max_tool_calls=max_tool_calls_per_case)
 
-        messages = render_result.prompt_messages.copy()
+        # Inject the loaded-skills context message just after the system prompt
+        # so it sits in the agent's standing context for every model call.
+        messages = inject_skills_message(
+            render_result.prompt_messages.copy(), skills_message
+        )
         tool_call_history = list(state.get("tool_call_history", []))
         iterations = 0
         # Monotonic per-case counter so scorers can reconstruct call ordering

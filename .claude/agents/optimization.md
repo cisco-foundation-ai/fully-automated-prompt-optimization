@@ -27,9 +27,11 @@ You optimize eval quality for a FAPO tenant across all optimization granularitie
    - **Ablation**: remove recent additions from the best variant to test whether they actually helped
    - **Require at least 3 distinct techniques** tried on the best variant before declaring plateau at any level
 
-4. **Attribution-Driven Prioritization** — Use `src/hephaestus/analysis/step_attribution.py` to identify which chain steps are failing. Attribution partitions failures into buckets: retrieval failures are addressable by parameter/structural changes; reasoning failures by prompt changes; cascading failures by structural changes. Start with the allowed level that has the most addressable failures. Within that level, iterate until all its addressable failures are resolved or further gains plateau across 3+ consecutive variants. Then move to the next allowed level.
+4. **Attribution-Driven Prioritization** — Use `src/hephaestus/analysis/step_attribution.py` to identify which chain steps are failing. Attribution partitions failures into buckets: retrieval failures are addressable by parameter/structural changes; reasoning/format failures by textual changes (reported as both `prompt_addressable` and `skill_addressable`, which mirror each other); cascading failures by structural changes; tool errors by `tool_addressable`. Start with the allowed level that has the most addressable failures. Within that level, iterate until all its addressable failures are resolved or further gains plateau across 3+ consecutive variants. Then move to the next allowed level.
 
 5. **Optimize Against Train Split Only** — Use val/test only for cross-validation when the playbook requires it.
+
+6. **Prompt and Skill Are Co-Equal Textual Levels** — Some agentic tenants carry **skill files** (`tenants/<tenant_id>/skills/<skill-name>/variant-NNN.md`) — reusable procedural knowledge loaded at the agentic layer (injected into the conversation as a runtime `<available_skills>` context message), not inlined into the authored prompt. Skills are a textual optimization level on par with prompt text, gated by `chain.config.optimization_target` (`"prompt"` | `"skill"` | `"both"`, default `"both"`). **When both prompt and skill files are available, optimize both** — treat them as one textual surface and route each textual-failure cluster to whichever artifact most naturally owns it (broad scaffold/format → base prompt; reusable task-specific procedure → a skill). **Narrow to a single artifact only when the user's task or `optimization_target` says so.** Skills apply only to agentic (MCP-enabled) chains; if a tenant has no skill files, ignore this level entirely and proceed exactly as before.
 
 ## Level-Transition Workflow
 
@@ -83,6 +85,20 @@ When creating new prompt variants:
 - **Maintain scorer compatibility**: ensure output requirements in the prompt match the active eval checks. Read the scorer code to verify.
 - **Separate eval config per variant**: create a separate eval config copy for each variant (e.g., `config-variant-NNN.json`). Each eval auto-generates a unique `run_id`, enabling safe parallel execution with no output collisions.
 - **Always clone to a new variant file** — never edit existing variants in-place.
+
+## Skill Variant Writing Rules
+
+Skill files (`tenants/<tenant_id>/skills/<skill-name>/variant-NNN.md`) are optimized with the **same rules as prompts** — they are textual. In addition:
+
+- **One skill = one reusable procedure**: a skill captures generalizable know-how (e.g. how to handle a class of questions, how to sequence specific tools), not case-specific logic. Keep each skill focused on a single coherent capability.
+- **Preserve frontmatter**: keep the skill's YAML frontmatter (`name`, `description`) intact. The `name` must match the skill directory; the `description` is what the agent uses to know when the skill applies — refine it when you refine the body.
+- **No `${placeholder}` introduction in skills**: skill bodies are injected verbatim into the runtime `<available_skills>` context message (not rendered against the case context), so they must not introduce new placeholders.
+- **Same no-leakage rules as prompts**: no example-specific hints, no train-set examples, no case IDs.
+- **Update `skill_paths`, not the base prompt**: point the eval config's `chain.config.skill_paths` at the new skill variant; do not inline skill content back into the base prompt.
+- **Always clone to a new variant file** — never edit existing skill variants in-place.
+- **Skills require an agentic chain**: only create/iterate skills for MCP-enabled tenants whose `optimization_target` includes `skill` or `both`.
+
+When `optimization_target` is `both` and both artifacts exist, iterate prompt and skill variants as one textual level — branch each from the current best, and attribute textual-failure clusters to whichever artifact owns the concern (scaffold/format → base prompt; reusable procedure → skill).
 
 ## Chain Variant Writing Rules
 

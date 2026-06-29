@@ -12,6 +12,7 @@ Each tenant lives in `tenants/<tenant_id>/`:
 - `code/` tenant-specific conversion logic that produces unified JSONL datasets
 - `tests/` tenant-specific tests that validate tenant conversion/data assumptions
 - `prompts/variants/` tenant prompt variants
+- `skills/<skill-name>/` agent skill files for agentic tenants (optional; optimized as a textual level co-equal with prompts)
 - `evals/tmp` and `evals/archive` local eval outputs (not committed)
 - `configs/` local ephemeral eval configs (ignored, not committed)
 - `storage/config.json` tracked storage config for `customer-data` operations
