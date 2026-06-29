@@ -10,3 +10,9 @@ Route each question to the right Splunk MCP tool, and sequence multi-step calls 
 - **Metadata / knowledge objects**: prefer `splunk_get_metadata` for host/source/sourcetype inventories and `splunk_get_knowledge_objects` for saved searches, lookups, macros, etc.
 - **Instance health / version**: use `splunk_get_info`.
 - When the task asks to rank, compare, or single out a specific item (e.g. the largest / nearly-full one), do not stop after the listing step — gather the full candidate set, then drill into the specific items with their detail tool before answering. Treat the per-item detail call as mandatory, not optional.
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->

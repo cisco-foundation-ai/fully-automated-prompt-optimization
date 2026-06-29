@@ -10,3 +10,9 @@ Format the final answer (after the `Answer:` marker) to fully and decisively res
 - **Be exhaustive for list / inventory questions.** When asked to list "all" of something, present the complete set returned by the tool — do not show only "a few" or a sample. When the listing tool already returns the full set (users, saved searches, sourcetypes, the index list), report every item from that single response; you do NOT need a separate per-item call for each one. Summarize compactly so the full set fits in the answer.
 - **Be direct on yes/no questions.** Lead with a clear Yes or No grounded in the data, then give the supporting detail. For a conditional follow-up ("...and if so, which?"), answer both parts explicitly, including stating that none were found when that is the case. Avoid hedging words like "likely" or "might" when the evidence is already in the tool output.
 - **Match the requested structure.** When the task names or implies distinct parts (e.g. two named items to compare, or two phenomena to report), give each part its own `##` Markdown section heading using the wording from the task, so every requested part is clearly and separately covered.
+
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
