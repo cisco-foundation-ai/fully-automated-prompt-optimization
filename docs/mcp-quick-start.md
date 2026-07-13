@@ -30,7 +30,7 @@ What you get out of the box:
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .          # installs mcp>=1.0.0 and httpx as core deps
-export OPENAI_API_KEY="sk-..."
+export OPENAI_API_KEY="<your-openai-api-key>"
 ```
 
 The `mcp` SDK ships as a core dependency, so no extra install step is needed.
