@@ -1,0 +1,189 @@
+{
+  "name": "FAPO test-v006 reference",
+  "level": "difficult",
+  "model": "gpt-4o-mini",
+  "source_run": "test-v006",
+  "source_note": "Actual FAPO test-v006 results for the difficult mini challenge subset.",
+  "cases": [
+    {
+      "case_id": "swc_test_004",
+      "software_name": "Nebula",
+      "expected": "network_and_remote_access",
+      "prediction": "network_and_remote_access",
+      "output_text": "network_and_remote_access",
+      "diagnostics": [
+        "expected=network_and_remote_access",
+        "actual=network_and_remote_access"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_017",
+      "software_name": "Commix",
+      "expected": "exposure_testing",
+      "prediction": "exposure_testing",
+      "output_text": "exposure_testing",
+      "diagnostics": [
+        "expected=exposure_testing",
+        "actual=exposure_testing"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_026",
+      "software_name": "Unison",
+      "expected": "data_transfer_and_sync",
+      "prediction": "data_transfer_and_sync",
+      "output_text": "data_transfer_and_sync",
+      "diagnostics": [
+        "expected=data_transfer_and_sync",
+        "actual=data_transfer_and_sync"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_033",
+      "software_name": "Firecracker",
+      "expected": "runtime_and_server_stack",
+      "prediction": "runtime_and_server_stack",
+      "output_text": "runtime_and_server_stack",
+      "diagnostics": [
+        "expected=runtime_and_server_stack",
+        "actual=runtime_and_server_stack"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_048",
+      "software_name": "Rime",
+      "expected": "user_endpoint_clients",
+      "prediction": "general_utility_other",
+      "output_text": "general_utility_other",
+      "diagnostics": [
+        "expected=user_endpoint_clients",
+        "actual=general_utility_other"
+      ],
+      "score_breakdown": {
+        "f1": 0.0,
+        "exact_match": 0.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 0.0
+    },
+    {
+      "case_id": "swc_test_052",
+      "software_name": "Mimikatz",
+      "expected": "sensitive_key_material",
+      "prediction": "sensitive_key_material",
+      "output_text": "sensitive_key_material",
+      "diagnostics": [
+        "expected=sensitive_key_material",
+        "actual=sensitive_key_material"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_061",
+      "software_name": "LuLu",
+      "expected": "security_posture_changes",
+      "prediction": "security_posture_changes",
+      "output_text": "security_posture_changes",
+      "diagnostics": [
+        "expected=security_posture_changes",
+        "actual=security_posture_changes"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_066",
+      "software_name": "Privatezilla",
+      "expected": "security_posture_changes",
+      "prediction": "security_posture_changes",
+      "output_text": "security_posture_changes",
+      "diagnostics": [
+        "expected=security_posture_changes",
+        "actual=security_posture_changes"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_072",
+      "software_name": "CopyQ",
+      "expected": "general_utility_other",
+      "prediction": "general_utility_other",
+      "output_text": "general_utility_other",
+      "diagnostics": [
+        "expected=general_utility_other",
+        "actual=general_utility_other"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_078",
+      "software_name": "Pandoc",
+      "expected": "general_utility_other",
+      "prediction": "general_utility_other",
+      "output_text": "general_utility_other",
+      "diagnostics": [
+        "expected=general_utility_other",
+        "actual=general_utility_other"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    }
+  ]
+}

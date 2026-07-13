@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>FAPO Mini Challenge</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand-title">
+        <img class="brand-logo" src="/assets/fapo-explorer-logo.webp" alt="" aria-hidden="true">
+        <h1>FAPO Mini Challenge</h1>
+      </div>
+      <div class="score-strip" aria-label="score comparison">
+        <div>
+          <span class="label">Manual</span>
+          <strong id="manual-score">--</strong>
+        </div>
+        <div>
+          <span class="label">FAPO v006</span>
+          <strong id="fapo-score">--</strong>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <section class="level-panel" aria-label="mini challenge levels">
+        <div id="level-tabs" class="level-tabs" role="tablist" aria-label="challenge level"></div>
+        <div id="allowed-labels" class="allowed-labels"></div>
+      </section>
+
+      <section class="panel training-panel">
+        <div class="panel-heading">
+          <h2>Training Ground Truth</h2>
+          <div class="filters">
+            <input id="search-input" aria-label="search training software" placeholder="Search software">
+            <select id="label-filter" aria-label="filter by label">
+              <option value="">All labels</option>
+            </select>
+          </div>
+        </div>
+        <div class="training-board-wrap">
+          <div id="training-board" class="training-board"></div>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <div class="panel prompt-panel">
+          <div class="panel-heading">
+            <h2>Prompt</h2>
+            <input id="model-input" aria-label="model" value="gpt-4o-mini">
+          </div>
+          <textarea id="prompt-input" spellcheck="false"></textarea>
+          <div class="actions">
+            <button id="run-button" type="button">Run Mini Eval</button>
+            <span id="status-text" role="status"></span>
+          </div>
+        </div>
+
+        <div class="panel subset-panel">
+          <div class="panel-heading">
+            <h2>Mini Test Subset</h2>
+            <span id="subset-count" class="subtle"></span>
+          </div>
+          <div id="mini-test-list" class="mini-list"></div>
+          <p id="fapo-note" class="note"></p>
+        </div>
+      </section>
+
+      <section id="verdict-card" class="verdict-card" aria-live="polite" hidden>
+        <div>
+          <p id="verdict-kicker" class="verdict-kicker"></p>
+          <h2 id="verdict-title"></h2>
+          <p id="verdict-quote" class="verdict-quote"></p>
+        </div>
+        <div class="verdict-scoreline">
+          <span>Manual <strong id="verdict-manual-score">--</strong></span>
+          <span>FAPO v006 <strong id="verdict-fapo-score">--</strong></span>
+        </div>
+      </section>
+
+      <section class="panel results-panel">
+        <div class="panel-heading">
+          <h2>Comparison</h2>
+          <span id="result-summary" class="subtle"></span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Software</th>
+                <th>Expected</th>
+                <th>Manual</th>
+                <th>FAPO</th>
+                <th>Result</th>
+              </tr>
+            </thead>
+            <tbody id="results-body">
+              <tr>
+                <td colspan="5" class="empty">Run the mini eval to populate results.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

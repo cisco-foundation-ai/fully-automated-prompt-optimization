@@ -1,0 +1,189 @@
+{
+  "name": "FAPO test-v006 reference",
+  "level": "medium",
+  "model": "gpt-4o-mini",
+  "source_run": "test-v006",
+  "source_note": "Actual FAPO test-v006 results for the medium mini challenge subset.",
+  "cases": [
+    {
+      "case_id": "swc_test_004",
+      "software_name": "Nebula",
+      "expected": "network_and_remote_access",
+      "prediction": "network_and_remote_access",
+      "output_text": "network_and_remote_access",
+      "diagnostics": [
+        "expected=network_and_remote_access",
+        "actual=network_and_remote_access"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_009",
+      "software_name": "Chisel",
+      "expected": "network_and_remote_access",
+      "prediction": "network_and_remote_access",
+      "output_text": "network_and_remote_access",
+      "diagnostics": [
+        "expected=network_and_remote_access",
+        "actual=network_and_remote_access"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_010",
+      "software_name": "Ligolo-ng",
+      "expected": "network_and_remote_access",
+      "prediction": "network_and_remote_access",
+      "output_text": "network_and_remote_access",
+      "diagnostics": [
+        "expected=network_and_remote_access",
+        "actual=network_and_remote_access"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_017",
+      "software_name": "Commix",
+      "expected": "exposure_testing",
+      "prediction": "exposure_testing",
+      "output_text": "exposure_testing",
+      "diagnostics": [
+        "expected=exposure_testing",
+        "actual=exposure_testing"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_019",
+      "software_name": "Vuls",
+      "expected": "exposure_testing",
+      "prediction": "exposure_testing",
+      "output_text": "exposure_testing",
+      "diagnostics": [
+        "expected=exposure_testing",
+        "actual=exposure_testing"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_020",
+      "software_name": "Scout Suite",
+      "expected": "exposure_testing",
+      "prediction": "exposure_testing",
+      "output_text": "exposure_testing",
+      "diagnostics": [
+        "expected=exposure_testing",
+        "actual=exposure_testing"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_026",
+      "software_name": "Unison",
+      "expected": "data_transfer_and_sync",
+      "prediction": "data_transfer_and_sync",
+      "output_text": "data_transfer_and_sync",
+      "diagnostics": [
+        "expected=data_transfer_and_sync",
+        "actual=data_transfer_and_sync"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_030",
+      "software_name": "Magic Wormhole",
+      "expected": "data_transfer_and_sync",
+      "prediction": "data_transfer_and_sync",
+      "output_text": "data_transfer_and_sync",
+      "diagnostics": [
+        "expected=data_transfer_and_sync",
+        "actual=data_transfer_and_sync"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_071",
+      "software_name": "Barrier",
+      "expected": "general_utility_other",
+      "prediction": "network_and_remote_access",
+      "output_text": "network_and_remote_access",
+      "diagnostics": [
+        "expected=general_utility_other",
+        "actual=network_and_remote_access"
+      ],
+      "score_breakdown": {
+        "f1": 0.0,
+        "exact_match": 0.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 0.0
+    },
+    {
+      "case_id": "swc_test_078",
+      "software_name": "Pandoc",
+      "expected": "general_utility_other",
+      "prediction": "general_utility_other",
+      "output_text": "general_utility_other",
+      "diagnostics": [
+        "expected=general_utility_other",
+        "actual=general_utility_other"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    }
+  ]
+}
