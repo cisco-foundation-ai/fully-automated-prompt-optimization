@@ -49,6 +49,16 @@ Then prompt FAPO to optimize the example tenant. For example:
 Optimize the software_name_categorization tenant until composite score on test set reaches 90.
 ```
 
+## Mini Challenge
+
+A standalone manual prompt-tuning mini challenge is available at
+`mini_challenge/`.
+
+It includes a 10-case test subset, a command-line evaluator, a training dataset
+viewer, easy/medium/difficult level selection, and a local UI that compares a
+manually tuned prompt against bundled FAPO v006 results. The mini challenge is
+decoupled from FAPO and can be run directly from that folder.
+
 ## Rules
 
 - You can use the provided example tenant, or prompt FAPO to create a tenant
