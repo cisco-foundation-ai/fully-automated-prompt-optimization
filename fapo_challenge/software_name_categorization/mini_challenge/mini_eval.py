@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Standalone evaluator for the software-name mini challenge."""
 
 from __future__ import annotations
