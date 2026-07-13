@@ -16,6 +16,9 @@ tenants/*/configs/**
 !tenants/skill_example/configs/
 !tenants/skill_example/configs/**
 !tenants/*/configs/.gitkeep
+!tenants/*/configs/train.json
+!tenants/*/configs/eval.json
+!tenants/*/configs/test.json
 !tenants/hotpotqa/configs/local-chain-variant001.json
 !tenants/hotpotqa/configs/remote-chain-variant001.json
 !tenants/hotpotqa/configs/local-chain-variant001-train.json
