@@ -1,0 +1,32 @@
+{
+  "tenant_id": "software_name_categorization",
+  "provider": "openai",
+  "provider_settings": {
+    "model": "gpt-4o-mini",
+    "temperature": 0.0,
+    "max_tokens": 32,
+    "timeout_seconds": 120,
+    "max_retries": 2
+  },
+  "dataset": {
+    "path": "tenants/software_name_categorization/datasets/datasets/eval.jsonl"
+  },
+  "chain": {
+    "path": "tenants/software_name_categorization/chains/classify.py",
+    "fn": "build_chain",
+    "config": {
+      "prompt_paths": {
+        "classify": "tenants/software_name_categorization/prompts/modules/classify/variant-001.md"
+      },
+      "optimization_target": "prompt"
+    }
+  },
+  "scoring_profile": {
+    "scorer": {
+      "module_path": "tenants/software_name_categorization/code/scorers/category_scorer.py",
+      "class_name": "Scorer"
+    }
+  },
+  "output_dir": "tenants/software_name_categorization/evals/eval"
+}
+
