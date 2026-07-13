@@ -1,0 +1,189 @@
+{
+  "name": "FAPO test-v006 reference",
+  "level": "easy",
+  "model": "gpt-4o-mini",
+  "source_run": "test-v006",
+  "source_note": "Actual FAPO test-v006 results for the easy mini challenge subset.",
+  "cases": [
+    {
+      "case_id": "swc_test_001",
+      "software_name": "Remmina",
+      "expected": "network_and_remote_access",
+      "prediction": "network_and_remote_access",
+      "output_text": "network_and_remote_access",
+      "diagnostics": [
+        "expected=network_and_remote_access",
+        "actual=network_and_remote_access"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_003",
+      "software_name": "MeshCentral",
+      "expected": "network_and_remote_access",
+      "prediction": "network_and_remote_access",
+      "output_text": "network_and_remote_access",
+      "diagnostics": [
+        "expected=network_and_remote_access",
+        "actual=network_and_remote_access"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_004",
+      "software_name": "Nebula",
+      "expected": "network_and_remote_access",
+      "prediction": "network_and_remote_access",
+      "output_text": "network_and_remote_access",
+      "diagnostics": [
+        "expected=network_and_remote_access",
+        "actual=network_and_remote_access"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_005",
+      "software_name": "NetBird",
+      "expected": "network_and_remote_access",
+      "prediction": "network_and_remote_access",
+      "output_text": "network_and_remote_access",
+      "diagnostics": [
+        "expected=network_and_remote_access",
+        "actual=network_and_remote_access"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_009",
+      "software_name": "Chisel",
+      "expected": "network_and_remote_access",
+      "prediction": "network_and_remote_access",
+      "output_text": "network_and_remote_access",
+      "diagnostics": [
+        "expected=network_and_remote_access",
+        "actual=network_and_remote_access"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_071",
+      "software_name": "Barrier",
+      "expected": "general_utility_other",
+      "prediction": "network_and_remote_access",
+      "output_text": "network_and_remote_access",
+      "diagnostics": [
+        "expected=general_utility_other",
+        "actual=network_and_remote_access"
+      ],
+      "score_breakdown": {
+        "f1": 0.0,
+        "exact_match": 0.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 0.0
+    },
+    {
+      "case_id": "swc_test_072",
+      "software_name": "CopyQ",
+      "expected": "general_utility_other",
+      "prediction": "general_utility_other",
+      "output_text": "general_utility_other",
+      "diagnostics": [
+        "expected=general_utility_other",
+        "actual=general_utility_other"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_074",
+      "software_name": "Rectangle",
+      "expected": "general_utility_other",
+      "prediction": "general_utility_other",
+      "output_text": "general_utility_other",
+      "diagnostics": [
+        "expected=general_utility_other",
+        "actual=general_utility_other"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_078",
+      "software_name": "Pandoc",
+      "expected": "general_utility_other",
+      "prediction": "general_utility_other",
+      "output_text": "general_utility_other",
+      "diagnostics": [
+        "expected=general_utility_other",
+        "actual=general_utility_other"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    },
+    {
+      "case_id": "swc_test_080",
+      "software_name": "BleachBit",
+      "expected": "general_utility_other",
+      "prediction": "general_utility_other",
+      "output_text": "general_utility_other",
+      "diagnostics": [
+        "expected=general_utility_other",
+        "actual=general_utility_other"
+      ],
+      "score_breakdown": {
+        "f1": 100.0,
+        "exact_match": 100.0,
+        "valid_label": 100.0,
+        "strict_format": 100.0
+      },
+      "composite_score": 100.0
+    }
+  ]
+}
