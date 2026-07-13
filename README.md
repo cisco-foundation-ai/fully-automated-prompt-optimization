@@ -10,6 +10,8 @@ SPDX-License-Identifier: Apache-2.0
 [![CI](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/actions/workflows/ci.yml/badge.svg)](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/actions/workflows/ci.yml)
 [![arXiv](https://img.shields.io/badge/arXiv-2606.19605-b31b1b.svg)](https://arxiv.org/abs/2606.19605)
 
+Demo video link: https://youtu.be/QG5mFbypNaI
+
 An optimization framework for multi-step LLM pipelines. FAPO uses [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as an autonomous optimizer that iteratively improves prompts, agent skills, parameters, and chain architecture — guided by built-in evaluation, step-level failure analysis, and a structured variant system.
 
 FAPO provides the full loop: **evaluate** a chain against a dataset, **analyze** what went wrong using step attribution, **create** a better variant, and **measure** whether it improved. The evaluation infrastructure exists to drive and measure optimization — not as an end in itself.
@@ -114,7 +116,7 @@ User: ${question}
 ### 3. Run a baseline eval
 
 ```bash
-export OPENAI_API_KEY="sk-..."
+export OPENAI_API_KEY="<your-openai-api-key>"
 python -m hephaestus.cli eval --config eval.json
 cat eval_output/summary.md
 ```

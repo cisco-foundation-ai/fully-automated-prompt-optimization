@@ -49,7 +49,7 @@ stdio subprocesses. The config bridges the two with `npx mcp-remote`, so you nee
 - **`SPLUNK_MCP_TOKEN`** — a Splunk auth token (sent as `Authorization: Bearer ...`).
 
 ```bash
-export OPENAI_API_KEY=sk-...
+export OPENAI_API_KEY="<your-openai-api-key>"
 export SPLUNK_MCP_URL="https://<your-splunk-host>/.../mcp"
 export SPLUNK_MCP_TOKEN="<your-splunk-token>"
 ```

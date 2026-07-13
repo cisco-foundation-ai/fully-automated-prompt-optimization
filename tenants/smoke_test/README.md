@@ -15,5 +15,5 @@ questions so the eval pipeline can be verified end-to-end without domain experti
 ## Running the smoke test
 
 ```bash
-OPENAI_API_KEY=sk-... pytest -m integration -v
+OPENAI_API_KEY="<your-openai-api-key>" pytest -m integration -v
 ```
