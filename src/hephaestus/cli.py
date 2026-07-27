@@ -63,6 +63,120 @@ def build_parser() -> argparse.ArgumentParser:
         help="Required confirmation for local data removal.",
     )
 
+    assets_parser = subparsers.add_parser(
+        "assets",
+        help="Create generic evaluation assets from prepared tenant-local data",
+    )
+    assets_subparsers = assets_parser.add_subparsers(dest="assets_command", required=True)
+
+    intent_parser = assets_subparsers.add_parser(
+        "intent-inventory",
+        help="Cluster prepared intent records and match them to trusted intents",
+    )
+    intent_parser.add_argument("--records", required=True, help="Prepared intent-record JSONL")
+    intent_parser.add_argument("--trusted-intents", required=True, help="Trusted intent JSONL")
+    intent_parser.add_argument("--output-dir", required=True, help="Output directory")
+    intent_parser.add_argument("--id-field", required=True, help="Dot path for record id")
+    intent_parser.add_argument(
+        "--text-field",
+        action="append",
+        required=True,
+        help="Dot path to include in canonical intent text; repeatable",
+    )
+    intent_parser.add_argument("--route-field", default=None, help="Optional dot path for route")
+    intent_parser.add_argument("--group-field", default=None, help="Optional dot path for group id")
+    intent_parser.add_argument(
+        "--vectorizer",
+        choices=("tfidf", "openai"),
+        default="openai",
+        help="Vectorizer for clustering and matching (default: openai)",
+    )
+    intent_parser.add_argument("--embedding-model", default="text-embedding-3-small")
+    intent_parser.add_argument("--embedding-batch-size", type=int, default=128)
+    intent_parser.add_argument("--embedding-timeout-seconds", type=int, default=300)
+    intent_parser.add_argument("--embedding-max-retries", type=int, default=3)
+    intent_parser.add_argument("--embedding-retry-backoff-seconds", type=int, default=2)
+    intent_parser.add_argument("--similarity-threshold", type=float, default=0.35)
+    intent_parser.add_argument("--match-threshold", type=float, default=0.35)
+    intent_parser.add_argument("--min-trusted-examples", type=int, default=1)
+    intent_parser.add_argument("--min-trusted-groups", type=int, default=0)
+    intent_parser.add_argument("--large-cluster-size", type=int, default=0)
+    intent_parser.add_argument("--min-trusted-examples-for-large-cluster", type=int, default=0)
+    intent_parser.add_argument("--max-unlabeled-to-trusted-ratio", type=float, default=None)
+
+    assemble_parser = assets_subparsers.add_parser(
+        "assemble",
+        help="Assemble versioned FAPO split files from prepared case JSONL",
+    )
+    assemble_parser.add_argument("--trusted-cases", required=True, help="Trusted FAPO cases JSONL")
+    assemble_parser.add_argument("--synthetic-cases", required=True, help="Synthetic FAPO cases JSONL")
+    assemble_parser.add_argument("--output-dir", required=True, help="Output directory")
+    assemble_parser.add_argument("--dataset-version", required=True, help="Dataset version label")
+    assemble_parser.add_argument("--regression-cases", default=None, help="Regression FAPO cases JSONL")
+    assemble_parser.add_argument("--triage-cases", default=None, help="Triage-hold FAPO cases JSONL")
+    assemble_parser.add_argument("--group-field", default="metadata.group_id")
+    assemble_parser.add_argument("--train-fraction", type=float, default=0.6)
+    assemble_parser.add_argument("--validation-fraction", type=float, default=0.2)
+    assemble_parser.add_argument("--test-fraction", type=float, default=0.2)
+    assemble_parser.add_argument("--seed", type=int, default=42)
+
+    create_asset_parser = assets_subparsers.add_parser(
+        "create",
+        help="Create a self-contained evaluation asset workspace",
+    )
+    create_asset_parser.add_argument("--tenant", required=True)
+    create_asset_parser.add_argument(
+        "--feedback",
+        required=True,
+        help="Labeled JSONL using fapo-evaluation-input-v1",
+    )
+    create_asset_parser.add_argument(
+        "--unlabeled",
+        required=True,
+        help="Unlabeled JSONL using fapo-evaluation-input-v1",
+    )
+    create_asset_parser.add_argument("--asset-id", default="v1")
+    create_asset_parser.add_argument("--tenants-root", default="tenants")
+    create_asset_parser.add_argument("--rubric-model", default="gpt-5.5")
+    create_asset_parser.add_argument(
+        "--embedding-model",
+        default="text-embedding-3-small",
+    )
+    create_asset_parser.add_argument("--clusters", type=int, default=50)
+    create_asset_parser.add_argument(
+        "--match-threshold",
+        type=float,
+        default=0.6,
+        help="Minimum Stage 5 cluster-to-trusted-intent cosine score",
+    )
+    create_asset_parser.add_argument(
+        "--enable-synthetic-coverage",
+        action="store_true",
+        help="Enable optional Stage 7 synthetic case generation",
+    )
+    create_asset_parser.add_argument(
+        "--synthetic-cases-per-cluster",
+        type=int,
+        default=1,
+        help="Synthetic cases to request for each supported cluster",
+    )
+
+    run_asset_parser = assets_subparsers.add_parser(
+        "run",
+        help="Run or resume a core evaluation asset pipeline",
+    )
+    run_asset_parser.add_argument("--tenant", required=True)
+    run_asset_parser.add_argument("--asset-id", default="v1")
+    run_asset_parser.add_argument("--tenants-root", default="tenants")
+
+    status_asset_parser = assets_subparsers.add_parser(
+        "status",
+        help="Read persisted evaluation asset pipeline progress",
+    )
+    status_asset_parser.add_argument("--tenant", required=True)
+    status_asset_parser.add_argument("--asset-id", default="v1")
+    status_asset_parser.add_argument("--tenants-root", default="tenants")
+
     return parser
 
 
@@ -160,6 +274,216 @@ def main() -> None:
             return
 
         raise ValueError(f"Unsupported customer-data command: {args.customer_data_command}")
+
+    if args.command == "assets":
+        if args.assets_command == "create":
+            import json as json_mod
+
+            from src.hephaestus.evaluation_assets.models import EvaluationAssetConfig
+            from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
+
+            config = EvaluationAssetConfig(
+                tenant_id=args.tenant,
+                asset_id=args.asset_id,
+                rubric_model=args.rubric_model,
+                embedding_provider=(
+                    "tfidf" if args.embedding_model == "tfidf" else "openai"
+                ),
+                embedding_model=args.embedding_model,
+                cluster_count=args.clusters,
+                match_threshold=args.match_threshold,
+                synthetic_coverage_enabled=args.enable_synthetic_coverage,
+                synthetic_cases_per_cluster=args.synthetic_cases_per_cluster,
+            )
+            layout = EvaluationAssetLayout(
+                Path(args.tenants_root),
+                args.tenant,
+                args.asset_id,
+            )
+            state = layout.initialize(
+                config,
+                Path(args.feedback),
+                Path(args.unlabeled),
+            )
+            print(json_mod.dumps(state.to_dict(), indent=2, sort_keys=True))
+            print(f"Evaluation asset workspace created at {layout.root}")
+            return
+
+        if args.assets_command == "run":
+            import json as json_mod
+
+            from src.hephaestus.evaluation_assets.pipeline import EvaluationAssetPipeline
+            from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
+
+            layout = EvaluationAssetLayout(
+                Path(args.tenants_root),
+                args.tenant,
+                args.asset_id,
+            )
+            state = EvaluationAssetPipeline(layout).run()
+            print(json_mod.dumps(state.to_dict(), indent=2, sort_keys=True))
+            return
+
+        if args.assets_command == "status":
+            import json as json_mod
+
+            from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
+
+            layout = EvaluationAssetLayout(
+                Path(args.tenants_root),
+                args.tenant,
+                args.asset_id,
+            )
+            print(json_mod.dumps(layout.load_state().to_dict(), indent=2, sort_keys=True))
+            return
+
+        if args.assets_command == "intent-inventory":
+            from src.hephaestus.datasets.embedding_providers import OpenAIEmbeddingProvider
+            from src.hephaestus.datasets.evaluation_assets import write_coverage_report, write_jsonl
+            from src.hephaestus.datasets.intent_assets import (
+                CoveragePolicy,
+                IntentInventory,
+                build_intent_inventory,
+                build_intent_match_texts,
+                cluster_records,
+                cluster_to_dict,
+                dense_vectors_to_sparse,
+                load_intent_records_from_jsonl,
+                load_trusted_intents_from_jsonl,
+                match_clusters_to_trusted_intents,
+                match_to_dict,
+            )
+
+            output_dir = Path(args.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            records = load_intent_records_from_jsonl(
+                Path(args.records),
+                id_field=args.id_field,
+                text_fields=args.text_field,
+                route_field=args.route_field,
+                group_field=args.group_field,
+            )
+            trusted = load_trusted_intents_from_jsonl(Path(args.trusted_intents))
+            coverage_policy = CoveragePolicy(
+                min_match_score=args.match_threshold,
+                min_trusted_examples=args.min_trusted_examples,
+                min_trusted_groups=args.min_trusted_groups,
+                large_cluster_size=args.large_cluster_size,
+                min_trusted_examples_for_large_cluster=args.min_trusted_examples_for_large_cluster,
+                max_unlabeled_to_trusted_ratio=args.max_unlabeled_to_trusted_ratio,
+            )
+            if args.vectorizer == "openai":
+                embedding_provider = OpenAIEmbeddingProvider(
+                    model=args.embedding_model,
+                    batch_size=args.embedding_batch_size,
+                    timeout_seconds=args.embedding_timeout_seconds,
+                    max_retries=args.embedding_max_retries,
+                    retry_backoff_seconds=args.embedding_retry_backoff_seconds,
+                )
+                record_ids = [record.record_id for record in records]
+                record_vectors = dense_vectors_to_sparse(
+                    record_ids,
+                    embedding_provider.embed_texts([record.text for record in records]),
+                )
+                clusters = cluster_records(
+                    records,
+                    similarity_threshold=args.similarity_threshold,
+                    vectors=record_vectors,
+                )
+                match_texts = build_intent_match_texts(clusters, records, trusted)
+                match_keys = list(match_texts)
+                match_vectors = dense_vectors_to_sparse(
+                    match_keys,
+                    embedding_provider.embed_texts([match_texts[key] for key in match_keys]),
+                )
+                matches = match_clusters_to_trusted_intents(
+                    clusters,
+                    records,
+                    trusted,
+                    coverage_policy=coverage_policy,
+                    vectors=match_vectors,
+                )
+                inventory = IntentInventory(clusters=clusters, matches=matches)
+            else:
+                inventory = build_intent_inventory(
+                    records,
+                    trusted,
+                    similarity_threshold=args.similarity_threshold,
+                    match_threshold=args.match_threshold,
+                    coverage_policy=coverage_policy,
+                )
+            inventory_path = output_dir / "intent_inventory.jsonl"
+            matches_path = output_dir / "intent_matches.jsonl"
+            report_path = output_dir / "coverage_report.md"
+            write_jsonl(inventory_path, [cluster_to_dict(item) for item in inventory.clusters])
+            write_jsonl(matches_path, [match_to_dict(item) for item in inventory.matches])
+            write_coverage_report(report_path, inventory.clusters, inventory.matches)
+            print(
+                f"Wrote {len(inventory.clusters)} clusters and "
+                f"{len(inventory.matches)} matches to {output_dir}"
+            )
+            return
+
+        if args.assets_command == "assemble":
+            from src.hephaestus.datasets.evaluation_assets import (
+                assemble_dataset_bundle,
+                filter_synthetic_cases,
+                load_fapo_cases,
+                sha256_file,
+                synthetic_issue_to_dict,
+                write_jsonl,
+            )
+
+            trusted_path = Path(args.trusted_cases)
+            synthetic_path = Path(args.synthetic_cases)
+            regression_path = Path(args.regression_cases) if args.regression_cases else None
+            triage_path = Path(args.triage_cases) if args.triage_cases else None
+
+            trusted_cases = load_fapo_cases(trusted_path)
+            synthetic_candidates = load_fapo_cases(synthetic_path)
+            regression_cases = load_fapo_cases(regression_path) if regression_path else []
+            triage_cases = load_fapo_cases(triage_path) if triage_path else []
+            filtered = filter_synthetic_cases(
+                synthetic_candidates,
+                existing_cases=trusted_cases,
+            )
+            source_hashes = {
+                "trusted_cases": sha256_file(trusted_path),
+                "synthetic_cases": sha256_file(synthetic_path),
+            }
+            if regression_path:
+                source_hashes["regression_cases"] = sha256_file(regression_path)
+            if triage_path:
+                source_hashes["triage_cases"] = sha256_file(triage_path)
+
+            manifest = assemble_dataset_bundle(
+                output_dir=Path(args.output_dir),
+                dataset_version=args.dataset_version,
+                trusted_cases=trusted_cases,
+                synthetic_cases=filtered.accepted,
+                regression_cases=regression_cases,
+                triage_cases=triage_cases,
+                group_path=args.group_field,
+                train_fraction=args.train_fraction,
+                validation_fraction=args.validation_fraction,
+                test_fraction=args.test_fraction,
+                seed=args.seed,
+                source_hashes=source_hashes,
+            )
+            output_dir = Path(args.output_dir)
+            write_jsonl(output_dir / "rejected_synthetic.jsonl", filtered.rejected)
+            write_jsonl(
+                output_dir / "synthetic_filter_issues.jsonl",
+                [synthetic_issue_to_dict(issue) for issue in filtered.issues],
+            )
+            rejected_count = len(filtered.rejected)
+            print(
+                f"Wrote dataset bundle {manifest.dataset_version} to {args.output_dir}; "
+                f"accepted synthetic={len(filtered.accepted)} rejected synthetic={rejected_count}"
+            )
+            return
+
+        raise ValueError(f"Unsupported assets command: {args.assets_command}")
 
     raise ValueError(f"Unsupported command: {args.command}")
 

@@ -27,6 +27,7 @@ Claude Code and Codex use parallel prompt sets. Users running Claude Code should
 | Step Attribution | `.claude/agents/step-attribution.md` | `.codex/agents/step-attribution.md` | Internal failure attribution phase after eval runs |
 | Variant Reviewer | `.claude/agents/variant-reviewer.md` | `.codex/agents/variant-reviewer.md` | Independent guardrail check on proposed variants before eval |
 | Eval Runner | `.claude/commands/eval-runner.md` | `.codex/commands/eval-runner.md` | Runs evaluations and returns score summaries |
+| Evaluation Asset Assistant | `.claude/agents/evaluation-asset-creator.md` | `.codex/agents/evaluation-asset-creator.md` | Triggers and monitors the shared core evaluation-asset pipeline, validates its eight checkpointed stages and artifacts, diagnoses failures, and explains review decisions |
 
 ### Data Tools
 
@@ -34,6 +35,18 @@ Claude Code and Codex use parallel prompt sets. Users running Claude Code should
 |-----------|------------------|------------|------|
 | Synthetic Samples | `.claude/commands/synthetic-samples.md` | `.codex/commands/synthetic-samples.md` | Creates synthetic examples for dataset augmentation |
 | Synthetic Pruner | `.claude/commands/synthetic-pruner.md` | `.codex/commands/synthetic-pruner.md` | Validates and cleans synthetic data |
+
+### Dataset Process References
+
+| Process | Reference | Role |
+|---------|-----------|------|
+| Evaluation Input Contract | `docs/processes/evaluation-input-contract.md` | Defines the vendor-neutral labeled and unlabeled JSONL boundary required before asset creation |
+| Feedback and Unlabeled Trace Dataset Flow | `docs/processes/feedback-dataset-flow.md` | Converts trusted feedback plus unlabeled trace distributions into versioned train, validation, test, and regression datasets |
+
+Evaluation asset preparation precedes the optimization loop. The shared core,
+not the assistant prompt, owns normalization, rubric extraction, clustering,
+coverage decisions, label inference, synthetic coverage, and dataset splitting.
+The resulting versioned splits become inputs to optimization and evaluation.
 
 ### Operational Tools
 

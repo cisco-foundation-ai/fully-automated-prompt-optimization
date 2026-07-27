@@ -39,6 +39,8 @@ Codex does not use Claude Code slash commands directly. When a user asks for a F
 - Reset tenant: `.codex/commands/reset-tenant.md`
 - Internal failure attribution phase: `.codex/agents/step-attribution.md`
 - Internal variant review phase: `.codex/agents/variant-reviewer.md`
+- Evaluation asset creation and monitoring:
+  `.codex/agents/evaluation-asset-creator.md`
 
 For repeated autonomous optimization rounds, use:
 

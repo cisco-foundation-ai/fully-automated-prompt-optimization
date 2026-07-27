@@ -45,6 +45,7 @@ select = ["E", "F", "I", "W"]
 # The web UI frontend is a single inline HTML/JS document; line length limits
 # don't apply to embedded markup.
 "src/hephaestus/webui/frontend.py" = ["E501"]
+"src/hephaestus/webui/evaluation_assets_frontend.py" = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["hephaestus", "src"]

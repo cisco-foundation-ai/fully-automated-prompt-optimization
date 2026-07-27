@@ -21,6 +21,12 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from src.hephaestus.evaluation_assets.models import STAGE_LABELS, PipelineStage
+from src.hephaestus.evaluation_assets.workspace import (
+    EvaluationAssetLayout,
+    list_asset_layouts,
+)
+
 # Directory names probed inside each tenant when listing eval runs. The repo
 # convention is ``evals/``, but eval configs can point output_dir anywhere, so
 # we probe a few common spellings.
@@ -38,6 +44,38 @@ _CONFIG_DIRS = ("config", "configs")
 # and skills are both optimizable markdown, so they live together here. Adding a
 # new asset subtree is just a new entry — discovery is otherwise path-agnostic.
 _PROMPT_ASSET_DIRS = (("prompts", "prompt"), ("skills", "skill"))
+
+_EVALUATION_STAGE_PATTERNS = {
+    "raw_inputs": ("raw_inputs/*.jsonl",),
+    "prepared_inputs": (
+        "prepared_inputs/normalized_feedback.jsonl",
+        "prepared_inputs/intent_records.jsonl",
+    ),
+    "rubric_extraction": (
+        "decision_assets/feedback_rubrics.jsonl",
+        "prepared_inputs/trusted_intents.jsonl",
+        "prepared_inputs/trusted_cases.jsonl",
+    ),
+    "intent_clustering": ("decision_assets/intent_inventory.jsonl",),
+    "coverage_decisions": (
+        "decision_assets/intent_matches.jsonl",
+        "decision_assets/coverage_report.md",
+    ),
+    "label_inference": (
+        "decision_assets/inferred_unlabeled_cluster_rubrics.jsonl",
+        "decision_assets/inferred_unlabeled_labels.jsonl",
+        "decision_assets/missing_labeled_feedback_clusters.jsonl",
+        "decision_assets/missing_labeled_feedback_report.md",
+        "prepared_inputs/inferred_cases.jsonl",
+    ),
+    "synthetic_coverage": (
+        "decision_assets/synthetic_candidates.jsonl",
+        "decision_assets/rejected_synthetic.jsonl",
+        "decision_assets/synthetic_filter_issues.jsonl",
+        "prepared_inputs/synthetic_cases.jsonl",
+    ),
+    "dataset_splits": ("dataset_splits/*",),
+}
 
 
 def _read_json(path: Path) -> Optional[Any]:
@@ -70,6 +108,113 @@ def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
     return rows
 
 
+def _evaluation_asset_preview(
+    path: Path,
+    tenant_dir: Path,
+    preview_limit: int,
+) -> Dict[str, Any]:
+    """Build a bounded preview for a known file inside an evaluation asset."""
+    relative_path = path.relative_to(tenant_dir).as_posix()
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    if path.suffix.lower() == ".jsonl":
+        rows: List[Any] = []
+        row_count = 0
+        try:
+            with path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    text = line.strip()
+                    if not text:
+                        continue
+                    row_count += 1
+                    if len(rows) >= preview_limit:
+                        continue
+                    try:
+                        rows.append(json.loads(text))
+                    except json.JSONDecodeError:
+                        rows.append(text)
+        except (OSError, UnicodeDecodeError):
+            pass
+        return {
+            "name": path.name,
+            "path": relative_path,
+            "kind": "jsonl",
+            "bytes": size,
+            "row_count": row_count,
+            "preview": rows,
+        }
+    if path.suffix.lower() == ".json":
+        content = _read_json(path)
+        return {
+            "name": path.name,
+            "path": relative_path,
+            "kind": "json",
+            "bytes": size,
+            "row_count": 1 if content is not None else 0,
+            "preview": [content] if content is not None else [],
+        }
+    text = _read_text(path) or ""
+    rendered_limit = 100_000
+    return {
+        "name": path.name,
+        "path": relative_path,
+        "kind": "markdown",
+        "bytes": size,
+        "row_count": None,
+        "preview": text[:4000],
+        "content": text[:rendered_limit],
+        "content_truncated": len(text) > rendered_limit,
+    }
+
+
+def _evaluation_cluster_summaries(
+    layout: EvaluationAssetLayout,
+    limit: int = 200,
+) -> List[Dict[str, Any]]:
+    """Return compact real cluster data separately from one-row file previews."""
+    inventory_path = layout.decision_assets / "intent_inventory.jsonl"
+    clusters = _read_jsonl(inventory_path)[:limit]
+    representative_ids = {
+        str(record_id)
+        for cluster in clusters
+        for record_id in cluster.get("representative_ids", [])
+    }
+    records_by_id = {
+        str(row.get("record_id")): row
+        for row in _read_jsonl(layout.prepared_inputs / "intent_records.jsonl")
+        if str(row.get("record_id")) in representative_ids
+    }
+    summaries = []
+    for cluster in clusters:
+        representatives = [
+            records_by_id.get(str(record_id), {})
+            for record_id in cluster.get("representative_ids", [])
+        ]
+        summaries.append(
+            {
+                "cluster_id": cluster.get("cluster_id"),
+                "route": cluster.get("route"),
+                "size": cluster.get("size", len(cluster.get("record_ids", []))),
+                "top_terms": cluster.get("top_terms", []),
+                "representatives": [
+                    row.get("user_input") or row.get("canonical_intent_text")
+                    for row in representatives
+                    if row
+                ],
+                "tools": sorted(
+                    {
+                        str(tool)
+                        for row in representatives
+                        for tool in row.get("tool_names", [])
+                    }
+                ),
+            }
+        )
+    return summaries
+
+
 class TenantStore:
     """Resolves and reads tenant artifacts under a single tenants root."""
 
@@ -85,7 +230,11 @@ class TenantStore:
             return None  # path traversal attempt
         if not candidate.is_dir():
             return None
-        if not (candidate / "__init__.py").exists() and not (candidate / "storage").exists():
+        if (
+            not (candidate / "__init__.py").exists()
+            and not (candidate / "storage").exists()
+            and not (candidate / "evaluation_assets").exists()
+        ):
             # Skip stray dirs like __pycache__.
             return None
         return candidate
@@ -104,6 +253,7 @@ class TenantStore:
                 continue
             runs = self._run_dirs(tenant_dir)
             iterations = self._iteration_rows(tenant_dir)
+            evaluation_assets = self.list_evaluation_assets(child.name)
             tenants.append(
                 {
                     "tenant_id": child.name,
@@ -114,6 +264,8 @@ class TenantStore:
                     "config_count": len(self._config_paths(tenant_dir)),
                     "doc_count": len(self._doc_paths(tenant_dir)),
                     "has_readme": (tenant_dir / "README.md").exists(),
+                    "evaluation_asset_count": len(evaluation_assets),
+                    "evaluation_asset": evaluation_assets[0] if evaluation_assets else None,
                 }
             )
         return tenants
@@ -163,6 +315,8 @@ class TenantStore:
                     "dataset_count": tenant["dataset_count"],
                     "doc_count": tenant["doc_count"],
                     "latest_run": latest,
+                    "evaluation_asset_count": tenant["evaluation_asset_count"],
+                    "evaluation_asset": tenant["evaluation_asset"],
                 }
             )
 
@@ -182,6 +336,85 @@ class TenantStore:
             "tenants": tenant_cards,
             "recent_runs": recent_runs[:8],
         }
+
+    def list_evaluation_assets(self, tenant_id: str) -> List[Dict[str, Any]]:
+        """List self-contained evaluation assets without reading tenant code/docs."""
+        tenant_dir = self._tenant_dir(tenant_id)
+        if tenant_dir is None:
+            return []
+        assets: List[Dict[str, Any]] = []
+        for layout in list_asset_layouts(self.root, tenant_id):
+            try:
+                config = layout.load_config().to_dict()
+                state = layout.load_state().to_dict()
+            except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                continue
+            assets.append(
+                {
+                    **layout.artifact_summary(),
+                    "config": config,
+                    "state": state,
+                }
+            )
+        return assets
+
+    def get_evaluation_asset_stage(
+        self,
+        tenant_id: str,
+        asset_id: str,
+        stage: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return one pipeline stage with safe, bounded artifact previews."""
+        tenant_dir = self._tenant_dir(tenant_id)
+        if tenant_dir is None or stage not in _EVALUATION_STAGE_PATTERNS:
+            return None
+        try:
+            layout = EvaluationAssetLayout(self.root, tenant_id, asset_id)
+            config = layout.load_config()
+            state = layout.load_state()
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            return None
+
+        stage_state = next(
+            (item for item in state.stages if item.stage == stage),
+            None,
+        )
+        artifacts = []
+        seen: set[Path] = set()
+        for pattern in _EVALUATION_STAGE_PATTERNS[stage]:
+            for path in sorted(layout.root.glob(pattern)):
+                resolved = path.resolve()
+                if (
+                    resolved in seen
+                    or layout.root.resolve() not in resolved.parents
+                    or not resolved.is_file()
+                ):
+                    continue
+                if resolved.suffix.lower() not in {".json", ".jsonl", ".md"}:
+                    continue
+                seen.add(resolved)
+                artifacts.append(
+                    _evaluation_asset_preview(
+                        resolved,
+                        tenant_dir,
+                        preview_limit=1,
+                    )
+                )
+
+        response = {
+            "stage": stage,
+            "label": STAGE_LABELS[PipelineStage(stage)],
+            "status": stage_state.status if stage_state else "pending",
+            "message": stage_state.message if stage_state else "",
+            "started_at": stage_state.started_at if stage_state else None,
+            "completed_at": stage_state.completed_at if stage_state else None,
+            "config": config.to_dict(),
+            "counts": state.counts,
+            "artifacts": artifacts,
+        }
+        if stage == "intent_clustering":
+            response["clusters"] = _evaluation_cluster_summaries(layout)
+        return response
 
     def _variants_tried(self, tenant_id: str) -> int:
         """Sum of ``variants_tried`` across a tenant's iteration records."""

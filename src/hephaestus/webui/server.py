@@ -4,12 +4,14 @@
 
 """Zero-dependency HTTP server for the local web UI.
 
-Serves a single-page app at ``/`` and a small read-only JSON API under
-``/api/``. Built on :mod:`http.server` so the UI requires no extra packages
-beyond the standard library.
+Serves the Explorer at ``/``, the Evaluation Asset Studio at
+``/evaluation-assets/``, and a small JSON API under ``/api/``. Built on
+:mod:`http.server` so the UI requires no extra packages beyond the standard
+library.
 
 Routes:
     GET /                                          -> SPA shell (HTML)
+    GET /evaluation-assets/                        -> asset studio (HTML)
     GET /api/overview?tenants=<a,b>                -> dashboard aggregates (filtered)
     GET /api/tenants                               -> [tenant summaries]
     GET /api/tenants/<t>/runs                      -> [run summaries]
@@ -24,6 +26,10 @@ Routes:
     GET /api/tenants/<t>/dataset?path=<rel>&offset=&limit=  -> dataset rows
     GET /api/tenants/<t>/docs                       -> [doc files]
     GET /api/tenants/<t>/doc?path=<rel>            -> doc content (markdown)
+    GET /api/tenants/<t>/evaluation-assets         -> asset pipeline summaries
+    GET /api/tenants/<t>/evaluation-assets/<a>/stages/<s> -> stage details
+    POST /api/evaluation-assets/start              -> create and run an asset
+    POST /api/tenants/<t>/evaluation-assets/<a>/resume -> resume a failed asset
 """
 
 from __future__ import annotations
@@ -34,14 +40,38 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
+from src.hephaestus.evaluation_assets.input_contract import input_contract_document
+from src.hephaestus.evaluation_assets.models import EvaluationAssetConfig
+from src.hephaestus.evaluation_assets.service import EvaluationAssetRunManager
 from src.hephaestus.webui.data import TenantStore
+from src.hephaestus.webui.evaluation_assets_frontend import EVALUATION_ASSET_HTML
 from src.hephaestus.webui.frontend import INDEX_HTML
 
 _LOGO_PATH = Path(__file__).with_name("assets") / "fapo-explorer-logo.webp"
 
+RUBRIC_MODELS = {
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.2",
+    "gpt-5.1",
+    "gpt-5",
+    "gpt-4.1",
+    "gpt-4.1-mini",
+    "gpt-4o",
+    "gpt-4o-mini",
+    "o3",
+    "o4-mini",
+}
+OPENAI_EMBEDDING_MODELS = {
+    "text-embedding-3-small",
+    "text-embedding-3-large",
+    "text-embedding-ada-002",
+}
+
 
 class _Handler(BaseHTTPRequestHandler):
     store: TenantStore  # injected via factory below
+    asset_manager: EvaluationAssetRunManager
 
     server_version = "HephaestusUI/0.1"
 
@@ -58,12 +88,24 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_html(INDEX_HTML)
             return
 
+        if path in (
+            "/evaluation-assets",
+            "/evaluation-assets/",
+            "/evaluation-assets/index.html",
+        ):
+            self._send_html(EVALUATION_ASSET_HTML)
+            return
+
         if path == "/assets/fapo-explorer-logo.webp":
             self._send_file(_LOGO_PATH, "image/webp")
             return
 
         if path == "/api/overview":
             self._send_json(self.store.overview(_overview_tenant_ids(query)))
+            return
+
+        if path == "/api/evaluation-assets/input-contract":
+            self._send_json(input_contract_document())
             return
 
         if path == "/api/tenants":
@@ -77,6 +119,20 @@ class _Handler(BaseHTTPRequestHandler):
                 return
 
         self._send_json({"error": "not found", "path": path}, status=404)
+
+    def do_POST(self) -> None:  # noqa: N802 (http.server API)
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/evaluation-assets/start":
+            self._route_start_evaluation_asset()
+            return
+        params = _match(
+            "/api/tenants/{tenant}/evaluation-assets/{asset}/resume",
+            parsed.path,
+        )
+        if params is not None:
+            self._route_resume_evaluation_asset(params)
+            return
+        self._send_json({"error": "not found", "path": parsed.path}, status=404)
 
     # -- route table -----------------------------------------------------
 
@@ -96,6 +152,14 @@ class _Handler(BaseHTTPRequestHandler):
             ("/api/tenants/{tenant}/dataset", _Handler._route_dataset),
             ("/api/tenants/{tenant}/docs", _Handler._route_docs),
             ("/api/tenants/{tenant}/doc", _Handler._route_doc),
+            (
+                "/api/tenants/{tenant}/evaluation-assets",
+                _Handler._route_evaluation_assets,
+            ),
+            (
+                "/api/tenants/{tenant}/evaluation-assets/{asset}/stages/{stage}",
+                _Handler._route_evaluation_asset_stage,
+            ),
         ]
 
     def _route_runs(self, params: Dict[str, str], query: Dict[str, List[str]]) -> None:
@@ -165,6 +229,103 @@ class _Handler(BaseHTTPRequestHandler):
         data = self.store.get_doc(params["tenant"], unquote(rel))
         self._send_json_or_404(data)
 
+    def _route_evaluation_assets(
+        self,
+        params: Dict[str, str],
+        query: Dict[str, List[str]],
+    ) -> None:
+        self._send_json(self.store.list_evaluation_assets(params["tenant"]))
+
+    def _route_evaluation_asset_stage(
+        self,
+        params: Dict[str, str],
+        query: Dict[str, List[str]],
+    ) -> None:
+        data = self.store.get_evaluation_asset_stage(
+            params["tenant"],
+            params["asset"],
+            params["stage"],
+        )
+        self._send_json_or_404(data)
+
+    def _route_start_evaluation_asset(self) -> None:
+        payload = self._read_json_body()
+        if payload is None:
+            return
+        try:
+            cluster_count = int(payload.get("cluster_count") or 50)
+            if not 1 <= cluster_count <= 1000:
+                raise ValueError("cluster_count must be between 1 and 1000")
+            raw_match_threshold = payload.get("match_threshold")
+            match_threshold = (
+                0.6
+                if raw_match_threshold is None or raw_match_threshold == ""
+                else float(raw_match_threshold)
+            )
+            if not 0.0 <= match_threshold <= 1.0:
+                raise ValueError("match_threshold must be between 0 and 1")
+            synthetic_coverage_enabled = str(
+                payload.get("synthetic_coverage_enabled", "false")
+            ).lower() in {"1", "true", "yes", "on"}
+            synthetic_cases_per_cluster = int(
+                payload.get("synthetic_cases_per_cluster") or 1
+            )
+            if not 1 <= synthetic_cases_per_cluster <= 100:
+                raise ValueError(
+                    "synthetic_cases_per_cluster must be between 1 and 100"
+                )
+            rubric_model = str(payload.get("rubric_model") or "gpt-5.5")
+            embedding_model = str(
+                payload.get("embedding_model") or "text-embedding-3-small"
+            )
+            if rubric_model not in RUBRIC_MODELS:
+                raise ValueError("unsupported rubric_model")
+            if (
+                embedding_model not in OPENAI_EMBEDDING_MODELS
+                and embedding_model != "tfidf"
+            ):
+                raise ValueError("unsupported embedding_model")
+            embedding_provider = (
+                "tfidf" if embedding_model == "tfidf" else "openai"
+            )
+            config = EvaluationAssetConfig(
+                tenant_id=str(payload["tenant_id"]),
+                asset_id=str(payload.get("asset_id") or "v1"),
+                rubric_model=rubric_model,
+                embedding_provider=embedding_provider,
+                embedding_model=embedding_model,
+                cluster_count=cluster_count,
+                match_threshold=match_threshold,
+                synthetic_coverage_enabled=synthetic_coverage_enabled,
+                synthetic_cases_per_cluster=synthetic_cases_per_cluster,
+            )
+            state = self.asset_manager.start(
+                config,
+                Path(str(payload["feedback_path"])),
+                Path(str(payload["unlabeled_path"])),
+            )
+        except FileExistsError as exc:
+            self._send_json({"error": str(exc)}, status=409)
+            return
+        except RuntimeError as exc:
+            self._send_json({"error": str(exc)}, status=409)
+            return
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        self._send_json(state, status=202)
+
+    def _route_resume_evaluation_asset(self, params: Dict[str, str]) -> None:
+        try:
+            state = self.asset_manager.resume(params["tenant"], params["asset"])
+        except RuntimeError as exc:
+            self._send_json({"error": str(exc)}, status=409)
+            return
+        except (ValueError, OSError, KeyError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        self._send_json(state, status=202)
+
     # -- response helpers ------------------------------------------------
 
     def _send_json_or_404(self, data: Any) -> None:
@@ -180,6 +341,32 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _read_json_body(self, max_bytes: int = 1024 * 1024) -> Dict[str, Any] | None:
+        content_type = self.headers.get("Content-Type", "")
+        if not content_type.lower().startswith("application/json"):
+            self._send_json({"error": "Content-Type must be application/json"}, status=415)
+            return None
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._send_json({"error": "invalid Content-Length"}, status=400)
+            return None
+        if content_length < 1:
+            self._send_json({"error": "request body is empty"}, status=400)
+            return None
+        if content_length > max_bytes:
+            self._send_json({"error": "request body is too large"}, status=413)
+            return None
+        try:
+            payload = json.loads(self.rfile.read(content_length))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._send_json({"error": "request body must be valid JSON"}, status=400)
+            return None
+        if not isinstance(payload, dict):
+            self._send_json({"error": "request body must be a JSON object"}, status=400)
+            return None
+        return payload
 
     def _send_html(self, html: str, status: int = 200) -> None:
         body = html.encode("utf-8")
@@ -242,8 +429,13 @@ def _match(pattern: str, path: str) -> Dict[str, str] | None:
 def serve(tenants_root: Path, host: str = "127.0.0.1", port: int = 8765) -> None:
     """Start the UI server and block until interrupted."""
     store = TenantStore(tenants_root)
+    asset_manager = EvaluationAssetRunManager(tenants_root)
 
-    handler = type("_BoundHandler", (_Handler,), {"store": store})
+    handler = type(
+        "_BoundHandler",
+        (_Handler,),
+        {"store": store, "asset_manager": asset_manager},
+    )
     httpd = ThreadingHTTPServer((host, port), handler)
 
     url = f"http://{host}:{port}/"

@@ -149,6 +149,111 @@ The agent autonomously analyzes failures, creates improved prompt variants, eval
 
 ---
 
+## Create an evaluation asset
+
+An evaluation asset turns a small set of trusted, feedback-labeled traces and a
+larger set of unlabeled traces into versioned datasets for evaluation and
+optimization. It can be the first step in creating a tenant: the pipeline does
+not require an existing chain, prompt, config, adapter, or legacy
+`tenants/<tenant_id>/datasets/` directory.
+
+Both input files must already use the vendor-neutral
+[`fapo-evaluation-input-v1`](docs/processes/evaluation-input-contract.md)
+JSONL contract. FAPO copies them into a self-contained workspace at:
+
+```text
+tenants/<tenant_id>/evaluation_assets/<asset_id>/
+├── config.json
+├── pipeline_state.json
+├── events.jsonl
+├── raw_inputs/
+├── prepared_inputs/
+├── decision_assets/
+└── dataset_splits/
+```
+
+After creation, every stage reads from this workspace rather than the original
+files or other tenant resources.
+
+### Eight-stage workflow
+
+| Stage | Purpose |
+|---|---|
+| 1. Validate raw inputs | Validate the canonical contract and record source counts and hashes. |
+| 2. Prepare inputs | Redact sensitive values, apply canonical defaults, and build intent text without renaming fields. |
+| 3. Extract rubrics | Use the selected LLM to turn trusted feedback into scoreable rubrics, trusted intents, and trusted cases. |
+| 4. Cluster intents | Embed unlabeled intent records and build the requested number of route-aware clusters. |
+| 5. Decide coverage | Match clusters to trusted intents using the configured threshold; unsupported clusters remain coverage gaps. |
+| 6. Infer labels | Infer rubrics and evaluation cases only for clusters supported by trusted evidence. |
+| 7. Expand coverage | Optionally generate and filter a configured number of synthetic cases per supported cluster. |
+| 8. Build splits | Create group-safe train, validation, and test splits plus an automatic, trusted-only 20% regression gate. |
+
+Stages are checkpointed in `pipeline_state.json`, with an append-only history in
+`events.jsonl`. If a run fails, fix the input, credential, model-access, or core
+error and run it again; completed stages are skipped.
+
+### Use the Evaluation Asset Studio
+
+Start the shared FAPO UI:
+
+```bash
+python -m hephaestus.cli ui --host 127.0.0.1 --port 8765
+```
+
+Open `http://127.0.0.1:8765/evaluation-assets/`. The Studio lets you choose:
+
+- Tenant and asset IDs.
+- Canonical labeled and unlabeled JSONL files.
+- The rubric extraction and inference model.
+- An OpenAI embedding model or the local `tfidf` fallback.
+- The exact cluster count.
+- The Stage 5 intent-match threshold (default `0.6`).
+- Whether Stage 7 synthetic coverage is enabled and how many candidates to
+  request per supported cluster.
+
+The tenant pipeline view shows the status, inputs, processing, outputs, and a
+bounded example for every stage, including cluster exploration and the rendered
+coverage report.
+
+### Use the CLI
+
+Set the relevant provider credential, then create and run the asset:
+
+```bash
+export OPENAI_API_KEY="<your-openai-api-key>"
+
+python -m hephaestus.cli assets create \
+  --tenant <tenant_id> \
+  --asset-id v1 \
+  --feedback <labeled_feedback.jsonl> \
+  --unlabeled <unlabeled.jsonl> \
+  --rubric-model gpt-5.5 \
+  --embedding-model text-embedding-3-small \
+  --clusters 20 \
+  --match-threshold 0.6
+
+python -m hephaestus.cli assets run \
+  --tenant <tenant_id> \
+  --asset-id v1
+
+python -m hephaestus.cli assets status \
+  --tenant <tenant_id> \
+  --asset-id v1
+```
+
+Add `--enable-synthetic-coverage --synthetic-cases-per-cluster <count>` to
+enable Stage 7. Use `--embedding-model tfidf` for deterministic local
+vectorization without an embedding API call. FAPO never silently changes
+providers after a failure.
+
+The UI, CLI, and evaluation-asset assistants all trigger and monitor the same
+core implementation under `src/hephaestus/evaluation_assets/`; agents do not
+implement the data transformations themselves. See the full
+[feedback and unlabeled trace flow](docs/processes/feedback-dataset-flow.md)
+for artifact details, trust boundaries, and split semantics.
+
+---
+
 ## How it works
 
 The core workflow is an **optimization loop**. Each pass runs the same six stages — the labels below are reused throughout this README:

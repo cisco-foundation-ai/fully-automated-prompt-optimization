@@ -6,10 +6,13 @@ SPDX-License-Identifier: Apache-2.0
 
 # FAPO Web UI
 
-The FAPO Web UI (the **FAPO Explorer**) is a local, read-only dashboard for
-browsing the artifacts a tenant accumulates during optimization: eval runs,
-per-case outputs, iteration history, prompt variants and agent skills, datasets,
-and tenant docs.
+The FAPO Web UI has two focused surfaces on one local server:
+
+- **FAPO Explorer** browses the artifacts a tenant accumulates during
+  optimization: eval runs, per-case outputs, iteration history, prompt variants
+  and agent skills, datasets, and tenant docs.
+- **Evaluation Asset Studio** creates and monitors the self-contained data
+  preparation assets that can bootstrap a tenant.
 
 It is intentionally zero-dependency — the server is built on Python's standard
 library `http.server`, and the frontend is a single self-contained HTML
@@ -24,8 +27,10 @@ From the repository root, with the project installed (`python -m pip install -e 
 python -m hephaestus.cli ui
 ```
 
-This serves the UI at <http://127.0.0.1:8765/> and reads from the `tenants/`
-directory by default. Press `Ctrl+C` to stop.
+This serves FAPO Explorer at <http://127.0.0.1:8765/> and Evaluation Asset
+Studio at <http://127.0.0.1:8765/evaluation-assets/>. Both surfaces use the
+same server and read from the `tenants/` directory by default. Press `Ctrl+C`
+to stop.
 
 ### Options
 
@@ -55,6 +60,40 @@ total tenants, eval runs, variants tried, and prompt templates, plus the
 average of each tenant's latest run score. It also lists the most recent runs
 and a per-tenant card showing that tenant's latest run (status, score, model,
 timestamp). Selecting a tenant card opens that tenant.
+
+The dashboard also shows the latest evaluation-asset stage for every tenant.
+Its **Open Evaluation Asset Studio** action moves data-preparation work to the
+separate Studio; the Explorer overview has no asset input form.
+
+### Evaluation Asset Studio
+
+The Studio has its own tenant index and creation screen. It accepts labeled and
+unlabeled JSONL paths, the rubric extraction model, embedding model, exact
+number of intent clusters, and the Stage 5 intent match threshold. The
+threshold defaults to `0.6` and is persisted with the asset. Stage 7 synthetic
+coverage is separately enabled or disabled and accepts an exact data-point
+count per supported cluster; it is disabled by default. Both JSONL files must
+already conform to the
+vendor-neutral `fapo-evaluation-input-v1` contract; the creation screen links
+to its machine-readable definition. The model menus include multiple GPT extraction
+models, current and legacy OpenAI embedding models, and a dependency-free local
+TF-IDF fallback. Selecting TF-IDF records `embedding_provider: tfidf` in the
+asset config and makes no embedding API calls. Starting a pipeline copies both
+source files into an independent
+`evaluation_assets/<asset_id>/raw_inputs/` workspace before background
+processing begins.
+
+Selecting a tenant visualizes all eight preparation stages, live status,
+selected models, requested clusters, match threshold, synthetic settings,
+pipeline counts, and the four artifact directories. Each stage is clickable
+and opens a focused view with its
+inputs, processing steps, outputs, stage metrics, and bounded previews of the
+real files created there. Artifact inspection intentionally returns one
+syntax-highlighted example per file rather than rendering entire datasets. The
+Intent Mining stage also includes the projection-style interactive cluster
+browser from the original workflow mock, backed by the asset's real routes,
+cluster sizes, representative requests, and observed tools. Failed or
+interrupted pipelines can be resumed from this surface.
 
 ### Tenant tabs
 
@@ -110,16 +149,19 @@ These behaviors apply across the views above:
 
 ## How it works
 
-The UI has three small modules under `src/hephaestus/webui/`:
+The UI has four small modules under `src/hephaestus/webui/`:
 
-- **`server.py`** — a stdlib `ThreadingHTTPServer` that serves the SPA shell at
-  `/` and a read-only JSON API under `/api/`.
-- **`data.py`** — `TenantStore`, the read-only filesystem layer that walks the
+- **`server.py`** — a stdlib `ThreadingHTTPServer` that serves Explorer at `/`,
+  Evaluation Asset Studio at `/evaluation-assets/`, read APIs, and narrow
+  evaluation-asset start/resume endpoints.
+- **`data.py`** — `TenantStore`, the constrained filesystem layer that walks the
   tenants root and surfaces artifacts. All paths are resolved relative to the
   tenants root and validated to stay inside it (and inside the expected
   subtree), so the HTTP layer cannot read arbitrary files on disk.
 - **`frontend.py`** — the single-page `INDEX_HTML` document that calls the JSON
-  API to render the views above.
+  API to render Explorer.
+- **`evaluation_assets_frontend.py`** — the separate
+  `EVALUATION_ASSET_HTML` document that renders creation and pipeline progress.
 
 ### JSON API
 
@@ -141,10 +183,17 @@ The frontend is backed by these read-only endpoints (useful for scripting too):
 | `GET /api/tenants/<t>/dataset?path=<rel>&offset=&limit=` | Dataset rows (paged) |
 | `GET /api/tenants/<t>/docs` | Doc files |
 | `GET /api/tenants/<t>/doc?path=<rel>` | Doc content (markdown) |
+| `GET /api/tenants/<t>/evaluation-assets` | Asset configuration, stage status, and directory summaries |
+| `GET /api/evaluation-assets/input-contract` | Versioned canonical field, message, tool-call, and feedback requirements |
+| `GET /api/tenants/<t>/evaluation-assets/<a>/stages/<s>` | One stage's status, metrics, artifact list, and bounded example previews |
+| `POST /api/evaluation-assets/start` | Copy inputs and start a core pipeline run |
+| `POST /api/tenants/<t>/evaluation-assets/<a>/resume` | Resume a failed or interrupted asset |
 
 ## Notes
 
-- **Read-only:** the UI never mutates tenant data — it only reads artifacts.
+- **Narrow writes:** the UI only creates/resumes evaluation assets. All other
+  tenant views remain read-only. Input paths must resolve inside the FAPO
+  workspace and are copied into `raw_inputs/` before processing.
 - **Local by default:** it binds to `127.0.0.1`. Change `--host` only if you
   understand the exposure, since it serves whatever is under the tenants root.
 - **No external dependencies:** standard-library server, no frontend build step.
