@@ -132,7 +132,11 @@ class EvaluationAssetPipeline:
             )
         self.rubric_provider = rubric_provider or OpenAIRubricProvider(
             model=self.config.rubric_model,
-            max_output_tokens=8192,
+            # Reasoning models (e.g. gpt-5.x) count reasoning tokens against this
+            # budget before any JSON is emitted. 8192 could be exhausted by a long
+            # reasoning trace, yielding a 400 / empty response that fails the whole
+            # rubric_extraction stage. Give reasoning ample headroom over the output.
+            max_output_tokens=16384,
         )
         self.embedding_provider = embedding_provider
         if self.embedding_provider is None and self.config.embedding_provider == "openai":
