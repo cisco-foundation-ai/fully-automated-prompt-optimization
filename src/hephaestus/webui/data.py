@@ -66,6 +66,7 @@ _EVALUATION_STAGE_PATTERNS = {
     ),
     "intent_clustering": (
         "stages/04_intent_clustering/intent_inventory.jsonl",
+        "stages/04_intent_clustering/cluster_lineage.jsonl",
         "decision_assets/intent_inventory.jsonl",
     ),
     "coverage_decisions": (
@@ -151,6 +152,11 @@ _ARTIFACT_CATALOG = {
         "Intent cluster inventory",
         "Cluster membership, representative records, and top terms.",
         "Key outputs",
+    ),
+    "cluster_lineage.jsonl": (
+        "Cluster lineage",
+        "Previous-to-current cluster continuity after an intent refresh.",
+        "Diagnostics",
     ),
     "intent_matches.jsonl": (
         "Cluster coverage decisions",

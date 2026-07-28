@@ -125,6 +125,11 @@ class EvaluationAssetPipeline:
     ) -> None:
         self.layout = layout
         self.config = layout.load_config()
+        self.lineage = (
+            json.loads(layout.lineage_path.read_text(encoding="utf-8"))
+            if layout.lineage_path.is_file()
+            else {}
+        )
         if self.config.rubric_provider != "openai" and rubric_provider is None:
             raise ValueError(f"Unsupported rubric provider: {self.config.rubric_provider}")
         if (
@@ -294,8 +299,37 @@ class EvaluationAssetPipeline:
                 "normalized_feedback.jsonl",
             )
         )
-        rubrics: List[Dict[str, Any]] = []
-        for batch in _batches(normalized, self.config.batch_size):
+        added_record_ids = {
+            str(value)
+            for value in self.lineage.get("added_labeled_record_ids", [])
+        }
+        incremental = bool(self.lineage)
+        rubric_path = self.layout.artifact_path(
+            PipelineStage.RUBRIC_EXTRACTION,
+            "feedback_rubrics.jsonl",
+        )
+        intent_path = self.layout.artifact_path(
+            PipelineStage.RUBRIC_EXTRACTION,
+            "trusted_intents.jsonl",
+        )
+        case_path = self.layout.artifact_path(
+            PipelineStage.RUBRIC_EXTRACTION,
+            "trusted_cases.jsonl",
+        )
+        existing_rubrics = _load_jsonl(rubric_path) if incremental else []
+        existing_intents = _load_jsonl(intent_path) if incremental else []
+        existing_cases = _load_jsonl(case_path) if incremental else []
+        pending = (
+            [
+                row
+                for row in normalized
+                if str(row["record_id"]) in added_record_ids
+            ]
+            if incremental
+            else normalized
+        )
+        new_rubrics: List[Dict[str, Any]] = []
+        for batch in _batches(pending, self.config.batch_size):
             response = self.rubric_provider.generate_json(
                 FEEDBACK_PROMPT,
                 {
@@ -317,7 +351,7 @@ class EvaluationAssetPipeline:
                 record_id = str(row["record_id"])
                 if record_id not in returned:
                     raise ValueError(f"Rubric response omitted {record_id}")
-                rubrics.append(
+                new_rubrics.append(
                     _normalize_rubric(
                         returned[record_id],
                         "record_id",
@@ -328,8 +362,13 @@ class EvaluationAssetPipeline:
                     )
                 )
 
+        rubrics = _replace_by_key(
+            existing_rubrics,
+            new_rubrics,
+            key="record_id",
+        )
         rubric_by_id = {row["record_id"]: row for row in rubrics}
-        trusted_intents = [
+        new_trusted_intents = [
             {
                 "intent_id": row["record_id"],
                 "label": rubric_by_id[row["record_id"]]["intent_label"],
@@ -347,35 +386,36 @@ class EvaluationAssetPipeline:
                     "feedback_polarity": row["feedback"]["polarity"],
                 },
             }
-            for row in normalized
+            for row in pending
         ]
-        trusted_cases = [
+        new_trusted_cases = [
             _trusted_case(
                 row,
                 rubric_by_id[row["record_id"]],
                 self.config.asset_id,
             )
-            for row in normalized
+            for row in pending
         ]
+        trusted_intents = _replace_by_key(
+            existing_intents,
+            new_trusted_intents,
+            key="intent_id",
+        )
+        trusted_cases = _replace_by_key(
+            [_case_for_asset(row, self.config.asset_id) for row in existing_cases],
+            new_trusted_cases,
+            key="case_id",
+        )
         write_jsonl(
-            self.layout.artifact_path(
-                PipelineStage.RUBRIC_EXTRACTION,
-                "feedback_rubrics.jsonl",
-            ),
+            rubric_path,
             rubrics,
         )
         write_jsonl(
-            self.layout.artifact_path(
-                PipelineStage.RUBRIC_EXTRACTION,
-                "trusted_intents.jsonl",
-            ),
+            intent_path,
             trusted_intents,
         )
         write_jsonl(
-            self.layout.artifact_path(
-                PipelineStage.RUBRIC_EXTRACTION,
-                "trusted_cases.jsonl",
-            ),
+            case_path,
             trusted_cases,
         )
         return {"feedback_rubrics": len(rubrics), "trusted_cases": len(trusted_cases)}
@@ -408,7 +448,58 @@ class EvaluationAssetPipeline:
             ),
             [cluster_to_dict(cluster) for cluster in clusters],
         )
+        if self.lineage:
+            self._write_cluster_lineage(clusters)
         return {"intent_clusters": len(clusters)}
+
+    def _write_cluster_lineage(
+        self,
+        clusters: Sequence[IntentCluster],
+    ) -> None:
+        parent_asset_id = str(self.lineage.get("parent_asset_id") or "")
+        if not parent_asset_id:
+            return
+        parent_rows = _load_jsonl(
+            self.layout.parent_snapshot / "parent_intent_inventory.jsonl"
+        )
+        previous = [_intent_cluster(row) for row in parent_rows]
+        rows = _cluster_lineage(previous, clusters)
+        write_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.INTENT_CLUSTERING,
+                "cluster_lineage.jsonl",
+            ),
+            rows,
+        )
+
+    def _changed_cluster_ids(
+        self,
+        matches: Sequence[IntentMatch],
+    ) -> set[str]:
+        if self.lineage.get("clustering_mode") != "keep":
+            return {match.cluster_id for match in matches}
+        snapshot = (
+            self.layout.parent_snapshot / "parent_intent_matches.jsonl"
+        )
+        if not snapshot.is_file():
+            return {match.cluster_id for match in matches}
+        previous = {
+            match.cluster_id: match
+            for match in (
+                _intent_match(row)
+                for row in _load_jsonl(
+                    snapshot
+                )
+            )
+        }
+        return {
+            match.cluster_id
+            for match in matches
+            if match.cluster_id not in previous
+            or previous[match.cluster_id].status != match.status
+            or previous[match.cluster_id].matched_intent_id
+            != match.matched_intent_id
+        }
 
     def _decide_coverage(self) -> Dict[str, int]:
         intent_rows = _load_jsonl(
@@ -544,8 +635,32 @@ class EvaluationAssetPipeline:
             if match_by_cluster[cluster.cluster_id].status
             == "matched_trusted_intent"
         ]
+        changed_cluster_ids = self._changed_cluster_ids(matches)
         cluster_rubrics: List[Dict[str, Any]] = []
-        for batch in _batches(matched, self.config.batch_size):
+        if (
+            self.lineage.get("clustering_mode") == "keep"
+            and (
+                self.layout.parent_snapshot
+                / "parent_inferred_cluster_rubrics.jsonl"
+            ).is_file()
+        ):
+            cluster_rubrics = [
+                row
+                for row in _load_jsonl(
+                    self.layout.parent_snapshot
+                    / "parent_inferred_cluster_rubrics.jsonl"
+                )
+                if str(row["cluster_id"]) not in changed_cluster_ids
+                and str(row["cluster_id"]) in match_by_cluster
+                and match_by_cluster[str(row["cluster_id"])].status
+                == "matched_trusted_intent"
+            ]
+        changed_matched = [
+            cluster
+            for cluster in matched
+            if cluster.cluster_id in changed_cluster_ids
+        ]
+        for batch in _batches(changed_matched, self.config.batch_size):
             response = self.rubric_provider.generate_json(
                 INFERENCE_PROMPT,
                 {
@@ -593,6 +708,18 @@ class EvaluationAssetPipeline:
             cluster_rubrics,
             self.config,
         )
+        trusted_record_ids = {
+            str(row["record_id"]) for row in normalized
+        }
+        labels = [
+            row for row in labels if str(row["record_id"]) not in trusted_record_ids
+        ]
+        inferred_cases = [
+            row
+            for row in inferred_cases
+            if str(row["case_id"]).removeprefix("inferred-")
+            not in trusted_record_ids
+        ]
         missing = _missing_clusters(clusters, matches, row_by_id)
         write_jsonl(
             self.layout.artifact_path(
@@ -653,65 +780,21 @@ class EvaluationAssetPipeline:
                 "synthetic_cases.jsonl",
             )
         )
-        trusted_regression_partition = split_cases_by_group(
-            trusted,
-            group_path="metadata.group_id",
-            train_fraction=1.0 - DEFAULT_REGRESSION_FRACTION,
-            validation_fraction=0.0,
-            test_fraction=DEFAULT_REGRESSION_FRACTION,
-            seed=self.config.split_seed,
-        )
-        trusted_for_standard_splits = trusted_regression_partition["train"]
-        regression_trusted = trusted_regression_partition["test"]
-        regression_group_ids = {
-            _case_group_id(case) for case in regression_trusted
-        }
-        inferred_for_standard_splits, held_inferred = (
-            _hold_regression_group_conflicts(
+        if self.lineage:
+            payloads = _incremental_split_payloads(
+                self.layout,
+                trusted,
                 inferred,
-                regression_group_ids,
-            )
-        )
-        synthetic_for_standard_splits, held_synthetic = (
-            _hold_regression_group_conflicts(
                 synthetic,
-                regression_group_ids,
+                seed=self.config.split_seed,
             )
-        )
-        standard_cases = (
-            trusted_for_standard_splits
-            + inferred_for_standard_splits
-            + synthetic_for_standard_splits
-        )
-        standard_splits = split_cases_by_group(
-            standard_cases,
-            group_path="metadata.group_id",
-            seed=self.config.split_seed,
-        )
-        trusted_case_ids = {
-            str(case["case_id"]) for case in trusted_for_standard_splits
-        }
-        inferred_case_ids = {
-            str(case["case_id"]) for case in inferred_for_standard_splits
-        }
-        synthetic_case_ids = {
-            str(case["case_id"]) for case in synthetic_for_standard_splits
-        }
-        payloads: Dict[str, List[Dict[str, Any]]] = {}
-        for split in ("train", "validation", "test"):
-            rows = standard_splits[split]
-            payloads[f"{split}_trusted"] = [
-                row for row in rows if str(row["case_id"]) in trusted_case_ids
-            ]
-            payloads[f"{split}_inferred"] = [
-                row for row in rows if str(row["case_id"]) in inferred_case_ids
-            ]
-            payloads[f"{split}_synthetic"] = [
-                row for row in rows if str(row["case_id"]) in synthetic_case_ids
-            ]
-            payloads[split] = rows
-        payloads["regression_trusted"] = regression_trusted
-        payloads["triage_hold"] = held_inferred + held_synthetic
+        else:
+            payloads = _default_split_payloads(
+                trusted,
+                inferred,
+                synthetic,
+                seed=self.config.split_seed,
+            )
         for name, rows in payloads.items():
             write_jsonl(
                 self.layout.artifact_path(
@@ -781,6 +864,8 @@ class EvaluationAssetPipeline:
                 "regression_group_conflicts": "triage_hold",
             },
         }
+        if self.lineage:
+            manifest["lineage"] = dict(self.lineage)
         atomic_write_json(
             self.layout.artifact_path(
                 PipelineStage.DATASET_SPLITS,
@@ -857,6 +942,39 @@ class EvaluationAssetPipeline:
         matched = [
             cluster for cluster in clusters if cluster.cluster_id in rubric_by_cluster
         ]
+        existing_synthetic: List[Dict[str, Any]] = []
+        if (
+            self.lineage.get("clustering_mode") == "keep"
+            and (
+                self.layout.parent_snapshot / "parent_synthetic_cases.jsonl"
+            ).is_file()
+        ):
+            matches = [
+                _intent_match(row)
+                for row in _load_jsonl(
+                    self.layout.artifact_path(
+                        PipelineStage.COVERAGE_DECISIONS,
+                        "intent_matches.jsonl",
+                    )
+                )
+            ]
+            changed_cluster_ids = self._changed_cluster_ids(matches)
+            existing_synthetic = [
+                _case_for_asset(row, self.config.asset_id)
+                for row in _load_jsonl(
+                    self.layout.parent_snapshot
+                    / "parent_synthetic_cases.jsonl"
+                )
+                if str((row.get("metadata") or {}).get("source_cluster"))
+                not in changed_cluster_ids
+                and str((row.get("metadata") or {}).get("source_cluster"))
+                in rubric_by_cluster
+            ]
+            matched = [
+                cluster
+                for cluster in matched
+                if cluster.cluster_id in changed_cluster_ids
+            ]
         candidates: List[Dict[str, Any]] = []
         for batch in _batches(matched, self.config.batch_size):
             response = self.rubric_provider.generate_json(
@@ -916,7 +1034,7 @@ class EvaluationAssetPipeline:
         )
         filtered = filter_synthetic_cases(
             candidates,
-            existing_cases=trusted + inferred,
+            existing_cases=trusted + inferred + existing_synthetic,
         )
         write_jsonl(
             self.layout.artifact_path(
@@ -951,10 +1069,10 @@ class EvaluationAssetPipeline:
                 PipelineStage.SYNTHETIC_COVERAGE,
                 "synthetic_cases.jsonl",
             ),
-            filtered.accepted,
+            existing_synthetic + filtered.accepted,
         )
         return {
-            "synthetic_cases": len(filtered.accepted),
+            "synthetic_cases": len(existing_synthetic) + len(filtered.accepted),
             "rejected_synthetic_cases": len(filtered.rejected),
         }
 
@@ -969,6 +1087,101 @@ def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
             raise ValueError(f"Expected JSON object at {path}:{line_number}")
         rows.append(row)
     return rows
+
+
+def _replace_by_key(
+    existing: Sequence[Mapping[str, Any]],
+    additions: Sequence[Mapping[str, Any]],
+    *,
+    key: str,
+) -> List[Dict[str, Any]]:
+    """Return a stable union where additions replace matching existing rows."""
+    added_keys = {str(row[key]) for row in additions}
+    rows = [
+        dict(row)
+        for row in existing
+        if str(row[key]) not in added_keys
+    ]
+    rows.extend(dict(row) for row in additions)
+    return rows
+
+
+def _case_for_asset(
+    case: Mapping[str, Any],
+    asset_id: str,
+) -> Dict[str, Any]:
+    copied = dict(case)
+    metadata = dict(copied.get("metadata") or {})
+    metadata["dataset_version"] = asset_id
+    copied["metadata"] = metadata
+    return copied
+
+
+def _cluster_lineage(
+    previous: Sequence[IntentCluster],
+    current: Sequence[IntentCluster],
+) -> List[Dict[str, Any]]:
+    """Describe cluster continuity using deterministic member overlap."""
+    previous_members = {
+        cluster.cluster_id: set(cluster.record_ids) for cluster in previous
+    }
+    provisional: List[Dict[str, Any]] = []
+    matched_previous: Counter[str] = Counter()
+    for cluster in current:
+        current_members = set(cluster.record_ids)
+        overlaps = []
+        for previous_id, members in previous_members.items():
+            intersection = len(current_members & members)
+            if not intersection:
+                continue
+            union = len(current_members | members)
+            overlaps.append(
+                (
+                    intersection / union if union else 0.0,
+                    previous_id,
+                )
+            )
+        overlaps.sort(key=lambda item: (-item[0], item[1]))
+        if not overlaps:
+            provisional.append(
+                {
+                    "previous_cluster_id": None,
+                    "new_cluster_id": cluster.cluster_id,
+                    "member_overlap": 0.0,
+                    "relationship": "new",
+                }
+            )
+            continue
+        best_score, best_id = overlaps[0]
+        matched_previous[best_id] += 1
+        provisional.append(
+            {
+                "previous_cluster_id": best_id,
+                "new_cluster_id": cluster.cluster_id,
+                "member_overlap": round(best_score, 4),
+                "relationship": "merged" if len(overlaps) > 1 else "continued",
+            }
+        )
+    for row in provisional:
+        previous_id = row["previous_cluster_id"]
+        if previous_id and matched_previous[previous_id] > 1:
+            row["relationship"] = "split"
+    represented = {
+        str(row["previous_cluster_id"])
+        for row in provisional
+        if row["previous_cluster_id"]
+    }
+    provisional.extend(
+        {
+            "previous_cluster_id": cluster.cluster_id,
+            "new_cluster_id": None,
+            "member_overlap": 0.0,
+            "relationship": "retired",
+        }
+        for cluster in previous
+        if cluster.cluster_id not in represented
+    )
+    return provisional
 
 
 def _normalize_feedback(row: Mapping[str, Any]) -> Dict[str, Any]:
@@ -1371,6 +1584,161 @@ def _case_group_id(case: Mapping[str, Any]) -> str:
         if group_id:
             return group_id
     return _string(case.get("case_id"))
+
+
+def _default_split_payloads(
+    trusted: Sequence[Dict[str, Any]],
+    inferred: Sequence[Dict[str, Any]],
+    synthetic: Sequence[Dict[str, Any]],
+    *,
+    seed: int,
+) -> Dict[str, List[Dict[str, Any]]]:
+    trusted_partition = split_cases_by_group(
+        trusted,
+        group_path="metadata.group_id",
+        train_fraction=1.0 - DEFAULT_REGRESSION_FRACTION,
+        validation_fraction=0.0,
+        test_fraction=DEFAULT_REGRESSION_FRACTION,
+        seed=seed,
+    )
+    trusted_standard = trusted_partition["train"]
+    regression_trusted = trusted_partition["test"]
+    regression_groups = {
+        _case_group_id(case) for case in regression_trusted
+    }
+    inferred_standard, held_inferred = _hold_regression_group_conflicts(
+        inferred,
+        regression_groups,
+    )
+    synthetic_standard, held_synthetic = _hold_regression_group_conflicts(
+        synthetic,
+        regression_groups,
+    )
+    standard_splits = split_cases_by_group(
+        trusted_standard + inferred_standard + synthetic_standard,
+        group_path="metadata.group_id",
+        seed=seed,
+    )
+    payloads = _provenance_split_payloads(
+        standard_splits,
+        trusted_standard,
+        inferred_standard,
+        synthetic_standard,
+    )
+    payloads["regression_trusted"] = regression_trusted
+    payloads["triage_hold"] = held_inferred + held_synthetic
+    return payloads
+
+
+def _incremental_split_payloads(
+    layout: EvaluationAssetLayout,
+    trusted: Sequence[Dict[str, Any]],
+    inferred: Sequence[Dict[str, Any]],
+    synthetic: Sequence[Dict[str, Any]],
+    *,
+    seed: int,
+) -> Dict[str, List[Dict[str, Any]]]:
+    parent_assignments: Dict[str, str] = {}
+    for split in ("train", "validation", "test"):
+        path = layout.parent_snapshot / f"parent_{split}.jsonl"
+        for case in _load_jsonl(path):
+            parent_assignments[_case_group_id(case)] = split
+    parent_regression = {
+        _case_group_id(case)
+        for case in _load_jsonl(
+            layout.parent_snapshot / "parent_regression_trusted.jsonl"
+        )
+    }
+
+    regression_trusted: List[Dict[str, Any]] = []
+    trusted_standard: List[Dict[str, Any]] = []
+    for case in trusted:
+        group_id = _case_group_id(case)
+        if group_id in parent_regression or (
+            group_id not in parent_assignments
+            and _stable_fraction(group_id, seed) < DEFAULT_REGRESSION_FRACTION
+        ):
+            regression_trusted.append(dict(case))
+        else:
+            trusted_standard.append(dict(case))
+    regression_groups = parent_regression | {
+        _case_group_id(case) for case in regression_trusted
+    }
+    inferred_standard, held_inferred = _hold_regression_group_conflicts(
+        inferred,
+        regression_groups,
+    )
+    synthetic_standard, held_synthetic = _hold_regression_group_conflicts(
+        synthetic,
+        regression_groups,
+    )
+
+    standard_splits: Dict[str, List[Dict[str, Any]]] = {
+        "train": [],
+        "validation": [],
+        "test": [],
+    }
+    for case in trusted_standard + inferred_standard + synthetic_standard:
+        group_id = _case_group_id(case)
+        split = parent_assignments.get(group_id)
+        if split is None:
+            value = _stable_fraction(group_id, seed)
+            split = (
+                "train"
+                if value < 0.6
+                else "validation"
+                if value < 0.8
+                else "test"
+            )
+        standard_splits[split].append(dict(case))
+    for rows in standard_splits.values():
+        rows.sort(key=lambda row: str(row["case_id"]))
+
+    payloads = _provenance_split_payloads(
+        standard_splits,
+        trusted_standard,
+        inferred_standard,
+        synthetic_standard,
+    )
+    payloads["regression_trusted"] = sorted(
+        regression_trusted,
+        key=lambda row: str(row["case_id"]),
+    )
+    payloads["triage_hold"] = sorted(
+        held_inferred + held_synthetic,
+        key=lambda row: str(row["case_id"]),
+    )
+    return payloads
+
+
+def _provenance_split_payloads(
+    standard_splits: Mapping[str, Sequence[Dict[str, Any]]],
+    trusted: Sequence[Dict[str, Any]],
+    inferred: Sequence[Dict[str, Any]],
+    synthetic: Sequence[Dict[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    trusted_ids = {str(case["case_id"]) for case in trusted}
+    inferred_ids = {str(case["case_id"]) for case in inferred}
+    synthetic_ids = {str(case["case_id"]) for case in synthetic}
+    payloads: Dict[str, List[Dict[str, Any]]] = {}
+    for split in ("train", "validation", "test"):
+        rows = [dict(row) for row in standard_splits[split]]
+        payloads[f"{split}_trusted"] = [
+            row for row in rows if str(row["case_id"]) in trusted_ids
+        ]
+        payloads[f"{split}_inferred"] = [
+            row for row in rows if str(row["case_id"]) in inferred_ids
+        ]
+        payloads[f"{split}_synthetic"] = [
+            row for row in rows if str(row["case_id"]) in synthetic_ids
+        ]
+        payloads[split] = rows
+    return payloads
+
+
+def _stable_fraction(group_id: str, seed: int) -> float:
+    digest = hashlib.sha256(f"{seed}:{group_id}".encode()).digest()
+    return int.from_bytes(digest[:8], "big") / float(2**64)
 
 
 def _hold_regression_group_conflicts(

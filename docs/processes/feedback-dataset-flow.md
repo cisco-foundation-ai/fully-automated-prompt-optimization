@@ -126,6 +126,42 @@ rejected while the same asset has an active background runner. If the pipeline
 already has an incomplete stage earlier than the decision's dependency, the
 audit records both boundaries and execution resumes at that earlier stage.
 
+### Extending a completed asset
+
+Extension creates a complete new asset version without modifying or rerunning
+the parent version. The child records `lineage.json`, `reuse_manifest.json`,
+and the parent asset ID. The small parent artifacts required for incremental
+comparison are copied into `stages/01_raw_inputs/parent_snapshot/` with hashes,
+so the child has no runtime dependency on the parent directory.
+
+The Studio and `assets extend` CLI expose two modes:
+
+| Mode | Allowed additions | Stage behavior |
+|---|---|---|
+| `keep` | Labeled feedback only | Merge and validate full inputs; prepare canonical inputs; seed Stage 3 from the parent and extract rubrics only for added feedback; reuse the exact Stage 4 inventory; recalculate Stages 5–8 |
+| `refresh` | Labeled feedback, unlabeled records, or both | Merge and validate full inputs; extract only added feedback rubrics; rerun Stage 4 over the combined unlabeled pool; recalculate Stages 5–8 |
+
+Keep mode requires the parent's embedding provider, embedding model, cluster
+count, and rubric model. Refresh mode may select a new embedding model and
+cluster count but retains the rubric model so the trusted pool does not mix
+rubric-generation versions.
+
+Feedback collected for a Stage 5 queue item may use the same `record_id` as its
+original unlabeled trace. The trace remains in the intent inventory so traffic
+frequency and cluster membership stay stable, but it is excluded from inferred
+cases once its trusted feedback is added.
+
+Stage 8 preserves the parent's group assignments. Existing groups stay in
+their train, validation, test, or regression location; new groups receive a
+deterministic assignment from the inherited split seed. This prevents an
+extension from reshuffling the established evaluation population.
+
+Refresh mode writes
+`stages/04_intent_clustering/cluster_lineage.jsonl`. Each row relates a previous
+and current cluster by member overlap and classifies it as `continued`, `split`,
+`merged`, `new`, or `retired`. Keep mode writes identity lineage with
+relationship `reused`.
+
 ## Evaluation Asset Studio
 
 The universal Studio is served on the same port as FAPO Explorer with its own
@@ -162,6 +198,11 @@ editor directly on the failed stage. The editor shows only stage-relevant
 settings and explains when changing one rebuilds from an earlier stage. Raw
 inputs remain immutable within an asset; a Stage 1 source correction requires
 a new asset version.
+
+Selecting **Extend asset** opens an execution-plan preview. Adding an unlabeled
+path automatically selects refreshed clustering; keep mode disables embedding
+and cluster-count edits. At least one additional labeled or unlabeled JSONL
+file is required.
 
 ## Provider Selection
 

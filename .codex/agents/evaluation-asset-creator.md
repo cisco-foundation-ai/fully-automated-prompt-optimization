@@ -65,6 +65,28 @@ After creation, no stage may depend on the original source path or other tenant
 files. Existing assets with legacy broad folders remain readable and resumable
 but are not migrated automatically.
 
+## Incremental Asset Extension
+
+When the user adds feedback or unlabeled traffic to a completed asset, create a
+new version with the core `assets extend` workflow. Never append to the
+parent's raw inputs.
+
+- Use `--clustering-mode keep` only for labeled additions with unchanged
+  rubric model, embedding model, and cluster count. Verify Stage 3 extracted
+  only the added record IDs and Stage 4 is marked reused.
+- Use `--clustering-mode refresh` when unlabeled records are added. Verify
+  Stage 4 reran over the combined pool and wrote `cluster_lineage.jsonl`.
+- Confirm `lineage.json` and `reuse_manifest.json` name the correct parent and
+  added record IDs.
+- Confirm `stages/01_raw_inputs/parent_snapshot/` contains hashed copies of the
+  parent decisions needed during the run; the child must remain runnable
+  without reading the live parent directory.
+- Confirm a newly trusted record is absent from inferred cases with the same
+  `record_id`.
+- Confirm existing parent `group_id` values retain their split assignment.
+- Treat the child as a complete self-contained asset; downstream consumers
+  must not need to join it with the parent.
+
 ## Core Stage Map
 
 Treat these exact ordered stage names as the runtime contract:

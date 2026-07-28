@@ -99,6 +99,12 @@ coverage configuration. The Studio shows which stage each setting affects;
 the core preserves earlier checkpoints and rebuilds the affected stage and all
 downstream artifacts.
 
+Completed versions can be extended from the tenant asset view. The extension
+wizard accepts additional labeled feedback and optional unlabeled records,
+offers **Keep original clustering** and **Rerun clustering**, and previews the
+eight-stage execution plan. Keep mode is restricted to labeled-only additions;
+entering an unlabeled path automatically selects refresh mode.
+
 ### Tenant tabs
 
 Inside a tenant, content is organized into tabs:
@@ -191,6 +197,7 @@ The frontend is backed by these read-only endpoints (useful for scripting too):
 | `GET /api/evaluation-assets/input-contract` | Versioned canonical field, message, tool-call, and feedback requirements |
 | `GET /api/tenants/<t>/evaluation-assets/<a>/stages/<s>` | One stage's status, metrics, artifact list, and bounded example previews |
 | `POST /api/evaluation-assets/start` | Copy inputs and start a core pipeline run |
+| `POST /api/evaluation-assets/extend` | Create and run an immutable child version with reused or refreshed clustering |
 | `POST /api/tenants/<t>/evaluation-assets/<a>/resume` | Optionally revise pipeline decisions, invalidate dependent stages, and resume an asset |
 
 ## Notes

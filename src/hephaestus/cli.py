@@ -188,6 +188,24 @@ def build_parser() -> argparse.ArgumentParser:
     run_asset_parser.add_argument("--synthetic-cases-per-cluster", type=int)
     run_asset_parser.add_argument("--split-seed", type=int)
 
+    extend_asset_parser = assets_subparsers.add_parser(
+        "extend",
+        help="Create a new asset version from additional labeled or unlabeled data",
+    )
+    extend_asset_parser.add_argument("--tenant", required=True)
+    extend_asset_parser.add_argument("--parent-asset-id", required=True)
+    extend_asset_parser.add_argument("--asset-id", required=True)
+    extend_asset_parser.add_argument("--additional-feedback")
+    extend_asset_parser.add_argument("--additional-unlabeled")
+    extend_asset_parser.add_argument(
+        "--clustering-mode",
+        choices=("keep", "refresh"),
+        default="keep",
+    )
+    extend_asset_parser.add_argument("--embedding-model")
+    extend_asset_parser.add_argument("--clusters", type=int)
+    extend_asset_parser.add_argument("--tenants-root", default="tenants")
+
     status_asset_parser = assets_subparsers.add_parser(
         "status",
         help="Read persisted evaluation asset pipeline progress",
@@ -295,6 +313,53 @@ def main() -> None:
         raise ValueError(f"Unsupported customer-data command: {args.customer_data_command}")
 
     if args.command == "assets":
+        if args.assets_command == "extend":
+            import json as json_mod
+
+            from src.hephaestus.evaluation_assets.pipeline import (
+                EvaluationAssetPipeline,
+            )
+            from src.hephaestus.evaluation_assets.workspace import (
+                EvaluationAssetLayout,
+            )
+
+            parent = EvaluationAssetLayout(
+                Path(args.tenants_root),
+                args.tenant,
+                args.parent_asset_id,
+            )
+            layout = EvaluationAssetLayout(
+                Path(args.tenants_root),
+                args.tenant,
+                args.asset_id,
+            )
+            updates = {
+                key: value
+                for key, value in {
+                    "embedding_model": args.embedding_model,
+                    "cluster_count": args.clusters,
+                }.items()
+                if value is not None
+            }
+            layout.initialize_extension(
+                parent,
+                additional_feedback=(
+                    Path(args.additional_feedback)
+                    if args.additional_feedback
+                    else None
+                ),
+                additional_unlabeled=(
+                    Path(args.additional_unlabeled)
+                    if args.additional_unlabeled
+                    else None
+                ),
+                clustering_mode=args.clustering_mode,
+                config_updates=updates,
+            )
+            state = EvaluationAssetPipeline(layout).run()
+            print(json_mod.dumps(state.to_dict(), indent=2, sort_keys=True))
+            return
+
         if args.assets_command == "create":
             import json as json_mod
 

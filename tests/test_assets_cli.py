@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 import src.hephaestus.datasets.embedding_providers as embedding_providers
-from src.hephaestus.cli import main
+from src.hephaestus.cli import build_parser, main
 
 
 def test_assets_intent_inventory_cli_uses_openai_vectorizer(
@@ -300,6 +300,35 @@ def test_assets_create_and_status_use_evaluation_assets_workspace(
     main()
 
     assert '"status": "queued"' in capsys.readouterr().out
+
+
+def test_assets_extend_cli_parses_incremental_clustering_options() -> None:
+    args = build_parser().parse_args(
+        [
+            "assets",
+            "extend",
+            "--tenant",
+            "tenant_a",
+            "--parent-asset-id",
+            "v1",
+            "--asset-id",
+            "v2",
+            "--additional-unlabeled",
+            "new.jsonl",
+            "--clustering-mode",
+            "refresh",
+            "--embedding-model",
+            "tfidf",
+            "--clusters",
+            "12",
+        ]
+    )
+
+    assert args.assets_command == "extend"
+    assert args.parent_asset_id == "v1"
+    assert args.clustering_mode == "refresh"
+    assert args.embedding_model == "tfidf"
+    assert args.clusters == 12
 
 
 def _case(case_id: str, message: str, thread: str = "t1") -> dict:

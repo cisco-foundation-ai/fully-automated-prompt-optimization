@@ -185,6 +185,22 @@ for embedding model or cluster-count changes, Stage 5 for coverage settings,
 Stage 7 for synthetic settings, and Stage 8 for split settings. Verify the
 revision in both `config_history.jsonl` and `events.jsonl`.
 
+## Incremental Asset Extension
+
+Use the shared `assets extend` workflow to create a new immutable version from
+additional canonical data. Never modify the completed parent asset.
+
+- `keep` is labeled-only and must retain the parent's rubric model, embedding
+  model, and cluster count. Stage 3 extracts only new rubrics and Stage 4 is
+  reused.
+- `refresh` is required for new unlabeled records. Stage 4 reruns over the full
+  combined pool and emits `cluster_lineage.jsonl`.
+- Verify `lineage.json`, `reuse_manifest.json`, parent identity, added record
+  IDs, and that newly trusted records do not also appear as inferred cases.
+- Verify the child snapshots required parent decisions under
+  `stages/01_raw_inputs/parent_snapshot/`, remains independently runnable, and
+  preserves existing parent group-to-split assignments.
+
 ## Provider Rules
 
 - Default rubric model: OpenAI `gpt-5.5`.

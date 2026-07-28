@@ -23,6 +23,10 @@ def test_asset_studio_owns_creation_controls() -> None:
     assert 'value="text-embedding-ada-002"' in EVALUATION_ASSET_HTML
     assert 'value="tfidf"' in EVALUATION_ASSET_HTML
     assert 'name="cluster_count"' in EVALUATION_ASSET_HTML
+    assert (
+        "Set this higher than the number of routes and lower than the number "
+        "of unlabeled data points."
+    ) in EVALUATION_ASSET_HTML
     assert 'name="match_threshold"' in EVALUATION_ASSET_HTML
     assert 'value="0.6"' in EVALUATION_ASSET_HTML
     assert 'name="synthetic_coverage_enabled"' in EVALUATION_ASSET_HTML
@@ -54,6 +58,15 @@ def test_asset_studio_owns_creation_controls() -> None:
     assert 'name="min_trusted_examples"' in EVALUATION_ASSET_HTML
     assert 'name="split_seed"' in EVALUATION_ASSET_HTML
     assert "Raw inputs are immutable inside an asset." in EVALUATION_ASSET_HTML
+    assert "Extend asset" in EVALUATION_ASSET_HTML
+    assert (
+        '<button class="primary extend-primary" id="extend">Extend asset</button>'
+        in EVALUATION_ASSET_HTML
+    )
+    assert "Keep original clustering" in EVALUATION_ASSET_HTML
+    assert "Rerun clustering" in EVALUATION_ASSET_HTML
+    assert "/api/evaluation-assets/extend" in EVALUATION_ASSET_HTML
+    assert "Extract only new rubrics" in EVALUATION_ASSET_HTML
 
 
 def test_explorer_links_to_studio_without_asset_form() -> None:

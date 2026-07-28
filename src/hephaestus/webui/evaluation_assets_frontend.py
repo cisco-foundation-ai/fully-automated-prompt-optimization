@@ -39,6 +39,7 @@ EVALUATION_ASSET_HTML = r"""<!doctype html>
   .back { display: block; margin: 28px 8px 0; color: #b8cec5; font-size: 13px; text-decoration: none; }
   main { min-width: 0; padding: 30px clamp(24px, 4vw, 58px) 60px; }
   .topbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 28px; }
+  .top-actions { display: flex; flex-wrap: wrap; gap: 8px; }
   h1 { margin: 0; font-size: clamp(25px,3vw,36px); letter-spacing: -.035em; }
   h2 { margin: 0; font-size: 20px; }
   h3 { margin: 0; font-size: 15px; }
@@ -59,6 +60,16 @@ EVALUATION_ASSET_HTML = r"""<!doctype html>
   label.disabled-control { opacity: .55; }
   .wide { grid-column: 1/-1; }
   .model-note { padding: 13px; border-radius: 9px; background: var(--blue-soft); color: #3d4e78; font-size: 13px; }
+  .extension-plan { grid-column: 1/-1; padding: 16px; border: 1px solid #b9d8cc;
+    border-radius: 10px; background: var(--green-soft); }
+  .extension-plan strong { display: block; margin-bottom: 8px; }
+  .extension-plan ol { display: grid; grid-template-columns: repeat(4,minmax(0,1fr));
+    gap: 8px; margin: 0; padding: 0; list-style: none; counter-reset: stage; }
+  .extension-plan li { padding: 9px; border-radius: 7px; background: white; font-size: 11px; }
+  .extension-plan li::before { counter-increment: stage; content: counter(stage) ". ";
+    color: var(--green); font-weight: 800; }
+  .lineage-note { margin: 0 26px 22px; padding: 12px 14px; border: 1px solid #cfd9f8;
+    border-radius: 9px; color: #42577c; background: var(--blue-soft); font-size: 12px; }
   .input-contract { grid-column: 1/-1; display: flex; align-items: flex-start; justify-content: space-between;
     gap: 18px; padding: 15px; border: 1px solid #cfd9f8; border-radius: 10px; background: var(--blue-soft); }
   .input-contract strong { display: block; color: #2f477e; }
@@ -99,6 +110,8 @@ EVALUATION_ASSET_HTML = r"""<!doctype html>
     font-weight: 750; }
   .primary:hover { background: #066b4d; }
   .primary:disabled { opacity: .5; cursor: wait; }
+  .primary.extend-primary { background: var(--blue); }
+  .primary.extend-primary:hover { background: #2f53b8; }
   .message { color: var(--muted); font-size: 13px; }
   .message.error { color: var(--red); }
   .empty { padding: 52px 24px; text-align: center; color: var(--muted); }
@@ -289,6 +302,7 @@ EVALUATION_ASSET_HTML = r"""<!doctype html>
     .stage-hero { flex-direction: column; } .stage-stat { text-align: left; }
     .cluster-layout { grid-template-columns: 1fr; } .cluster-head { display: block; }
     .cluster-summary { margin-top: 12px; padding: 0; border: 0; text-align: left; }
+    .extension-plan ol { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -565,7 +579,7 @@ function renderCreate() {
             <option value="tfidf">TF-IDF (local fallback · no API)</option>
           </select>
         </label>
-        <label>Number of intent clusters <span>The pipeline creates exactly this many clusters.</span>
+        <label>Number of intent clusters <span>Set this higher than the number of routes and lower than the number of unlabeled data points. The pipeline creates exactly this many clusters.</span>
           <input name="cluster_count" type="number" min="1" max="1000" value="50" required>
         </label>
         <label>Intent match threshold <span>Minimum Stage 5 cosine score for a trusted-intent match.</span>
@@ -687,11 +701,13 @@ function renderTenant() {
   const asset = APP.assets.find(a => a.asset_id === APP.assetId) || APP.assets[0];
   const title = `<div class="topbar"><div><h1>${esc(APP.tenant)}</h1>
     <p class="lede">Evaluation asset preparation is isolated from tenant prompts, configs, and datasets.</p>
-    </div><button class="primary" id="another">＋ New asset</button></div>`;
+    </div><div class="top-actions"><button class="primary extend-primary" id="extend">Extend asset</button>
+      <button class="primary" id="another">＋ New asset</button></div></div>`;
   if (!asset) {
     document.getElementById('main').innerHTML = title +
       '<section class="card empty"><h2>No evaluation assets yet</h2><p>Create the first asset for this tenant.</p></section>';
     document.getElementById('another').onclick = renderCreate;
+    document.getElementById('extend').disabled = true;
     return;
   }
   const config = asset.config || {}, state = asset.state || {}, dirs = asset.directories || {};
@@ -713,6 +729,10 @@ function renderTenant() {
     ['Synthetic coverage', config.synthetic_coverage_enabled ? 'Enabled' : 'Disabled'],
     ['Synthetic cases / cluster', config.synthetic_cases_per_cluster],
     ['Configuration revisions', asset.config_revisions?.count || 0],
+    ...(asset.lineage ? [
+      ['Parent asset', asset.lineage.parent_asset_id],
+      ['Clustering mode', asset.lineage.clustering_mode]
+    ] : []),
     ['Current stage', pretty(state.current_stage || state.status)],
     ...Object.entries(state.counts || {}).map(([key,value]) => [pretty(key), value])
   ];
@@ -727,6 +747,10 @@ function renderTenant() {
         ${state.error ? `<br>${esc(state.error)}` : '<br>The persisted run has no active worker.'}
         <div class="error-actions"><button id="resume">Resume with current decisions</button></div>
         <br>Select the failed stage below to adjust its input parameters.</div>` : ''}
+      ${asset.lineage ? `<div class="lineage-note"><strong>Extended from ${esc(asset.lineage.parent_asset_id)}</strong>
+        · ${asset.lineage.clustering_mode === 'keep' ? 'Original intent clustering reused'
+          : 'Intent clustering refreshed'} · ${Number((asset.lineage.added_labeled_record_ids || []).length)}
+        labeled and ${Number((asset.lineage.added_unlabeled_record_ids || []).length)} unlabeled records added.</div>` : ''}
       <div class="pipeline">${stageCards(asset)}</div>
     </section>
     <div id="stage-detail">${renderStageDetail(asset)}</div>
@@ -737,6 +761,7 @@ function renderTenant() {
       <section class="card panel"><h3>Self-contained artifacts</h3><div class="dirs">${dirCards}</div></section>
     </div>`;
   document.getElementById('another').onclick = renderCreate;
+  document.getElementById('extend').onclick = () => renderExtend(asset);
   document.querySelectorAll('[data-asset]').forEach(button => button.onclick = () => {
     APP.assetId = button.dataset.asset; APP.stageKey = null; APP.stageDetail = null;
     renderTenant();
@@ -748,6 +773,119 @@ function renderTenant() {
   const resume = document.getElementById('resume');
   if (resume) resume.onclick = () => resumeAsset(asset.asset_id, {});
   if (!APP.stageDetail || APP.stageDetail.stage !== APP.stageKey) loadStage(asset.asset_id);
+}
+
+function renderExtend(parent) {
+  const config = parent.config || {};
+  APP.stageDetail = null;
+  document.getElementById('main').innerHTML = `
+    <div class="topbar"><div><h1>Extend ${esc(parent.asset_id)}</h1>
+      <p class="lede">Create a new immutable version from additional trusted feedback, new unlabeled traffic, or both.</p>
+    </div><button class="contract-back" id="extend-back">← Back to asset</button></div>
+    <section class="card new-card">
+      <div class="section-head"><div><h2>Incremental asset setup</h2>
+        <p>The parent remains unchanged. The new version receives complete, self-contained artifacts.</p></div></div>
+      <form id="extend-form">
+        <label>Parent asset <span>The completed version used as the base.</span>
+          <input name="parent_asset_id" value="${esc(parent.asset_id)}" readonly>
+        </label>
+        <label>New asset version <span>Must not already exist.</span>
+          <input name="asset_id" value="${esc(nextAssetId(parent.asset_id))}" required
+            pattern="[A-Za-z0-9][A-Za-z0-9_-]*">
+        </label>
+        <label class="wide">Additional labeled feedback JSONL <span>Optional canonical labeled records, including completed Stage 5 feedback.</span>
+          <input name="additional_feedback_path" placeholder="path/to/additional_feedback.jsonl">
+        </label>
+        <label class="wide">Additional unlabeled JSONL <span>Optional canonical records. Adding these requires refreshed clustering.</span>
+          <input id="extend-unlabeled" name="additional_unlabeled_path" placeholder="path/to/additional_unlabeled.jsonl">
+        </label>
+        <label>Clustering strategy <span>Keep is the fast labeled-only path.</span>
+          <select id="extend-mode" name="clustering_mode">
+            <option value="keep">Keep original clustering</option>
+            <option value="refresh">Rerun clustering</option>
+          </select>
+        </label>
+        <label>Embedding model <span>Adjustable only when clustering is refreshed.</span>
+          <select id="extend-embedding" name="embedding_model">
+            <option value="text-embedding-3-small" ${selected(config.embedding_model,'text-embedding-3-small')}>text-embedding-3-small</option>
+            <option value="text-embedding-3-large" ${selected(config.embedding_model,'text-embedding-3-large')}>text-embedding-3-large</option>
+            <option value="text-embedding-ada-002" ${selected(config.embedding_model,'text-embedding-ada-002')}>text-embedding-ada-002 (legacy)</option>
+            <option value="tfidf" ${selected(config.embedding_model,'tfidf')}>TF-IDF (local fallback)</option>
+          </select>
+        </label>
+        <label>Number of clusters <span>Inherited when original clustering is kept.</span>
+          <input id="extend-clusters" name="cluster_count" type="number" min="1" max="1000"
+            value="${esc(config.cluster_count)}" required>
+        </label>
+        <div class="extension-plan" id="extension-plan"></div>
+        <div class="form-actions"><button class="primary" type="submit">Create &amp; run extended asset</button>
+          <span class="message" id="extend-message"></span></div>
+      </form>
+    </section>`;
+  document.getElementById('extend-back').onclick = renderTenant;
+  document.getElementById('extend-form').onsubmit = extendAsset;
+  const mode = document.getElementById('extend-mode');
+  const unlabeled = document.getElementById('extend-unlabeled');
+  mode.onchange = syncExtensionPlan;
+  unlabeled.oninput = () => {
+    if (unlabeled.value.trim()) mode.value = 'refresh';
+    syncExtensionPlan();
+  };
+  syncExtensionPlan();
+}
+
+function nextAssetId(assetId) {
+  const match = String(assetId).match(/^(.*?)(\d+)$/);
+  return match ? `${match[1]}${Number(match[2]) + 1}` : `${assetId}-next`;
+}
+
+function syncExtensionPlan() {
+  const mode = document.getElementById('extend-mode');
+  if (!mode) return;
+  const keep = mode.value === 'keep';
+  const embedding = document.getElementById('extend-embedding');
+  const clusters = document.getElementById('extend-clusters');
+  embedding.disabled = keep;
+  clusters.disabled = keep;
+  const steps = keep
+    ? ['Merge labeled input','Prepare full canonical inputs','Extract only new rubrics',
+      'Reuse intent clusters','Recalculate coverage','Refresh inferred labels',
+      'Refresh optional synthesis','Materialize v2 splits']
+    : ['Merge labeled and unlabeled inputs','Prepare full canonical inputs','Extract only new rubrics',
+      'Rerun intent clustering','Recalculate coverage','Rebuild inferred labels',
+      'Refresh optional synthesis','Materialize v2 splits'];
+  document.getElementById('extension-plan').innerHTML = `<strong>${keep
+    ? 'Fast path · Stage 4 is reused' : 'Intent refresh · Stage 4 is rebuilt'}</strong>
+    <ol>${steps.map(step => `<li>${esc(step)}</li>`).join('')}</ol>`;
+}
+
+async function extendAsset(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('button[type=submit]');
+  const message = document.getElementById('extend-message');
+  const values = Object.fromEntries(new FormData(form));
+  values.tenant_id = APP.tenant;
+  if ('cluster_count' in values) values.cluster_count = Number(values.cluster_count);
+  if (!values.additional_feedback_path && !values.additional_unlabeled_path) {
+    message.className = 'message error';
+    message.textContent = 'Provide additional labeled or unlabeled JSONL.';
+    return;
+  }
+  button.disabled = true;
+  message.className = 'message';
+  message.textContent = 'Creating incremental workspace…';
+  try {
+    await api('/api/evaluation-assets/extend', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(values)
+    });
+    APP.assetId = values.asset_id;
+    await selectTenant(APP.tenant);
+  } catch (error) {
+    message.className = 'message error';
+    message.textContent = error.message;
+    button.disabled = false;
+  }
 }
 
 function rubricModelInput(config) {

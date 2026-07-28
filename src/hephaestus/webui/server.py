@@ -29,6 +29,7 @@ Routes:
     GET /api/tenants/<t>/evaluation-assets         -> asset pipeline summaries
     GET /api/tenants/<t>/evaluation-assets/<a>/stages/<s> -> stage details
     POST /api/evaluation-assets/start              -> create and run an asset
+    POST /api/evaluation-assets/extend             -> create an incremental version
     POST /api/tenants/<t>/evaluation-assets/<a>/resume -> revise and resume an asset
 """
 
@@ -124,6 +125,9 @@ class _Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/evaluation-assets/start":
             self._route_start_evaluation_asset()
+            return
+        if parsed.path == "/api/evaluation-assets/extend":
+            self._route_extend_evaluation_asset()
             return
         params = _match(
             "/api/tenants/{tenant}/evaluation-assets/{asset}/resume",
@@ -336,6 +340,54 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, status=409)
             return
         except (ValueError, OSError, KeyError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        self._send_json(state, status=202)
+
+    def _route_extend_evaluation_asset(self) -> None:
+        payload = self._read_json_body()
+        if payload is None:
+            return
+        try:
+            mode = str(payload.get("clustering_mode") or "keep")
+            if mode not in {"keep", "refresh"}:
+                raise ValueError("clustering_mode must be 'keep' or 'refresh'")
+            updates: Dict[str, Any] = {}
+            if payload.get("embedding_model"):
+                embedding_model = str(payload["embedding_model"])
+                if (
+                    embedding_model not in OPENAI_EMBEDDING_MODELS
+                    and embedding_model != "tfidf"
+                ):
+                    raise ValueError("unsupported embedding_model")
+                updates["embedding_model"] = embedding_model
+            if payload.get("cluster_count") not in {None, ""}:
+                cluster_count = int(payload["cluster_count"])
+                if not 1 <= cluster_count <= 1000:
+                    raise ValueError("cluster_count must be between 1 and 1000")
+                updates["cluster_count"] = cluster_count
+            feedback_value = str(payload.get("additional_feedback_path") or "").strip()
+            unlabeled_value = str(payload.get("additional_unlabeled_path") or "").strip()
+            state = self.asset_manager.extend(
+                str(payload["tenant_id"]),
+                str(payload["parent_asset_id"]),
+                str(payload["asset_id"]),
+                additional_feedback=(
+                    Path(feedback_value) if feedback_value else None
+                ),
+                additional_unlabeled=(
+                    Path(unlabeled_value) if unlabeled_value else None
+                ),
+                clustering_mode=mode,
+                config_updates=updates,
+            )
+        except FileExistsError as exc:
+            self._send_json({"error": str(exc)}, status=409)
+            return
+        except RuntimeError as exc:
+            self._send_json({"error": str(exc)}, status=409)
+            return
+        except (KeyError, TypeError, ValueError, OSError) as exc:
             self._send_json({"error": str(exc)}, status=400)
             return
         self._send_json(state, status=202)

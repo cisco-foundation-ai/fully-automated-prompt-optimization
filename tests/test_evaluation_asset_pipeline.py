@@ -36,9 +36,13 @@ class FakeRubricProvider:
 
     def __init__(self):
         self.synthetic_calls = 0
+        self.feedback_record_ids = []
 
     def generate_json(self, system_prompt, payload):
         if "records" in payload:
+            self.feedback_record_ids.extend(
+                row["record_id"] for row in payload["records"]
+            )
             return {
                 "rubrics": [
                     {
@@ -312,6 +316,166 @@ def test_revise_config_resumes_an_earlier_incomplete_stage(
     assert revision["invalidated_from_stage"] == "synthetic_coverage"
     assert revision["resume_from_stage"] == "coverage_decisions"
     assert layout.load_state().current_stage == "coverage_decisions"
+
+
+def test_extend_asset_keeps_clustering_and_extracts_only_new_rubrics(
+    tmp_path: Path,
+) -> None:
+    tenants_root = tmp_path / "tenants"
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    feedback = inputs / "feedback.jsonl"
+    unlabeled = inputs / "unlabeled.jsonl"
+    added_feedback = inputs / "added-feedback.jsonl"
+    _write_extension_feedback(feedback, ["f1"])
+    _write_extension_unlabeled(unlabeled, ["u1", "u2"])
+    _write_extension_feedback(added_feedback, ["u1"])
+    parent_layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    parent_pipeline = EvaluationAssetPipeline.create(
+        tenants_root,
+        EvaluationAssetConfig(
+            tenant_id="tenant_a",
+            cluster_count=1,
+            synthetic_coverage_enabled=False,
+        ),
+        feedback,
+        unlabeled,
+        rubric_provider=FakeRubricProvider(),
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+    parent_pipeline.run()
+    parent_inventory = parent_layout.artifact_path(
+        PipelineStage.INTENT_CLUSTERING,
+        "intent_inventory.jsonl",
+    ).read_text(encoding="utf-8")
+    parent_locations = _split_case_locations(parent_layout)
+
+    child_layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v2")
+    child_layout.initialize_extension(
+        parent_layout,
+        additional_feedback=added_feedback,
+        additional_unlabeled=None,
+        clustering_mode="keep",
+    )
+    parent_layout.root.rename(tmp_path / "archived-parent")
+    child_provider = FakeRubricProvider()
+    child_state = EvaluationAssetPipeline(
+        child_layout,
+        rubric_provider=child_provider,
+        embedding_provider=FakeEmbeddingProvider(),
+    ).run()
+
+    assert child_state.status == "completed"
+    assert child_provider.feedback_record_ids == ["u1"]
+    assert child_layout.artifact_path(
+        PipelineStage.INTENT_CLUSTERING,
+        "intent_inventory.jsonl",
+    ).read_text(encoding="utf-8") == parent_inventory
+    rubrics = _read_test_jsonl(
+        child_layout.artifact_path(
+            PipelineStage.RUBRIC_EXTRACTION,
+            "feedback_rubrics.jsonl",
+        )
+    )
+    assert {row["record_id"] for row in rubrics} == {"f1", "u1"}
+    inferred = _read_test_jsonl(
+        child_layout.artifact_path(
+            PipelineStage.LABEL_INFERENCE,
+            "inferred_cases.jsonl",
+        )
+    )
+    assert "inferred-u1" not in {row["case_id"] for row in inferred}
+    child_locations = _split_case_locations(child_layout)
+    for case_id in ("feedback-f1", "inferred-u2"):
+        assert child_locations[case_id] == parent_locations[case_id]
+    lineage = json.loads(child_layout.lineage_path.read_text(encoding="utf-8"))
+    assert lineage["parent_asset_id"] == "v1"
+    assert lineage["clustering_mode"] == "keep"
+
+
+def test_extend_asset_refreshes_clustering_for_new_unlabeled_records(
+    tmp_path: Path,
+) -> None:
+    tenants_root = tmp_path / "tenants"
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    feedback = inputs / "feedback.jsonl"
+    unlabeled = inputs / "unlabeled.jsonl"
+    added_unlabeled = inputs / "added-unlabeled.jsonl"
+    _write_extension_feedback(feedback, ["f1"])
+    _write_extension_unlabeled(unlabeled, ["u1", "u2"])
+    _write_extension_unlabeled(added_unlabeled, ["u3"])
+    parent = EvaluationAssetPipeline.create(
+        tenants_root,
+        EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
+        feedback,
+        unlabeled,
+        rubric_provider=FakeRubricProvider(),
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+    parent.run()
+    parent_layout = parent.layout
+
+    child_layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v2")
+    child_layout.initialize_extension(
+        parent_layout,
+        additional_feedback=None,
+        additional_unlabeled=added_unlabeled,
+        clustering_mode="refresh",
+        config_updates={"cluster_count": 2},
+    )
+    child_provider = FakeRubricProvider()
+    state = EvaluationAssetPipeline(
+        child_layout,
+        rubric_provider=child_provider,
+        embedding_provider=FakeEmbeddingProvider(),
+    ).run()
+
+    assert state.status == "completed"
+    assert child_provider.feedback_record_ids == []
+    assert state.counts["unlabeled_records"] == 3
+    assert state.counts["intent_clusters"] == 2
+    lineage_rows = _read_test_jsonl(
+        child_layout.artifact_path(
+            PipelineStage.INTENT_CLUSTERING,
+            "cluster_lineage.jsonl",
+        )
+    )
+    assert lineage_rows
+    assert {
+        row["relationship"] for row in lineage_rows
+    } <= {"continued", "split", "merged", "new", "retired"}
+
+
+def test_extend_asset_rejects_unlabeled_additions_when_clustering_is_kept(
+    tmp_path: Path,
+) -> None:
+    tenants_root = tmp_path / "tenants"
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    feedback = inputs / "feedback.jsonl"
+    unlabeled = inputs / "unlabeled.jsonl"
+    added_unlabeled = inputs / "added-unlabeled.jsonl"
+    _write_extension_feedback(feedback, ["f1"])
+    _write_extension_unlabeled(unlabeled, ["u1"])
+    _write_extension_unlabeled(added_unlabeled, ["u2"])
+    parent = EvaluationAssetPipeline.create(
+        tenants_root,
+        EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
+        feedback,
+        unlabeled,
+        rubric_provider=FakeRubricProvider(),
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+    parent.run()
+
+    with pytest.raises(ValueError, match="use refresh"):
+        EvaluationAssetLayout(tenants_root, "tenant_a", "v2").initialize_extension(
+            parent.layout,
+            additional_feedback=None,
+            additional_unlabeled=added_unlabeled,
+            clustering_mode="keep",
+        )
 
 
 def test_labeling_queue_samples_only_clusters_needing_trusted_labels() -> None:
@@ -699,3 +863,73 @@ def test_layout_rejects_unsafe_tenant_and_asset_names(tmp_path: Path) -> None:
         except ValueError:
             continue
         raise AssertionError("unsafe evaluation asset path was accepted")
+
+
+def _write_extension_feedback(path: Path, record_ids: list[str]) -> None:
+    rows = [
+        {
+            "schema_version": "fapo-evaluation-input-v1",
+            "record_id": record_id,
+            "group_id": f"group-{record_id}",
+            "task_type": "answer",
+            "route": "route_a",
+            "user_input": f"Request {record_id}",
+            "assistant_output": "Previous response",
+            "conversation_context": [],
+            "tool_calls": [],
+            "runtime": {},
+            "metadata": {},
+            "feedback": {
+                "polarity": "positive",
+                "rationale": "The response satisfied the request.",
+            },
+        }
+        for record_id in record_ids
+    ]
+    path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
+def _write_extension_unlabeled(path: Path, record_ids: list[str]) -> None:
+    rows = [
+        {
+            "schema_version": "fapo-evaluation-input-v1",
+            "record_id": record_id,
+            "group_id": f"group-{record_id}",
+            "task_type": "answer",
+            "route": "route_a",
+            "user_input": f"Request {record_id}",
+            "conversation_context": [],
+            "tool_calls": [],
+            "runtime": {},
+            "metadata": {},
+        }
+        for record_id in record_ids
+    ]
+    path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
+def _read_test_jsonl(path: Path) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _split_case_locations(layout: EvaluationAssetLayout) -> dict[str, str]:
+    locations = {}
+    for split in ("train", "validation", "test", "regression_trusted"):
+        for row in _read_test_jsonl(
+            layout.artifact_path(
+                PipelineStage.DATASET_SPLITS,
+                f"{split}.jsonl",
+            )
+        ):
+            locations[row["case_id"]] = split
+    return locations

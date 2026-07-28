@@ -91,6 +91,64 @@ class EvaluationAssetRunManager:
         response["resume"] = revision
         return response
 
+    def extend(
+        self,
+        tenant_id: str,
+        parent_asset_id: str,
+        asset_id: str,
+        *,
+        additional_feedback: Optional[Path],
+        additional_unlabeled: Optional[Path],
+        clustering_mode: str,
+        config_updates: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Create and run a new asset version derived from a completed parent."""
+        feedback_path = (
+            self._allowed_input(additional_feedback)
+            if additional_feedback is not None
+            else None
+        )
+        unlabeled_path = (
+            self._allowed_input(additional_unlabeled)
+            if additional_unlabeled is not None
+            else None
+        )
+        key = (tenant_id, asset_id)
+        with self._lock:
+            for candidate in ((tenant_id, parent_asset_id), key):
+                existing = self._threads.get(candidate)
+                if existing is not None and existing.is_alive():
+                    raise RuntimeError(
+                        "parent or extended evaluation asset pipeline is already running"
+                    )
+            parent = EvaluationAssetLayout(
+                self.tenants_root,
+                tenant_id,
+                parent_asset_id,
+            )
+            layout = EvaluationAssetLayout(
+                self.tenants_root,
+                tenant_id,
+                asset_id,
+            )
+            layout.initialize_extension(
+                parent,
+                additional_feedback=feedback_path,
+                additional_unlabeled=unlabeled_path,
+                clustering_mode=clustering_mode,
+                config_updates=config_updates,
+            )
+            pipeline = EvaluationAssetPipeline(layout)
+            thread = threading.Thread(
+                target=self._run_pipeline,
+                args=(key, pipeline),
+                name=f"evaluation-asset-{tenant_id}-{asset_id}",
+                daemon=True,
+            )
+            self._threads[key] = thread
+            thread.start()
+        return layout.load_state().to_dict()
+
     def is_running(self, tenant_id: str, asset_id: str) -> bool:
         """Return whether this process currently owns a live pipeline thread."""
         with self._lock:

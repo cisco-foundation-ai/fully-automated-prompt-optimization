@@ -167,6 +167,8 @@ tenants/<tenant_id>/evaluation_assets/<asset_id>/
 ├── config_history.jsonl
 ├── pipeline_state.json
 ├── events.jsonl
+├── lineage.json                 # extended versions only
+├── reuse_manifest.json          # extended versions only
 ├── asset_manifest.json
 └── stages/
     ├── 01_raw_inputs/
@@ -228,6 +230,19 @@ friendly name and purpose beside every filename. If a run stops, the Studio
 can resume with the existing decisions or edit them first. FAPO automatically
 reruns from the earliest affected stage and preserves earlier checkpoints.
 
+Completed assets also expose **Extend asset**, which creates a new immutable
+version from additional canonical data:
+
+- **Keep original clustering** accepts labeled additions only. It reuses the
+  parent's Stage 4 inventory and extracts Stage 3 rubrics only for the new
+  feedback.
+- **Rerun clustering** accepts new unlabeled records, rebuilds Stage 4 over the
+  combined traffic, and writes `cluster_lineage.jsonl` to relate previous and
+  current clusters.
+
+Both modes recalculate coverage, inferred labels, optional synthesis, and
+complete dataset splits in the new version. The parent asset is never changed.
+
 ### Use the CLI
 
 Set the relevant provider credential, then create and run the asset:
@@ -253,6 +268,20 @@ python -m hephaestus.cli assets status \
   --tenant <tenant_id> \
   --asset-id v1
 ```
+
+Extend a completed version from the CLI:
+
+```bash
+python -m hephaestus.cli assets extend \
+  --tenant <tenant_id> \
+  --parent-asset-id v1 \
+  --asset-id v2 \
+  --additional-feedback <additional_feedback.jsonl> \
+  --clustering-mode keep
+```
+
+Use `--additional-unlabeled <additional_unlabeled.jsonl>
+--clustering-mode refresh` when the intent landscape must be rebuilt.
 
 Add `--enable-synthetic-coverage --synthetic-cases-per-cluster <count>` to
 enable Stage 7. Use `--embedding-model tfidf` for deterministic local

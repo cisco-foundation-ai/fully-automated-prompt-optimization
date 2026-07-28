@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -13,7 +14,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 from src.hephaestus.evaluation_assets.models import (
     CONFIG_STAGE_DEPENDENCIES,
@@ -47,7 +48,10 @@ STAGE_ARTIFACTS = {
         "trusted_intents.jsonl",
         "trusted_cases.jsonl",
     ),
-    PipelineStage.INTENT_CLUSTERING: ("intent_inventory.jsonl",),
+    PipelineStage.INTENT_CLUSTERING: (
+        "intent_inventory.jsonl",
+        "cluster_lineage.jsonl",
+    ),
     PipelineStage.COVERAGE_DECISIONS: (
         "intent_matches.jsonl",
         "coverage_report.md",
@@ -185,12 +189,27 @@ class EvaluationAssetLayout:
         return self.root / "config_history.jsonl"
 
     @property
+    def lineage_path(self) -> Path:
+        return self.root / "lineage.json"
+
+    @property
+    def reuse_manifest_path(self) -> Path:
+        return self.root / "reuse_manifest.json"
+
+    @property
     def feedback_path(self) -> Path:
         return self.artifact_path(PipelineStage.RAW_INPUTS, "labeled_feedback.jsonl")
 
     @property
     def unlabeled_path(self) -> Path:
         return self.artifact_path(PipelineStage.RAW_INPUTS, "unlabeled.jsonl")
+
+    @property
+    def parent_snapshot(self) -> Path:
+        return self.artifact_path(
+            PipelineStage.RAW_INPUTS,
+            "parent_snapshot",
+        )
 
     def ensure(self) -> None:
         """Create the canonical directories without requiring other tenant files."""
@@ -226,6 +245,259 @@ class EvaluationAssetLayout:
             }
         )
         self.append_event("pipeline_created", {"status": state.status})
+        return state
+
+    def initialize_extension(
+        self,
+        parent: "EvaluationAssetLayout",
+        *,
+        additional_feedback: Optional[Path],
+        additional_unlabeled: Optional[Path],
+        clustering_mode: str,
+        config_updates: Optional[Mapping[str, Any]] = None,
+    ) -> PipelineState:
+        """Create a new immutable asset version from a completed parent."""
+        if clustering_mode not in {"keep", "refresh"}:
+            raise ValueError("clustering_mode must be 'keep' or 'refresh'")
+        if parent.tenant_id != self.tenant_id:
+            raise ValueError("parent and child assets must belong to the same tenant")
+        if parent.asset_id == self.asset_id:
+            raise ValueError("extended asset must use a new asset_id")
+        if parent.load_state().status != "completed":
+            raise ValueError("parent evaluation asset must be completed")
+        self.ensure()
+        if self.config_path.exists() or self.state_path.exists():
+            raise FileExistsError(f"Evaluation asset already exists: {self.root}")
+
+        extra_feedback = _read_jsonl_rows(additional_feedback)
+        extra_unlabeled = _read_jsonl_rows(additional_unlabeled)
+        if not extra_feedback and not extra_unlabeled:
+            raise ValueError(
+                "extension requires additional labeled or unlabeled records"
+            )
+        if clustering_mode == "keep" and extra_unlabeled:
+            raise ValueError(
+                "keep clustering accepts labeled additions only; "
+                "use refresh when adding unlabeled records"
+            )
+
+        parent_config = parent.load_config()
+        merged_config = parent_config.to_dict()
+        merged_config.update(dict(config_updates or {}))
+        merged_config["tenant_id"] = self.tenant_id
+        merged_config["asset_id"] = self.asset_id
+        if "embedding_model" in (config_updates or {}):
+            merged_config["embedding_provider"] = (
+                "tfidf"
+                if config_updates["embedding_model"] == "tfidf"
+                else "openai"
+            )
+        config = EvaluationAssetConfig.from_dict(merged_config)
+        if config.rubric_provider != parent_config.rubric_provider or (
+            config.rubric_model != parent_config.rubric_model
+        ):
+            raise ValueError(
+                "incremental extension must keep the parent's rubric model"
+            )
+        if clustering_mode == "keep" and (
+            config.embedding_provider != parent_config.embedding_provider
+            or config.embedding_model != parent_config.embedding_model
+            or config.cluster_count != parent_config.cluster_count
+        ):
+            raise ValueError(
+                "keep clustering requires the parent's embedding model "
+                "and cluster count"
+            )
+
+        feedback_rows = _merge_jsonl_rows(
+            _read_jsonl_rows(parent.feedback_path),
+            extra_feedback,
+            source="labeled feedback",
+        )
+        unlabeled_rows = _merge_jsonl_rows(
+            _read_jsonl_rows(parent.unlabeled_path),
+            extra_unlabeled,
+            source="unlabeled input",
+        )
+        _atomic_write_jsonl(self.feedback_path, feedback_rows)
+        _atomic_write_jsonl(self.unlabeled_path, unlabeled_rows)
+
+        seeded_artifacts = []
+        for name in STAGE_ARTIFACTS[PipelineStage.RUBRIC_EXTRACTION]:
+            source = parent.artifact_path(PipelineStage.RUBRIC_EXTRACTION, name)
+            if not source.is_file():
+                raise FileNotFoundError(source)
+            destination = self.artifact_path(PipelineStage.RUBRIC_EXTRACTION, name)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            seeded_artifacts.append(name)
+
+        snapshot_sources = {
+            "parent_intent_inventory.jsonl": parent.artifact_path(
+                PipelineStage.INTENT_CLUSTERING,
+                "intent_inventory.jsonl",
+            ),
+            "parent_intent_matches.jsonl": parent.artifact_path(
+                PipelineStage.COVERAGE_DECISIONS,
+                "intent_matches.jsonl",
+            ),
+            "parent_inferred_cluster_rubrics.jsonl": parent.artifact_path(
+                PipelineStage.LABEL_INFERENCE,
+                "inferred_unlabeled_cluster_rubrics.jsonl",
+            ),
+            "parent_synthetic_cases.jsonl": parent.artifact_path(
+                PipelineStage.SYNTHETIC_COVERAGE,
+                "synthetic_cases.jsonl",
+            ),
+            **{
+                f"parent_{split}.jsonl": parent.artifact_path(
+                    PipelineStage.DATASET_SPLITS,
+                    f"{split}.jsonl",
+                )
+                for split in (
+                    "train",
+                    "validation",
+                    "test",
+                    "regression_trusted",
+                )
+            },
+        }
+        snapshot_artifacts = []
+        for name, source in snapshot_sources.items():
+            if not source.is_file():
+                raise FileNotFoundError(source)
+            destination = self.parent_snapshot / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            snapshot_artifacts.append(
+                {
+                    "file": name,
+                    "sha256": _sha256_path(destination),
+                }
+            )
+
+        reused_artifacts = []
+        if clustering_mode == "keep":
+            source = parent.artifact_path(
+                PipelineStage.INTENT_CLUSTERING,
+                "intent_inventory.jsonl",
+            )
+            if not source.is_file():
+                raise FileNotFoundError(source)
+            destination = self.artifact_path(
+                PipelineStage.INTENT_CLUSTERING,
+                "intent_inventory.jsonl",
+            )
+            shutil.copy2(source, destination)
+            reused_artifacts.append("intent_inventory.jsonl")
+            clusters = _read_jsonl_rows(destination)
+            lineage_rows = [
+                {
+                    "previous_cluster_id": row["cluster_id"],
+                    "new_cluster_id": row["cluster_id"],
+                    "member_overlap": 1.0,
+                    "relationship": "reused",
+                }
+                for row in clusters
+            ]
+            _atomic_write_jsonl(
+                self.artifact_path(
+                    PipelineStage.INTENT_CLUSTERING,
+                    "cluster_lineage.jsonl",
+                ),
+                lineage_rows,
+            )
+            reused_artifacts.append("cluster_lineage.jsonl")
+
+        timestamp = utc_now()
+        state = PipelineState.new(config, timestamp)
+        if clustering_mode == "keep":
+            stage_state = next(
+                item
+                for item in state.stages
+                if item.stage == PipelineStage.INTENT_CLUSTERING.value
+            )
+            stage_state.status = "completed"
+            stage_state.started_at = timestamp
+            stage_state.completed_at = timestamp
+            stage_state.message = (
+                f"Reused from parent asset {parent.asset_id}"
+            )
+            state.counts["intent_clusters"] = len(
+                _read_jsonl_rows(
+                    self.artifact_path(
+                        PipelineStage.INTENT_CLUSTERING,
+                        "intent_inventory.jsonl",
+                    )
+                )
+            )
+
+        lineage = {
+            "asset_id": self.asset_id,
+            "parent_asset_id": parent.asset_id,
+            "creation_mode": "incremental_feedback",
+            "clustering_mode": clustering_mode,
+            "created_at": timestamp,
+            "added_labeled_record_ids": [
+                str(row["record_id"]) for row in extra_feedback
+            ],
+            "added_unlabeled_record_ids": [
+                str(row["record_id"]) for row in extra_unlabeled
+            ],
+            "parent_input_counts": {
+                "labeled": len(feedback_rows) - len(extra_feedback),
+                "unlabeled": len(unlabeled_rows) - len(extra_unlabeled),
+            },
+            "extended_input_counts": {
+                "labeled": len(feedback_rows),
+                "unlabeled": len(unlabeled_rows),
+            },
+        }
+        reuse_manifest = {
+            "parent_asset_id": parent.asset_id,
+            "parent_snapshot": {
+                "path": self.parent_snapshot.relative_to(self.root).as_posix(),
+                "artifacts": snapshot_artifacts,
+            },
+            "seeded_incremental_stage": {
+                "stage": PipelineStage.RUBRIC_EXTRACTION.value,
+                "artifacts": seeded_artifacts,
+                "operation": "append_new_feedback_rubrics",
+            },
+            "reused_stages": (
+                [
+                    {
+                        "stage": PipelineStage.INTENT_CLUSTERING.value,
+                        "artifacts": reused_artifacts,
+                        "reason": "no unlabeled records or clustering settings changed",
+                    }
+                ]
+                if clustering_mode == "keep"
+                else []
+            ),
+        }
+        atomic_write_json(self.config_path, config.to_dict())
+        atomic_write_json(self.state_path, state.to_dict())
+        atomic_write_json(self.lineage_path, lineage)
+        atomic_write_json(self.reuse_manifest_path, reuse_manifest)
+        self._append_config_revision(
+            {
+                "timestamp": timestamp,
+                "revision": 1,
+                "event": "configuration_inherited",
+                "parent_asset_id": parent.asset_id,
+                "configuration": config.to_dict(),
+            }
+        )
+        self.append_event(
+            "pipeline_extended",
+            {
+                "parent_asset_id": parent.asset_id,
+                "clustering_mode": clustering_mode,
+                "added_labeled_records": len(extra_feedback),
+                "added_unlabeled_records": len(extra_unlabeled),
+            },
+        )
         return state
 
     def load_config(self) -> EvaluationAssetConfig:
@@ -415,6 +687,11 @@ class EvaluationAssetLayout:
         return {
             "asset_id": self.asset_id,
             "path": self.root.relative_to(self.tenant_root).as_posix(),
+            "lineage": (
+                read_json(self.lineage_path)
+                if self.lineage_path.is_file()
+                else None
+            ),
             "directories": {
                 name: {
                     "path": path.relative_to(self.tenant_root).as_posix(),
@@ -510,3 +787,71 @@ def _copy_jsonl(source: Path, destination: Path) -> None:
             shutil.copyfileobj(source_handle, handle)
         temporary_path = Path(handle.name)
     temporary_path.replace(destination)
+
+
+def _read_jsonl_rows(path: Optional[Path]) -> list[Dict[str, Any]]:
+    if path is None:
+        return []
+    resolved = path.resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(resolved)
+    if resolved.suffix.lower() != ".jsonl":
+        raise ValueError(f"Evaluation asset inputs must be JSONL: {resolved}")
+    rows: list[Dict[str, Any]] = []
+    for line_number, line in enumerate(
+        resolved.read_text(encoding="utf-8").splitlines(),
+        start=1,
+    ):
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if not isinstance(row, dict):
+            raise ValueError(f"Expected JSON object at {resolved}:{line_number}")
+        rows.append(row)
+    return rows
+
+
+def _merge_jsonl_rows(
+    parent_rows: Sequence[Mapping[str, Any]],
+    added_rows: Sequence[Mapping[str, Any]],
+    *,
+    source: str,
+) -> list[Dict[str, Any]]:
+    merged: list[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in [*parent_rows, *added_rows]:
+        record_id = str(row.get("record_id") or "").strip()
+        if not record_id:
+            raise ValueError(f"{source} record is missing record_id")
+        if record_id in seen:
+            raise ValueError(f"duplicate {source} record_id: {record_id}")
+        seen.add(record_id)
+        merged.append(dict(row))
+    return merged
+
+
+def _atomic_write_jsonl(
+    path: Path,
+    rows: Sequence[Mapping[str, Any]],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        for row in rows:
+            handle.write(json.dumps(dict(row), sort_keys=True) + "\n")
+        temporary_path = Path(handle.name)
+    temporary_path.replace(path)
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

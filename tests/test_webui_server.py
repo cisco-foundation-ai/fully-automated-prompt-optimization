@@ -165,3 +165,54 @@ def test_resume_evaluation_asset_accepts_decision_updates(tmp_path: Path) -> Non
             "split_seed": 73,
         },
     )
+
+
+def test_extend_evaluation_asset_endpoint_accepts_refresh_plan(
+    tmp_path: Path,
+) -> None:
+    class FakeManager:
+        received = None
+
+        def extend(self, tenant_id, parent_asset_id, asset_id, **kwargs):
+            self.received = (tenant_id, parent_asset_id, asset_id, kwargs)
+            return {"status": "queued", "asset_id": asset_id}
+
+    manager = FakeManager()
+    handler = type(
+        "_TestHandler",
+        (_Handler,),
+        {"store": TenantStore(tmp_path / "tenants"), "asset_manager": manager},
+    )
+    instance = object.__new__(handler)
+    instance._read_json_body = lambda: {
+        "tenant_id": "tenant_a",
+        "parent_asset_id": "v1",
+        "asset_id": "v2",
+        "additional_feedback_path": str(tmp_path / "feedback.jsonl"),
+        "additional_unlabeled_path": str(tmp_path / "unlabeled.jsonl"),
+        "clustering_mode": "refresh",
+        "embedding_model": "tfidf",
+        "cluster_count": 12,
+    }
+    sent = {}
+    instance._send_json = lambda body, status=200: sent.update(
+        {"body": body, "status": status}
+    )
+
+    instance._route_extend_evaluation_asset()
+
+    assert sent["status"] == 202
+    assert manager.received == (
+        "tenant_a",
+        "v1",
+        "v2",
+        {
+            "additional_feedback": tmp_path / "feedback.jsonl",
+            "additional_unlabeled": tmp_path / "unlabeled.jsonl",
+            "clustering_mode": "refresh",
+            "config_updates": {
+                "embedding_model": "tfidf",
+                "cluster_count": 12,
+            },
+        },
+    )
