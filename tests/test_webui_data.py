@@ -158,7 +158,13 @@ def test_list_and_get_configs_support_config_and_configs_dirs(tmp_path: Path) ->
 def test_evaluation_asset_only_directory_is_a_tenant(tmp_path: Path) -> None:
     tenant = tmp_path / "bootstrap_tenant"
     asset = tenant / "evaluation_assets" / "v1"
-    for name in ("raw_inputs", "prepared_inputs", "decision_assets", "dataset_splits"):
+    for name in (
+        "raw_inputs",
+        "prepared_inputs",
+        "decision_assets",
+        "review_queues",
+        "dataset_splits",
+    ):
         (asset / name).mkdir(parents=True, exist_ok=True)
     (asset / "config.json").write_text(
         json.dumps(
@@ -258,12 +264,72 @@ def test_evaluation_asset_stage_returns_bounded_artifact_previews(
     )
 
 
+def test_evaluation_asset_stage_reads_stage_oriented_layout(
+    tmp_path: Path,
+) -> None:
+    tenant = tmp_path / "bootstrap_tenant"
+    asset = tenant / "evaluation_assets" / "v1"
+    prepared = asset / "stages" / "02_prepared_inputs"
+    clustering = asset / "stages" / "04_intent_clustering"
+    prepared.mkdir(parents=True)
+    clustering.mkdir(parents=True)
+    _write_json(
+        asset / "config.json",
+        {"tenant_id": "bootstrap_tenant", "asset_id": "v1"},
+    )
+    _write_json(
+        asset / "pipeline_state.json",
+        {
+            "tenant_id": "bootstrap_tenant",
+            "asset_id": "v1",
+            "status": "completed",
+            "stages": [],
+        },
+    )
+    (prepared / "intent_records.jsonl").write_text(
+        '{"record_id":"r1","user_input":"request alpha"}\n',
+        encoding="utf-8",
+    )
+    (clustering / "intent_inventory.jsonl").write_text(
+        json.dumps(
+            {
+                "cluster_id": "route-001",
+                "route": "route",
+                "size": 1,
+                "record_ids": ["r1"],
+                "representative_ids": ["r1"],
+                "top_terms": ["alpha"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    detail = TenantStore(tmp_path).get_evaluation_asset_stage(
+        "bootstrap_tenant",
+        "v1",
+        "intent_clustering",
+    )
+
+    assert detail is not None
+    assert detail["artifacts"][0]["path"].endswith(
+        "stages/04_intent_clustering/intent_inventory.jsonl"
+    )
+    assert detail["clusters"][0]["representatives"] == ["request alpha"]
+
+
 def test_missing_label_artifacts_belong_to_label_inference(
     tmp_path: Path,
 ) -> None:
     tenant = tmp_path / "bootstrap_tenant"
     asset = tenant / "evaluation_assets" / "v1"
-    for name in ("raw_inputs", "prepared_inputs", "decision_assets", "dataset_splits"):
+    for name in (
+        "raw_inputs",
+        "prepared_inputs",
+        "decision_assets",
+        "review_queues",
+        "dataset_splits",
+    ):
         (asset / name).mkdir(parents=True, exist_ok=True)
     _write_json(
         asset / "config.json",
@@ -284,6 +350,10 @@ def test_missing_label_artifacts_belong_to_label_inference(
     )
     (asset / "decision_assets" / "coverage_report.md").write_text(
         "# Coverage\n",
+        encoding="utf-8",
+    )
+    (asset / "review_queues" / "labeling_queue.jsonl").write_text(
+        '{"queue_id":"cluster-1:record-1"}\n',
         encoding="utf-8",
     )
     (
@@ -314,7 +384,15 @@ def test_missing_label_artifacts_belong_to_label_inference(
     assert {item["name"] for item in coverage["artifacts"]} == {
         "intent_matches.jsonl",
         "coverage_report.md",
+        "labeling_queue.jsonl",
     }
+    labeling_queue = next(
+        item
+        for item in coverage["artifacts"]
+        if item["name"] == "labeling_queue.jsonl"
+    )
+    assert labeling_queue["display_name"] == "Traces to label"
+    assert labeling_queue["group"] == "Needs attention"
     coverage_report = next(
         item
         for item in coverage["artifacts"]

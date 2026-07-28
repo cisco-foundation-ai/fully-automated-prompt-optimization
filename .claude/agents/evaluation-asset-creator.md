@@ -61,18 +61,27 @@ Every asset is independent and self-contained:
 ```text
 tenants/<tenant_id>/evaluation_assets/<asset_id>/
 ├── config.json
+├── config_history.jsonl
 ├── pipeline_state.json
 ├── events.jsonl
 ├── asset_manifest.json
-├── raw_inputs/
-├── prepared_inputs/
-├── decision_assets/
-└── dataset_splits/
+└── stages/
+    ├── 01_raw_inputs/
+    ├── 02_prepared_inputs/
+    ├── 03_rubric_extraction/
+    ├── 04_intent_clustering/
+    ├── 05_coverage_decisions/
+    │   └── review_queue/
+    ├── 06_label_inference/
+    ├── 07_synthetic_coverage/
+    └── 08_dataset_splits/
 ```
 
-The core copies both source JSONL files into `raw_inputs/` before processing.
-After creation, no stage may depend on the source paths or any other tenant
-file.
+The core copies both source JSONL files into `stages/01_raw_inputs/` before
+processing. Each stage owns only its outputs and may read earlier stage
+folders. After creation, no stage may depend on the source paths or any other
+tenant file. Existing assets with legacy broad folders remain readable and
+resumable but are not migrated automatically.
 
 ## Eight-Stage Contract
 
@@ -84,7 +93,7 @@ Treat these exact ordered stage names as authoritative:
 | `prepared_inputs` | Write `normalized_feedback.jsonl` and `intent_records.jsonl` |
 | `rubric_extraction` | Write `feedback_rubrics.jsonl`, `trusted_intents.jsonl`, and `trusted_cases.jsonl` |
 | `intent_clustering` | Write exact-count `intent_inventory.jsonl` |
-| `coverage_decisions` | Write `intent_matches.jsonl` and `coverage_report.md` |
+| `coverage_decisions` | Write `intent_matches.jsonl`, `coverage_report.md`, and `review_queue/labeling_queue.jsonl` in `stages/05_coverage_decisions/` |
 | `label_inference` | Write `inferred_unlabeled_cluster_rubrics.jsonl`, `inferred_unlabeled_labels.jsonl`, `missing_labeled_feedback_clusters.jsonl`, `missing_labeled_feedback_report.md`, and `inferred_cases.jsonl` |
 | `synthetic_coverage` | Optionally write candidate, accepted, rejected, and filter-audit artifacts; disabled runs make no model call |
 | `dataset_splits` | Write globally group-safe component and combined split JSONL, an automatic 20% trusted regression gate, collision triage, dataset manifest, and final asset manifest |
@@ -164,6 +173,17 @@ the tenant to have prompts, chains, configs, docs, or datasets.
 7. Fix only the in-scope cause, then invoke `assets run` again. Confirm prior
    completed stages remained complete and execution restarted at the first
    incomplete stage.
+8. If the user wants to change a pipeline decision before resuming, use the
+   Studio's **Edit decisions & resume** form or the corresponding optional
+   `assets run` flags. Do not edit `config.json` or `pipeline_state.json`
+   manually. The core must append `config_history.jsonl`, invalidate the
+   earliest dependent stage and everything downstream, and preserve earlier
+   checkpoints.
+
+Resume-time restart boundaries are Stage 3 for rubric model changes, Stage 4
+for embedding model or cluster-count changes, Stage 5 for coverage settings,
+Stage 7 for synthetic settings, and Stage 8 for split settings. Verify the
+revision in both `config_history.jsonl` and `events.jsonl`.
 
 ## Provider Rules
 
@@ -182,6 +202,28 @@ the tenant to have prompts, chains, configs, docs, or datasets.
 - A fallback is a user choice, not automatic error recovery. Never mutate an
   existing asset's provider/model to continue a failed run.
 
+## OpenAI SSL Troubleshooting
+
+When the underlying provider error specifically reports SSL/TLS certificate
+verification or a blocked trust chain:
+
+1. Tell the user to run this command in the environment used by FAPO:
+
+   ```bash
+   python3 -m pip install --upgrade openai httpx certifi truststore
+   ```
+
+2. Check whether the `truststore` blocks are commented. If so, uncomment:
+   - `src/hephaestus/providers/openai.py`, lines 50–54.
+   - `src/hephaestus/datasets/rubric_providers.py`, lines 85–89.
+   - `src/hephaestus/datasets/embedding_providers.py`, lines 61–65.
+3. Restart the FAPO UI or CLI process, then resume the asset. Confirm completed
+   stages remain complete and the first incomplete stage restarts.
+
+Do not recommend this procedure for invalid credentials, unavailable models,
+rate limits, or malformed model output. The blocks may already be uncommented;
+do not edit them again when they are active.
+
 ## Stage-Specific Review
 
 - `raw_inputs`: verify source copies exist, counts are plausible, and later
@@ -196,8 +238,12 @@ the tenant to have prompts, chains, configs, docs, or datasets.
   full-vector clustering result.
 - `coverage_decisions`: distinguish `matched_trusted_intent`,
   `needs_more_trusted_examples`, and `missing_or_weak_labels`. Unsupported
-  clusters must remain held; their missing-label artifacts are written in
-  Stage 6.
+  clusters must remain held. Verify the labeling queue contains a deterministic
+  10% centroid-near sample, minimum one and maximum three traces, from every
+  cluster in the latter two states.
+- Explain Studio artifacts using the displayed groups: Key outputs, Needs
+  attention, Supporting data, and Diagnostics. Prefer the friendly purpose
+  over reciting technical filenames, but retain the path for reproducibility.
 - `label_inference`: confirm inference applies only to supported clusters and
   retains provenance and confidence.
 - `synthetic_coverage`: first verify whether it is enabled. Disabled runs must
@@ -234,7 +280,7 @@ Before reporting completion, verify:
 - Stage 6 writes unsupported clusters to missing-label decision assets.
 - Train, validation, test, regression, and triage split files parse.
 - `asset_manifest.json` and
-  `dataset_splits/dataset_manifest.json` agree.
+  `stages/08_dataset_splits/dataset_manifest.json` agree.
 
 ## Output Contract
 

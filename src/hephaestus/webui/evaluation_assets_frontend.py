@@ -148,13 +148,21 @@ EVALUATION_ASSET_HTML = r"""<!doctype html>
   .subhead { padding: 13px 15px; border-bottom: 1px solid var(--line); background: #f6f9f7; }
   .subhead strong { display: block; font-size: 13px; }
   .subhead span { color: var(--muted); font-size: 11px; }
+  .artifact-group + .artifact-group { border-top: 1px solid var(--line); }
+  .artifact-group-title { padding: 8px 14px; color: var(--muted); background: #fbfdfc;
+    font-size: 10px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; }
   .artifact-button { display: grid; grid-template-columns: 1fr auto; gap: 8px; width: 100%;
     padding: 12px 14px; border: 0; border-top: 1px solid #edf1ef; color: var(--ink);
     text-align: left; background: white; }
-  .artifact-button:first-of-type { border-top: 0; }
+  .artifact-group .artifact-button:first-of-type { border-top: 0; }
   .artifact-button:hover, .artifact-button.active { background: var(--green-soft); }
-  .artifact-button strong { overflow: hidden; text-overflow: ellipsis; font: 12px var(--mono); }
-  .artifact-button span { color: var(--muted); font-size: 11px; }
+  .artifact-button strong { display: block; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
+  .artifact-button small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px;
+    line-height: 1.35; }
+  .artifact-button code { display: block; margin-top: 5px; color: #718079; font: 9px var(--mono); }
+  .artifact-count { align-self: start; color: var(--muted); font-size: 10px; white-space: nowrap; }
+  .artifact-purpose { padding: 10px 14px; border-bottom: 1px solid var(--line); color: #52615b;
+    background: #fbfdfc; font-size: 12px; }
   .example-toolbar { display: flex; justify-content: space-between; gap: 10px; padding: 10px 14px;
     color: var(--muted); background: #17231f; font-size: 11px; }
   .example-panel pre { min-height: 290px; max-height: 500px; margin: 0; padding: 17px;
@@ -253,6 +261,21 @@ EVALUATION_ASSET_HTML = r"""<!doctype html>
     color: #842d2d; background: var(--red-soft); }
   .error-box button { margin-top: 10px; padding: 7px 12px; border: 1px solid #d07c75; border-radius: 7px;
     color: #842d2d; background: white; font-weight: 700; }
+  .error-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .resume-editor { margin-top: 14px; padding: 16px; border: 1px solid #e8bbb7; border-radius: 9px;
+    color: var(--ink); background: white; }
+  .resume-editor[hidden] { display: none; }
+  .resume-editor h3 { font-size: 15px; }
+  .resume-editor > p { margin: 4px 0 14px; color: var(--muted); font-size: 12px; }
+  .failed-stage-parameters { margin: 0 26px 22px; border-color: #e1a09b;
+    box-shadow: none; }
+  .failed-stage-parameters .resume-editor { margin: 0; border: 0; border-radius: 13px; }
+  .resume-form { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 13px; }
+  .resume-form label { font-size: 12px; }
+  .resume-form input, .resume-form select { padding: 9px 10px; }
+  .resume-form .form-actions { padding-top: 2px; }
+  .resume-impact { grid-column: 1/-1; padding: 10px 12px; border-radius: 8px;
+    color: #42577c; background: var(--blue-soft); font-size: 12px; }
   .asset-list { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 18px; }
   .asset-chip { padding: 7px 11px; border: 1px solid var(--line); border-radius: 999px; background: white; }
   .asset-chip.active { color: white; border-color: var(--green); background: var(--green); }
@@ -261,7 +284,7 @@ EVALUATION_ASSET_HTML = r"""<!doctype html>
     .brand { margin-bottom: 12px; } .side-label { display: none; }
     #tenant-list { display: flex; overflow-x: auto; }
     .back { margin-top: 12px; } main { padding: 24px 16px 50px; }
-    form, .grid, .process-map, .stage-body, .contract-grid { grid-template-columns: 1fr; }
+    form, .resume-form, .grid, .process-map, .stage-body, .contract-grid { grid-template-columns: 1fr; }
     .wide, .form-actions { grid-column: auto; }
     .stage-hero { flex-direction: column; } .stage-stat { text-align: left; }
     .cluster-layout { grid-template-columns: 1fr; } .cluster-head { display: block; }
@@ -291,6 +314,7 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => (
   {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]
 ));
 const pretty = value => String(value || '').replaceAll('_', ' ').replace(/\b\w/g, c => c.toUpperCase());
+const selected = (current, value) => current === value ? 'selected' : '';
 const CONTRACT_FIELD_HELP = {
   schema_version: 'Identifies the canonical FAPO input contract.',
   record_id: 'Stable unique identifier within this file.',
@@ -443,8 +467,8 @@ const STAGE_INFO = {
   coverage_decisions: {
     eyebrow: 'Trust boundary', description: 'Decide which mined clusters are supported by trusted feedback and which must be held.',
     inputs: ['Intent inventory', 'Trusted intents', 'Coverage policy'],
-    process: ['Match clusters to trusted intents', 'Apply support thresholds', 'Record gaps and reasons'],
-    outputs: ['Intent matches', 'Coverage report']
+    process: ['Match clusters to trusted intents', 'Apply support thresholds', 'Sample 10% of unsupported clusters for labeling'],
+    outputs: ['Coverage report', 'Cluster match decisions', 'Representative traces to label']
   },
   label_inference: {
     eyebrow: 'Reviewable inference', description: 'Infer labels only for clusters that pass the trusted coverage gate.',
@@ -671,6 +695,8 @@ function renderTenant() {
     return;
   }
   const config = asset.config || {}, state = asset.state || {}, dirs = asset.directories || {};
+  const canResume = state.status === 'failed'
+    || (!asset.runner_active && ['running','queued'].includes(state.status));
   const stages = state.stages || [];
   if (!APP.stageKey || !stages.some(stage => stage.stage === APP.stageKey)) {
     APP.stageKey = state.current_stage || stages.find(stage => stage.status !== 'pending')?.stage || stages[0]?.stage;
@@ -686,6 +712,7 @@ function renderTenant() {
     ['Intent match threshold', config.match_threshold],
     ['Synthetic coverage', config.synthetic_coverage_enabled ? 'Enabled' : 'Disabled'],
     ['Synthetic cases / cluster', config.synthetic_cases_per_cluster],
+    ['Configuration revisions', asset.config_revisions?.count || 0],
     ['Current stage', pretty(state.current_stage || state.status)],
     ...Object.entries(state.counts || {}).map(([key,value]) => [pretty(key), value])
   ];
@@ -696,8 +723,10 @@ function renderTenant() {
     <section class="card">
       <div class="asset-head"><div><h2>Asset ${esc(asset.asset_id)}</h2>
         <p><code>${esc(asset.path)}</code> · updated ${esc(state.updated_at || '—')}</p></div>${statusPill(state.status)}</div>
-      ${state.error ? `<div class="error-box"><strong>Pipeline stopped</strong><br>${esc(state.error)}
-        <br><button id="resume">Resume from failed stage</button></div>` : ''}
+      ${canResume ? `<div class="error-box"><strong>Pipeline stopped</strong>
+        ${state.error ? `<br>${esc(state.error)}` : '<br>The persisted run has no active worker.'}
+        <div class="error-actions"><button id="resume">Resume with current decisions</button></div>
+        <br>Select the failed stage below to adjust its input parameters.</div>` : ''}
       <div class="pipeline">${stageCards(asset)}</div>
     </section>
     <div id="stage-detail">${renderStageDetail(asset)}</div>
@@ -717,8 +746,101 @@ function renderTenant() {
   });
   wireStageDetail(asset);
   const resume = document.getElementById('resume');
-  if (resume) resume.onclick = () => resumeAsset(asset.asset_id);
+  if (resume) resume.onclick = () => resumeAsset(asset.asset_id, {});
   if (!APP.stageDetail || APP.stageDetail.stage !== APP.stageKey) loadStage(asset.asset_id);
+}
+
+function rubricModelInput(config) {
+  return `<label>Rubric model <span>Changing this rebuilds from Stage 3.</span>
+    <select name="rubric_model">
+      <option value="gpt-5.5" ${selected(config.rubric_model,'gpt-5.5')}>GPT-5.5</option>
+      <option value="gpt-5.4" ${selected(config.rubric_model,'gpt-5.4')}>GPT-5.4</option>
+      <option value="gpt-5.2" ${selected(config.rubric_model,'gpt-5.2')}>GPT-5.2</option>
+      <option value="gpt-5.1" ${selected(config.rubric_model,'gpt-5.1')}>GPT-5.1</option>
+      <option value="gpt-5" ${selected(config.rubric_model,'gpt-5')}>GPT-5</option>
+      <option value="gpt-4.1" ${selected(config.rubric_model,'gpt-4.1')}>GPT-4.1</option>
+      <option value="gpt-4.1-mini" ${selected(config.rubric_model,'gpt-4.1-mini')}>GPT-4.1 mini</option>
+      <option value="gpt-4o" ${selected(config.rubric_model,'gpt-4o')}>GPT-4o</option>
+      <option value="gpt-4o-mini" ${selected(config.rubric_model,'gpt-4o-mini')}>GPT-4o mini</option>
+      <option value="o3" ${selected(config.rubric_model,'o3')}>o3</option>
+      <option value="o4-mini" ${selected(config.rubric_model,'o4-mini')}>o4-mini</option>
+    </select>
+  </label>`;
+}
+
+function embeddingModelInput(config) {
+  return `<label>Embedding model <span>Changing this rebuilds from Stage 4.</span>
+    <select name="embedding_model">
+      <option value="text-embedding-3-small" ${selected(config.embedding_model,'text-embedding-3-small')}>text-embedding-3-small</option>
+      <option value="text-embedding-3-large" ${selected(config.embedding_model,'text-embedding-3-large')}>text-embedding-3-large</option>
+      <option value="text-embedding-ada-002" ${selected(config.embedding_model,'text-embedding-ada-002')}>text-embedding-ada-002 (legacy)</option>
+      <option value="tfidf" ${selected(config.embedding_model,'tfidf')}>TF-IDF (local fallback)</option>
+    </select>
+  </label>`;
+}
+
+function failedStageInputs(config, stage) {
+  const controls = {
+    rubric_model: rubricModelInput(config),
+    embedding_model: embeddingModelInput(config),
+    batch_size: `<label>LLM batch size <span>Changing this rebuilds from Stage 3.</span>
+      <input name="batch_size" type="number" min="1" max="100" value="${esc(config.batch_size)}" required></label>`,
+    cluster_count: `<label>Number of clusters <span>Changing this rebuilds from Stage 4.</span>
+      <input name="cluster_count" type="number" min="1" max="1000" value="${esc(config.cluster_count)}" required></label>`,
+    match_threshold: `<label>Intent match threshold <span>Changing this rebuilds from Stage 5.</span>
+      <input name="match_threshold" type="number" min="0" max="1" step="0.01" value="${esc(config.match_threshold)}" required></label>`,
+    min_trusted_examples: `<label>Minimum trusted examples <span>Required support for a matched intent.</span>
+      <input name="min_trusted_examples" type="number" min="1" value="${esc(config.min_trusted_examples)}" required></label>`,
+    min_trusted_groups: `<label>Minimum trusted groups <span>Independent groups required for coverage.</span>
+      <input name="min_trusted_groups" type="number" min="0" value="${esc(config.min_trusted_groups)}" required></label>`,
+    max_unlabeled_to_trusted_ratio: `<label>Maximum unlabeled / trusted ratio <span>Leave empty to disable this constraint.</span>
+      <input name="max_unlabeled_to_trusted_ratio" type="number" min="0.01" step="0.01"
+        value="${esc(config.max_unlabeled_to_trusted_ratio ?? '')}" placeholder="No limit"></label>`,
+    synthetic_coverage_enabled: `<label>Synthetic coverage <span>Changing this rebuilds from Stage 7.</span>
+      <select name="synthetic_coverage_enabled">
+        <option value="false" ${selected(config.synthetic_coverage_enabled,false)}>Disabled</option>
+        <option value="true" ${selected(config.synthetic_coverage_enabled,true)}>Enabled</option>
+      </select></label>`,
+    synthetic_cases_per_cluster: `<label>Data points per supported cluster <span>Changing this rebuilds from Stage 7.</span>
+      <input name="synthetic_cases_per_cluster" type="number" min="1" max="100"
+        value="${esc(config.synthetic_cases_per_cluster)}" required></label>`,
+    split_seed: `<label>Dataset split seed <span>Changing this rebuilds Stage 8.</span>
+      <input name="split_seed" type="number" value="${esc(config.split_seed)}" required></label>`
+  };
+  const fields = {
+    raw_inputs: [],
+    prepared_inputs: [],
+    rubric_extraction: ['rubric_model','batch_size'],
+    intent_clustering: ['embedding_model','cluster_count'],
+    coverage_decisions: ['embedding_model','match_threshold','min_trusted_examples',
+      'min_trusted_groups','max_unlabeled_to_trusted_ratio'],
+    label_inference: ['rubric_model','batch_size'],
+    synthetic_coverage: ['rubric_model','batch_size','synthetic_coverage_enabled',
+      'synthetic_cases_per_cluster'],
+    dataset_splits: ['split_seed']
+  }[stage] || Object.keys(controls);
+  return fields.map(field => controls[field]).join('');
+}
+
+function renderFailedStageEditor(config, stage) {
+  const inputs = failedStageInputs(config, stage);
+  if (!inputs) {
+    const message = stage === 'raw_inputs'
+      ? 'Raw inputs are immutable inside an asset. Correct the canonical source files and create a new asset version.'
+      : 'This stage has no adjustable pipeline decisions. Correct the reported input or core error, then resume with the current decisions.';
+    return `<section class="card failed-stage-parameters"><div class="resume-editor">
+      <h3>No adjustable parameters for this stage</h3><p>${esc(message)}</p></div></section>`;
+  }
+  return `<section class="card failed-stage-parameters"><div class="resume-editor" id="resume-editor">
+    <h3>Adjust inputs for ${esc(STAGE_CARD_LABELS[stage] || pretty(stage))}</h3>
+    <p>Only parameters relevant to this failed stage are shown. Earlier checkpoints are preserved unless a changed parameter depends on an earlier stage.</p>
+    <form class="resume-form" id="resume-form">
+      ${inputs}
+      <div class="resume-impact">The update is recorded in <code>config_history.jsonl</code> and <code>events.jsonl</code>. Stale downstream artifacts are removed before execution.</div>
+      <div class="form-actions"><button class="primary" type="submit">Save decisions &amp; resume</button>
+        <span class="message" id="resume-message"></span></div>
+    </form>
+  </div></section>`;
 }
 
 function renderStageDetail(asset) {
@@ -756,18 +878,20 @@ function renderStageDetail(asset) {
       ${processColumn('What happens', info.process || [])}
       ${processColumn('Outputs', info.outputs || [])}
     </div>
+    ${stateStage && ['failed','running'].includes(stateStage.status) && !asset.runner_active
+      ? renderFailedStageEditor(detail.config || asset.config || {}, detail.stage) : ''}
     ${detail.stage === 'intent_clustering' ? renderClusterView(detail) : ''}
     <div class="stage-body">
-      <div class="artifact-menu"><div class="subhead"><strong>Stage artifacts</strong>
-        <span>${artifacts.length} files · click to inspect</span></div>
-        ${artifacts.length ? artifacts.map((item,index) => `<button class="artifact-button ${index === APP.artifactIndex ? 'active' : ''}"
-          data-artifact="${index}"><strong>${esc(item.name)}</strong>
-          <span>${item.row_count === null ? pretty(item.kind) : `${Number(item.row_count)} rows`}</span></button>`).join('')
+      <div class="artifact-menu"><div class="subhead"><strong>Artifact guide</strong>
+        <span>${artifacts.length} files grouped by how you use them</span></div>
+        ${artifacts.length ? renderArtifactMenu(artifacts)
           : '<div class="empty">Artifacts appear when this stage runs.</div>'}
       </div>
       <div class="example-panel"><div class="subhead"><strong>Example data</strong>
         <span>${artifact ? esc(artifact.path) : 'No output yet'}</span></div>
-        ${artifact ? `<div class="example-toolbar"><span>${esc(artifact.name)}</span>
+        ${artifact ? `<div class="artifact-purpose"><strong>${esc(artifact.display_name || artifact.name)}</strong>
+          · ${esc(artifact.description || '')}</div>
+          <div class="example-toolbar"><span>${esc(artifact.name)}</span>
           <span>${artifact.row_count === null ? 'report preview' : `1 example of ${Number(artifact.row_count)} rows`}</span></div>
           <pre>${formatArtifactPreview(artifact, detail.stage)}</pre>` : '<div class="empty">No preview available.</div>'}
       </div>
@@ -786,13 +910,29 @@ function processColumn(label, items) {
       <span>${esc(item)}</span></div>`).join('')}</div>`;
 }
 
+function renderArtifactMenu(artifacts) {
+  const groups = new Map();
+  artifacts.forEach((item,index) => {
+    const group = item.group || 'Supporting data';
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push({item,index});
+  });
+  return [...groups.entries()].map(([group,entries]) => `<div class="artifact-group">
+    <div class="artifact-group-title">${esc(group)}</div>
+    ${entries.map(({item,index}) => `<button class="artifact-button ${index === APP.artifactIndex ? 'active' : ''}"
+      data-artifact="${index}"><span class="artifact-copy"><strong>${esc(item.display_name || item.name)}</strong>
+      <small>${esc(item.description || '')}</small><code>${esc(item.name)}</code></span>
+      <span class="artifact-count">${item.row_count === null ? pretty(item.kind) : `${Number(item.row_count)} rows`}</span></button>`).join('')}
+  </div>`).join('');
+}
+
 function stageMetrics(detail) {
   const keys = {
     raw_inputs: ['feedback_records','unlabeled_records'],
     prepared_inputs: ['feedback_records','unlabeled_records'],
     rubric_extraction: ['feedback_rubrics'],
     intent_clustering: ['intent_clusters'],
-    coverage_decisions: ['matched_clusters','needs_more_feedback_clusters','missing_label_clusters'],
+    coverage_decisions: ['matched_clusters','needs_more_feedback_clusters','missing_label_clusters','labeling_queue_traces'],
     label_inference: ['inferred_cases','feedback_rubrics'],
     synthetic_coverage: ['synthetic_cases'],
     dataset_splits: ['dataset_cases','train_cases','validation_cases','test_cases','regression_trusted_cases']
@@ -1001,6 +1141,10 @@ function stageNavigation(asset) {
 }
 
 function wireStageDetail(asset) {
+  const resumeForm = document.getElementById('resume-form');
+  if (resumeForm) {
+    resumeForm.onsubmit = event => resumeWithChanges(event, asset.asset_id);
+  }
   document.querySelectorAll('[data-artifact]').forEach(button => button.onclick = () => {
     APP.artifactIndex = Number(button.dataset.artifact); updateStageDetail(asset);
   });
@@ -1050,14 +1194,38 @@ async function loadStage(assetId) {
   }
 }
 
-async function resumeAsset(assetId) {
-  const button = document.getElementById('resume');
+async function resumeWithChanges(event, assetId) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const values = Object.fromEntries(new FormData(form));
+  for (const field of ['cluster_count','batch_size','match_threshold',
+    'min_trusted_examples','min_trusted_groups','synthetic_cases_per_cluster','split_seed']) {
+    if (field in values) values[field] = Number(values[field]);
+  }
+  if ('max_unlabeled_to_trusted_ratio' in values) {
+    values.max_unlabeled_to_trusted_ratio = values.max_unlabeled_to_trusted_ratio === ''
+      ? null : Number(values.max_unlabeled_to_trusted_ratio);
+  }
+  if ('synthetic_coverage_enabled' in values) {
+    values.synthetic_coverage_enabled = values.synthetic_coverage_enabled === 'true';
+  }
+  await resumeAsset(assetId, values, form.querySelector('button[type=submit]'));
+}
+
+async function resumeAsset(assetId, updates, sourceButton) {
+  const button = sourceButton || document.getElementById('resume');
+  const originalText = button.textContent;
   button.disabled = true; button.textContent = 'Resuming…';
   try {
-    await api(`/api/tenants/${encodeURIComponent(APP.tenant)}/evaluation-assets/${encodeURIComponent(assetId)}/resume`, {method:'POST'});
+    await api(`/api/tenants/${encodeURIComponent(APP.tenant)}/evaluation-assets/${encodeURIComponent(assetId)}/resume`, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(updates || {})
+    });
     await selectTenant(APP.tenant);
   } catch (error) {
-    button.disabled = false; button.textContent = error.message;
+    button.disabled = false; button.textContent = originalText;
+    const message = document.getElementById('resume-message');
+    if (message) { message.className = 'message error'; message.textContent = error.message; }
+    else button.textContent = error.message;
   }
 }
 
@@ -1067,6 +1235,7 @@ function assetRevision(assets) {
     updated_at: asset.state?.updated_at,
     status: asset.state?.status,
     current_stage: asset.state?.current_stage,
+    runner_active: asset.runner_active,
     directories: asset.directories
   })));
 }

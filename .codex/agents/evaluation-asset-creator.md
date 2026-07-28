@@ -43,17 +43,27 @@ Every asset is self-contained at:
 ```text
 tenants/<tenant_id>/evaluation_assets/<asset_id>/
 ├── config.json
+├── config_history.jsonl
 ├── pipeline_state.json
 ├── events.jsonl
 ├── asset_manifest.json
-├── raw_inputs/
-├── prepared_inputs/
-├── decision_assets/
-└── dataset_splits/
+└── stages/
+    ├── 01_raw_inputs/
+    ├── 02_prepared_inputs/
+    ├── 03_rubric_extraction/
+    ├── 04_intent_clustering/
+    ├── 05_coverage_decisions/
+    │   └── review_queue/
+    ├── 06_label_inference/
+    ├── 07_synthetic_coverage/
+    └── 08_dataset_splits/
 ```
 
-The core copies source JSONL files into `raw_inputs/` before execution. After
-creation, no stage may depend on the original source path or other tenant files.
+The core copies source JSONL files into `stages/01_raw_inputs/` before
+execution. Each stage owns only its outputs and may read earlier stage folders.
+After creation, no stage may depend on the original source path or other tenant
+files. Existing assets with legacy broad folders remain readable and resumable
+but are not migrated automatically.
 
 ## Core Stage Map
 
@@ -65,7 +75,7 @@ Treat these exact ordered stage names as the runtime contract:
 | `prepared_inputs` | `normalized_feedback.jsonl`, `intent_records.jsonl` |
 | `rubric_extraction` | `feedback_rubrics.jsonl`, `trusted_intents.jsonl`, `trusted_cases.jsonl` |
 | `intent_clustering` | Exact-count `intent_inventory.jsonl` |
-| `coverage_decisions` | `intent_matches.jsonl` and `coverage_report.md` |
+| `coverage_decisions` | `intent_matches.jsonl`, `coverage_report.md`, and `review_queue/labeling_queue.jsonl` in `stages/05_coverage_decisions/` |
 | `label_inference` | `inferred_unlabeled_cluster_rubrics.jsonl`, `inferred_unlabeled_labels.jsonl`, `missing_labeled_feedback_clusters.jsonl`, `missing_labeled_feedback_report.md`, and `inferred_cases.jsonl` |
 | `synthetic_coverage` | Optional candidate, accepted, rejected, and filter-audit artifacts; disabled runs write empty files without a model call |
 | `dataset_splits` | Globally group-safe component and combined split JSONL, automatic 20% trusted regression gate, collision triage, dataset manifest, final asset manifest |
@@ -128,9 +138,12 @@ one output file.
      --asset-id <asset_id>
    ```
 
-5. If a run fails, inspect `pipeline_state.json` and `events.jsonl`, fix only
-   configuration, credentials, canonical input contract, or core defects, then invoke
-   `assets run` again. Completed stages are checkpointed and skipped.
+5. If a run fails, inspect `pipeline_state.json` and `events.jsonl`. Resume
+   unchanged when the decision was not the cause. When the user explicitly
+   changes a decision, use the Studio editor or the matching optional
+   `assets run` flag. The core records `config_history.jsonl`, invalidates the
+   earliest affected stage and all downstream stages, and preserves earlier
+   checkpoints. Never edit `config.json` or stage statuses manually.
 6. When complete, verify:
    - all stages are `completed`
    - source hashes exist
@@ -140,7 +153,8 @@ one output file.
    - train, validation, test, regression, and triage split files load
    - no `group_id` crosses train, validation, or test; regression-group
      conflicts appear only in `triage_hold`
-   - `asset_manifest.json` and `dataset_splits/dataset_manifest.json` agree
+   - `asset_manifest.json` and
+     `stages/08_dataset_splits/dataset_manifest.json` agree
 
 ## Provider Rules
 
@@ -157,6 +171,28 @@ one output file.
 - A provider fallback must be explicitly selected by the user. Never change an
   existing asset's persisted model/provider to make a failed run continue.
 
+## OpenAI SSL Troubleshooting
+
+When the underlying provider error specifically reports SSL/TLS certificate
+verification or a blocked trust chain:
+
+1. Tell the user to run this command in the environment used by FAPO:
+
+   ```bash
+   python3 -m pip install --upgrade openai httpx certifi truststore
+   ```
+
+2. Check whether the `truststore` blocks are commented. If so, uncomment:
+   - `src/hephaestus/providers/openai.py`, lines 50–54.
+   - `src/hephaestus/datasets/rubric_providers.py`, lines 85–89.
+   - `src/hephaestus/datasets/embedding_providers.py`, lines 61–65.
+3. Restart the FAPO UI or CLI process, then resume the asset. Confirm completed
+   stages remain complete and the first incomplete stage restarts.
+
+Do not recommend this procedure for invalid credentials, unavailable models,
+rate limits, or malformed model output. The blocks may already be uncommented;
+do not edit them again when they are active.
+
 ## Monitoring and Assistance
 
 - Poll `assets status` or read `pipeline_state.json`; do not repeatedly invoke
@@ -168,7 +204,12 @@ one output file.
   count. A cluster view is exploratory; projection positions do not change the
   vector-space clustering result.
 - For `coverage_decisions`, distinguish `matched_trusted_intent`,
-  `needs_more_trusted_examples`, and `missing_or_weak_labels`.
+  `needs_more_trusted_examples`, and `missing_or_weak_labels`. Verify the
+  labeling queue contains a deterministic 10% centroid-near sample, minimum
+  one and maximum three traces, from every cluster in the latter two states.
+- Explain Studio artifacts using the displayed groups: Key outputs, Needs
+  attention, Supporting data, and Diagnostics. Prefer the friendly purpose
+  over reciting technical filenames, but retain the path for reproducibility.
 - For failed runs, classify the cause as credentials/model access, source
   contract, invalid cluster count, provider/API failure, or core defect before
   proposing an action.
@@ -176,6 +217,10 @@ one output file.
   to emit the canonical contract; do not guess nested paths downstream.
 - Resume only after the cause is corrected. Verify completed stages remained
   completed and the first incomplete stage restarted.
+- For a resume-time decision change, verify the restart boundary: rubric model
+  at Stage 3; embedding model or cluster count at Stage 4; coverage settings at
+  Stage 5; synthetic settings at Stage 7; and split seed at Stage 8. Confirm
+  the revision appears in both `config_history.jsonl` and `events.jsonl`.
 - When the user wants a UI, use the universal Evaluation Asset Studio at
   `/evaluation-assets/`. FAPO Explorer `/` is a read-only summary surface.
 - In UI or reports, show one syntax-highlighted example per artifact. Use the

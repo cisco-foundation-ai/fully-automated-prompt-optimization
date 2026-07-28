@@ -9,10 +9,16 @@ from pathlib import Path
 
 import pytest
 
-from src.hephaestus.evaluation_assets.models import EvaluationAssetConfig
+from src.hephaestus.datasets.intent_assets import IntentCluster, IntentMatch
+from src.hephaestus.evaluation_assets.models import (
+    STAGE_COUNT_KEYS,
+    EvaluationAssetConfig,
+    PipelineStage,
+)
 from src.hephaestus.evaluation_assets.pipeline import (
     FEEDBACK_PROMPT,
     EvaluationAssetPipeline,
+    _build_labeling_queue,
     _normalize_rubric,
 )
 from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
@@ -121,6 +127,246 @@ def test_evaluation_asset_optional_settings_have_safe_defaults() -> None:
     assert loaded.synthetic_cases_per_cluster == 1
 
 
+def test_layout_resolves_existing_legacy_artifact_paths(tmp_path: Path) -> None:
+    layout = EvaluationAssetLayout(tmp_path / "tenants", "legacy_tenant", "v1")
+    for name in (
+        "raw_inputs",
+        "prepared_inputs",
+        "decision_assets",
+        "review_queues",
+        "dataset_splits",
+    ):
+        (layout.root / name).mkdir(parents=True, exist_ok=True)
+
+    assert layout.uses_stage_layout is False
+    assert layout.artifact_path(
+        "rubric_extraction",
+        "feedback_rubrics.jsonl",
+    ) == (layout.root / "decision_assets" / "feedback_rubrics.jsonl")
+    assert layout.artifact_path(
+        "rubric_extraction",
+        "trusted_cases.jsonl",
+    ) == (layout.root / "prepared_inputs" / "trusted_cases.jsonl")
+    assert layout.artifact_path(
+        "coverage_decisions",
+        "review_queue/labeling_queue.jsonl",
+    ) == (layout.root / "review_queues" / "labeling_queue.jsonl")
+
+
+def test_revise_config_invalidates_only_dependent_stages(tmp_path: Path) -> None:
+    tenants_root = tmp_path / "tenants"
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    feedback = inputs / "feedback.jsonl"
+    unlabeled = inputs / "unlabeled.jsonl"
+    feedback.write_text("{}\n", encoding="utf-8")
+    unlabeled.write_text("{}\n", encoding="utf-8")
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    state = layout.initialize(
+        EvaluationAssetConfig(
+            tenant_id="tenant_a",
+            cluster_count=5,
+            match_threshold=0.6,
+        ),
+        feedback,
+        unlabeled,
+    )
+    for stage_state in state.stages:
+        stage_state.status = "completed"
+        stage_state.message = "done"
+        stage_state.started_at = "start"
+        stage_state.completed_at = "end"
+    state.status = "failed"
+    state.error = "stopped"
+    state.counts = {
+        key: 1 for keys in STAGE_COUNT_KEYS.values() for key in keys
+    }
+    layout.save_state(state)
+    stage_four_artifact = layout.artifact_path(
+        PipelineStage.INTENT_CLUSTERING,
+        "intent_inventory.jsonl",
+    )
+    stage_five_artifact = layout.artifact_path(
+        PipelineStage.COVERAGE_DECISIONS,
+        "intent_matches.jsonl",
+    )
+    stage_four_artifact.write_text("{}\n", encoding="utf-8")
+    stage_five_artifact.write_text("{}\n", encoding="utf-8")
+    layout.manifest_path.write_text("{}\n", encoding="utf-8")
+
+    revision = layout.revise_config({"match_threshold": 0.2})
+
+    revised_state = layout.load_state()
+    assert revision["resume_from_stage"] == "coverage_decisions"
+    assert revision["invalidated_from_stage"] == "coverage_decisions"
+    assert revision["changed_fields"] == {
+        "match_threshold": {"previous": 0.6, "new": 0.2}
+    }
+    assert layout.load_config().match_threshold == 0.2
+    assert stage_four_artifact.exists()
+    assert not stage_five_artifact.exists()
+    assert not layout.manifest_path.exists()
+    assert [
+        item.status for item in revised_state.stages[:4]
+    ] == ["completed"] * 4
+    assert [
+        item.status for item in revised_state.stages[4:]
+    ] == ["pending"] * 4
+    assert "intent_clusters" in revised_state.counts
+    assert "matched_clusters" not in revised_state.counts
+    assert revised_state.status == "queued"
+    assert revised_state.current_stage == "coverage_decisions"
+    history = [
+        json.loads(line)
+        for line in layout.config_history_path.read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    assert [entry["event"] for entry in history] == [
+        "configuration_created",
+        "configuration_updated",
+    ]
+
+
+def test_revise_config_derives_embedding_provider_and_restarts_stage_four(
+    tmp_path: Path,
+) -> None:
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    feedback = inputs / "feedback.jsonl"
+    unlabeled = inputs / "unlabeled.jsonl"
+    feedback.write_text("{}\n", encoding="utf-8")
+    unlabeled.write_text("{}\n", encoding="utf-8")
+    layout = EvaluationAssetLayout(tmp_path / "tenants", "tenant_a", "v1")
+    state = layout.initialize(
+        EvaluationAssetConfig(tenant_id="tenant_a"),
+        feedback,
+        unlabeled,
+    )
+    for stage_state in state.stages[:3]:
+        stage_state.status = "completed"
+    layout.save_state(state)
+
+    revision = layout.revise_config({"embedding_model": "tfidf"})
+
+    config = layout.load_config()
+    assert config.embedding_model == "tfidf"
+    assert config.embedding_provider == "tfidf"
+    assert revision["resume_from_stage"] == "intent_clustering"
+    assert revision["invalidated_from_stage"] == "intent_clustering"
+
+
+def test_revise_config_with_unchanged_values_preserves_checkpoints(
+    tmp_path: Path,
+) -> None:
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    feedback = inputs / "feedback.jsonl"
+    unlabeled = inputs / "unlabeled.jsonl"
+    feedback.write_text("{}\n", encoding="utf-8")
+    unlabeled.write_text("{}\n", encoding="utf-8")
+    layout = EvaluationAssetLayout(tmp_path / "tenants", "tenant_a", "v1")
+    state = layout.initialize(
+        EvaluationAssetConfig(tenant_id="tenant_a"),
+        feedback,
+        unlabeled,
+    )
+    state.stages[0].status = "completed"
+    layout.save_state(state)
+
+    revision = layout.revise_config({"match_threshold": 0.6})
+
+    assert revision == {
+        "changed_fields": {},
+        "invalidated_from_stage": None,
+        "resume_from_stage": None,
+    }
+    assert layout.load_state().stages[0].status == "completed"
+    assert layout.config_revision_summary()["count"] == 1
+
+
+def test_revise_config_resumes_an_earlier_incomplete_stage(
+    tmp_path: Path,
+) -> None:
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    feedback = inputs / "feedback.jsonl"
+    unlabeled = inputs / "unlabeled.jsonl"
+    feedback.write_text("{}\n", encoding="utf-8")
+    unlabeled.write_text("{}\n", encoding="utf-8")
+    layout = EvaluationAssetLayout(tmp_path / "tenants", "tenant_a", "v1")
+    state = layout.initialize(
+        EvaluationAssetConfig(tenant_id="tenant_a"),
+        feedback,
+        unlabeled,
+    )
+    for stage_state in state.stages:
+        stage_state.status = "completed"
+    state.stages[4].status = "failed"
+    state.status = "failed"
+    state.current_stage = "coverage_decisions"
+    layout.save_state(state)
+
+    revision = layout.revise_config({"synthetic_coverage_enabled": True})
+
+    assert revision["invalidated_from_stage"] == "synthetic_coverage"
+    assert revision["resume_from_stage"] == "coverage_decisions"
+    assert layout.load_state().current_stage == "coverage_decisions"
+
+
+def test_labeling_queue_samples_only_clusters_needing_trusted_labels() -> None:
+    clusters = [
+        IntentCluster(
+            cluster_id="route-a-001",
+            route="route_a",
+            record_ids=[f"u{index}" for index in range(1, 25)],
+            representative_ids=["u1", "u2", "u3"],
+            top_terms=["category", "alpha"],
+        ),
+        IntentCluster(
+            cluster_id="route-b-001",
+            route="route_b",
+            record_ids=["u25"],
+            representative_ids=["u25"],
+            top_terms=["category", "beta"],
+        ),
+    ]
+    matches = [
+        IntentMatch(
+            cluster_id="route-a-001",
+            status="missing_or_weak_labels",
+            score=0.2,
+            reason="below threshold",
+        ),
+        IntentMatch(
+            cluster_id="route-b-001",
+            status="matched_trusted_intent",
+            score=0.9,
+        ),
+    ]
+    intent_rows = [
+        {
+            "record_id": f"u{index}",
+            "user_input": f"request {index}",
+            "route": "route_a" if index < 25 else "route_b",
+        }
+        for index in range(1, 26)
+    ]
+
+    queue = _build_labeling_queue(
+        clusters,
+        matches,
+        intent_rows,
+        sample_ratio=0.1,
+        max_per_cluster=3,
+    )
+
+    assert [row["trace"]["record_id"] for row in queue] == ["u1", "u2", "u3"]
+    assert {row["cluster_id"] for row in queue} == {"route-a-001"}
+    assert {row["annotation_status"] for row in queue} == {"pending"}
+    assert {row["samples_from_cluster"] for row in queue} == {3}
+
+
 @pytest.mark.parametrize(
     (
         "synthetic_coverage_enabled",
@@ -221,44 +467,69 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
     assert all(stage.status == "completed" for stage in state.stages)
     assert layout.feedback_path.exists()
     assert layout.unlabeled_path.exists()
-    assert (layout.prepared_inputs / "normalized_feedback.jsonl").exists()
-    assert (layout.decision_assets / "intent_matches.jsonl").exists()
-    assert (layout.dataset_splits / "train.jsonl").exists()
+    assert layout.artifact_path(
+        "prepared_inputs",
+        "normalized_feedback.jsonl",
+    ).exists()
+    assert layout.artifact_path(
+        "coverage_decisions",
+        "intent_matches.jsonl",
+    ).exists()
+    assert layout.artifact_path(
+        "coverage_decisions",
+        "review_queue/labeling_queue.jsonl",
+    ).exists()
+    assert layout.artifact_path("dataset_splits", "train.jsonl").exists()
     assert layout.manifest_path.exists()
     assert not (layout.tenant_root / "datasets").exists()
+    assert (layout.root / "stages" / "01_raw_inputs").is_dir()
+    assert not (layout.root / "raw_inputs").exists()
 
     prepared_feedback = json.loads(
-        (layout.prepared_inputs / "normalized_feedback.jsonl")
+        layout.artifact_path(
+            "prepared_inputs",
+            "normalized_feedback.jsonl",
+        )
         .read_text(encoding="utf-8")
         .splitlines()[0]
     )
     prepared_intent = json.loads(
-        (layout.prepared_inputs / "intent_records.jsonl")
+        layout.artifact_path(
+            "prepared_inputs",
+            "intent_records.jsonl",
+        )
         .read_text(encoding="utf-8")
         .splitlines()[0]
     )
     feedback_rubric = json.loads(
-        (layout.decision_assets / "feedback_rubrics.jsonl")
+        layout.artifact_path(
+            "rubric_extraction",
+            "feedback_rubrics.jsonl",
+        )
         .read_text(encoding="utf-8")
         .splitlines()[0]
     )
     trusted_case = json.loads(
-        (layout.prepared_inputs / "trusted_cases.jsonl")
+        layout.artifact_path(
+            "rubric_extraction",
+            "trusted_cases.jsonl",
+        )
         .read_text(encoding="utf-8")
         .splitlines()[0]
     )
     inferred_rubric = json.loads(
-        (
-            layout.decision_assets
-            / "inferred_unlabeled_cluster_rubrics.jsonl"
+        layout.artifact_path(
+            "label_inference",
+            "inferred_unlabeled_cluster_rubrics.jsonl",
         )
         .read_text(encoding="utf-8")
         .splitlines()[0]
     )
     dataset_manifest = json.loads(
-        (layout.dataset_splits / "dataset_manifest.json").read_text(
-            encoding="utf-8"
-        )
+        layout.artifact_path(
+            "dataset_splits",
+            "dataset_manifest.json",
+        ).read_text(encoding="utf-8")
     )
 
     assert prepared_feedback["record_id"] == "f1"
@@ -285,6 +556,16 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
         == "accepted_without_review"
     )
     assert dataset_manifest["coverage"]["match_threshold"] == 0.6
+    assert dataset_manifest["coverage"]["labeling_queue"] == {
+        "statuses": [
+            "needs_more_trusted_examples",
+            "missing_or_weak_labels",
+        ],
+        "sample_ratio": 0.1,
+        "minimum_per_cluster": 1,
+        "maximum_per_cluster": 3,
+        "selection": "deterministic_centroid_nearest",
+    }
     assert dataset_manifest["synthetic_coverage"] == {
         "enabled": synthetic_coverage_enabled,
         "cases_per_cluster": synthetic_cases_per_cluster,
@@ -299,17 +580,23 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
         dataset_manifest["review_policy"]["regression_gate"]
         == "automatic_trusted_feedback_holdout"
     )
+    assert (
+        dataset_manifest["review_policy"]["coverage_labeling_queue"]
+        == "human_label_required"
+    )
 
     synthetic_candidates = [
         json.loads(line)
-        for line in (
-            layout.decision_assets / "synthetic_candidates.jsonl"
+        for line in layout.artifact_path(
+            "synthetic_coverage",
+            "synthetic_candidates.jsonl",
         ).read_text(encoding="utf-8").splitlines()
     ]
     synthetic_cases = [
         json.loads(line)
-        for line in (
-            layout.prepared_inputs / "synthetic_cases.jsonl"
+        for line in layout.artifact_path(
+            "synthetic_coverage",
+            "synthetic_cases.jsonl",
         ).read_text(encoding="utf-8").splitlines()
     ]
     assert len(synthetic_candidates) == expected_synthetic_cases
@@ -323,15 +610,17 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
 
     regression_cases = [
         json.loads(line)
-        for line in (
-            layout.dataset_splits / "regression_trusted.jsonl"
+        for line in layout.artifact_path(
+            "dataset_splits",
+            "regression_trusted.jsonl",
         ).read_text(encoding="utf-8").splitlines()
     ]
     standard_trusted_cases = [
         json.loads(line)
         for name in ("train_trusted", "validation_trusted", "test_trusted")
-        for line in (
-            layout.dataset_splits / f"{name}.jsonl"
+        for line in layout.artifact_path(
+            "dataset_splits",
+            f"{name}.jsonl",
         ).read_text(encoding="utf-8").splitlines()
     ]
     assert len(regression_cases) == 2
@@ -349,8 +638,9 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
     combined_splits = {
         name: [
             json.loads(line)
-            for line in (
-                layout.dataset_splits / f"{name}.jsonl"
+            for line in layout.artifact_path(
+                "dataset_splits",
+                f"{name}.jsonl",
             ).read_text(encoding="utf-8").splitlines()
         ]
         for name in ("train", "validation", "test")
@@ -372,8 +662,9 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
 
     triage_cases = [
         json.loads(line)
-        for line in (
-            layout.dataset_splits / "triage_hold.jsonl"
+        for line in layout.artifact_path(
+            "dataset_splits",
+            "triage_hold.jsonl",
         ).read_text(encoding="utf-8").splitlines()
     ]
     assert all(

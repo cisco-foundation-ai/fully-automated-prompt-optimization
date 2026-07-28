@@ -30,7 +30,9 @@ def test_asset_studio_owns_creation_controls() -> None:
     assert "Disabled" in EVALUATION_ASSET_HTML
     assert "raw feedback and unlabeled conversations" in EVALUATION_ASSET_HTML
     assert "Interactive clustering view" in EVALUATION_ASSET_HTML
-    assert "Stage artifacts" in EVALUATION_ASSET_HTML
+    assert "Artifact guide" in EVALUATION_ASSET_HTML
+    assert "renderArtifactMenu(artifacts)" in EVALUATION_ASSET_HTML
+    assert "Representative traces to label" in EVALUATION_ASSET_HTML
     assert "Example data" in EVALUATION_ASSET_HTML
     assert "Report unsupported clusters" in EVALUATION_ASSET_HTML
     assert "Split all remaining provenance classes globally by group" in EVALUATION_ASSET_HTML
@@ -44,6 +46,14 @@ def test_asset_studio_owns_creation_controls() -> None:
     assert "renderCoverageMarkdown(report.content || report.preview)" in EVALUATION_ASSET_HTML
     assert "detail.stage === 'coverage_decisions' ? renderCoverageReport(detail)" in EVALUATION_ASSET_HTML
     assert "/stages/" in EVALUATION_ASSET_HTML
+    assert "Select the failed stage below to adjust its input parameters." in EVALUATION_ASSET_HTML
+    assert "Adjust inputs for" in EVALUATION_ASSET_HTML
+    assert "Save decisions &amp; resume" in EVALUATION_ASSET_HTML
+    assert "config_history.jsonl" in EVALUATION_ASSET_HTML
+    assert "Changing this rebuilds from Stage 5." in EVALUATION_ASSET_HTML
+    assert 'name="min_trusted_examples"' in EVALUATION_ASSET_HTML
+    assert 'name="split_seed"' in EVALUATION_ASSET_HTML
+    assert "Raw inputs are immutable inside an asset." in EVALUATION_ASSET_HTML
 
 
 def test_explorer_links_to_studio_without_asset_form() -> None:

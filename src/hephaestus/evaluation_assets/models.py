@@ -38,6 +38,49 @@ STAGE_LABELS = {
     PipelineStage.DATASET_SPLITS: "Build dataset splits",
 }
 
+CONFIG_STAGE_DEPENDENCIES = {
+    "rubric_provider": PipelineStage.RUBRIC_EXTRACTION,
+    "rubric_model": PipelineStage.RUBRIC_EXTRACTION,
+    "batch_size": PipelineStage.RUBRIC_EXTRACTION,
+    "embedding_provider": PipelineStage.INTENT_CLUSTERING,
+    "embedding_model": PipelineStage.INTENT_CLUSTERING,
+    "cluster_count": PipelineStage.INTENT_CLUSTERING,
+    "match_threshold": PipelineStage.COVERAGE_DECISIONS,
+    "min_trusted_examples": PipelineStage.COVERAGE_DECISIONS,
+    "min_trusted_groups": PipelineStage.COVERAGE_DECISIONS,
+    "max_unlabeled_to_trusted_ratio": PipelineStage.COVERAGE_DECISIONS,
+    "synthetic_coverage_enabled": PipelineStage.SYNTHETIC_COVERAGE,
+    "synthetic_cases_per_cluster": PipelineStage.SYNTHETIC_COVERAGE,
+    "split_seed": PipelineStage.DATASET_SPLITS,
+}
+
+STAGE_COUNT_KEYS = {
+    PipelineStage.RAW_INPUTS: {"feedback_records", "unlabeled_records"},
+    PipelineStage.PREPARED_INPUTS: {"prepared_feedback", "prepared_intents"},
+    PipelineStage.RUBRIC_EXTRACTION: {"feedback_rubrics", "trusted_cases"},
+    PipelineStage.INTENT_CLUSTERING: {"intent_clusters"},
+    PipelineStage.COVERAGE_DECISIONS: {
+        "matched_clusters",
+        "needs_more_feedback_clusters",
+        "missing_label_clusters",
+        "labeling_queue_clusters",
+        "labeling_queue_traces",
+    },
+    PipelineStage.LABEL_INFERENCE: {"inferred_cases", "review_clusters"},
+    PipelineStage.SYNTHETIC_COVERAGE: {
+        "synthetic_cases",
+        "rejected_synthetic_cases",
+    },
+    PipelineStage.DATASET_SPLITS: {
+        "dataset_cases",
+        "train_cases",
+        "validation_cases",
+        "test_cases",
+        "regression_trusted_cases",
+        "triage_hold_cases",
+    },
+}
+
 
 @dataclass(frozen=True)
 class EvaluationAssetConfig:
@@ -66,6 +109,15 @@ class EvaluationAssetConfig:
             raise ValueError("batch_size must be at least 1")
         if not 0.0 <= self.match_threshold <= 1.0:
             raise ValueError("match_threshold must be between 0 and 1")
+        if self.min_trusted_examples < 1:
+            raise ValueError("min_trusted_examples must be at least 1")
+        if self.min_trusted_groups < 0:
+            raise ValueError("min_trusted_groups must be at least 0")
+        if (
+            self.max_unlabeled_to_trusted_ratio is not None
+            and self.max_unlabeled_to_trusted_ratio <= 0
+        ):
+            raise ValueError("max_unlabeled_to_trusted_ratio must be positive")
         if not 1 <= self.synthetic_cases_per_cluster <= 100:
             raise ValueError(
                 "synthetic_cases_per_cluster must be between 1 and 100"

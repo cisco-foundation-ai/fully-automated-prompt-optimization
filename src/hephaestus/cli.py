@@ -168,6 +168,25 @@ def build_parser() -> argparse.ArgumentParser:
     run_asset_parser.add_argument("--tenant", required=True)
     run_asset_parser.add_argument("--asset-id", default="v1")
     run_asset_parser.add_argument("--tenants-root", default="tenants")
+    run_asset_parser.add_argument("--rubric-model")
+    run_asset_parser.add_argument("--embedding-model")
+    run_asset_parser.add_argument("--clusters", type=int)
+    run_asset_parser.add_argument("--batch-size", type=int)
+    run_asset_parser.add_argument("--match-threshold", type=float)
+    run_asset_parser.add_argument("--min-trusted-examples", type=int)
+    run_asset_parser.add_argument("--min-trusted-groups", type=int)
+    run_asset_parser.add_argument(
+        "--max-unlabeled-to-trusted-ratio",
+        type=float,
+    )
+    run_asset_parser.add_argument(
+        "--synthetic-coverage",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable Stage 7 when resuming",
+    )
+    run_asset_parser.add_argument("--synthetic-cases-per-cluster", type=int)
+    run_asset_parser.add_argument("--split-seed", type=int)
 
     status_asset_parser = assets_subparsers.add_parser(
         "status",
@@ -320,6 +339,27 @@ def main() -> None:
                 args.tenant,
                 args.asset_id,
             )
+            updates = {
+                key: value
+                for key, value in {
+                    "rubric_model": args.rubric_model,
+                    "embedding_model": args.embedding_model,
+                    "cluster_count": args.clusters,
+                    "batch_size": args.batch_size,
+                    "match_threshold": args.match_threshold,
+                    "min_trusted_examples": args.min_trusted_examples,
+                    "min_trusted_groups": args.min_trusted_groups,
+                    "max_unlabeled_to_trusted_ratio": (
+                        args.max_unlabeled_to_trusted_ratio
+                    ),
+                    "synthetic_coverage_enabled": args.synthetic_coverage,
+                    "synthetic_cases_per_cluster": args.synthetic_cases_per_cluster,
+                    "split_seed": args.split_seed,
+                }.items()
+                if value is not None
+            }
+            if updates:
+                layout.revise_config(updates)
             state = EvaluationAssetPipeline(layout).run()
             print(json_mod.dumps(state.to_dict(), indent=2, sort_keys=True))
             return

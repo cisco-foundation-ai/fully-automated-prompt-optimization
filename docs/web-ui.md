@@ -80,12 +80,12 @@ models, current and legacy OpenAI embedding models, and a dependency-free local
 TF-IDF fallback. Selecting TF-IDF records `embedding_provider: tfidf` in the
 asset config and makes no embedding API calls. Starting a pipeline copies both
 source files into an independent
-`evaluation_assets/<asset_id>/raw_inputs/` workspace before background
-processing begins.
+`evaluation_assets/<asset_id>/stages/01_raw_inputs/` workspace before
+background processing begins.
 
 Selecting a tenant visualizes all eight preparation stages, live status,
 selected models, requested clusters, match threshold, synthetic settings,
-pipeline counts, and the four artifact directories. Each stage is clickable
+pipeline counts, and the eight numbered stage directories. Each stage is clickable
 and opens a focused view with its
 inputs, processing steps, outputs, stage metrics, and bounded previews of the
 real files created there. Artifact inspection intentionally returns one
@@ -93,7 +93,11 @@ syntax-highlighted example per file rather than rendering entire datasets. The
 Intent Mining stage also includes the projection-style interactive cluster
 browser from the original workflow mock, backed by the asset's real routes,
 cluster sizes, representative requests, and observed tools. Failed or
-interrupted pipelines can be resumed from this surface.
+interrupted pipelines can be resumed from this surface with current decisions
+or an edited model, embedding, cluster count, match threshold, or synthetic
+coverage configuration. The Studio shows which stage each setting affects;
+the core preserves earlier checkpoints and rebuilds the affected stage and all
+downstream artifacts.
 
 ### Tenant tabs
 
@@ -187,13 +191,19 @@ The frontend is backed by these read-only endpoints (useful for scripting too):
 | `GET /api/evaluation-assets/input-contract` | Versioned canonical field, message, tool-call, and feedback requirements |
 | `GET /api/tenants/<t>/evaluation-assets/<a>/stages/<s>` | One stage's status, metrics, artifact list, and bounded example previews |
 | `POST /api/evaluation-assets/start` | Copy inputs and start a core pipeline run |
-| `POST /api/tenants/<t>/evaluation-assets/<a>/resume` | Resume a failed or interrupted asset |
+| `POST /api/tenants/<t>/evaluation-assets/<a>/resume` | Optionally revise pipeline decisions, invalidate dependent stages, and resume an asset |
 
 ## Notes
 
 - **Narrow writes:** the UI only creates/resumes evaluation assets. All other
   tenant views remain read-only. Input paths must resolve inside the FAPO
-  workspace and are copied into `raw_inputs/` before processing.
+  workspace and are copied into `stages/01_raw_inputs/` before processing.
+- **Audited resume edits:** the resume endpoint accepts a JSON object containing
+  any editable pipeline decision, including model and batch settings,
+  embedding and clustering settings, trusted-coverage thresholds, synthetic
+  settings, and the split seed. The failed-stage view shows only the parameters
+  relevant to that stage. Revisions are recorded in `config_history.jsonl` and
+  `events.jsonl`.
 - **Local by default:** it binds to `127.0.0.1`. Change `--host` only if you
   understand the exposure, since it serves whatever is under the tenants root.
 - **No external dependencies:** standard-library server, no frontend build step.

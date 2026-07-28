@@ -260,8 +260,20 @@ def test_assets_create_and_status_use_evaluation_assets_workspace(
     main()
 
     asset_root = tenants_root / "bootstrap" / "evaluation_assets" / "v2"
-    assert (asset_root / "raw_inputs" / "labeled_feedback.jsonl").exists()
-    assert (asset_root / "raw_inputs" / "unlabeled.jsonl").exists()
+    assert (
+        asset_root
+        / "stages"
+        / "01_raw_inputs"
+        / "labeled_feedback.jsonl"
+    ).exists()
+    assert (
+        asset_root
+        / "stages"
+        / "01_raw_inputs"
+        / "unlabeled.jsonl"
+    ).exists()
+    assert (asset_root / "stages" / "08_dataset_splits").is_dir()
+    assert not (asset_root / "raw_inputs").exists()
     config = json.loads((asset_root / "config.json").read_text(encoding="utf-8"))
     assert config["embedding_provider"] == "tfidf"
     assert config["embedding_model"] == "tfidf"

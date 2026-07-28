@@ -29,7 +29,7 @@ Routes:
     GET /api/tenants/<t>/evaluation-assets         -> asset pipeline summaries
     GET /api/tenants/<t>/evaluation-assets/<a>/stages/<s> -> stage details
     POST /api/evaluation-assets/start              -> create and run an asset
-    POST /api/tenants/<t>/evaluation-assets/<a>/resume -> resume a failed asset
+    POST /api/tenants/<t>/evaluation-assets/<a>/resume -> revise and resume an asset
 """
 
 from __future__ import annotations
@@ -234,7 +234,13 @@ class _Handler(BaseHTTPRequestHandler):
         params: Dict[str, str],
         query: Dict[str, List[str]],
     ) -> None:
-        self._send_json(self.store.list_evaluation_assets(params["tenant"]))
+        assets = self.store.list_evaluation_assets(params["tenant"])
+        for asset in assets:
+            asset["runner_active"] = self.asset_manager.is_running(
+                params["tenant"],
+                str(asset["asset_id"]),
+            )
+        self._send_json(assets)
 
     def _route_evaluation_asset_stage(
         self,
@@ -316,8 +322,16 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json(state, status=202)
 
     def _route_resume_evaluation_asset(self, params: Dict[str, str]) -> None:
+        payload = self._read_json_body()
+        if payload is None:
+            return
         try:
-            state = self.asset_manager.resume(params["tenant"], params["asset"])
+            updates = _validated_resume_updates(payload)
+            state = self.asset_manager.resume(
+                params["tenant"],
+                params["asset"],
+                updates,
+            )
         except RuntimeError as exc:
             self._send_json({"error": str(exc)}, status=409)
             return
@@ -398,6 +412,92 @@ def _int_param(query: Dict[str, List[str]], name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def _validated_resume_updates(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate the user-editable pipeline decisions accepted on resume."""
+    allowed = {
+        "rubric_model",
+        "embedding_model",
+        "cluster_count",
+        "batch_size",
+        "match_threshold",
+        "min_trusted_examples",
+        "min_trusted_groups",
+        "max_unlabeled_to_trusted_ratio",
+        "synthetic_coverage_enabled",
+        "synthetic_cases_per_cluster",
+        "split_seed",
+    }
+    unknown = set(payload) - allowed
+    if unknown:
+        raise ValueError(
+            "unsupported resume fields: " + ", ".join(sorted(unknown))
+        )
+    updates: Dict[str, Any] = {}
+    if "rubric_model" in payload:
+        rubric_model = str(payload["rubric_model"])
+        if rubric_model not in RUBRIC_MODELS:
+            raise ValueError("unsupported rubric_model")
+        updates["rubric_model"] = rubric_model
+    if "embedding_model" in payload:
+        embedding_model = str(payload["embedding_model"])
+        if (
+            embedding_model not in OPENAI_EMBEDDING_MODELS
+            and embedding_model != "tfidf"
+        ):
+            raise ValueError("unsupported embedding_model")
+        updates["embedding_model"] = embedding_model
+    if "cluster_count" in payload:
+        cluster_count = int(payload["cluster_count"])
+        if not 1 <= cluster_count <= 1000:
+            raise ValueError("cluster_count must be between 1 and 1000")
+        updates["cluster_count"] = cluster_count
+    if "batch_size" in payload:
+        batch_size = int(payload["batch_size"])
+        if not 1 <= batch_size <= 100:
+            raise ValueError("batch_size must be between 1 and 100")
+        updates["batch_size"] = batch_size
+    if "match_threshold" in payload:
+        match_threshold = float(payload["match_threshold"])
+        if not 0.0 <= match_threshold <= 1.0:
+            raise ValueError("match_threshold must be between 0 and 1")
+        updates["match_threshold"] = match_threshold
+    if "min_trusted_examples" in payload:
+        min_trusted_examples = int(payload["min_trusted_examples"])
+        if min_trusted_examples < 1:
+            raise ValueError("min_trusted_examples must be at least 1")
+        updates["min_trusted_examples"] = min_trusted_examples
+    if "min_trusted_groups" in payload:
+        min_trusted_groups = int(payload["min_trusted_groups"])
+        if min_trusted_groups < 0:
+            raise ValueError("min_trusted_groups must be at least 0")
+        updates["min_trusted_groups"] = min_trusted_groups
+    if "max_unlabeled_to_trusted_ratio" in payload:
+        raw_ratio = payload["max_unlabeled_to_trusted_ratio"]
+        ratio = None if raw_ratio is None or raw_ratio == "" else float(raw_ratio)
+        if ratio is not None and ratio <= 0:
+            raise ValueError(
+                "max_unlabeled_to_trusted_ratio must be positive"
+            )
+        updates["max_unlabeled_to_trusted_ratio"] = ratio
+    if "synthetic_coverage_enabled" in payload:
+        raw_enabled = payload["synthetic_coverage_enabled"]
+        updates["synthetic_coverage_enabled"] = (
+            raw_enabled
+            if isinstance(raw_enabled, bool)
+            else str(raw_enabled).lower() in {"1", "true", "yes", "on"}
+        )
+    if "synthetic_cases_per_cluster" in payload:
+        cases_per_cluster = int(payload["synthetic_cases_per_cluster"])
+        if not 1 <= cases_per_cluster <= 100:
+            raise ValueError(
+                "synthetic_cases_per_cluster must be between 1 and 100"
+            )
+        updates["synthetic_cases_per_cluster"] = cases_per_cluster
+    if "split_seed" in payload:
+        updates["split_seed"] = int(payload["split_seed"])
+    return updates
 
 
 def _parse_query(raw_query: str) -> Dict[str, List[str]]:

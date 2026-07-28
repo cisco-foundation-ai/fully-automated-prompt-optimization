@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections import Counter
 from pathlib import Path
@@ -47,6 +48,9 @@ from src.hephaestus.evaluation_assets.workspace import (
     atomic_write_json,
     utc_now,
 )
+
+LABELING_QUEUE_SAMPLE_RATIO = 0.1
+LABELING_QUEUE_MAX_PER_CLUSTER = 3
 
 FEEDBACK_PROMPT = """\
 Create reviewable evaluation rubrics from explicit user feedback. Return one JSON
@@ -256,7 +260,10 @@ class EvaluationAssetPipeline:
                 },
             }
         }
-        atomic_write_json(self.layout.raw_inputs / "input_manifest.json", manifest)
+        atomic_write_json(
+            self.layout.artifact_path(PipelineStage.RAW_INPUTS, "input_manifest.json"),
+            manifest,
+        )
         return {"feedback_records": len(feedback), "unlabeled_records": len(unlabeled)}
 
     def _prepare_inputs(self) -> Dict[str, int]:
@@ -265,15 +272,27 @@ class EvaluationAssetPipeline:
         normalized = [_normalize_feedback(row) for row in feedback_rows]
         intents = [_normalize_intent(row) for row in unlabeled_rows]
         write_jsonl(
-            self.layout.prepared_inputs / "normalized_feedback.jsonl",
+            self.layout.artifact_path(
+                PipelineStage.PREPARED_INPUTS,
+                "normalized_feedback.jsonl",
+            ),
             normalized,
         )
-        write_jsonl(self.layout.prepared_inputs / "intent_records.jsonl", intents)
+        write_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.PREPARED_INPUTS,
+                "intent_records.jsonl",
+            ),
+            intents,
+        )
         return {"prepared_feedback": len(normalized), "prepared_intents": len(intents)}
 
     def _extract_rubrics(self) -> Dict[str, int]:
         normalized = _load_jsonl(
-            self.layout.prepared_inputs / "normalized_feedback.jsonl"
+            self.layout.artifact_path(
+                PipelineStage.PREPARED_INPUTS,
+                "normalized_feedback.jsonl",
+            )
         )
         rubrics: List[Dict[str, Any]] = []
         for batch in _batches(normalized, self.config.batch_size):
@@ -338,19 +357,36 @@ class EvaluationAssetPipeline:
             )
             for row in normalized
         ]
-        write_jsonl(self.layout.decision_assets / "feedback_rubrics.jsonl", rubrics)
         write_jsonl(
-            self.layout.prepared_inputs / "trusted_intents.jsonl",
+            self.layout.artifact_path(
+                PipelineStage.RUBRIC_EXTRACTION,
+                "feedback_rubrics.jsonl",
+            ),
+            rubrics,
+        )
+        write_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.RUBRIC_EXTRACTION,
+                "trusted_intents.jsonl",
+            ),
             trusted_intents,
         )
         write_jsonl(
-            self.layout.prepared_inputs / "trusted_cases.jsonl",
+            self.layout.artifact_path(
+                PipelineStage.RUBRIC_EXTRACTION,
+                "trusted_cases.jsonl",
+            ),
             trusted_cases,
         )
         return {"feedback_rubrics": len(rubrics), "trusted_cases": len(trusted_cases)}
 
     def _cluster_intents(self) -> Dict[str, int]:
-        rows = _load_jsonl(self.layout.prepared_inputs / "intent_records.jsonl")
+        rows = _load_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.PREPARED_INPUTS,
+                "intent_records.jsonl",
+            )
+        )
         records = [_intent_record(row) for row in rows]
         vectors = None
         if self.embedding_provider is not None:
@@ -366,18 +402,32 @@ class EvaluationAssetPipeline:
             vectors=vectors,
         )
         write_jsonl(
-            self.layout.decision_assets / "intent_inventory.jsonl",
+            self.layout.artifact_path(
+                PipelineStage.INTENT_CLUSTERING,
+                "intent_inventory.jsonl",
+            ),
             [cluster_to_dict(cluster) for cluster in clusters],
         )
         return {"intent_clusters": len(clusters)}
 
     def _decide_coverage(self) -> Dict[str, int]:
-        intent_rows = _load_jsonl(self.layout.prepared_inputs / "intent_records.jsonl")
+        intent_rows = _load_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.PREPARED_INPUTS,
+                "intent_records.jsonl",
+            )
+        )
         trusted_rows = _load_jsonl(
-            self.layout.prepared_inputs / "trusted_intents.jsonl"
+            self.layout.artifact_path(
+                PipelineStage.RUBRIC_EXTRACTION,
+                "trusted_intents.jsonl",
+            )
         )
         cluster_rows = _load_jsonl(
-            self.layout.decision_assets / "intent_inventory.jsonl"
+            self.layout.artifact_path(
+                PipelineStage.INTENT_CLUSTERING,
+                "intent_inventory.jsonl",
+            )
         )
         records = [_intent_record(row) for row in intent_rows]
         trusted = [_trusted_intent(row) for row in trusted_rows]
@@ -405,13 +455,33 @@ class EvaluationAssetPipeline:
             vectors=vectors,
         )
         write_jsonl(
-            self.layout.decision_assets / "intent_matches.jsonl",
+            self.layout.artifact_path(
+                PipelineStage.COVERAGE_DECISIONS,
+                "intent_matches.jsonl",
+            ),
             [match_to_dict(match) for match in matches],
         )
         write_coverage_report(
-            self.layout.decision_assets / "coverage_report.md",
+            self.layout.artifact_path(
+                PipelineStage.COVERAGE_DECISIONS,
+                "coverage_report.md",
+            ),
             clusters,
             matches,
+        )
+        labeling_queue = _build_labeling_queue(
+            clusters,
+            matches,
+            intent_rows,
+            sample_ratio=LABELING_QUEUE_SAMPLE_RATIO,
+            max_per_cluster=LABELING_QUEUE_MAX_PER_CLUSTER,
+        )
+        write_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.COVERAGE_DECISIONS,
+                "review_queue/labeling_queue.jsonl",
+            ),
+            labeling_queue,
         )
         statuses = Counter(match.status for match in matches)
         return {
@@ -420,27 +490,48 @@ class EvaluationAssetPipeline:
                 "needs_more_trusted_examples"
             ],
             "missing_label_clusters": statuses["missing_or_weak_labels"],
+            "labeling_queue_clusters": len(
+                {row["cluster_id"] for row in labeling_queue}
+            ),
+            "labeling_queue_traces": len(labeling_queue),
         }
 
     def _infer_labels(self) -> Dict[str, int]:
-        intent_rows = _load_jsonl(self.layout.prepared_inputs / "intent_records.jsonl")
+        intent_rows = _load_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.PREPARED_INPUTS,
+                "intent_records.jsonl",
+            )
+        )
         normalized = _load_jsonl(
-            self.layout.prepared_inputs / "normalized_feedback.jsonl"
+            self.layout.artifact_path(
+                PipelineStage.PREPARED_INPUTS,
+                "normalized_feedback.jsonl",
+            )
         )
         raw_rows = _load_jsonl(self.layout.unlabeled_path)
         feedback_rubrics = _load_jsonl(
-            self.layout.decision_assets / "feedback_rubrics.jsonl"
+            self.layout.artifact_path(
+                PipelineStage.RUBRIC_EXTRACTION,
+                "feedback_rubrics.jsonl",
+            )
         )
         clusters = [
             _intent_cluster(row)
             for row in _load_jsonl(
-                self.layout.decision_assets / "intent_inventory.jsonl"
+                self.layout.artifact_path(
+                    PipelineStage.INTENT_CLUSTERING,
+                    "intent_inventory.jsonl",
+                )
             )
         ]
         matches = [
             _intent_match(row)
             for row in _load_jsonl(
-                self.layout.decision_assets / "intent_matches.jsonl"
+                self.layout.artifact_path(
+                    PipelineStage.COVERAGE_DECISIONS,
+                    "intent_matches.jsonl",
+                )
             )
         ]
         row_by_id = {row["record_id"]: row for row in intent_rows}
@@ -504,24 +595,38 @@ class EvaluationAssetPipeline:
         )
         missing = _missing_clusters(clusters, matches, row_by_id)
         write_jsonl(
-            self.layout.decision_assets
-            / "inferred_unlabeled_cluster_rubrics.jsonl",
+            self.layout.artifact_path(
+                PipelineStage.LABEL_INFERENCE,
+                "inferred_unlabeled_cluster_rubrics.jsonl",
+            ),
             cluster_rubrics,
         )
         write_jsonl(
-            self.layout.decision_assets / "inferred_unlabeled_labels.jsonl",
+            self.layout.artifact_path(
+                PipelineStage.LABEL_INFERENCE,
+                "inferred_unlabeled_labels.jsonl",
+            ),
             labels,
         )
         write_jsonl(
-            self.layout.decision_assets / "missing_labeled_feedback_clusters.jsonl",
+            self.layout.artifact_path(
+                PipelineStage.LABEL_INFERENCE,
+                "missing_labeled_feedback_clusters.jsonl",
+            ),
             missing,
         )
         _write_missing_report(
-            self.layout.decision_assets / "missing_labeled_feedback_report.md",
+            self.layout.artifact_path(
+                PipelineStage.LABEL_INFERENCE,
+                "missing_labeled_feedback_report.md",
+            ),
             missing,
         )
         write_jsonl(
-            self.layout.prepared_inputs / "inferred_cases.jsonl",
+            self.layout.artifact_path(
+                PipelineStage.LABEL_INFERENCE,
+                "inferred_cases.jsonl",
+            ),
             inferred_cases,
         )
         return {
@@ -530,9 +635,24 @@ class EvaluationAssetPipeline:
         }
 
     def _build_splits(self) -> Dict[str, int]:
-        trusted = _load_jsonl(self.layout.prepared_inputs / "trusted_cases.jsonl")
-        inferred = _load_jsonl(self.layout.prepared_inputs / "inferred_cases.jsonl")
-        synthetic = _load_jsonl(self.layout.prepared_inputs / "synthetic_cases.jsonl")
+        trusted = _load_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.RUBRIC_EXTRACTION,
+                "trusted_cases.jsonl",
+            )
+        )
+        inferred = _load_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.LABEL_INFERENCE,
+                "inferred_cases.jsonl",
+            )
+        )
+        synthetic = _load_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.SYNTHETIC_COVERAGE,
+                "synthetic_cases.jsonl",
+            )
+        )
         trusted_regression_partition = split_cases_by_group(
             trusted,
             group_path="metadata.group_id",
@@ -593,12 +713,19 @@ class EvaluationAssetPipeline:
         payloads["regression_trusted"] = regression_trusted
         payloads["triage_hold"] = held_inferred + held_synthetic
         for name, rows in payloads.items():
-            write_jsonl(self.layout.dataset_splits / f"{name}.jsonl", rows)
+            write_jsonl(
+                self.layout.artifact_path(
+                    PipelineStage.DATASET_SPLITS,
+                    f"{name}.jsonl",
+                ),
+                rows,
+            )
 
         input_manifest = json.loads(
-            (self.layout.raw_inputs / "input_manifest.json").read_text(
-                encoding="utf-8"
-            )
+            self.layout.artifact_path(
+                PipelineStage.RAW_INPUTS,
+                "input_manifest.json",
+            ).read_text(encoding="utf-8")
         )
         manifest = {
             "asset_id": self.config.asset_id,
@@ -620,6 +747,16 @@ class EvaluationAssetPipeline:
                 "max_unlabeled_to_trusted_ratio": (
                     self.config.max_unlabeled_to_trusted_ratio
                 ),
+                "labeling_queue": {
+                    "statuses": [
+                        "needs_more_trusted_examples",
+                        "missing_or_weak_labels",
+                    ],
+                    "sample_ratio": LABELING_QUEUE_SAMPLE_RATIO,
+                    "minimum_per_cluster": 1,
+                    "maximum_per_cluster": LABELING_QUEUE_MAX_PER_CLUSTER,
+                    "selection": "deterministic_centroid_nearest",
+                },
             },
             "synthetic_coverage": {
                 "enabled": self.config.synthetic_coverage_enabled,
@@ -639,12 +776,16 @@ class EvaluationAssetPipeline:
             "review_policy": {
                 "feedback_rubrics": "accepted_without_review",
                 "inferred_labels": "review_required",
+                "coverage_labeling_queue": "human_label_required",
                 "regression_gate": "automatic_trusted_feedback_holdout",
                 "regression_group_conflicts": "triage_hold",
             },
         }
         atomic_write_json(
-            self.layout.dataset_splits / "dataset_manifest.json",
+            self.layout.artifact_path(
+                PipelineStage.DATASET_SPLITS,
+                "dataset_manifest.json",
+            ),
             manifest,
         )
         atomic_write_json(self.layout.manifest_path, manifest)
@@ -660,19 +801,31 @@ class EvaluationAssetPipeline:
     def _generate_synthetic_coverage(self) -> Dict[str, int]:
         if not self.config.synthetic_coverage_enabled:
             write_jsonl(
-                self.layout.decision_assets / "synthetic_candidates.jsonl",
+                self.layout.artifact_path(
+                    PipelineStage.SYNTHETIC_COVERAGE,
+                    "synthetic_candidates.jsonl",
+                ),
                 [],
             )
             write_jsonl(
-                self.layout.decision_assets / "rejected_synthetic.jsonl",
+                self.layout.artifact_path(
+                    PipelineStage.SYNTHETIC_COVERAGE,
+                    "rejected_synthetic.jsonl",
+                ),
                 [],
             )
             write_jsonl(
-                self.layout.decision_assets / "synthetic_filter_issues.jsonl",
+                self.layout.artifact_path(
+                    PipelineStage.SYNTHETIC_COVERAGE,
+                    "synthetic_filter_issues.jsonl",
+                ),
                 [],
             )
             write_jsonl(
-                self.layout.prepared_inputs / "synthetic_cases.jsonl",
+                self.layout.artifact_path(
+                    PipelineStage.SYNTHETIC_COVERAGE,
+                    "synthetic_cases.jsonl",
+                ),
                 [],
             )
             return {
@@ -680,13 +833,23 @@ class EvaluationAssetPipeline:
                 "rejected_synthetic_cases": 0,
             }
 
-        intent_rows = _load_jsonl(self.layout.prepared_inputs / "intent_records.jsonl")
+        intent_rows = _load_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.PREPARED_INPUTS,
+                "intent_records.jsonl",
+            )
+        )
         cluster_rows = _load_jsonl(
-            self.layout.decision_assets / "intent_inventory.jsonl"
+            self.layout.artifact_path(
+                PipelineStage.INTENT_CLUSTERING,
+                "intent_inventory.jsonl",
+            )
         )
         rubric_rows = _load_jsonl(
-            self.layout.decision_assets
-            / "inferred_unlabeled_cluster_rubrics.jsonl"
+            self.layout.artifact_path(
+                PipelineStage.LABEL_INFERENCE,
+                "inferred_unlabeled_cluster_rubrics.jsonl",
+            )
         )
         clusters = [_intent_cluster(row) for row in cluster_rows]
         row_by_id = {row["record_id"]: row for row in intent_rows}
@@ -739,22 +902,41 @@ class EvaluationAssetPipeline:
                             candidate_index,
                         )
                     )
-        trusted = _load_jsonl(self.layout.prepared_inputs / "trusted_cases.jsonl")
-        inferred = _load_jsonl(self.layout.prepared_inputs / "inferred_cases.jsonl")
+        trusted = _load_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.RUBRIC_EXTRACTION,
+                "trusted_cases.jsonl",
+            )
+        )
+        inferred = _load_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.LABEL_INFERENCE,
+                "inferred_cases.jsonl",
+            )
+        )
         filtered = filter_synthetic_cases(
             candidates,
             existing_cases=trusted + inferred,
         )
         write_jsonl(
-            self.layout.decision_assets / "synthetic_candidates.jsonl",
+            self.layout.artifact_path(
+                PipelineStage.SYNTHETIC_COVERAGE,
+                "synthetic_candidates.jsonl",
+            ),
             candidates,
         )
         write_jsonl(
-            self.layout.decision_assets / "rejected_synthetic.jsonl",
+            self.layout.artifact_path(
+                PipelineStage.SYNTHETIC_COVERAGE,
+                "rejected_synthetic.jsonl",
+            ),
             filtered.rejected,
         )
         write_jsonl(
-            self.layout.decision_assets / "synthetic_filter_issues.jsonl",
+            self.layout.artifact_path(
+                PipelineStage.SYNTHETIC_COVERAGE,
+                "synthetic_filter_issues.jsonl",
+            ),
             [
                 {
                     "case_id": issue.case_id,
@@ -765,7 +947,10 @@ class EvaluationAssetPipeline:
             ],
         )
         write_jsonl(
-            self.layout.prepared_inputs / "synthetic_cases.jsonl",
+            self.layout.artifact_path(
+                PipelineStage.SYNTHETIC_COVERAGE,
+                "synthetic_cases.jsonl",
+            ),
             filtered.accepted,
         )
         return {
@@ -998,6 +1183,58 @@ def _inferred_cases(
             validate_fapo_case(case)
             cases.append(case)
     return labels, cases
+
+
+def _build_labeling_queue(
+    clusters: Sequence[IntentCluster],
+    matches: Sequence[IntentMatch],
+    intent_rows: Sequence[Mapping[str, Any]],
+    *,
+    sample_ratio: float,
+    max_per_cluster: int,
+) -> List[Dict[str, Any]]:
+    """Select deterministic representative traces for coverage-gap labeling."""
+    if not 0.0 < sample_ratio <= 1.0:
+        raise ValueError("sample_ratio must be greater than 0 and at most 1")
+    if max_per_cluster < 1:
+        raise ValueError("max_per_cluster must be at least 1")
+
+    row_by_id = {str(row["record_id"]): row for row in intent_rows}
+    match_by_cluster = {match.cluster_id: match for match in matches}
+    queue: List[Dict[str, Any]] = []
+    for cluster in clusters:
+        match = match_by_cluster[cluster.cluster_id]
+        if match.status == "matched_trusted_intent":
+            continue
+        target_count = min(
+            max_per_cluster,
+            len(cluster.representative_ids),
+            max(1, math.ceil(cluster.size * sample_ratio)),
+        )
+        selected_ids = cluster.representative_ids[:target_count]
+        for rank, record_id in enumerate(selected_ids, start=1):
+            trace = row_by_id.get(record_id)
+            if trace is None:
+                raise ValueError(
+                    f"Cluster {cluster.cluster_id} references unknown record {record_id}"
+                )
+            queue.append(
+                {
+                    "queue_id": f"{cluster.cluster_id}:{record_id}",
+                    "annotation_status": "pending",
+                    "cluster_id": cluster.cluster_id,
+                    "route": cluster.route,
+                    "coverage_status": match.status,
+                    "coverage_reason": match.reason,
+                    "match_score": match.score,
+                    "cluster_size": cluster.size,
+                    "sample_ratio": sample_ratio,
+                    "sample_rank": rank,
+                    "samples_from_cluster": len(selected_ids),
+                    "trace": dict(trace),
+                }
+            )
+    return queue
 
 
 def _missing_clusters(

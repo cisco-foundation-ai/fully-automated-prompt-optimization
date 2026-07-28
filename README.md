@@ -164,16 +164,25 @@ JSONL contract. FAPO copies them into a self-contained workspace at:
 ```text
 tenants/<tenant_id>/evaluation_assets/<asset_id>/
 ├── config.json
+├── config_history.jsonl
 ├── pipeline_state.json
 ├── events.jsonl
-├── raw_inputs/
-├── prepared_inputs/
-├── decision_assets/
-└── dataset_splits/
+├── asset_manifest.json
+└── stages/
+    ├── 01_raw_inputs/
+    ├── 02_prepared_inputs/
+    ├── 03_rubric_extraction/
+    ├── 04_intent_clustering/
+    ├── 05_coverage_decisions/
+    │   └── review_queue/
+    ├── 06_label_inference/
+    ├── 07_synthetic_coverage/
+    └── 08_dataset_splits/
 ```
 
 After creation, every stage reads from this workspace rather than the original
-files or other tenant resources.
+files or other tenant resources. Each stage owns only its outputs and reads
+inputs from earlier stage folders.
 
 ### Eight-stage workflow
 
@@ -183,7 +192,7 @@ files or other tenant resources.
 | 2. Prepare inputs | Redact sensitive values, apply canonical defaults, and build intent text without renaming fields. |
 | 3. Extract rubrics | Use the selected LLM to turn trusted feedback into scoreable rubrics, trusted intents, and trusted cases. |
 | 4. Cluster intents | Embed unlabeled intent records and build the requested number of route-aware clusters. |
-| 5. Decide coverage | Match clusters to trusted intents using the configured threshold; unsupported clusters remain coverage gaps. |
+| 5. Decide coverage | Match clusters to trusted intents and sample representative traces from coverage gaps into a labeling queue. |
 | 6. Infer labels | Infer rubrics and evaluation cases only for clusters supported by trusted evidence. |
 | 7. Expand coverage | Optionally generate and filter a configured number of synthetic cases per supported cluster. |
 | 8. Build splits | Create group-safe train, validation, and test splits plus an automatic, trusted-only 20% regression gate. |
@@ -213,7 +222,11 @@ Open `http://127.0.0.1:8765/evaluation-assets/`. The Studio lets you choose:
 
 The tenant pipeline view shows the status, inputs, processing, outputs, and a
 bounded example for every stage, including cluster exploration and the rendered
-coverage report.
+coverage report. Its artifact guide groups stable technical files into **Key
+outputs**, **Needs attention**, **Supporting data**, and **Diagnostics**, with a
+friendly name and purpose beside every filename. If a run stops, the Studio
+can resume with the existing decisions or edit them first. FAPO automatically
+reruns from the earliest affected stage and preserves earlier checkpoints.
 
 ### Use the CLI
 
@@ -245,6 +258,44 @@ Add `--enable-synthetic-coverage --synthetic-cases-per-cluster <count>` to
 enable Stage 7. Use `--embedding-model tfidf` for deterministic local
 vectorization without an embedding API call. FAPO never silently changes
 providers after a failure.
+
+To change decisions while resuming, pass only the settings that should change:
+
+```bash
+python -m hephaestus.cli assets run \
+  --tenant <tenant_id> \
+  --asset-id v1 \
+  --clusters 12 \
+  --match-threshold 0.5 \
+  --embedding-model tfidf
+```
+
+Rubric changes restart at Stage 3; embedding or cluster-count changes at Stage
+4; matching changes at Stage 5; synthetic settings at Stage 7; and split
+settings at Stage 8. Each revision is appended to `config_history.jsonl` and
+`events.jsonl` before stale downstream outputs are removed and rebuilt.
+
+### Troubleshoot OpenAI SSL connections
+
+If an OpenAI request fails because TLS/SSL certificate verification is blocked,
+upgrade the OpenAI HTTP and certificate packages in the Python environment that
+runs FAPO:
+
+```bash
+python3 -m pip install --upgrade openai httpx certifi truststore
+```
+
+Then uncomment the `try`/`import truststore`/
+`truststore.inject_into_ssl()`/`except ImportError` block at:
+
+- `src/hephaestus/providers/openai.py`, lines 50–54.
+- `src/hephaestus/datasets/rubric_providers.py`, lines 85–89.
+- `src/hephaestus/datasets/embedding_providers.py`, lines 61–65.
+
+Restart the FAPO UI or CLI process after changing the environment or source,
+then resume the failed asset run.
+Use this procedure only for an SSL/certificate error; it does not fix
+an invalid API key, unavailable model, rate limit, or malformed response.
 
 The UI, CLI, and evaluation-asset assistants all trigger and monitor the same
 core implementation under `src/hephaestus/evaluation_assets/`; agents do not

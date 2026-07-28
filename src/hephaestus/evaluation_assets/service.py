@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 from src.hephaestus.evaluation_assets.models import EvaluationAssetConfig
 from src.hephaestus.evaluation_assets.pipeline import EvaluationAssetPipeline
@@ -54,14 +54,30 @@ class EvaluationAssetRunManager:
             thread.start()
         return pipeline.layout.load_state().to_dict()
 
-    def resume(self, tenant_id: str, asset_id: str) -> Dict[str, Any]:
-        """Resume a failed or interrupted persisted pipeline."""
+    def resume(
+        self,
+        tenant_id: str,
+        asset_id: str,
+        config_updates: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Revise decisions when requested, then resume a persisted pipeline."""
         key = (tenant_id, asset_id)
         with self._lock:
             existing = self._threads.get(key)
             if existing is not None and existing.is_alive():
                 raise RuntimeError("evaluation asset pipeline is already running")
             layout = EvaluationAssetLayout(self.tenants_root, tenant_id, asset_id)
+            revision = layout.revise_config(config_updates or {})
+            layout.append_event(
+                "pipeline_resume_requested",
+                {
+                    "changed_fields": revision["changed_fields"],
+                    "invalidated_from_stage": revision[
+                        "invalidated_from_stage"
+                    ],
+                    "resume_from_stage": revision["resume_from_stage"],
+                },
+            )
             pipeline = EvaluationAssetPipeline(layout)
             thread = threading.Thread(
                 target=self._run_pipeline,
@@ -71,7 +87,9 @@ class EvaluationAssetRunManager:
             )
             self._threads[key] = thread
             thread.start()
-        return layout.load_state().to_dict()
+        response = layout.load_state().to_dict()
+        response["resume"] = revision
+        return response
 
     def is_running(self, tenant_id: str, asset_id: str) -> bool:
         """Return whether this process currently owns a live pipeline thread."""

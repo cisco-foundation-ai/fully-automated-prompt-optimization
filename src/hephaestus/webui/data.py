@@ -46,22 +46,42 @@ _CONFIG_DIRS = ("config", "configs")
 _PROMPT_ASSET_DIRS = (("prompts", "prompt"), ("skills", "skill"))
 
 _EVALUATION_STAGE_PATTERNS = {
-    "raw_inputs": ("raw_inputs/*.jsonl",),
+    "raw_inputs": (
+        "stages/01_raw_inputs/*.jsonl",
+        "raw_inputs/*.jsonl",
+    ),
     "prepared_inputs": (
+        "stages/02_prepared_inputs/normalized_feedback.jsonl",
+        "stages/02_prepared_inputs/intent_records.jsonl",
         "prepared_inputs/normalized_feedback.jsonl",
         "prepared_inputs/intent_records.jsonl",
     ),
     "rubric_extraction": (
+        "stages/03_rubric_extraction/feedback_rubrics.jsonl",
+        "stages/03_rubric_extraction/trusted_intents.jsonl",
+        "stages/03_rubric_extraction/trusted_cases.jsonl",
         "decision_assets/feedback_rubrics.jsonl",
         "prepared_inputs/trusted_intents.jsonl",
         "prepared_inputs/trusted_cases.jsonl",
     ),
-    "intent_clustering": ("decision_assets/intent_inventory.jsonl",),
+    "intent_clustering": (
+        "stages/04_intent_clustering/intent_inventory.jsonl",
+        "decision_assets/intent_inventory.jsonl",
+    ),
     "coverage_decisions": (
+        "stages/05_coverage_decisions/intent_matches.jsonl",
+        "stages/05_coverage_decisions/coverage_report.md",
+        "stages/05_coverage_decisions/review_queue/labeling_queue.jsonl",
         "decision_assets/intent_matches.jsonl",
         "decision_assets/coverage_report.md",
+        "review_queues/labeling_queue.jsonl",
     ),
     "label_inference": (
+        "stages/06_label_inference/inferred_unlabeled_cluster_rubrics.jsonl",
+        "stages/06_label_inference/inferred_unlabeled_labels.jsonl",
+        "stages/06_label_inference/missing_labeled_feedback_clusters.jsonl",
+        "stages/06_label_inference/missing_labeled_feedback_report.md",
+        "stages/06_label_inference/inferred_cases.jsonl",
         "decision_assets/inferred_unlabeled_cluster_rubrics.jsonl",
         "decision_assets/inferred_unlabeled_labels.jsonl",
         "decision_assets/missing_labeled_feedback_clusters.jsonl",
@@ -69,13 +89,190 @@ _EVALUATION_STAGE_PATTERNS = {
         "prepared_inputs/inferred_cases.jsonl",
     ),
     "synthetic_coverage": (
+        "stages/07_synthetic_coverage/synthetic_candidates.jsonl",
+        "stages/07_synthetic_coverage/rejected_synthetic.jsonl",
+        "stages/07_synthetic_coverage/synthetic_filter_issues.jsonl",
+        "stages/07_synthetic_coverage/synthetic_cases.jsonl",
         "decision_assets/synthetic_candidates.jsonl",
         "decision_assets/rejected_synthetic.jsonl",
         "decision_assets/synthetic_filter_issues.jsonl",
         "prepared_inputs/synthetic_cases.jsonl",
     ),
-    "dataset_splits": ("dataset_splits/*",),
+    "dataset_splits": (
+        "stages/08_dataset_splits/*",
+        "dataset_splits/*",
+    ),
 }
+
+_ARTIFACT_GROUP_ORDER = {
+    "Key outputs": 0,
+    "Needs attention": 1,
+    "Supporting data": 2,
+    "Diagnostics": 3,
+}
+
+_ARTIFACT_CATALOG = {
+    "labeled_feedback.jsonl": (
+        "Labeled source records",
+        "Immutable canonical feedback input copied into this asset.",
+        "Key outputs",
+    ),
+    "unlabeled.jsonl": (
+        "Unlabeled source records",
+        "Immutable canonical traffic input copied into this asset.",
+        "Key outputs",
+    ),
+    "normalized_feedback.jsonl": (
+        "Prepared feedback",
+        "Redacted feedback records used for trusted rubric extraction.",
+        "Key outputs",
+    ),
+    "intent_records.jsonl": (
+        "Prepared intent records",
+        "Redacted unlabeled records with canonical intent text.",
+        "Key outputs",
+    ),
+    "feedback_rubrics.jsonl": (
+        "Trusted feedback rubrics",
+        "Scoreable criteria extracted from direct feedback.",
+        "Key outputs",
+    ),
+    "trusted_intents.jsonl": (
+        "Trusted intent catalog",
+        "Intent labels and evidence derived from labeled records.",
+        "Supporting data",
+    ),
+    "trusted_cases.jsonl": (
+        "Trusted evaluation cases",
+        "Evaluation cases built directly from trusted feedback.",
+        "Key outputs",
+    ),
+    "intent_inventory.jsonl": (
+        "Intent cluster inventory",
+        "Cluster membership, representative records, and top terms.",
+        "Key outputs",
+    ),
+    "intent_matches.jsonl": (
+        "Cluster coverage decisions",
+        "Machine-readable trusted-intent match result for every cluster.",
+        "Supporting data",
+    ),
+    "coverage_report.md": (
+        "Coverage report",
+        "Readable summary of supported clusters and labeling gaps.",
+        "Key outputs",
+    ),
+    "labeling_queue.jsonl": (
+        "Traces to label",
+        "Representative traces sampled from clusters lacking enough trusted evidence.",
+        "Needs attention",
+    ),
+    "inferred_unlabeled_cluster_rubrics.jsonl": (
+        "Inferred cluster rubrics",
+        "Review-required rubrics inferred for supported clusters.",
+        "Supporting data",
+    ),
+    "inferred_unlabeled_labels.jsonl": (
+        "Inferred trace labels",
+        "Review-required labels attached to real supported traces.",
+        "Key outputs",
+    ),
+    "missing_labeled_feedback_clusters.jsonl": (
+        "Unsupported cluster details",
+        "Structured description of clusters that remain outside trusted coverage.",
+        "Needs attention",
+    ),
+    "missing_labeled_feedback_report.md": (
+        "Unsupported cluster report",
+        "Readable explanation of remaining feedback needs.",
+        "Needs attention",
+    ),
+    "inferred_cases.jsonl": (
+        "Inferred evaluation cases",
+        "Evaluation cases created from supported real traces.",
+        "Key outputs",
+    ),
+    "synthetic_candidates.jsonl": (
+        "Generated candidates",
+        "Unfiltered synthetic candidates produced for supported clusters.",
+        "Supporting data",
+    ),
+    "synthetic_cases.jsonl": (
+        "Accepted synthetic cases",
+        "Synthetic evaluation cases that passed all filters.",
+        "Key outputs",
+    ),
+    "rejected_synthetic.jsonl": (
+        "Rejected synthetic candidates",
+        "Candidates excluded by validation or quality filters.",
+        "Diagnostics",
+    ),
+    "synthetic_filter_issues.jsonl": (
+        "Synthetic filter audit",
+        "Reasons synthetic candidates were rejected.",
+        "Diagnostics",
+    ),
+    "dataset_manifest.json": (
+        "Dataset manifest",
+        "Counts, provenance, split policy, and review policy for the final dataset.",
+        "Key outputs",
+    ),
+    "train.jsonl": (
+        "Training dataset",
+        "Combined group-safe training split.",
+        "Key outputs",
+    ),
+    "validation.jsonl": (
+        "Validation dataset",
+        "Combined group-safe validation split.",
+        "Key outputs",
+    ),
+    "test.jsonl": (
+        "Test dataset",
+        "Combined group-safe test split.",
+        "Key outputs",
+    ),
+    "regression_trusted.jsonl": (
+        "Trusted regression gate",
+        "Automatic trusted-only regression holdout.",
+        "Key outputs",
+    ),
+    "triage_hold.jsonl": (
+        "Triage hold",
+        "Cases held out because their groups conflict with regression isolation.",
+        "Needs attention",
+    ),
+}
+
+
+def _artifact_metadata(relative_path: str) -> Dict[str, Any]:
+    """Return stable user-facing semantics without changing artifact filenames."""
+    name = Path(relative_path).name
+    catalog_item = _ARTIFACT_CATALOG.get(name)
+    if catalog_item is not None:
+        display_name, description, group = catalog_item
+    elif (
+        name.endswith("_trusted.jsonl")
+        or name.endswith("_inferred.jsonl")
+        or name.endswith("_synthetic.jsonl")
+    ):
+        display_name = name.removesuffix(".jsonl").replace("_", " ").title()
+        description = "Provenance-specific view of a combined dataset split."
+        group = "Supporting data"
+    elif name.endswith("manifest.json") or name.endswith("manifest.jsonl"):
+        display_name = name.rsplit(".", 1)[0].replace("_", " ").title()
+        description = "Machine-readable provenance and count metadata."
+        group = "Diagnostics"
+    else:
+        display_name = name.rsplit(".", 1)[0].replace("_", " ").title()
+        description = "Supporting artifact produced by this pipeline stage."
+        group = "Supporting data"
+    return {
+        "display_name": display_name,
+        "description": description,
+        "group": group,
+        "group_order": _ARTIFACT_GROUP_ORDER[group],
+    }
 
 
 def _read_json(path: Path) -> Optional[Any]:
@@ -119,6 +316,7 @@ def _evaluation_asset_preview(
         size = path.stat().st_size
     except OSError:
         size = 0
+    metadata = _artifact_metadata(relative_path)
     if path.suffix.lower() == ".jsonl":
         rows: List[Any] = []
         row_count = 0
@@ -144,6 +342,7 @@ def _evaluation_asset_preview(
             "bytes": size,
             "row_count": row_count,
             "preview": rows,
+            **metadata,
         }
     if path.suffix.lower() == ".json":
         content = _read_json(path)
@@ -154,6 +353,7 @@ def _evaluation_asset_preview(
             "bytes": size,
             "row_count": 1 if content is not None else 0,
             "preview": [content] if content is not None else [],
+            **metadata,
         }
     text = _read_text(path) or ""
     rendered_limit = 100_000
@@ -166,6 +366,7 @@ def _evaluation_asset_preview(
         "preview": text[:4000],
         "content": text[:rendered_limit],
         "content_truncated": len(text) > rendered_limit,
+        **metadata,
     }
 
 
@@ -174,7 +375,10 @@ def _evaluation_cluster_summaries(
     limit: int = 200,
 ) -> List[Dict[str, Any]]:
     """Return compact real cluster data separately from one-row file previews."""
-    inventory_path = layout.decision_assets / "intent_inventory.jsonl"
+    inventory_path = layout.artifact_path(
+        PipelineStage.INTENT_CLUSTERING,
+        "intent_inventory.jsonl",
+    )
     clusters = _read_jsonl(inventory_path)[:limit]
     representative_ids = {
         str(record_id)
@@ -183,7 +387,12 @@ def _evaluation_cluster_summaries(
     }
     records_by_id = {
         str(row.get("record_id")): row
-        for row in _read_jsonl(layout.prepared_inputs / "intent_records.jsonl")
+        for row in _read_jsonl(
+            layout.artifact_path(
+                PipelineStage.PREPARED_INPUTS,
+                "intent_records.jsonl",
+            )
+        )
         if str(row.get("record_id")) in representative_ids
     }
     summaries = []
@@ -400,6 +609,13 @@ class TenantStore:
                         preview_limit=1,
                     )
                 )
+        artifacts.sort(
+            key=lambda item: (
+                int(item["group_order"]),
+                str(item["display_name"]),
+                str(item["name"]),
+            )
+        )
 
         response = {
             "stage": stage,

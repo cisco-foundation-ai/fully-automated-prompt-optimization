@@ -51,7 +51,7 @@ pipeline; the core has no downstream field-name mappings.
 Canonical JSONL files may begin anywhere inside the local FAPO workspace. The
 core pipeline immediately copies them into the self-contained asset workspace:
 
-`tenants/<tenant_id>/evaluation_assets/<asset_id>/raw_inputs/`
+`tenants/<tenant_id>/evaluation_assets/<asset_id>/stages/01_raw_inputs/`
 
 Every later stage reads only this copied input. Asset creation therefore does
 not require tenant docs, prompts, chains, configs, adapters, or a legacy
@@ -74,27 +74,57 @@ Shared repo docs and tests must not include tenant-specific trace content, tenan
 
 ## Step-by-Step Flow
 
-Asset creation has exactly eight ordered stages. Creating the asset workspace
-copies the two source files into `raw_inputs/`; Stage 1 then validates those
-copies. FAPO evaluation, optimization, and prompt promotion happen only after
-this pipeline completes and are not additional evaluation-asset stages.
+Asset creation has exactly eight ordered stages. Each numbered folder owns the
+outputs of its corresponding stage and reads inputs from earlier folders.
+Creating the asset workspace copies the two source files into
+`stages/01_raw_inputs/`; Stage 1 then validates those copies. FAPO evaluation,
+optimization, and prompt promotion happen only after this pipeline completes
+and are not additional evaluation-asset stages.
 
 | Stage | Inputs | What happens | Outputs |
 |---|---|---|---|
-| 1. `raw_inputs` — Validate raw inputs | Copied `labeled_feedback.jsonl` and `unlabeled.jsonl` | Reject empty inputs; validate every record against `fapo-evaluation-input-v1`; require feedback only on labeled records; count rows and calculate source hashes | `raw_inputs/input_manifest.json`; validated copied inputs remain in `raw_inputs/` |
-| 2. `prepared_inputs` — Prepare canonical inputs | Validated raw input files | Redact sensitive values; preserve the vendor-neutral field names; default `request_id` to `record_id` and `route` to `task_type`; create canonical intent text for clustering | `prepared_inputs/normalized_feedback.jsonl`, `prepared_inputs/intent_records.jsonl` |
-| 3. `rubric_extraction` — Extract trusted rubrics | `normalized_feedback.jsonl`; configured rubric model | Use the configured LLM to extract scoreable `must`, `must_not`, `should`, tool expectations, deterministic checks, and intent labels from each trusted feedback record; build trusted intents and trusted FAPO cases directly from those rubrics | `decision_assets/feedback_rubrics.jsonl`, `prepared_inputs/trusted_intents.jsonl`, `prepared_inputs/trusted_cases.jsonl` |
-| 4. `intent_clustering` — Mine intent clusters | `intent_records.jsonl`; configured embedding provider/model; exact cluster count | Vectorize canonical intent text with the selected OpenAI embedding model or local TF-IDF; allocate the configured cluster count across routes; cluster deterministically within each route; retain representative record IDs and top terms | `decision_assets/intent_inventory.jsonl` |
-| 5. `coverage_decisions` — Apply coverage decisions | `intent_inventory.jsonl`, `intent_records.jsonl`, `trusted_intents.jsonl`; configured embedding provider/model and coverage parameters | Compare each mined cluster with trusted intents; apply the match threshold (default `0.6`) and trusted-support constraints; classify each cluster as `matched_trusted_intent`, `needs_more_trusted_examples`, or `missing_or_weak_labels` | `decision_assets/intent_matches.jsonl`, `decision_assets/coverage_report.md` |
-| 6. `label_inference` — Infer reviewable labels | Intent clusters and matches; canonical unlabeled records; normalized feedback; trusted rubrics; configured rubric model | For matched clusters only, use the configured LLM and matched trusted evidence to infer a cluster rubric, attach inferred labels to the real unlabeled records, and build inferred FAPO cases; separately report every unsupported cluster | `decision_assets/inferred_unlabeled_cluster_rubrics.jsonl`, `decision_assets/inferred_unlabeled_labels.jsonl`, `decision_assets/missing_labeled_feedback_clusters.jsonl`, `decision_assets/missing_labeled_feedback_report.md`, `prepared_inputs/inferred_cases.jsonl` |
-| 7. `synthetic_coverage` — Optional synthetic coverage | Supported clusters, representative requests, inferred cluster rubrics; enable flag and candidates-per-cluster setting | When enabled, use the configured LLM to generate exactly the requested candidates per supported cluster, then filter invalid, duplicate, inconsistent, leaky, or unsolvable candidates. When disabled, make no model call and write empty artifacts | `decision_assets/synthetic_candidates.jsonl`, `decision_assets/rejected_synthetic.jsonl`, `decision_assets/synthetic_filter_issues.jsonl`, `prepared_inputs/synthetic_cases.jsonl` |
-| 8. `dataset_splits` — Build dataset splits | Trusted, inferred, and accepted synthetic cases; split seed | Reserve an approximately 20%, deterministic, group-safe trusted-only regression holdout; send inferred or synthetic cases that share its groups to `triage_hold`; globally assign every remaining group across train, validation, and test; write combined and provenance-specific splits and manifests | `dataset_splits/train*.jsonl`, `dataset_splits/validation*.jsonl`, `dataset_splits/test*.jsonl`, `dataset_splits/regression_trusted.jsonl`, `dataset_splits/triage_hold.jsonl`, `dataset_splits/dataset_manifest.json`, `asset_manifest.json` |
+| 1. `raw_inputs` — Validate raw inputs | Copied `labeled_feedback.jsonl` and `unlabeled.jsonl` | Reject empty inputs; validate every record against `fapo-evaluation-input-v1`; require feedback only on labeled records; count rows and calculate source hashes | `stages/01_raw_inputs/` |
+| 2. `prepared_inputs` — Prepare canonical inputs | Validated raw input files | Redact sensitive values; preserve the vendor-neutral field names; default `request_id` to `record_id` and `route` to `task_type`; create canonical intent text for clustering | `stages/02_prepared_inputs/` |
+| 3. `rubric_extraction` — Extract trusted rubrics | `normalized_feedback.jsonl`; configured rubric model | Use the configured LLM to extract scoreable `must`, `must_not`, `should`, tool expectations, deterministic checks, and intent labels from each trusted feedback record; build trusted intents and trusted FAPO cases directly from those rubrics | `stages/03_rubric_extraction/` |
+| 4. `intent_clustering` — Mine intent clusters | `intent_records.jsonl`; configured embedding provider/model; exact cluster count | Vectorize canonical intent text with the selected OpenAI embedding model or local TF-IDF; allocate the configured cluster count across routes; cluster deterministically within each route; retain representative record IDs and top terms | `stages/04_intent_clustering/` |
+| 5. `coverage_decisions` — Apply coverage decisions | `intent_inventory.jsonl`, `intent_records.jsonl`, `trusted_intents.jsonl`; configured embedding provider/model and coverage parameters | Compare each mined cluster with trusted intents; apply the match threshold (default `0.6`) and trusted-support constraints; classify every cluster; sample centroid-near traces from under-supported and unsupported clusters for labeling | `stages/05_coverage_decisions/`, including `review_queue/` |
+| 6. `label_inference` — Infer reviewable labels | Intent clusters and matches; canonical unlabeled records; normalized feedback; trusted rubrics; configured rubric model | For matched clusters only, use the configured LLM and matched trusted evidence to infer a cluster rubric, attach inferred labels to the real unlabeled records, and build inferred FAPO cases; separately report every unsupported cluster | `stages/06_label_inference/` |
+| 7. `synthetic_coverage` — Optional synthetic coverage | Supported clusters, representative requests, inferred cluster rubrics; enable flag and candidates-per-cluster setting | When enabled, use the configured LLM to generate exactly the requested candidates per supported cluster, then filter invalid, duplicate, inconsistent, leaky, or unsolvable candidates. When disabled, make no model call and write empty artifacts | `stages/07_synthetic_coverage/` |
+| 8. `dataset_splits` — Build dataset splits | Trusted, inferred, and accepted synthetic cases; split seed | Reserve an approximately 20%, deterministic, group-safe trusted-only regression holdout; send inferred or synthetic cases that share its groups to `triage_hold`; globally assign every remaining group across train, validation, and test; write combined and provenance-specific splits and manifests | `stages/08_dataset_splits/` and root `asset_manifest.json` |
 
 Every stage persists `pending`, `running`, `completed`, or `failed`, timestamps,
 a human-readable message, and cumulative counts. `events.jsonl` provides an
 append-only operational history. A failure preserves completed checkpoints;
 after its cause is corrected, rerunning resumes from the first incomplete
 stage.
+
+### Updating decisions on resume
+
+A stopped pipeline can resume with its existing configuration or an updated
+set of decisions. The Studio's **Edit decisions & resume** form and optional
+`assets run` flags use the same core revision mechanism:
+
+1. Validate the requested settings and compare them with `config.json`.
+2. Select the earliest stage affected by an actual change.
+3. Preserve every earlier completed checkpoint.
+4. Reset the affected stage and all downstream stages to `pending`.
+5. Remove their stale artifacts and the stale final manifest.
+6. Append the old and new values plus the restart stage to
+   `config_history.jsonl` and `events.jsonl`.
+7. Resume the normal core runner.
+
+| Changed decision | Earliest stage rebuilt |
+|---|---|
+| Rubric provider/model or LLM batch size | Stage 3, `rubric_extraction` |
+| Embedding provider/model or exact cluster count | Stage 4, `intent_clustering` |
+| Match threshold or trusted-support constraints | Stage 5, `coverage_decisions` |
+| Synthetic coverage enable flag or cases per cluster | Stage 7, `synthetic_coverage` |
+| Split seed | Stage 8, `dataset_splits` |
+
+An unchanged submitted value does not invalidate anything. Decision edits are
+rejected while the same asset has an active background runner. If the pipeline
+already has an incomplete stage earlier than the decision's dependency, the
+audit records both boundaries and execution resumes at that earlier stage.
 
 ## Evaluation Asset Studio
 
@@ -117,8 +147,21 @@ shows the projection-style cluster explorer with route filters, cluster sizes,
 representative requests, and observed tools. Visualization data is separate
 from artifact examples; the example panel never loads an entire JSONL file.
 
+The artifact guide keeps stable machine-readable filenames while presenting
+friendly names, descriptions, and four usage groups:
+
+- **Key outputs** are the files most users consume next.
+- **Needs attention** contains labeling and triage work queues.
+- **Supporting data** explains or decomposes a key output.
+- **Diagnostics** contains manifests, rejection reasons, and audits.
+
 The Studio refreshes running state every five seconds and calls the same core
-start/resume service used by CLI-driven workflows.
+start/resume service used by CLI-driven workflows. A failed asset retains a
+**Resume with current decisions** action and places an always-visible parameter
+editor directly on the failed stage. The editor shows only stage-relevant
+settings and explains when changing one rebuilds from an earlier stage. Raw
+inputs remain immutable within an asset; a Stage 1 source correction requires
+a new asset version.
 
 ## Provider Selection
 
@@ -138,6 +181,32 @@ TF-IDF is a provider choice, not an OpenAI model alias. When selected, persist
 create an OpenAI embedding client or make embedding API calls. Never silently
 switch providers after an embedding failure. Surface the failure and let the
 operator explicitly choose a new asset configuration.
+
+## Troubleshooting OpenAI SSL Connections
+
+Use this procedure when the persisted failure or underlying provider exception
+shows an SSL/TLS certificate verification or trust-chain error. Do not apply it
+to authentication, model-access, rate-limit, or response-format failures.
+
+Install or upgrade the OpenAI client, HTTP client, certificate bundle, and
+system-trust integration in the same Python environment used to run FAPO:
+
+```bash
+python3 -m pip install --upgrade openai httpx certifi truststore
+```
+
+If they are commented in the checkout, uncomment the five-line `truststore`
+blocks at:
+
+- `src/hephaestus/providers/openai.py`, lines 50–54.
+- `src/hephaestus/datasets/rubric_providers.py`, lines 85–89.
+- `src/hephaestus/datasets/embedding_providers.py`, lines 61–65.
+
+Each block imports `truststore`, calls `truststore.inject_into_ssl()`, and
+continues when the optional package is unavailable. The blocks may already be
+active. Restart the FAPO UI or CLI process so it loads the updated environment
+and source, then invoke `assets run` again. The checkpointed runner resumes at
+the first incomplete stage.
 
 ## Dataset Splits
 
@@ -228,10 +297,18 @@ The core uses the following deterministic mechanics:
 5. Stage 5 builds comparable text for clusters and trusted intents, vectorizes
    it with the same configured provider, chooses the best same-route trusted
    match by cosine similarity, and applies the configured coverage policy.
+6. For each `needs_more_trusted_examples` or `missing_or_weak_labels` cluster,
+   Stage 5 selects 10% of its records, with a minimum of one and a maximum of
+   three. Selection uses the centroid-near representatives already calculated
+   by Stage 4, so it is deterministic and favors typical traces over outliers.
+   The selected redacted traces are written to
+   `stages/05_coverage_decisions/review_queue/labeling_queue.jsonl` with their
+   cluster status and reason.
 
 Stage 5 does not call an LLM and has no manual review checkpoint. Its output is
-the persisted coverage decision. Stage 6 uses the configured rubric LLM only
-for clusters whose Stage 5 status is `matched_trusted_intent`.
+the persisted coverage decision and an external labeling work queue. Stage 6
+uses the configured rubric LLM only for clusters whose Stage 5 status is
+`matched_trusted_intent`.
 
 This asset creation step is not a FAPO eval run. It produces versioned datasets and coverage reports that the FAPO optimization loop consumes afterward.
 
@@ -242,6 +319,7 @@ Recommended generic artifacts:
 | `intent_inventory.jsonl` | Cluster records with representative IDs, top terms, route, and size |
 | `intent_matches.jsonl` | Coverage decisions: matched trusted intent or missing/weak labels |
 | `coverage_report.md` | Human-readable summary of high-volume clusters, trusted coverage, and feedback requests |
+| `stages/05_coverage_decisions/review_queue/labeling_queue.jsonl` | Representative redacted traces that need new trusted labels |
 | `dataset_manifest.json` | Dataset version, split files, oracle version, and generation settings |
 | FAPO JSONL split files | Versioned train, validation, test, and regression datasets |
 
@@ -253,14 +331,23 @@ The core owns contract validation, redaction, rubric extraction, exact-count
 clustering, coverage decisions, inferred labels, group-safe splits, manifests,
 checkpoints, and progress events.
 
-Each asset contains:
+Each new asset contains:
 
 | Directory | Contents |
 |---|---|
-| `raw_inputs/` | Immutable copied labeled and unlabeled JSONL plus source hashes |
-| `prepared_inputs/` | Normalized feedback, canonical intents, trusted cases, inferred cases |
-| `decision_assets/` | Rubrics, clusters, match decisions, coverage and missing-label reports |
-| `dataset_splits/` | Component and combined train, validation, test, regression, and triage files |
+| `stages/01_raw_inputs/` | Immutable copied labeled and unlabeled JSONL plus source hashes |
+| `stages/02_prepared_inputs/` | Normalized feedback and canonical intent records |
+| `stages/03_rubric_extraction/` | Trusted rubrics, intents, and evaluation cases |
+| `stages/04_intent_clustering/` | Intent cluster inventory |
+| `stages/05_coverage_decisions/` | Match decisions, coverage report, and nested human labeling queue |
+| `stages/06_label_inference/` | Inferred labels and cases plus unsupported-cluster reports |
+| `stages/07_synthetic_coverage/` | Candidate, accepted, rejected, and filter-audit synthetic artifacts |
+| `stages/08_dataset_splits/` | Component and combined train, validation, test, regression, and triage files |
+
+Assets created before the stage-oriented layout remain readable and resumable
+through the compatibility mapper. They keep their existing `raw_inputs/`,
+`prepared_inputs/`, `decision_assets/`, `review_queues/`, and
+`dataset_splits/` directories and are not migrated automatically.
 
 ## CLI Workflow
 
@@ -319,6 +406,23 @@ python -m hephaestus.cli assets status \
 The Explorer UI calls the same core service. Completed stages are persisted and
 skipped on resume; model settings and the fixed cluster count are recorded in
 the asset manifest.
+
+Pass optional decision flags to revise and resume in one command:
+
+```bash
+python -m hephaestus.cli assets run \
+  --tenant <tenant_id> \
+  --asset-id <asset_id> \
+  --rubric-model gpt-5.5 \
+  --embedding-model text-embedding-3-small \
+  --clusters 40 \
+  --match-threshold 0.55 \
+  --no-synthetic-coverage
+```
+
+Omitted settings retain their persisted values. Use
+`--synthetic-coverage` to enable Stage 7 and
+`--synthetic-cases-per-cluster <count>` to change its requested size.
 
 ## Synthetic Coverage Cases
 
