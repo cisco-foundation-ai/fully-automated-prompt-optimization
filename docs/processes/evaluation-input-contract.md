@@ -145,8 +145,8 @@ Example:
 }
 ```
 
-The previous assistant output is context for rubric extraction, not an answer
-key.
+The previous assistant output is context for evaluation-guideline creation,
+not an answer key.
 
 ## Unlabeled Records
 
@@ -212,6 +212,7 @@ feedback resources, traversing child spans, extracting messages, standardizing
 tool calls, assigning stable groups, and mapping feedback into canonical
 polarity and rationale.
 
-Adapters must not implement rubric extraction, clustering, coverage decisions,
-label inference, synthetic generation, or dataset splitting. Those operations
-remain in the shared core after the contract boundary.
+Adapters must not implement evaluation-guideline creation, clustering,
+coverage decisions, label inference, synthetic generation, or dataset
+splitting. Those operations remain in the shared core after the contract
+boundary.

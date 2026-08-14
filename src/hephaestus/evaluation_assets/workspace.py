@@ -28,12 +28,15 @@ SAFE_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$")
 STAGE_DIRECTORIES = {
     PipelineStage.RAW_INPUTS.value: "01_raw_inputs",
     PipelineStage.PREPARED_INPUTS.value: "02_prepared_inputs",
-    PipelineStage.RUBRIC_EXTRACTION.value: "03_rubric_extraction",
+    PipelineStage.RUBRIC_EXTRACTION.value: "03_evaluation_guidelines",
     PipelineStage.INTENT_CLUSTERING.value: "04_intent_clustering",
     PipelineStage.COVERAGE_DECISIONS.value: "05_coverage_decisions",
     PipelineStage.LABEL_INFERENCE.value: "06_label_inference",
     PipelineStage.SYNTHETIC_COVERAGE.value: "07_synthetic_coverage",
     PipelineStage.DATASET_SPLITS.value: "08_dataset_splits",
+}
+PREVIOUS_STAGE_DIRECTORIES = {
+    PipelineStage.RUBRIC_EXTRACTION.value: "03_rubric_extraction",
 }
 LEGACY_DIRECTORIES = (
     "raw_inputs",
@@ -44,6 +47,9 @@ LEGACY_DIRECTORIES = (
 )
 STAGE_ARTIFACTS = {
     PipelineStage.RUBRIC_EXTRACTION: (
+        "feedback_evidence.jsonl",
+        "candidate_guidelines.jsonl",
+        "evaluation_guidelines.jsonl",
         "feedback_rubrics.jsonl",
         "trusted_intents.jsonl",
         "trusted_cases.jsonl",
@@ -122,7 +128,12 @@ class EvaluationAssetLayout:
             directory = STAGE_DIRECTORIES[stage_name]
         except KeyError as exc:
             raise ValueError(f"Unknown evaluation asset stage: {stage_name}") from exc
-        return self.stages_root / directory
+        canonical = self.stages_root / directory
+        previous_name = PREVIOUS_STAGE_DIRECTORIES.get(stage_name)
+        previous = self.stages_root / previous_name if previous_name else None
+        if previous is not None and previous.is_dir() and not canonical.exists():
+            return previous
+        return canonical
 
     def artifact_path(
         self,
@@ -167,6 +178,29 @@ class EvaluationAssetLayout:
         if self.uses_stage_layout:
             return self.stage_directory(PipelineStage.DATASET_SPLITS)
         return self.root / "dataset_splits"
+
+    @property
+    def published_datasets(self) -> Path:
+        """Return the versioned tenant dataset directory published by Stage 8."""
+        return self.tenant_root / "datasets" / "evaluation_assets" / self.asset_id
+
+    def publish_dataset_splits(
+        self,
+        split_names: Sequence[str],
+    ) -> Dict[str, str]:
+        """Copy selected Stage 8 splits into the tenant's dataset catalog."""
+        published: Dict[str, str] = {}
+        for split_name in split_names:
+            source = self.artifact_path(
+                PipelineStage.DATASET_SPLITS,
+                f"{split_name}.jsonl",
+            )
+            destination = self.published_datasets / f"{split_name}.jsonl"
+            _copy_jsonl(source, destination)
+            published[split_name] = destination.relative_to(
+                self.tenant_root
+            ).as_posix()
+        return published
 
     @property
     def config_path(self) -> Path:
@@ -297,7 +331,7 @@ class EvaluationAssetLayout:
             config.rubric_model != parent_config.rubric_model
         ):
             raise ValueError(
-                "incremental extension must keep the parent's rubric model"
+                "incremental extension must keep the parent's guideline model"
             )
         if clustering_mode == "keep" and (
             config.embedding_provider != parent_config.embedding_provider
@@ -322,8 +356,22 @@ class EvaluationAssetLayout:
         _atomic_write_jsonl(self.feedback_path, feedback_rows)
         _atomic_write_jsonl(self.unlabeled_path, unlabeled_rows)
 
+        guideline_artifacts = (
+            "feedback_evidence.jsonl",
+            "candidate_guidelines.jsonl",
+            "evaluation_guidelines.jsonl",
+        )
+        compatibility_artifacts = ("feedback_rubrics.jsonl",)
+        shared_artifacts = ("trusted_intents.jsonl", "trusted_cases.jsonl")
+        if parent.artifact_path(
+            PipelineStage.RUBRIC_EXTRACTION,
+            "evaluation_guidelines.jsonl",
+        ).is_file():
+            stage_three_artifacts = guideline_artifacts + shared_artifacts
+        else:
+            stage_three_artifacts = compatibility_artifacts + shared_artifacts
         seeded_artifacts = []
-        for name in STAGE_ARTIFACTS[PipelineStage.RUBRIC_EXTRACTION]:
+        for name in stage_three_artifacts:
             source = parent.artifact_path(PipelineStage.RUBRIC_EXTRACTION, name)
             if not source.is_file():
                 raise FileNotFoundError(source)
@@ -462,7 +510,7 @@ class EvaluationAssetLayout:
             "seeded_incremental_stage": {
                 "stage": PipelineStage.RUBRIC_EXTRACTION.value,
                 "artifacts": seeded_artifacts,
-                "operation": "append_new_feedback_rubrics",
+                "operation": "append_evidence_and_rebuild_guidelines",
             },
             "reused_stages": (
                 [
@@ -651,6 +699,7 @@ class EvaluationAssetLayout:
             handle.write(json.dumps(dict(payload), sort_keys=True) + "\n")
 
     def _clear_stage_outputs(self, stages: Iterable[PipelineStage]) -> None:
+        stages = tuple(stages)
         for stage in stages:
             if self.uses_stage_layout:
                 directory = self.stage_directory(stage)
@@ -670,6 +719,11 @@ class EvaluationAssetLayout:
                     path.unlink()
         if PipelineStage.DATASET_SPLITS in stages and self.manifest_path.is_file():
             self.manifest_path.unlink()
+        if (
+            PipelineStage.DATASET_SPLITS in stages
+            and self.published_datasets.is_dir()
+        ):
+            shutil.rmtree(self.published_datasets)
 
     def artifact_summary(self) -> Dict[str, Any]:
         """Return API-safe paths and file counts for the canonical directories."""
@@ -711,7 +765,17 @@ def _legacy_artifact_path(stage: str, relative_name: str) -> Path:
     if stage == PipelineStage.PREPARED_INPUTS.value:
         return Path("prepared_inputs") / name
     if stage == PipelineStage.RUBRIC_EXTRACTION.value:
-        parent = "decision_assets" if name == "feedback_rubrics.jsonl" else "prepared_inputs"
+        parent = (
+            "decision_assets"
+            if name
+            in {
+                "feedback_evidence.jsonl",
+                "candidate_guidelines.jsonl",
+                "evaluation_guidelines.jsonl",
+                "feedback_rubrics.jsonl",
+            }
+            else "prepared_inputs"
+        )
         return Path(parent) / name
     if stage == PipelineStage.INTENT_CLUSTERING.value:
         return Path("decision_assets") / name

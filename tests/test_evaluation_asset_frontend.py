@@ -39,7 +39,8 @@ def test_asset_studio_owns_creation_controls() -> None:
     assert "Representative traces to label" in EVALUATION_ASSET_HTML
     assert "Example data" in EVALUATION_ASSET_HTML
     assert "Report unsupported clusters" in EVALUATION_ASSET_HTML
-    assert "Split all remaining provenance classes globally by group" in EVALUATION_ASSET_HTML
+    assert "Split remaining cases globally by group" in EVALUATION_ASSET_HTML
+    assert "Publish versioned tenant datasets" in EVALUATION_ASSET_HTML
     assert "Match coverage" in EVALUATION_ASSET_HTML
     assert "stageCardResult(stage, counts)" in EVALUATION_ASSET_HTML
     assert "stage.message ||" not in EVALUATION_ASSET_HTML
@@ -66,7 +67,9 @@ def test_asset_studio_owns_creation_controls() -> None:
     assert "Keep original clustering" in EVALUATION_ASSET_HTML
     assert "Rerun clustering" in EVALUATION_ASSET_HTML
     assert "/api/evaluation-assets/extend" in EVALUATION_ASSET_HTML
-    assert "Extract only new rubrics" in EVALUATION_ASSET_HTML
+    assert "Guideline creation model" in EVALUATION_ASSET_HTML
+    assert "Create guidelines" in EVALUATION_ASSET_HTML
+    assert "Extract only new evidence and rebuild guidelines" in EVALUATION_ASSET_HTML
 
 
 def test_explorer_links_to_studio_without_asset_form() -> None:

@@ -51,23 +51,48 @@ from src.hephaestus.evaluation_assets.workspace import (
 
 LABELING_QUEUE_SAMPLE_RATIO = 0.1
 LABELING_QUEUE_MAX_PER_CLUSTER = 3
+PUBLISHED_DATASET_SPLITS = (
+    "train",
+    "validation",
+    "test",
+    "regression_trusted",
+)
 
-FEEDBACK_PROMPT = """\
-Create reviewable evaluation rubrics from explicit user feedback. Return one JSON
-object with a `rubrics` array preserving every `record_id`. User feedback is
-trusted evidence; the previous assistant output is context, not an answer key.
-Each rubric must contain record_id, intent_label, confidence (0..1), must,
-must_not, should, deterministic_checks, tool_expectations, and reference_output.
-The must, must_not, and should fields must be arrays of strings;
-deterministic_checks must be an array; tool_expectations must be a JSON object,
-never an array or string; and reference_output must be a string or null.
-Never invent environment facts, private identifiers, tool results, or unsupported
-correctness requirements.
+EVIDENCE_EXTRACTION_PROMPT = """\
+Extract atomic evaluation evidence from explicit user feedback. Return one JSON
+object with an `evidence` array preserving every `record_id`. The feedback is
+trusted evidence; the previous assistant output and tool calls are context, not
+an answer key. Each item must contain record_id, intent_label, confidence (0..1),
+observations, requested_corrections, and uncertainties. Each observation must
+contain claim, evidence_type, evidence_pointer, and polarity. Record only claims
+directly supported by the supplied feedback or correction. Do not generalize a
+case-specific preference into a universal rule. Never invent environment facts,
+private identifiers, tool results, or unsupported correctness requirements.
+"""
+
+GUIDELINE_SYNTHESIS_PROMPT = """\
+Create reusable evaluation guidelines from trusted feedback evidence grouped by
+route. Return one JSON object with a `guidelines` array. Every supplied record_id
+must appear in at least one guideline's source_record_ids. Aggregate compatible
+evidence and keep conflicting or case-specific evidence explicit rather than
+silently resolving it. Each guideline must contain intent_label, description,
+route, source_record_ids, confidence (0..1), criteria, tool_expectations, and
+reference_output, conflicts, and uncertainties. Each criterion must contain
+kind (required, prohibited, or preferred), statement, source_record_ids,
+dimension, severity (critical, major, or minor), applicability, scoring,
+evidence_required, and evaluator. Criterion source_record_ids must be a subset
+of the guideline source_record_ids. Evaluator must contain type and fallback;
+prefer state_check or deterministic_check when the evidence is
+objectively verifiable, semantic_trajectory only when the path itself matters,
+llm_judge for qualitative criteria, and human_review when evidence is
+insufficient. Avoid literal tool names unless the feedback makes that exact tool
+contract mandatory. Permit multiple valid solution paths. reference_output must
+be a string or null and must never be copied from a previous assistant response.
 """
 
 INFERENCE_PROMPT = """\
-Infer reviewable rubrics for unlabeled intent clusters using only the supplied
-trusted feedback rubric as correctness evidence. Return one JSON object with a
+Infer reviewable case rubrics for unlabeled intent clusters using only the
+supplied trusted evaluation guideline as correctness evidence. Return one JSON object with a
 `rubrics` array preserving every `cluster_id`. Each item must contain cluster_id,
 intent_label, confidence (0..1), must, must_not, should, deterministic_checks,
 tool_expectations, and reference_output. Representative unlabeled requests may
@@ -225,7 +250,7 @@ class EvaluationAssetPipeline:
         handlers = {
             PipelineStage.RAW_INPUTS: self._validate_raw_inputs,
             PipelineStage.PREPARED_INPUTS: self._prepare_inputs,
-            PipelineStage.RUBRIC_EXTRACTION: self._extract_rubrics,
+            PipelineStage.RUBRIC_EXTRACTION: self._create_evaluation_guidelines,
             PipelineStage.INTENT_CLUSTERING: self._cluster_intents,
             PipelineStage.COVERAGE_DECISIONS: self._decide_coverage,
             PipelineStage.LABEL_INFERENCE: self._infer_labels,
@@ -292,7 +317,7 @@ class EvaluationAssetPipeline:
         )
         return {"prepared_feedback": len(normalized), "prepared_intents": len(intents)}
 
-    def _extract_rubrics(self) -> Dict[str, int]:
+    def _create_evaluation_guidelines(self) -> Dict[str, int]:
         normalized = _load_jsonl(
             self.layout.artifact_path(
                 PipelineStage.PREPARED_INPUTS,
@@ -303,10 +328,17 @@ class EvaluationAssetPipeline:
             str(value)
             for value in self.lineage.get("added_labeled_record_ids", [])
         }
-        incremental = bool(self.lineage)
-        rubric_path = self.layout.artifact_path(
+        evidence_path = self.layout.artifact_path(
             PipelineStage.RUBRIC_EXTRACTION,
-            "feedback_rubrics.jsonl",
+            "feedback_evidence.jsonl",
+        )
+        candidate_path = self.layout.artifact_path(
+            PipelineStage.RUBRIC_EXTRACTION,
+            "candidate_guidelines.jsonl",
+        )
+        guideline_path = self.layout.artifact_path(
+            PipelineStage.RUBRIC_EXTRACTION,
+            "evaluation_guidelines.jsonl",
         )
         intent_path = self.layout.artifact_path(
             PipelineStage.RUBRIC_EXTRACTION,
@@ -316,9 +348,8 @@ class EvaluationAssetPipeline:
             PipelineStage.RUBRIC_EXTRACTION,
             "trusted_cases.jsonl",
         )
-        existing_rubrics = _load_jsonl(rubric_path) if incremental else []
-        existing_intents = _load_jsonl(intent_path) if incremental else []
-        existing_cases = _load_jsonl(case_path) if incremental else []
+        incremental = bool(self.lineage) and evidence_path.is_file()
+        existing_evidence = _load_jsonl(evidence_path) if incremental else []
         pending = (
             [
                 row
@@ -328,10 +359,10 @@ class EvaluationAssetPipeline:
             if incremental
             else normalized
         )
-        new_rubrics: List[Dict[str, Any]] = []
+        new_evidence: List[Dict[str, Any]] = []
         for batch in _batches(pending, self.config.batch_size):
             response = self.rubric_provider.generate_json(
-                FEEDBACK_PROMPT,
+                EVIDENCE_EXTRACTION_PROMPT,
                 {
                     "records": [
                         {
@@ -346,70 +377,85 @@ class EvaluationAssetPipeline:
                     ]
                 },
             )
-            returned = _indexed_items(response, "rubrics", "record_id")
+            returned = _indexed_items(response, "evidence", "record_id")
             for row in batch:
                 record_id = str(row["record_id"])
                 if record_id not in returned:
-                    raise ValueError(f"Rubric response omitted {record_id}")
-                new_rubrics.append(
-                    _normalize_rubric(
-                        returned[record_id],
-                        "record_id",
-                        record_id,
-                        "human_feedback",
-                        self.config.rubric_model,
-                        review_status=None,
+                    raise ValueError(f"Evidence response omitted {record_id}")
+                new_evidence.append(
+                    _normalize_feedback_evidence(
+                        returned[record_id], row, self.config.rubric_model
                     )
                 )
 
-        rubrics = _replace_by_key(
-            existing_rubrics,
-            new_rubrics,
+        evidence = _replace_by_key(
+            existing_evidence,
+            new_evidence,
             key="record_id",
         )
-        rubric_by_id = {row["record_id"]: row for row in rubrics}
-        new_trusted_intents = [
-            {
-                "intent_id": row["record_id"],
-                "label": rubric_by_id[row["record_id"]]["intent_label"],
-                "texts": [
-                    row["user_input"],
-                    " ".join(
-                        rubric_by_id[row["record_id"]]["must"]
-                        + rubric_by_id[row["record_id"]]["must_not"]
-                    ),
-                ],
-                "route": row["route"],
-                "metadata": {
-                    "trusted_example_count": 1,
-                    "trusted_group_count": 1,
-                    "feedback_polarity": row["feedback"]["polarity"],
+        evidence_by_route: Dict[str, List[Dict[str, Any]]] = {}
+        normalized_by_id = {str(row["record_id"]): row for row in normalized}
+        for item in evidence:
+            evidence_by_route.setdefault(str(item["route"]), []).append(item)
+
+        candidates: List[Dict[str, Any]] = []
+        for route in sorted(evidence_by_route):
+            route_evidence = sorted(
+                evidence_by_route[route], key=lambda item: str(item["record_id"])
+            )
+            source_records = [
+                normalized_by_id[str(item["record_id"])] for item in route_evidence
+            ]
+            response = self.rubric_provider.generate_json(
+                GUIDELINE_SYNTHESIS_PROMPT,
+                {
+                    "route": route,
+                    "evidence": route_evidence,
+                    "examples": [
+                        {
+                            "record_id": row["record_id"],
+                            "task_type": row["task_type"],
+                            "user_input": row["user_input"],
+                            "feedback_polarity": row["feedback"]["polarity"],
+                        }
+                        for row in source_records
+                    ],
                 },
-            }
-            for row in pending
+            )
+            items = response.get("guidelines")
+            if not isinstance(items, list):
+                raise ValueError("Guideline response missing guidelines array")
+            candidates.extend(
+                {**dict(item), "route": route}
+                for item in items
+                if isinstance(item, Mapping)
+            )
+
+        guidelines = _compile_evaluation_guidelines(
+            candidates,
+            evidence,
+            self.config.rubric_model,
+        )
+        guideline_by_record = _guidelines_by_source_record(guidelines)
+        trusted_intents = [
+            _trusted_intent_from_guideline(guideline, normalized_by_id)
+            for guideline in guidelines
         ]
-        new_trusted_cases = [
+        trusted_cases = [
             _trusted_case(
                 row,
-                rubric_by_id[row["record_id"]],
+                _rubric_from_guidelines(
+                    str(row["record_id"]),
+                    guideline_by_record[str(row["record_id"])],
+                    self.config.rubric_model,
+                ),
                 self.config.asset_id,
             )
-            for row in pending
+            for row in normalized
         ]
-        trusted_intents = _replace_by_key(
-            existing_intents,
-            new_trusted_intents,
-            key="intent_id",
-        )
-        trusted_cases = _replace_by_key(
-            [_case_for_asset(row, self.config.asset_id) for row in existing_cases],
-            new_trusted_cases,
-            key="case_id",
-        )
-        write_jsonl(
-            rubric_path,
-            rubrics,
-        )
+        write_jsonl(evidence_path, evidence)
+        write_jsonl(candidate_path, candidates)
+        write_jsonl(guideline_path, guidelines)
         write_jsonl(
             intent_path,
             trusted_intents,
@@ -418,7 +464,12 @@ class EvaluationAssetPipeline:
             case_path,
             trusted_cases,
         )
-        return {"feedback_rubrics": len(rubrics), "trusted_cases": len(trusted_cases)}
+        return {
+            "feedback_evidence": len(evidence),
+            "candidate_guidelines": len(candidates),
+            "evaluation_guidelines": len(guidelines),
+            "trusted_cases": len(trusted_cases),
+        }
 
     def _cluster_intents(self) -> Dict[str, int]:
         rows = _load_jsonl(
@@ -601,12 +652,22 @@ class EvaluationAssetPipeline:
             )
         )
         raw_rows = _load_jsonl(self.layout.unlabeled_path)
-        feedback_rubrics = _load_jsonl(
-            self.layout.artifact_path(
-                PipelineStage.RUBRIC_EXTRACTION,
-                "feedback_rubrics.jsonl",
-            )
+        guideline_path = self.layout.artifact_path(
+            PipelineStage.RUBRIC_EXTRACTION,
+            "evaluation_guidelines.jsonl",
         )
+        if guideline_path.is_file():
+            evaluation_guidelines = _load_jsonl(guideline_path)
+        else:
+            evaluation_guidelines = [
+                _legacy_guideline_from_rubric(row)
+                for row in _load_jsonl(
+                    self.layout.artifact_path(
+                        PipelineStage.RUBRIC_EXTRACTION,
+                        "feedback_rubrics.jsonl",
+                    )
+                )
+            ]
         clusters = [
             _intent_cluster(row)
             for row in _load_jsonl(
@@ -627,7 +688,9 @@ class EvaluationAssetPipeline:
         ]
         row_by_id = {row["record_id"]: row for row in intent_rows}
         normalized_by_id = {row["record_id"]: row for row in normalized}
-        feedback_by_id = {row["record_id"]: row for row in feedback_rubrics}
+        guideline_by_id = {
+            row["guideline_id"]: row for row in evaluation_guidelines
+        }
         match_by_cluster = {match.cluster_id: match for match in matches}
         matched = [
             cluster
@@ -672,11 +735,22 @@ class EvaluationAssetPipeline:
                                 row_by_id[record_id]["user_input"]
                                 for record_id in cluster.representative_ids
                             ],
-                            "trusted_request": normalized_by_id[
-                                str(match_by_cluster[cluster.cluster_id].matched_intent_id)
-                            ]["user_input"],
-                            "trusted_rubric": feedback_by_id[
-                                str(match_by_cluster[cluster.cluster_id].matched_intent_id)
+                            "trusted_requests": [
+                                normalized_by_id[record_id]["user_input"]
+                                for record_id in guideline_by_id[
+                                    str(
+                                        match_by_cluster[
+                                            cluster.cluster_id
+                                        ].matched_intent_id
+                                    )
+                                ]["source_record_ids"]
+                            ],
+                            "trusted_evaluation_guideline": guideline_by_id[
+                                str(
+                                    match_by_cluster[
+                                        cluster.cluster_id
+                                    ].matched_intent_id
+                                )
                             ],
                             "match_score": match_by_cluster[cluster.cluster_id].score,
                         }
@@ -803,12 +877,22 @@ class EvaluationAssetPipeline:
                 ),
                 rows,
             )
+        published_datasets = self.layout.publish_dataset_splits(
+            PUBLISHED_DATASET_SPLITS
+        )
 
         input_manifest = json.loads(
             self.layout.artifact_path(
                 PipelineStage.RAW_INPUTS,
                 "input_manifest.json",
             ).read_text(encoding="utf-8")
+        )
+        guideline_path = self.layout.artifact_path(
+            PipelineStage.RUBRIC_EXTRACTION,
+            "evaluation_guidelines.jsonl",
+        )
+        guideline_count = (
+            len(_load_jsonl(guideline_path)) if guideline_path.is_file() else 0
         )
         manifest = {
             "asset_id": self.config.asset_id,
@@ -818,6 +902,22 @@ class EvaluationAssetPipeline:
                 "rubric_model": self.config.rubric_model,
                 "embedding_provider": self.config.embedding_provider,
                 "embedding_model": self.config.embedding_model,
+            },
+            "evaluation_guidelines": {
+                "schema_version": (
+                    "fapo-evaluation-guideline-v1"
+                    if guideline_path.is_file()
+                    else "legacy-feedback-rubric-v1"
+                ),
+                "count": guideline_count,
+                "activation_status": (
+                    "active_from_trusted_evidence"
+                    if guideline_path.is_file()
+                    else "legacy_compatibility"
+                ),
+                "calibration_status": (
+                    "uncalibrated" if guideline_path.is_file() else "unavailable"
+                ),
             },
             "clustering": {
                 "algorithm": "deterministic_cosine_fixed_count_v1",
@@ -855,9 +955,16 @@ class EvaluationAssetPipeline:
                 name: details["sha256"]
                 for name, details in input_manifest["inputs"].items()
             },
+            "published_datasets": {
+                "directory": self.layout.published_datasets.relative_to(
+                    self.layout.tenant_root
+                ).as_posix(),
+                "files": published_datasets,
+            },
             "split_counts": {name: len(rows) for name, rows in payloads.items()},
             "review_policy": {
-                "feedback_rubrics": "accepted_without_review",
+                "evaluation_guidelines": "active_from_trusted_evidence",
+                "guideline_calibration": "uncalibrated",
                 "inferred_labels": "review_required",
                 "coverage_labeling_queue": "human_label_required",
                 "regression_gate": "automatic_trusted_feedback_holdout",
@@ -1216,6 +1323,385 @@ def _normalize_intent(row: Mapping[str, Any]) -> Dict[str, Any]:
     return prepared
 
 
+def _normalize_feedback_evidence(
+    raw: Mapping[str, Any],
+    source: Mapping[str, Any],
+    rubric_model: str,
+) -> Dict[str, Any]:
+    observations = []
+    for item in list(raw.get("observations") or []):
+        if not isinstance(item, Mapping) or not _string(item.get("claim")):
+            continue
+        observations.append(
+            {
+                "claim": _string(item["claim"]),
+                "evidence_type": _string(item.get("evidence_type"))
+                or "explicit_feedback",
+                "evidence_pointer": _string(item.get("evidence_pointer"))
+                or "feedback.rationale",
+                "polarity": _string(item.get("polarity"))
+                or _string(source["feedback"].get("polarity")),
+            }
+        )
+    return {
+        "record_id": str(source["record_id"]),
+        "group_id": str(source["group_id"]),
+        "route": str(source["route"]),
+        "task_type": str(source["task_type"]),
+        "intent_label": _string(raw.get("intent_label")) or "unclassified",
+        "confidence": _confidence(raw.get("confidence")),
+        "observations": observations,
+        "requested_corrections": _string_list(raw.get("requested_corrections")),
+        "uncertainties": _string_list(raw.get("uncertainties")),
+        "evidence_source": "trusted_feedback",
+        "guideline_provider": "openai",
+        "guideline_model": rubric_model,
+    }
+
+
+def _compile_evaluation_guidelines(
+    candidates: Sequence[Mapping[str, Any]],
+    evidence: Sequence[Mapping[str, Any]],
+    rubric_model: str,
+) -> List[Dict[str, Any]]:
+    evidence_by_id = {str(item["record_id"]): item for item in evidence}
+    represented: set[str] = set()
+    provisional: List[Dict[str, Any]] = []
+    for raw in candidates:
+        route = _string(raw.get("route"))
+        source_ids = sorted(
+            {
+                value
+                for value in _string_list(raw.get("source_record_ids"))
+                if value in evidence_by_id
+                and str(evidence_by_id[value]["route"]) == route
+            }
+        )
+        if not source_ids:
+            continue
+        represented.update(source_ids)
+        intent_label = _string(raw.get("intent_label")) or "unclassified"
+        criteria = _normalize_guideline_criteria(
+            raw.get("criteria"), route, source_ids
+        )
+        if not criteria:
+            raise ValueError(
+                f"Evaluation guideline for route '{route}' has no scoreable criteria"
+            )
+        identity = json.dumps(
+            {
+                "route": route,
+                "intent_label": intent_label,
+                "criteria": [item["statement"] for item in criteria],
+            },
+            sort_keys=True,
+        )
+        guideline_id = (
+            f"guideline-{_slug(route)}-"
+            f"{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:10]}"
+        )
+        groups = {
+            str(evidence_by_id[record_id].get("group_id") or record_id)
+            for record_id in source_ids
+        }
+        corrections = {
+            correction
+            for record_id in source_ids
+            for correction in _string_list(
+                evidence_by_id[record_id].get("requested_corrections")
+            )
+        }
+        provisional.append(
+            {
+                "guideline_id": guideline_id,
+                "route": route,
+                "intent_label": intent_label,
+                "description": _string(raw.get("description")) or intent_label,
+                "confidence": _confidence(raw.get("confidence")),
+                "source_record_ids": source_ids,
+                "support": {
+                    "trusted_example_count": len(source_ids),
+                    "trusted_group_count": len(groups),
+                },
+                "criteria": criteria,
+                "conflicts": _string_list(raw.get("conflicts")),
+                "uncertainties": sorted(
+                    {
+                        *(
+                            uncertainty
+                            for record_id in source_ids
+                            for uncertainty in _string_list(
+                                evidence_by_id[record_id].get("uncertainties")
+                            )
+                        ),
+                        *_string_list(raw.get("uncertainties")),
+                    }
+                ),
+                "tool_expectations": _normalize_tool_expectations(
+                    raw.get("tool_expectations")
+                ),
+                "reference_output": (
+                    next(iter(corrections)) if len(corrections) == 1 else None
+                ),
+                "unknown_policy": "needs_review",
+                "activation_status": "active_from_trusted_evidence",
+                "calibration_status": "uncalibrated",
+                "guideline_provider": "openai",
+                "guideline_model": rubric_model,
+                "oracle_version": "fapo-evaluation-guideline-v1",
+            }
+        )
+    missing = sorted(set(evidence_by_id) - represented)
+    if missing:
+        raise ValueError(
+            "Evaluation guideline response omitted trusted evidence records: "
+            + ", ".join(missing)
+        )
+    return sorted(provisional, key=lambda item: str(item["guideline_id"]))
+
+
+def _normalize_guideline_criteria(
+    value: Any,
+    route: str,
+    guideline_source_ids: Sequence[str],
+) -> List[Dict[str, Any]]:
+    allowed_kinds = {"required", "prohibited", "preferred"}
+    allowed_severities = {"critical", "major", "minor"}
+    allowed_evaluators = {
+        "state_check",
+        "deterministic_check",
+        "semantic_trajectory",
+        "llm_judge",
+        "human_review",
+    }
+    criteria = []
+    for index, raw in enumerate(list(value or []), start=1):
+        if not isinstance(raw, Mapping):
+            continue
+        statement = _string(raw.get("statement"))
+        if not statement:
+            continue
+        kind = _string(raw.get("kind"))
+        severity = _string(raw.get("severity"))
+        evaluator = raw.get("evaluator")
+        evaluator = dict(evaluator) if isinstance(evaluator, Mapping) else {}
+        evaluator_type = _string(evaluator.get("type"))
+        fallback = _string(evaluator.get("fallback")) or "human_review"
+        digest = hashlib.sha256(
+            f"{route}:{kind}:{statement}".encode("utf-8")
+        ).hexdigest()[:10]
+        applicability = raw.get("applicability")
+        if not isinstance(applicability, (Mapping, str)):
+            applicability = "always"
+        criterion_source_ids = sorted(
+            set(_string_list(raw.get("source_record_ids")))
+            & set(guideline_source_ids)
+        ) or list(guideline_source_ids)
+        criteria.append(
+            {
+                "criterion_id": f"criterion-{digest}",
+                "kind": kind if kind in allowed_kinds else "required",
+                "statement": statement,
+                "source_record_ids": criterion_source_ids,
+                "dimension": _string(raw.get("dimension")) or "task_success",
+                "severity": (
+                    severity if severity in allowed_severities else "major"
+                ),
+                "applicability": (
+                    dict(applicability)
+                    if isinstance(applicability, Mapping)
+                    else applicability
+                ),
+                "scoring": _string(raw.get("scoring")) or "binary",
+                "evidence_required": bool(raw.get("evidence_required", False)),
+                "evaluator": {
+                    "type": (
+                        evaluator_type
+                        if evaluator_type in allowed_evaluators
+                        else "llm_judge"
+                    ),
+                    "fallback": (
+                        fallback
+                        if fallback in allowed_evaluators
+                        else "human_review"
+                    ),
+                },
+                "order": index,
+            }
+        )
+    return criteria
+
+
+def _guidelines_by_source_record(
+    guidelines: Sequence[Mapping[str, Any]],
+) -> Dict[str, List[Mapping[str, Any]]]:
+    grouped: Dict[str, List[Mapping[str, Any]]] = {}
+    for guideline in guidelines:
+        for record_id in guideline["source_record_ids"]:
+            grouped.setdefault(str(record_id), []).append(guideline)
+    return grouped
+
+
+def _rubric_from_guidelines(
+    record_id: str,
+    guidelines: Sequence[Mapping[str, Any]],
+    rubric_model: str,
+) -> Dict[str, Any]:
+    criteria = [
+        criterion
+        for guideline in guidelines
+        for criterion in list(guideline["criteria"])
+    ]
+    deterministic_checks = [
+        {
+            "criterion_id": criterion["criterion_id"],
+            "statement": criterion["statement"],
+            "applicability": criterion["applicability"],
+            "evaluator": criterion["evaluator"],
+        }
+        for criterion in criteria
+        if criterion["evaluator"]["type"]
+        in {"state_check", "deterministic_check"}
+    ]
+    semantic_trajectory = [
+        criterion["statement"]
+        for criterion in criteria
+        if criterion["evaluator"]["type"] == "semantic_trajectory"
+    ]
+    tool_expectations = {
+        "guidelines": [
+            dict(guideline["tool_expectations"])
+            for guideline in guidelines
+            if guideline["tool_expectations"]
+        ]
+    }
+    if semantic_trajectory:
+        tool_expectations["semantic_trajectory"] = semantic_trajectory
+    references = {
+        str(guideline["reference_output"])
+        for guideline in guidelines
+        if guideline.get("reference_output")
+    }
+    return {
+        "record_id": record_id,
+        "intent_label": " / ".join(
+            sorted({str(guideline["intent_label"]) for guideline in guidelines})
+        ),
+        "confidence": min(float(guideline["confidence"]) for guideline in guidelines),
+        "must": [
+            criterion["statement"]
+            for criterion in criteria
+            if criterion["kind"] == "required"
+        ],
+        "must_not": [
+            criterion["statement"]
+            for criterion in criteria
+            if criterion["kind"] == "prohibited"
+        ],
+        "should": [
+            criterion["statement"]
+            for criterion in criteria
+            if criterion["kind"] == "preferred"
+        ],
+        "deterministic_checks": deterministic_checks,
+        "tool_expectations": tool_expectations,
+        "reference_output": next(iter(references)) if len(references) == 1 else None,
+        "evaluation_guideline_ids": [
+            str(guideline["guideline_id"]) for guideline in guidelines
+        ],
+        "evaluation_guidelines": [dict(guideline) for guideline in guidelines],
+        "label_source": "evaluation_guideline_from_trusted_feedback",
+        "rubric_provider": "openai",
+        "rubric_model": rubric_model,
+        "oracle_version": "fapo-evaluation-guideline-v1",
+    }
+
+
+def _trusted_intent_from_guideline(
+    guideline: Mapping[str, Any],
+    normalized_by_id: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, Any]:
+    source_ids = [str(value) for value in guideline["source_record_ids"]]
+    groups = {
+        str(normalized_by_id[record_id]["group_id"]) for record_id in source_ids
+    }
+    polarities = sorted(
+        {
+            str(normalized_by_id[record_id]["feedback"]["polarity"])
+            for record_id in source_ids
+        }
+    )
+    return {
+        "intent_id": guideline["guideline_id"],
+        "label": guideline["intent_label"],
+        "texts": [
+            str(guideline["description"]),
+            *(str(item["statement"]) for item in guideline["criteria"]),
+            *(str(normalized_by_id[record_id]["user_input"]) for record_id in source_ids),
+        ],
+        "route": guideline["route"],
+        "metadata": {
+            "trusted_example_count": len(source_ids),
+            "trusted_group_count": len(groups),
+            "feedback_polarities": polarities,
+            "evaluation_guideline_id": guideline["guideline_id"],
+            "source_record_ids": source_ids,
+        },
+    }
+
+
+def _legacy_guideline_from_rubric(rubric: Mapping[str, Any]) -> Dict[str, Any]:
+    record_id = str(rubric["record_id"])
+    criteria = []
+    for kind, field in (
+        ("required", "must"),
+        ("prohibited", "must_not"),
+        ("preferred", "should"),
+    ):
+        for statement in _string_list(rubric.get(field)):
+            digest = hashlib.sha256(
+                f"legacy:{record_id}:{kind}:{statement}".encode("utf-8")
+            ).hexdigest()[:10]
+            criteria.append(
+                {
+                    "criterion_id": f"criterion-{digest}",
+                    "kind": kind,
+                    "statement": statement,
+                    "dimension": "task_success",
+                    "severity": "major",
+                    "applicability": "always",
+                    "scoring": "binary",
+                    "evidence_required": False,
+                    "evaluator": {
+                        "type": "llm_judge",
+                        "fallback": "human_review",
+                    },
+                }
+            )
+    return {
+        "guideline_id": record_id,
+        "route": "",
+        "intent_label": rubric.get("intent_label") or "unclassified",
+        "description": rubric.get("intent_label") or "Legacy feedback rubric",
+        "confidence": rubric.get("confidence", 0.5),
+        "source_record_ids": [record_id],
+        "criteria": criteria,
+        "tool_expectations": _normalize_tool_expectations(
+            rubric.get("tool_expectations")
+        ),
+        "reference_output": rubric.get("reference_output"),
+        "calibration_status": "legacy_unavailable",
+    }
+
+
+def _confidence(value: Any) -> float:
+    return max(0.0, min(1.0, float(value or 0.5)))
+
+
+def _slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "general"
+
+
 def _normalize_rubric(
     raw: Mapping[str, Any],
     identity_key: str,
@@ -1251,7 +1737,7 @@ def _normalize_rubric(
 
 
 def _expected(rubric: Mapping[str, Any]) -> Dict[str, Any]:
-    return {
+    expected = {
         "label_source": rubric["label_source"],
         "confidence": rubric["confidence"],
         "rubric": {
@@ -1263,6 +1749,14 @@ def _expected(rubric: Mapping[str, Any]) -> Dict[str, Any]:
         "tool_expectations": dict(rubric["tool_expectations"]),
         "reference_output": rubric["reference_output"],
     }
+    if rubric.get("evaluation_guideline_ids"):
+        expected["evaluation_guideline_ids"] = list(
+            rubric["evaluation_guideline_ids"]
+        )
+        expected["evaluation_guidelines"] = list(
+            rubric.get("evaluation_guidelines") or []
+        )
+    return expected
 
 
 def _trusted_case(

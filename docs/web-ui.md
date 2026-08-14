@@ -68,15 +68,15 @@ separate Studio; the Explorer overview has no asset input form.
 ### Evaluation Asset Studio
 
 The Studio has its own tenant index and creation screen. It accepts labeled and
-unlabeled JSONL paths, the rubric extraction model, embedding model, exact
-number of intent clusters, and the Stage 5 intent match threshold. The
+unlabeled JSONL paths, the evaluation-guideline creation model, embedding
+model, exact number of intent clusters, and the Stage 5 intent match threshold. The
 threshold defaults to `0.6` and is persisted with the asset. Stage 7 synthetic
 coverage is separately enabled or disabled and accepts an exact data-point
 count per supported cluster; it is disabled by default. Both JSONL files must
 already conform to the
 vendor-neutral `fapo-evaluation-input-v1` contract; the creation screen links
-to its machine-readable definition. The model menus include multiple GPT extraction
-models, current and legacy OpenAI embedding models, and a dependency-free local
+to its machine-readable definition. The model menus include multiple GPT
+guideline models, current and legacy OpenAI embedding models, and a dependency-free local
 TF-IDF fallback. Selecting TF-IDF records `embedding_provider: tfidf` in the
 asset config and makes no embedding API calls. Starting a pipeline copies both
 source files into an independent

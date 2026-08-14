@@ -44,7 +44,7 @@ Claude Code and Codex use parallel prompt sets. Users running Claude Code should
 | Feedback and Unlabeled Trace Dataset Flow | `docs/processes/feedback-dataset-flow.md` | Converts trusted feedback plus unlabeled trace distributions into versioned train, validation, test, and regression datasets |
 
 Evaluation asset preparation precedes the optimization loop. The shared core,
-not the assistant prompt, owns normalization, rubric extraction, clustering,
+not the assistant prompt, owns normalization, evaluation-guideline creation, clustering,
 coverage decisions, label inference, synthetic coverage, and dataset splitting.
 The resulting versioned splits become inputs to optimization and evaluation.
 

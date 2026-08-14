@@ -20,7 +20,7 @@ DEFAULT_MAX_OUTPUT_TOKENS = 4096
 
 
 class OpenAIRubricProvider:
-    """OpenAI JSON generator for rubric extraction and inferred-label rubrics."""
+    """OpenAI JSON generator for guideline creation and inferred-label rubrics."""
 
     def __init__(
         self,

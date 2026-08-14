@@ -30,7 +30,7 @@ class PipelineStage(str, Enum):
 STAGE_LABELS = {
     PipelineStage.RAW_INPUTS: "Validate raw inputs",
     PipelineStage.PREPARED_INPUTS: "Prepare canonical inputs",
-    PipelineStage.RUBRIC_EXTRACTION: "Extract trusted rubrics",
+    PipelineStage.RUBRIC_EXTRACTION: "Create evaluation guidelines",
     PipelineStage.INTENT_CLUSTERING: "Mine intent clusters",
     PipelineStage.COVERAGE_DECISIONS: "Apply coverage decisions",
     PipelineStage.LABEL_INFERENCE: "Infer reviewable labels",
@@ -57,7 +57,12 @@ CONFIG_STAGE_DEPENDENCIES = {
 STAGE_COUNT_KEYS = {
     PipelineStage.RAW_INPUTS: {"feedback_records", "unlabeled_records"},
     PipelineStage.PREPARED_INPUTS: {"prepared_feedback", "prepared_intents"},
-    PipelineStage.RUBRIC_EXTRACTION: {"feedback_rubrics", "trusted_cases"},
+    PipelineStage.RUBRIC_EXTRACTION: {
+        "feedback_evidence",
+        "candidate_guidelines",
+        "evaluation_guidelines",
+        "trusted_cases",
+    },
     PipelineStage.INTENT_CLUSTERING: {"intent_clusters"},
     PipelineStage.COVERAGE_DECISIONS: {
         "matched_clusters",
@@ -229,6 +234,10 @@ class PipelineState:
             for item in list(raw.get("stages") or [])
             if isinstance(item, Mapping)
         ]
+        labels_by_value = {stage.value: label for stage, label in STAGE_LABELS.items()}
+        for stage_state in stages:
+            if stage_state.stage in labels_by_value:
+                stage_state.label = labels_by_value[stage_state.stage]
         existing_stages = {item.stage for item in stages}
         stages.extend(
             StageState(stage=stage.value, label=STAGE_LABELS[stage])

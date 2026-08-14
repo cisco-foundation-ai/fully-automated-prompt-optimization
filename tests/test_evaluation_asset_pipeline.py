@@ -16,10 +16,12 @@ from src.hephaestus.evaluation_assets.models import (
     PipelineStage,
 )
 from src.hephaestus.evaluation_assets.pipeline import (
-    FEEDBACK_PROMPT,
+    GUIDELINE_SYNTHESIS_PROMPT,
     EvaluationAssetPipeline,
     _build_labeling_queue,
+    _compile_evaluation_guidelines,
     _normalize_rubric,
+    _rubric_from_guidelines,
 )
 from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
 
@@ -44,19 +46,67 @@ class FakeRubricProvider:
                 row["record_id"] for row in payload["records"]
             )
             return {
-                "rubrics": [
+                "evidence": [
                     {
                         "record_id": row["record_id"],
                         "intent_label": "answer the request",
                         "confidence": 0.9,
-                        "must": ["Answer the user's stated request."],
-                        "must_not": ["Change the requested scope."],
-                        "should": ["Be concise."],
-                        "deterministic_checks": [],
+                        "observations": [
+                            {
+                                "claim": "Answer the user's stated request.",
+                                "evidence_type": "explicit_feedback",
+                                "evidence_pointer": "feedback.rationale",
+                                "polarity": row["feedback"]["polarity"],
+                            }
+                        ],
+                        "requested_corrections": [],
+                        "uncertainties": [],
+                    }
+                    for row in payload["records"]
+                ]
+            }
+        if "evidence" in payload:
+            return {
+                "guidelines": [
+                    {
+                        "intent_label": "answer the request",
+                        "description": "Answer requests within their stated scope.",
+                        "route": payload["route"],
+                        "source_record_ids": [
+                            row["record_id"] for row in payload["evidence"]
+                        ],
+                        "confidence": 0.9,
+                        "criteria": [
+                            {
+                                "kind": "required",
+                                "statement": "Answer the user's stated request.",
+                                "dimension": "task_success",
+                                "severity": "critical",
+                                "applicability": "always",
+                                "scoring": "binary",
+                                "evidence_required": False,
+                                "evaluator": {
+                                    "type": "llm_judge",
+                                    "fallback": "human_review",
+                                },
+                            },
+                            {
+                                "kind": "prohibited",
+                                "statement": "Change the requested scope.",
+                                "dimension": "instruction_following",
+                                "severity": "major",
+                                "applicability": "always",
+                                "scoring": "binary",
+                                "evidence_required": False,
+                                "evaluator": {
+                                    "type": "llm_judge",
+                                    "fallback": "human_review",
+                                },
+                            },
+                        ],
                         "tool_expectations": {},
                         "reference_output": None,
                     }
-                    for row in payload["records"]
                 ]
             }
         if "synthetic evaluation input" in system_prompt:
@@ -115,7 +165,64 @@ def test_rubric_normalization_accepts_list_form_tool_expectations() -> None:
     )
 
     assert rubric["tool_expectations"] == {"requirements": [expectation]}
-    assert "tool_expectations must be a JSON object" in FEEDBACK_PROMPT
+    assert "tool_expectations" in GUIDELINE_SYNTHESIS_PROMPT
+
+
+def test_guideline_compilation_preserves_provenance_and_evaluator_plan() -> None:
+    evidence = [
+        {
+            "record_id": "feedback-1",
+            "group_id": "group-1",
+            "route": "task_route",
+            "requested_corrections": [],
+            "uncertainties": ["The required ordering is not established."],
+        }
+    ]
+    candidates = [
+        {
+            "route": "task_route",
+            "intent_label": "complete the task",
+            "description": "Complete the requested task safely.",
+            "source_record_ids": ["feedback-1"],
+            "confidence": 0.9,
+            "criteria": [
+                {
+                    "kind": "required",
+                    "statement": "The requested state change is present.",
+                    "source_record_ids": ["feedback-1"],
+                    "dimension": "task_success",
+                    "severity": "critical",
+                    "applicability": "always",
+                    "scoring": "binary",
+                    "evidence_required": True,
+                    "evaluator": {
+                        "type": "state_check",
+                        "fallback": "human_review",
+                    },
+                }
+            ],
+            "tool_expectations": {},
+            "reference_output": None,
+            "conflicts": [],
+            "uncertainties": [],
+        }
+    ]
+
+    guidelines = _compile_evaluation_guidelines(
+        candidates,
+        evidence,
+        "gpt-5.5",
+    )
+    rubric = _rubric_from_guidelines("feedback-1", guidelines, "gpt-5.5")
+
+    assert guidelines[0]["criteria"][0]["source_record_ids"] == ["feedback-1"]
+    assert guidelines[0]["criteria"][0]["evaluator"]["type"] == "state_check"
+    assert guidelines[0]["uncertainties"] == [
+        "The required ordering is not established."
+    ]
+    assert rubric["deterministic_checks"][0]["criterion_id"].startswith(
+        "criterion-"
+    )
 
 
 def test_evaluation_asset_optional_settings_have_safe_defaults() -> None:
@@ -155,6 +262,18 @@ def test_layout_resolves_existing_legacy_artifact_paths(tmp_path: Path) -> None:
         "coverage_decisions",
         "review_queue/labeling_queue.jsonl",
     ) == (layout.root / "review_queues" / "labeling_queue.jsonl")
+
+
+def test_layout_resolves_previous_stage_three_directory(tmp_path: Path) -> None:
+    layout = EvaluationAssetLayout(tmp_path / "tenants", "tenant_a", "v1")
+    previous = layout.stages_root / "03_rubric_extraction"
+    previous.mkdir(parents=True)
+
+    assert layout.stage_directory(PipelineStage.RUBRIC_EXTRACTION) == previous
+    assert layout.artifact_path(
+        PipelineStage.RUBRIC_EXTRACTION,
+        "feedback_rubrics.jsonl",
+    ) == previous / "feedback_rubrics.jsonl"
 
 
 def test_revise_config_invalidates_only_dependent_stages(tmp_path: Path) -> None:
@@ -197,6 +316,9 @@ def test_revise_config_invalidates_only_dependent_stages(tmp_path: Path) -> None
     stage_four_artifact.write_text("{}\n", encoding="utf-8")
     stage_five_artifact.write_text("{}\n", encoding="utf-8")
     layout.manifest_path.write_text("{}\n", encoding="utf-8")
+    published_split = layout.published_datasets / "train.jsonl"
+    published_split.parent.mkdir(parents=True)
+    published_split.write_text("{}\n", encoding="utf-8")
 
     revision = layout.revise_config({"match_threshold": 0.2})
 
@@ -210,6 +332,7 @@ def test_revise_config_invalidates_only_dependent_stages(tmp_path: Path) -> None
     assert stage_four_artifact.exists()
     assert not stage_five_artifact.exists()
     assert not layout.manifest_path.exists()
+    assert not layout.published_datasets.exists()
     assert [
         item.status for item in revised_state.stages[:4]
     ] == ["completed"] * 4
@@ -371,13 +494,17 @@ def test_extend_asset_keeps_clustering_and_extracts_only_new_rubrics(
         PipelineStage.INTENT_CLUSTERING,
         "intent_inventory.jsonl",
     ).read_text(encoding="utf-8") == parent_inventory
-    rubrics = _read_test_jsonl(
+    guidelines = _read_test_jsonl(
         child_layout.artifact_path(
             PipelineStage.RUBRIC_EXTRACTION,
-            "feedback_rubrics.jsonl",
+            "evaluation_guidelines.jsonl",
         )
     )
-    assert {row["record_id"] for row in rubrics} == {"f1", "u1"}
+    assert {
+        record_id
+        for row in guidelines
+        for record_id in row["source_record_ids"]
+    } == {"f1", "u1"}
     inferred = _read_test_jsonl(
         child_layout.artifact_path(
             PipelineStage.LABEL_INFERENCE,
@@ -645,8 +772,21 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
     ).exists()
     assert layout.artifact_path("dataset_splits", "train.jsonl").exists()
     assert layout.manifest_path.exists()
-    assert not (layout.tenant_root / "datasets").exists()
+    for split_name in (
+        "train",
+        "validation",
+        "test",
+        "regression_trusted",
+    ):
+        stage_split = layout.artifact_path(
+            "dataset_splits",
+            f"{split_name}.jsonl",
+        )
+        published_split = layout.published_datasets / f"{split_name}.jsonl"
+        assert published_split.read_bytes() == stage_split.read_bytes()
     assert (layout.root / "stages" / "01_raw_inputs").is_dir()
+    assert (layout.root / "stages" / "03_evaluation_guidelines").is_dir()
+    assert not (layout.root / "stages" / "03_rubric_extraction").exists()
     assert not (layout.root / "raw_inputs").exists()
 
     prepared_feedback = json.loads(
@@ -665,10 +805,18 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
         .read_text(encoding="utf-8")
         .splitlines()[0]
     )
-    feedback_rubric = json.loads(
+    feedback_evidence = json.loads(
         layout.artifact_path(
             "rubric_extraction",
-            "feedback_rubrics.jsonl",
+            "feedback_evidence.jsonl",
+        )
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+    evaluation_guideline = json.loads(
+        layout.artifact_path(
+            "rubric_extraction",
+            "evaluation_guidelines.jsonl",
         )
         .read_text(encoding="utf-8")
         .splitlines()[0]
@@ -706,20 +854,34 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
     assert prepared_intent["schema_version"] == "fapo-evaluation-input-v1"
     assert "feedback_id" not in prepared_intent
     assert "thread_id" not in prepared_intent
-    assert feedback_rubric["record_id"] == "f1"
-    assert "feedback_id" not in feedback_rubric
-    assert "review_status" not in feedback_rubric
+    assert feedback_evidence["record_id"] == "f1"
+    assert "feedback_id" not in feedback_evidence
+    assert set(evaluation_guideline["source_record_ids"]) == {
+        f"f{index}" for index in range(1, 11)
+    }
+    assert evaluation_guideline["calibration_status"] == "uncalibrated"
+    assert evaluation_guideline["criteria"][0]["evaluator"]["type"] == "llm_judge"
     assert trusted_case["metadata"]["group_id"] == "feedback-thread"
     assert trusted_case["metadata"]["request_id"] == "f1"
     assert "review_status" not in trusted_case["metadata"]
     assert "thread_group" not in trusted_case["metadata"]
     assert "request_group" not in trusted_case["metadata"]
+    assert trusted_case["expected"]["evaluation_guideline_ids"] == [
+        evaluation_guideline["guideline_id"]
+    ]
     assert inferred_rubric["review_status"] == "review_required"
     assert (
-        dataset_manifest["review_policy"]["feedback_rubrics"]
-        == "accepted_without_review"
+        dataset_manifest["review_policy"]["evaluation_guidelines"]
+        == "active_from_trusted_evidence"
     )
+    assert dataset_manifest["review_policy"]["guideline_calibration"] == "uncalibrated"
     assert dataset_manifest["coverage"]["match_threshold"] == 0.6
+    assert dataset_manifest["evaluation_guidelines"] == {
+        "schema_version": "fapo-evaluation-guideline-v1",
+        "count": 1,
+        "activation_status": "active_from_trusted_evidence",
+        "calibration_status": "uncalibrated",
+    }
     assert dataset_manifest["coverage"]["labeling_queue"] == {
         "statuses": [
             "needs_more_trusted_examples",
@@ -739,6 +901,17 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
         "fraction": 0.2,
         "selection": "deterministic_group_safe_random",
         "seed": 42,
+    }
+    assert dataset_manifest["published_datasets"] == {
+        "directory": "datasets/evaluation_assets/v1",
+        "files": {
+            "train": "datasets/evaluation_assets/v1/train.jsonl",
+            "validation": "datasets/evaluation_assets/v1/validation.jsonl",
+            "test": "datasets/evaluation_assets/v1/test.jsonl",
+            "regression_trusted": (
+                "datasets/evaluation_assets/v1/regression_trusted.jsonl"
+            ),
+        },
     }
     assert (
         dataset_manifest["review_policy"]["regression_gate"]

@@ -461,16 +461,16 @@ const STAGE_INFO = {
     outputs: ['Labeled feedback snapshot', 'Unlabeled input snapshot']
   },
   prepared_inputs: {
-    eyebrow: 'Canonical preparation', description: 'Redact canonical input records and build stable representations for rubric extraction and clustering.',
+    eyebrow: 'Canonical preparation', description: 'Redact canonical input records and build stable representations for guideline creation and clustering.',
     inputs: ['Validated FAPO Evaluation Input v1', 'Fixed canonical fields'],
     process: ['Redact feedback records', 'Build canonical intent text', 'Preserve provenance metadata'],
     outputs: ['Normalized feedback', 'Canonical intent records']
   },
   rubric_extraction: {
-    eyebrow: 'Trusted evidence', description: 'Extract reusable evaluation rubrics from examples with direct user feedback.',
+    eyebrow: 'Trusted evidence', description: 'Create reusable evaluation guidelines from direct user feedback without treating old responses as answer keys.',
     inputs: ['Normalized labeled feedback', 'Assistant outputs and rationale'],
-    process: ['Batch trusted examples', 'Extract must and must-not criteria', 'Validate structured rubric JSON'],
-    outputs: ['Feedback rubrics', 'Trusted intents', 'Trusted evaluation cases']
+    process: ['Extract atomic evidence', 'Synthesize evidence across routes', 'Compile criteria and evaluator plans'],
+    outputs: ['Evaluation guidelines', 'Trusted intents', 'Trusted evaluation cases']
   },
   intent_clustering: {
     eyebrow: 'Intent mining', description: 'Group canonical requests into an exact, reviewable set of intent clusters.',
@@ -486,7 +486,7 @@ const STAGE_INFO = {
   },
   label_inference: {
     eyebrow: 'Reviewable inference', description: 'Infer labels only for clusters that pass the trusted coverage gate.',
-    inputs: ['Matched clusters', 'Trusted rubrics', 'Unlabeled records'],
+    inputs: ['Matched clusters', 'Trusted evaluation guidelines', 'Unlabeled records'],
     process: ['Infer cluster rubrics', 'Build inferred cases', 'Report unsupported clusters'],
     outputs: ['Inferred rubrics and labels', 'Inferred cases', 'Missing-feedback queue and report']
   },
@@ -497,10 +497,10 @@ const STAGE_INFO = {
     outputs: ['Accepted synthetic cases', 'Rejected candidates', 'Filter audit']
   },
   dataset_splits: {
-    eyebrow: 'Evaluation dataset', description: 'Create deterministic, provenance-aware train, validation, test, and holdout splits.',
+    eyebrow: 'Evaluation dataset', description: 'Create deterministic, provenance-aware splits and publish the four evaluation-ready datasets.',
     inputs: ['Trusted cases', 'Inferred cases', 'Synthetic cases'],
-    process: ['Reserve 20% of trusted groups for regression', 'Split all remaining provenance classes globally by group', 'Route regression-group collisions to triage'],
-    outputs: ['Train split', 'Validation split', 'Test split', 'Automatic trusted regression gate']
+    process: ['Reserve 20% of trusted groups for regression', 'Split remaining cases globally by group', 'Publish versioned tenant datasets'],
+    outputs: ['Train dataset', 'Validation dataset', 'Test dataset', 'Trusted regression dataset']
   }
 };
 
@@ -556,7 +556,7 @@ function renderCreate() {
         <label class="wide">Unlabeled JSONL <span>Workspace path to examples requiring inferred labels.</span>
           <input name="unlabeled_path" required placeholder="path/to/unlabeled.jsonl">
         </label>
-        <label>Rubric extraction model <span>Extracts rubrics and infers reviewable labels.</span>
+        <label>Guideline creation model <span>Creates evaluation guidelines and infers reviewable case labels.</span>
           <select name="rubric_model">
             <option value="gpt-5.5">GPT-5.5</option>
             <option value="gpt-5.4">GPT-5.4</option>
@@ -594,7 +594,7 @@ function renderCreate() {
         <label id="synthetic-count-label">Data points per supported cluster <span>Exact number requested from the LLM for each matched cluster.</span>
           <input id="synthetic-count" name="synthetic_cases_per_cluster" type="number" min="1" max="100" value="1" required>
         </label>
-        <div class="model-note"><strong>Model roles</strong><br>Rubric model → extraction and label inference<br>Embedding model → similarity and intent clustering</div>
+        <div class="model-note"><strong>Model roles</strong><br>Guideline model → evidence extraction, guideline synthesis, and label inference<br>Embedding model → similarity and intent clustering</div>
         <div class="form-actions"><button class="primary" type="submit">Create &amp; run pipeline</button>
           <span class="message" id="form-message"></span></div>
       </form>
@@ -658,7 +658,7 @@ async function selectTenant(tenant) {
 const STAGE_CARD_LABELS = {
   raw_inputs: 'Raw inputs',
   prepared_inputs: 'Prepare data',
-  rubric_extraction: 'Extract rubrics',
+  rubric_extraction: 'Create guidelines',
   intent_clustering: 'Mine intents',
   coverage_decisions: 'Match coverage',
   label_inference: 'Infer labels',
@@ -673,7 +673,7 @@ function stageCardResult(stage, counts) {
   const metrics = {
     raw_inputs: ['feedback_records', 'unlabeled_records', 'records'],
     prepared_inputs: ['prepared_feedback', 'prepared_intents', 'prepared'],
-    rubric_extraction: ['feedback_rubrics', null, 'rubrics'],
+    rubric_extraction: ['evaluation_guidelines', null, 'guidelines'],
     intent_clustering: ['intent_clusters', null, 'clusters'],
     coverage_decisions: ['matched_clusters', null, 'matched'],
     label_inference: ['inferred_cases', null, 'inferred'],
@@ -721,7 +721,7 @@ function renderTenant() {
   const chips = APP.assets.map(item => `<button class="asset-chip ${item.asset_id === asset.asset_id ? 'active' : ''}"
     data-asset="${esc(item.asset_id)}">${esc(item.asset_id)}</button>`).join('');
   const facts = [
-    ['Rubric extraction', config.rubric_model],
+    ['Guideline creation', config.rubric_model],
     ['Intent embeddings', config.embedding_provider === 'tfidf'
       ? 'TF-IDF · local fallback' : config.embedding_model],
     ['Requested clusters', config.cluster_count],
@@ -848,10 +848,10 @@ function syncExtensionPlan() {
   embedding.disabled = keep;
   clusters.disabled = keep;
   const steps = keep
-    ? ['Merge labeled input','Prepare full canonical inputs','Extract only new rubrics',
+    ? ['Merge labeled input','Prepare full canonical inputs','Extract only new evidence and rebuild guidelines',
       'Reuse intent clusters','Recalculate coverage','Refresh inferred labels',
       'Refresh optional synthesis','Materialize v2 splits']
-    : ['Merge labeled and unlabeled inputs','Prepare full canonical inputs','Extract only new rubrics',
+    : ['Merge labeled and unlabeled inputs','Prepare full canonical inputs','Extract only new evidence and rebuild guidelines',
       'Rerun intent clustering','Recalculate coverage','Rebuild inferred labels',
       'Refresh optional synthesis','Materialize v2 splits'];
   document.getElementById('extension-plan').innerHTML = `<strong>${keep
@@ -889,7 +889,7 @@ async function extendAsset(event) {
 }
 
 function rubricModelInput(config) {
-  return `<label>Rubric model <span>Changing this rebuilds from Stage 3.</span>
+  return `<label>Guideline creation model <span>Changing this rebuilds from Stage 3.</span>
     <select name="rubric_model">
       <option value="gpt-5.5" ${selected(config.rubric_model,'gpt-5.5')}>GPT-5.5</option>
       <option value="gpt-5.4" ${selected(config.rubric_model,'gpt-5.4')}>GPT-5.4</option>
@@ -1068,10 +1068,10 @@ function stageMetrics(detail) {
   const keys = {
     raw_inputs: ['feedback_records','unlabeled_records'],
     prepared_inputs: ['feedback_records','unlabeled_records'],
-    rubric_extraction: ['feedback_rubrics'],
+    rubric_extraction: ['feedback_evidence','candidate_guidelines','evaluation_guidelines'],
     intent_clustering: ['intent_clusters'],
     coverage_decisions: ['matched_clusters','needs_more_feedback_clusters','missing_label_clusters','labeling_queue_traces'],
-    label_inference: ['inferred_cases','feedback_rubrics'],
+    label_inference: ['inferred_cases','evaluation_guidelines'],
     synthetic_coverage: ['synthetic_cases'],
     dataset_splits: ['dataset_cases','train_cases','validation_cases','test_cases','regression_trusted_cases']
   }[detail.stage] || [];

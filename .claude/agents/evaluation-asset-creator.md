@@ -37,7 +37,8 @@ Before operating the workflow, read
 - Do not manually normalize, label, cluster, split, or synthesize records.
 - Do not read tenant docs, prompts, chains, or configs to make the core run.
 - Do not use `tenants/<tenant_id>/datasets/` for evaluation-asset inputs or
-  outputs.
+  intermediate outputs. Stage 8 alone publishes its four consumer-facing
+  splits under `datasets/evaluation_assets/<asset_id>/`.
 - Do not put tenant data, tenant identifiers, or tenant examples in shared
   repo locations.
 - Treat `tenants/*/source_artifacts/` as protected. Do not modify or delete
@@ -68,7 +69,7 @@ tenants/<tenant_id>/evaluation_assets/<asset_id>/
 └── stages/
     ├── 01_raw_inputs/
     ├── 02_prepared_inputs/
-    ├── 03_rubric_extraction/
+    ├── 03_evaluation_guidelines/
     ├── 04_intent_clustering/
     ├── 05_coverage_decisions/
     │   └── review_queue/
@@ -91,12 +92,12 @@ Treat these exact ordered stage names as authoritative:
 |---|---|
 | `raw_inputs` | Copy and validate `labeled_feedback.jsonl` and `unlabeled.jsonl`; persist counts and source hashes |
 | `prepared_inputs` | Write `normalized_feedback.jsonl` and `intent_records.jsonl` |
-| `rubric_extraction` | Write `feedback_rubrics.jsonl`, `trusted_intents.jsonl`, and `trusted_cases.jsonl` |
+| `rubric_extraction` | Create `feedback_evidence.jsonl`, `candidate_guidelines.jsonl`, `evaluation_guidelines.jsonl`, `trusted_intents.jsonl`, and `trusted_cases.jsonl` under `stages/03_evaluation_guidelines/` |
 | `intent_clustering` | Write exact-count `intent_inventory.jsonl` |
 | `coverage_decisions` | Write `intent_matches.jsonl`, `coverage_report.md`, and `review_queue/labeling_queue.jsonl` in `stages/05_coverage_decisions/` |
 | `label_inference` | Write `inferred_unlabeled_cluster_rubrics.jsonl`, `inferred_unlabeled_labels.jsonl`, `missing_labeled_feedback_clusters.jsonl`, `missing_labeled_feedback_report.md`, and `inferred_cases.jsonl` |
 | `synthetic_coverage` | Optionally write candidate, accepted, rejected, and filter-audit artifacts; disabled runs make no model call |
-| `dataset_splits` | Write globally group-safe component and combined split JSONL, an automatic 20% trusted regression gate, collision triage, dataset manifest, and final asset manifest |
+| `dataset_splits` | Write globally group-safe component and combined split JSONL, an automatic 20% trusted regression gate, collision triage, dataset manifest, final asset manifest, and versioned tenant-dataset copies of train, validation, test, and regression trusted |
 
 `pipeline_state.json` is the source of truth for stage status and counts.
 `events.jsonl` is the append-only operational history. Do not declare a stage
@@ -110,7 +111,7 @@ Collect:
 - Asset ID/version.
 - Labeled feedback JSONL workspace path.
 - Unlabeled JSONL workspace path.
-- Rubric extraction model.
+- Evaluation-guideline creation model.
 - Embedding provider/model, including whether local TF-IDF is desired.
 - Exact cluster count.
 - Stage 5 match threshold, defaulting to `0.6`.
@@ -180,7 +181,7 @@ the tenant to have prompts, chains, configs, docs, or datasets.
    earliest dependent stage and everything downstream, and preserve earlier
    checkpoints.
 
-Resume-time restart boundaries are Stage 3 for rubric model changes, Stage 4
+Resume-time restart boundaries are Stage 3 for guideline model changes, Stage 4
 for embedding model or cluster-count changes, Stage 5 for coverage settings,
 Stage 7 for synthetic settings, and Stage 8 for split settings. Verify the
 revision in both `config_history.jsonl` and `events.jsonl`.
@@ -190,9 +191,10 @@ revision in both `config_history.jsonl` and `events.jsonl`.
 Use the shared `assets extend` workflow to create a new immutable version from
 additional canonical data. Never modify the completed parent asset.
 
-- `keep` is labeled-only and must retain the parent's rubric model, embedding
-  model, and cluster count. Stage 3 extracts only new rubrics and Stage 4 is
-  reused.
+- `keep` is labeled-only and must retain the parent's guideline model,
+  embedding model, and cluster count. Stage 3 extracts evidence only for new
+  feedback, rebuilds guidelines across the complete evidence pool, and reuses
+  Stage 4.
 - `refresh` is required for new unlabeled records. Stage 4 reruns over the full
   combined pool and emits `cluster_lineage.jsonl`.
 - Verify `lineage.json`, `reuse_manifest.json`, parent identity, added record
@@ -203,8 +205,8 @@ additional canonical data. Never modify the completed parent asset.
 
 ## Provider Rules
 
-- Default rubric model: OpenAI `gpt-5.5`.
-- Other Studio rubric choices include GPT-5.x, GPT-4.1 variants, GPT-4o
+- Default guideline model: OpenAI `gpt-5.5`.
+- Other Studio guideline choices include GPT-5.x, GPT-4.1 variants, GPT-4o
   variants, `o3`, and `o4-mini`. Availability depends on account access; report
   provider errors without silently changing models.
 - Default embedding provider/model: OpenAI
@@ -246,9 +248,14 @@ do not edit them again when they are active.
   stages no longer need the original paths.
 - `prepared_inputs`: inspect one normalized example and one canonical intent
   example; confirm no source-system field mapping leaked into core logic.
-- `rubric_extraction`: verify model provenance and structured criteria. Rubrics
-  extracted from labeled feedback are accepted without a separate review gate.
-  Never promote the old assistant answer as truth.
+- `rubric_extraction`: verify atomic evidence preserves every feedback record,
+  every record appears in at least one compiled guideline, conflicts and
+  uncertainties remain explicit, and criteria retain provenance,
+  applicability, severity, scoring, and evaluator plans. Prefer state or
+  deterministic checks where possible and semantic trajectories only when the
+  path matters. Guidelines are active from trusted evidence and marked
+  uncalibrated without a separate blocking review gate. Never promote the old
+  assistant answer as truth.
 - `intent_clustering`: verify the output count equals the requested fixed
   count. The Studio's 2D projection is exploratory; positions do not alter the
   full-vector clustering result.
@@ -291,10 +298,12 @@ Before reporting completion, verify:
 
 - Every stage is `completed`.
 - Source hashes exist.
-- Persisted rubric and embedding provider/model match the user's selection.
+- Persisted guideline and embedding provider/model match the user's selection.
 - Actual intent cluster count equals the requested count.
 - Stage 6 writes unsupported clusters to missing-label decision assets.
 - Train, validation, test, regression, and triage split files parse.
+- The four published copies under `datasets/evaluation_assets/<asset_id>/`
+  match their authoritative Stage 8 sources.
 - `asset_manifest.json` and
   `stages/08_dataset_splits/dataset_manifest.json` agree.
 
@@ -305,7 +314,7 @@ Report:
 - Tenant ID and asset ID.
 - Workspace path.
 - Current or final stage.
-- Rubric and embedding provider/model settings.
+- Guideline and embedding provider/model settings.
 - Counts for feedback, unlabeled records, clusters, matched clusters,
   missing-label clusters, inferred cases, synthetic cases, and splits.
 - Any failed stage and its persisted error.

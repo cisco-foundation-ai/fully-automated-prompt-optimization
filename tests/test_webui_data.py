@@ -270,8 +270,10 @@ def test_evaluation_asset_stage_reads_stage_oriented_layout(
     tenant = tmp_path / "bootstrap_tenant"
     asset = tenant / "evaluation_assets" / "v1"
     prepared = asset / "stages" / "02_prepared_inputs"
+    guidelines = asset / "stages" / "03_evaluation_guidelines"
     clustering = asset / "stages" / "04_intent_clustering"
     prepared.mkdir(parents=True)
+    guidelines.mkdir(parents=True)
     clustering.mkdir(parents=True)
     _write_json(
         asset / "config.json",
@@ -288,6 +290,18 @@ def test_evaluation_asset_stage_reads_stage_oriented_layout(
     )
     (prepared / "intent_records.jsonl").write_text(
         '{"record_id":"r1","user_input":"request alpha"}\n',
+        encoding="utf-8",
+    )
+    (guidelines / "feedback_evidence.jsonl").write_text(
+        '{"record_id":"f1","observations":[]}\n',
+        encoding="utf-8",
+    )
+    (guidelines / "candidate_guidelines.jsonl").write_text(
+        '{"intent_label":"answer"}\n',
+        encoding="utf-8",
+    )
+    (guidelines / "evaluation_guidelines.jsonl").write_text(
+        '{"guideline_id":"guideline-answer"}\n',
         encoding="utf-8",
     )
     (clustering / "intent_inventory.jsonl").write_text(
@@ -316,6 +330,17 @@ def test_evaluation_asset_stage_reads_stage_oriented_layout(
         "stages/04_intent_clustering/intent_inventory.jsonl"
     )
     assert detail["clusters"][0]["representatives"] == ["request alpha"]
+    guideline_detail = TenantStore(tmp_path).get_evaluation_asset_stage(
+        "bootstrap_tenant",
+        "v1",
+        "rubric_extraction",
+    )
+    assert guideline_detail is not None
+    artifacts = {item["name"]: item for item in guideline_detail["artifacts"]}
+    assert artifacts["evaluation_guidelines.jsonl"]["display_name"] == (
+        "Evaluation guidelines"
+    )
+    assert artifacts["evaluation_guidelines.jsonl"]["group"] == "Key outputs"
 
 
 def test_missing_label_artifacts_belong_to_label_inference(

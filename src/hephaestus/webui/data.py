@@ -57,6 +57,14 @@ _EVALUATION_STAGE_PATTERNS = {
         "prepared_inputs/intent_records.jsonl",
     ),
     "rubric_extraction": (
+        "stages/03_evaluation_guidelines/feedback_evidence.jsonl",
+        "stages/03_evaluation_guidelines/candidate_guidelines.jsonl",
+        "stages/03_evaluation_guidelines/evaluation_guidelines.jsonl",
+        "stages/03_evaluation_guidelines/trusted_intents.jsonl",
+        "stages/03_evaluation_guidelines/trusted_cases.jsonl",
+        "stages/03_rubric_extraction/feedback_evidence.jsonl",
+        "stages/03_rubric_extraction/candidate_guidelines.jsonl",
+        "stages/03_rubric_extraction/evaluation_guidelines.jsonl",
         "stages/03_rubric_extraction/feedback_rubrics.jsonl",
         "stages/03_rubric_extraction/trusted_intents.jsonl",
         "stages/03_rubric_extraction/trusted_cases.jsonl",
@@ -125,7 +133,7 @@ _ARTIFACT_CATALOG = {
     ),
     "normalized_feedback.jsonl": (
         "Prepared feedback",
-        "Redacted feedback records used for trusted rubric extraction.",
+        "Redacted feedback records used for evaluation guideline creation.",
         "Key outputs",
     ),
     "intent_records.jsonl": (
@@ -133,14 +141,29 @@ _ARTIFACT_CATALOG = {
         "Redacted unlabeled records with canonical intent text.",
         "Key outputs",
     ),
-    "feedback_rubrics.jsonl": (
-        "Trusted feedback rubrics",
-        "Scoreable criteria extracted from direct feedback.",
+    "feedback_evidence.jsonl": (
+        "Trusted feedback evidence",
+        "Atomic claims and uncertainties extracted directly from user feedback.",
+        "Supporting data",
+    ),
+    "candidate_guidelines.jsonl": (
+        "Candidate guidelines",
+        "Uncompiled proposals synthesized across compatible evidence.",
+        "Diagnostics",
+    ),
+    "evaluation_guidelines.jsonl": (
+        "Evaluation guidelines",
+        "Reusable criteria with provenance, applicability, and evaluator plans.",
         "Key outputs",
+    ),
+    "feedback_rubrics.jsonl": (
+        "Legacy feedback rubrics",
+        "Compatibility artifact from assets created before guideline creation.",
+        "Supporting data",
     ),
     "trusted_intents.jsonl": (
         "Trusted intent catalog",
-        "Intent labels and evidence derived from labeled records.",
+        "Intent labels and support derived from evaluation guidelines.",
         "Supporting data",
     ),
     "trusted_cases.jsonl": (

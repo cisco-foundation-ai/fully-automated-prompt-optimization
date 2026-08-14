@@ -173,7 +173,7 @@ tenants/<tenant_id>/evaluation_assets/<asset_id>/
 └── stages/
     ├── 01_raw_inputs/
     ├── 02_prepared_inputs/
-    ├── 03_rubric_extraction/
+    ├── 03_evaluation_guidelines/
     ├── 04_intent_clustering/
     ├── 05_coverage_decisions/
     │   └── review_queue/
@@ -192,16 +192,30 @@ inputs from earlier stage folders.
 |---|---|
 | 1. Validate raw inputs | Validate the canonical contract and record source counts and hashes. |
 | 2. Prepare inputs | Redact sensitive values, apply canonical defaults, and build intent text without renaming fields. |
-| 3. Extract rubrics | Use the selected LLM to turn trusted feedback into scoreable rubrics, trusted intents, and trusted cases. |
+| 3. Create evaluation guidelines | Extract atomic evidence from feedback, synthesize reusable guidance across compatible examples, and compile criteria with provenance and evaluator plans. |
 | 4. Cluster intents | Embed unlabeled intent records and build the requested number of route-aware clusters. |
 | 5. Decide coverage | Match clusters to trusted intents and sample representative traces from coverage gaps into a labeling queue. |
-| 6. Infer labels | Infer rubrics and evaluation cases only for clusters supported by trusted evidence. |
+| 6. Infer labels | Infer reviewable case rubrics and evaluation cases only for clusters supported by trusted evaluation guidelines. |
 | 7. Expand coverage | Optionally generate and filter a configured number of synthetic cases per supported cluster. |
-| 8. Build splits | Create group-safe train, validation, and test splits plus an automatic, trusted-only 20% regression gate. |
+| 8. Build splits | Create group-safe train, validation, and test splits plus an automatic, trusted-only 20% regression gate, then publish those four datasets to the tenant dataset catalog. |
 
 Stages are checkpointed in `pipeline_state.json`, with an append-only history in
 `events.jsonl`. If a run fails, fix the input, credential, model-access, or core
 error and run it again; completed stages are skipped.
+
+After Stage 8 succeeds, the authoritative split artifacts remain inside the
+asset workspace and four consumer-facing copies are published to:
+
+```text
+tenants/<tenant_id>/datasets/evaluation_assets/<asset_id>/
+├── train.jsonl
+├── validation.jsonl
+├── test.jsonl
+└── regression_trusted.jsonl
+```
+
+The versioned directory prevents one asset from overwriting another and can be
+used directly as the `dataset.path` source in evaluation configurations.
 
 ### Use the Evaluation Asset Studio
 
@@ -215,7 +229,7 @@ Open `http://127.0.0.1:8765/evaluation-assets/`. The Studio lets you choose:
 
 - Tenant and asset IDs.
 - Canonical labeled and unlabeled JSONL files.
-- The rubric extraction and inference model.
+- The evaluation-guideline creation and label-inference model.
 - An OpenAI embedding model or the local `tfidf` fallback.
 - The exact cluster count.
 - The Stage 5 intent-match threshold (default `0.6`).
@@ -234,8 +248,8 @@ Completed assets also expose **Extend asset**, which creates a new immutable
 version from additional canonical data:
 
 - **Keep original clustering** accepts labeled additions only. It reuses the
-  parent's Stage 4 inventory and extracts Stage 3 rubrics only for the new
-  feedback.
+  parent's Stage 4 inventory, extracts evidence only for new feedback, and
+  rebuilds Stage 3 guidelines across the complete trusted evidence pool.
 - **Rerun clustering** accepts new unlabeled records, rebuilds Stage 4 over the
   combined traffic, and writes `cluster_lineage.jsonl` to relate previous and
   current clusters.
@@ -299,10 +313,11 @@ python -m hephaestus.cli assets run \
   --embedding-model tfidf
 ```
 
-Rubric changes restart at Stage 3; embedding or cluster-count changes at Stage
-4; matching changes at Stage 5; synthetic settings at Stage 7; and split
-settings at Stage 8. Each revision is appended to `config_history.jsonl` and
-`events.jsonl` before stale downstream outputs are removed and rebuilt.
+Guideline-model changes restart at Stage 3; embedding or cluster-count changes
+at Stage 4; matching changes at Stage 5; synthetic settings at Stage 7; and
+split settings at Stage 8. Each revision is appended to
+`config_history.jsonl` and `events.jsonl` before stale downstream outputs are
+removed and rebuilt.
 
 ### Troubleshoot OpenAI SSL connections
 

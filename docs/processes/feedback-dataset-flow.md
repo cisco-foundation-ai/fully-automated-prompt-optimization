@@ -85,12 +85,18 @@ and are not additional evaluation-asset stages.
 |---|---|---|---|
 | 1. `raw_inputs` — Validate raw inputs | Copied `labeled_feedback.jsonl` and `unlabeled.jsonl` | Reject empty inputs; validate every record against `fapo-evaluation-input-v1`; require feedback only on labeled records; count rows and calculate source hashes | `stages/01_raw_inputs/` |
 | 2. `prepared_inputs` — Prepare canonical inputs | Validated raw input files | Redact sensitive values; preserve the vendor-neutral field names; default `request_id` to `record_id` and `route` to `task_type`; create canonical intent text for clustering | `stages/02_prepared_inputs/` |
-| 3. `rubric_extraction` — Extract trusted rubrics | `normalized_feedback.jsonl`; configured rubric model | Use the configured LLM to extract scoreable `must`, `must_not`, `should`, tool expectations, deterministic checks, and intent labels from each trusted feedback record; build trusted intents and trusted FAPO cases directly from those rubrics | `stages/03_rubric_extraction/` |
+| 3. `rubric_extraction` — Create evaluation guidelines | `normalized_feedback.jsonl`; configured guideline model | First extract atomic claims, corrections, and uncertainties directly supported by each feedback record. Then synthesize compatible evidence within each route into reusable guidelines and compile every criterion with provenance, applicability, severity, scoring, and a preferred evaluator type. Build trusted intents and cases from the compiled guidelines | `stages/03_evaluation_guidelines/` |
 | 4. `intent_clustering` — Mine intent clusters | `intent_records.jsonl`; configured embedding provider/model; exact cluster count | Vectorize canonical intent text with the selected OpenAI embedding model or local TF-IDF; allocate the configured cluster count across routes; cluster deterministically within each route; retain representative record IDs and top terms | `stages/04_intent_clustering/` |
 | 5. `coverage_decisions` — Apply coverage decisions | `intent_inventory.jsonl`, `intent_records.jsonl`, `trusted_intents.jsonl`; configured embedding provider/model and coverage parameters | Compare each mined cluster with trusted intents; apply the match threshold (default `0.6`) and trusted-support constraints; classify every cluster; sample centroid-near traces from under-supported and unsupported clusters for labeling | `stages/05_coverage_decisions/`, including `review_queue/` |
-| 6. `label_inference` — Infer reviewable labels | Intent clusters and matches; canonical unlabeled records; normalized feedback; trusted rubrics; configured rubric model | For matched clusters only, use the configured LLM and matched trusted evidence to infer a cluster rubric, attach inferred labels to the real unlabeled records, and build inferred FAPO cases; separately report every unsupported cluster | `stages/06_label_inference/` |
+| 6. `label_inference` — Infer reviewable labels | Intent clusters and matches; canonical unlabeled records; normalized feedback; trusted evaluation guidelines; configured guideline model | For matched clusters only, use the configured LLM and matched guideline as correctness evidence to infer a case rubric, attach inferred labels to the real unlabeled records, and build inferred FAPO cases; separately report every unsupported cluster | `stages/06_label_inference/` |
 | 7. `synthetic_coverage` — Optional synthetic coverage | Supported clusters, representative requests, inferred cluster rubrics; enable flag and candidates-per-cluster setting | When enabled, use the configured LLM to generate exactly the requested candidates per supported cluster, then filter invalid, duplicate, inconsistent, leaky, or unsolvable candidates. When disabled, make no model call and write empty artifacts | `stages/07_synthetic_coverage/` |
-| 8. `dataset_splits` — Build dataset splits | Trusted, inferred, and accepted synthetic cases; split seed | Reserve an approximately 20%, deterministic, group-safe trusted-only regression holdout; send inferred or synthetic cases that share its groups to `triage_hold`; globally assign every remaining group across train, validation, and test; write combined and provenance-specific splits and manifests | `stages/08_dataset_splits/` and root `asset_manifest.json` |
+| 8. `dataset_splits` — Build dataset splits | Trusted, inferred, and accepted synthetic cases; split seed | Reserve an approximately 20%, deterministic, group-safe trusted-only regression holdout; send inferred or synthetic cases that share its groups to `triage_hold`; globally assign every remaining group across train, validation, and test; write combined and provenance-specific splits and manifests; publish the combined train, validation, test, and trusted regression files to the tenant dataset catalog | `stages/08_dataset_splits/`, root `asset_manifest.json`, and `datasets/evaluation_assets/<asset_id>/` |
+
+The persisted Stage 3 identifier remains `rubric_extraction` so existing
+`pipeline_state.json`, CLI, and API clients stay compatible. Its product name,
+canonical folder, and behavior are **Evaluation guideline creation**. Existing
+`03_rubric_extraction` and `feedback_rubrics.jsonl` assets remain readable as a
+legacy contract.
 
 Every stage persists `pending`, `running`, `completed`, or `failed`, timestamps,
 a human-readable message, and cumulative counts. `events.jsonl` provides an
@@ -115,7 +121,7 @@ set of decisions. The Studio's **Edit decisions & resume** form and optional
 
 | Changed decision | Earliest stage rebuilt |
 |---|---|
-| Rubric provider/model or LLM batch size | Stage 3, `rubric_extraction` |
+| Guideline provider/model or LLM batch size | Stage 3, `rubric_extraction` |
 | Embedding provider/model or exact cluster count | Stage 4, `intent_clustering` |
 | Match threshold or trusted-support constraints | Stage 5, `coverage_decisions` |
 | Synthetic coverage enable flag or cases per cluster | Stage 7, `synthetic_coverage` |
@@ -138,13 +144,13 @@ The Studio and `assets extend` CLI expose two modes:
 
 | Mode | Allowed additions | Stage behavior |
 |---|---|---|
-| `keep` | Labeled feedback only | Merge and validate full inputs; prepare canonical inputs; seed Stage 3 from the parent and extract rubrics only for added feedback; reuse the exact Stage 4 inventory; recalculate Stages 5–8 |
-| `refresh` | Labeled feedback, unlabeled records, or both | Merge and validate full inputs; extract only added feedback rubrics; rerun Stage 4 over the combined unlabeled pool; recalculate Stages 5–8 |
+| `keep` | Labeled feedback only | Merge and validate full inputs; prepare canonical inputs; extract evidence only for added feedback; rebuild guidelines across the complete evidence pool; reuse the exact Stage 4 inventory; recalculate Stages 5–8 |
+| `refresh` | Labeled feedback, unlabeled records, or both | Merge and validate full inputs; extract only added feedback evidence; rebuild guidelines; rerun Stage 4 over the combined unlabeled pool; recalculate Stages 5–8 |
 
 Keep mode requires the parent's embedding provider, embedding model, cluster
-count, and rubric model. Refresh mode may select a new embedding model and
-cluster count but retains the rubric model so the trusted pool does not mix
-rubric-generation versions.
+count, and guideline model. Refresh mode may select a new embedding model and
+cluster count but retains the guideline model so the trusted pool does not mix
+guideline-generation versions.
 
 Feedback collected for a Stage 5 queue item may use the same `record_id` as its
 original unlabeled trace. The trace remains in the intent inventory so traffic
@@ -169,7 +175,7 @@ index at `/evaluation-assets/`. Its creation form accepts:
 
 - Tenant ID and asset version.
 - Labeled feedback and unlabeled JSONL workspace paths.
-- Rubric extraction model.
+- Evaluation-guideline creation model.
 - OpenAI embedding model or explicit local TF-IDF fallback.
 - Exact requested cluster count.
 - Stage 5 intent match threshold, defaulting to `0.6`.
@@ -206,7 +212,7 @@ file is required.
 
 ## Provider Selection
 
-Rubric extraction and label inference use the configured OpenAI model. The
+Evaluation-guideline creation and label inference use the configured OpenAI model. The
 Studio currently offers GPT-5.x, GPT-4.1 variants, GPT-4o variants, `o3`, and
 `o4-mini`; availability still depends on the caller's OpenAI account.
 
@@ -310,7 +316,7 @@ Trusted intent records may carry support statistics in `metadata`:
 {
   "intent_id": "intent-family-id",
   "label": "human readable intent label",
-  "texts": ["trusted example or rubric summary"],
+  "texts": ["trusted example or evaluation guideline summary"],
   "route": "task_family",
   "metadata": {
     "trusted_example_count": 12,
@@ -348,7 +354,7 @@ The core uses the following deterministic mechanics:
 
 Stage 5 does not call an LLM and has no manual review checkpoint. Its output is
 the persisted coverage decision and an external labeling work queue. Stage 6
-uses the configured rubric LLM only for clusters whose Stage 5 status is
+uses the configured guideline LLM only for clusters whose Stage 5 status is
 `matched_trusted_intent`.
 
 This asset creation step is not a FAPO eval run. It produces versioned datasets and coverage reports that the FAPO optimization loop consumes afterward.
@@ -368,7 +374,7 @@ Recommended generic artifacts:
 
 The shared pipeline parses `fapo-evaluation-input-v1` directly. No source field
 mappings are stored in the asset configuration and no tenant code is imported.
-The core owns contract validation, redaction, rubric extraction, exact-count
+The core owns contract validation, redaction, evaluation-guideline creation, exact-count
 clustering, coverage decisions, inferred labels, group-safe splits, manifests,
 checkpoints, and progress events.
 
@@ -378,12 +384,13 @@ Each new asset contains:
 |---|---|
 | `stages/01_raw_inputs/` | Immutable copied labeled and unlabeled JSONL plus source hashes |
 | `stages/02_prepared_inputs/` | Normalized feedback and canonical intent records |
-| `stages/03_rubric_extraction/` | Trusted rubrics, intents, and evaluation cases |
+| `stages/03_evaluation_guidelines/` | Feedback evidence, candidate and compiled guidelines, trusted intents, and trusted evaluation cases |
 | `stages/04_intent_clustering/` | Intent cluster inventory |
 | `stages/05_coverage_decisions/` | Match decisions, coverage report, and nested human labeling queue |
 | `stages/06_label_inference/` | Inferred labels and cases plus unsupported-cluster reports |
 | `stages/07_synthetic_coverage/` | Candidate, accepted, rejected, and filter-audit synthetic artifacts |
-| `stages/08_dataset_splits/` | Component and combined train, validation, test, regression, and triage files |
+| `stages/08_dataset_splits/` | Authoritative component and combined train, validation, test, regression, and triage files |
+| `datasets/evaluation_assets/<asset_id>/` | Stage 8 copies of `train.jsonl`, `validation.jsonl`, `test.jsonl`, and `regression_trusted.jsonl` for evaluation consumers |
 
 Assets created before the stage-oriented layout remain readable and resumable
 through the compatibility mapper. They keep their existing `raw_inputs/`,
@@ -471,7 +478,7 @@ Synthetic examples should expand known, trusted intents rather than define new u
 
 Generation should use:
 
-- Trusted rubrics or deterministic checks for correctness criteria.
+- Trusted evaluation guidelines or deterministic checks for correctness criteria.
 - Unlabeled intent clusters for realistic phrasing, context shape, workflow frequency, and tool-use patterns.
 
 Filtering should remove synthetic cases that are:
@@ -521,7 +528,42 @@ redacted feedback record. It preserves the canonical identity fields
 ```
 
 The prepared record is not the eval dataset yet. It is an internal redacted
-format used for rubric extraction, adjudication, and auditability.
+format used for evidence extraction, guideline creation, and auditability.
+
+## Evaluation Guideline Creation
+
+Stage 3 deliberately separates evidence from generalization:
+
+1. `feedback_evidence.jsonl` records atomic claims, explicit corrections, and
+   uncertainties for every trusted record. The previous assistant output is
+   context and never becomes an answer key.
+2. `candidate_guidelines.jsonl` contains model-proposed groupings of compatible
+   evidence within a route. Every trusted `record_id` must be represented.
+3. `evaluation_guidelines.jsonl` is the compiled contract used downstream.
+   Each guideline has stable provenance and criteria with source record IDs,
+   `kind`, `dimension`, `severity`, `applicability`, `scoring`,
+   `evidence_required`, and an evaluator plan. Conflicts and uncertainties stay
+   explicit.
+4. `trusted_intents.jsonl` aggregates support counts and matching text at the
+   guideline level. `trusted_cases.jsonl` embeds the applicable guideline IDs
+   and complete guideline snapshots so split files remain independently
+   usable.
+
+Evaluator plans use this preference order:
+
+1. `state_check` for verifiable final environment state and collateral effects.
+2. `deterministic_check` for schemas, policies, parsers, and exact invariants.
+3. `semantic_trajectory` only when an abstract workflow subpath is itself
+   required; literal tool names are avoided unless contractually mandatory.
+4. `llm_judge` for qualitative criteria with multiple valid answers.
+5. `human_review` when the available evidence cannot support an automated
+   decision.
+
+Generated guidelines are active because their source is trusted feedback, but
+they are marked `uncalibrated`. A later eval lifecycle should compare automated
+grades with human or executable outcomes before treating judge scores as a
+high-confidence release signal. This is metadata, not a blocking Stage 3 review
+gate.
 
 ## Oracle Construction
 
@@ -529,11 +571,11 @@ Construct `expected` from the strongest available source:
 
 1. **Human correction**: Use a corrected answer, accepted edited query, or SME-approved artifact as the highest-trust reference.
 2. **Deterministic oracle**: Use tool schema constraints, parser checks, policy checks, syntax checks, and output format checks when they can decide correctness without another model.
-3. **Feedback rationale rubric**: Convert user rationale into explicit pass/fail criteria. The evaluation-asset pipeline accepts this extraction directly as trusted feedback evidence without a separate review gate.
+3. **Evaluation guideline**: Compile repeated or compatible feedback evidence into explicit criteria while preserving source record IDs, conflicts, applicability, and uncertainty.
 4. **Positive exemplar**: For positive feedback, preserve behavior as a non-regression expectation only after checking that the response is safe, grounded, and not merely pleasant.
-5. **LLM judge**: Use only as a calibrated scorer component. The judge should compare a new response to the rubric and evidence, not to the previous assistant output alone.
+5. **LLM judge**: Use only as a calibrated scorer component. The judge should compare a new response to the applicable guideline and evidence, not to the previous assistant output alone.
 
-Avoid exact-answer labels when the task has many valid outputs. Prefer rubric, invariants, and tool-behavior expectations.
+Avoid exact-answer labels when the task has many valid outputs. Prefer evaluation guidelines, invariants, and tool-behavior expectations.
 
 ## FAPO Case Shape
 
@@ -549,9 +591,17 @@ Write unified JSONL cases using the existing FAPO schema:
     "runtime_json": "..."
   },
   "expected": {
-    "label_source": "human_feedback",
+    "label_source": "evaluation_guideline_from_trusted_feedback",
     "confidence": 0.9,
     "feedback_polarity": "negative",
+    "evaluation_guideline_ids": ["guideline-task-family-identifier"],
+    "evaluation_guidelines": [
+      {
+        "guideline_id": "guideline-task-family-identifier",
+        "calibration_status": "uncalibrated",
+        "criteria": []
+      }
+    ],
     "failure_modes": ["wrong_tool_behavior"],
     "rubric": {
       "must": [],
