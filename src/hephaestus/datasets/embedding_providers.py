@@ -52,7 +52,11 @@ class OpenAIEmbeddingProvider:
         for start in range(0, len(texts), self.batch_size):
             batch = [str(text) for text in texts[start : start + self.batch_size]]
             embeddings.extend(self._embed_batch(client, batch))
-        return embeddings
+        return validate_embedding_vectors(
+            embeddings,
+            expected_count=len(texts),
+            source="OpenAI embedding response",
+        )
 
     def _create_client(self) -> Any:
         from openai import OpenAI

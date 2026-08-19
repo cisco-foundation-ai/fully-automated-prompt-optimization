@@ -154,9 +154,7 @@ class ProviderCallError(RuntimeError):
         model: str,
         cause: Exception,
     ) -> None:
-        cause_name = type(cause).__name__
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", cause_name):
-            cause_name = "ProviderError"
+        cause_name = _provider_cause_label(cause)
         summary = _provider_cause_summary(cause)
         super().__init__(
             "Provider call failed: "
@@ -1381,20 +1379,18 @@ def _cluster_lineage(
 
 def _normalize_feedback(row: Mapping[str, Any]) -> Dict[str, Any]:
     prepared = _redact_record(row)
-    record_id = _string(prepared["record_id"])
-    task_type = _string(prepared["task_type"])
-    prepared["request_id"] = _string(prepared.get("request_id")) or record_id
-    prepared["route"] = _string(prepared.get("route")) or task_type
+    if "request_id" not in prepared:
+        prepared["request_id"] = prepared["record_id"]
+    if "route" not in prepared:
+        prepared["route"] = prepared["task_type"]
     return prepared
 
 
 def _normalize_intent(row: Mapping[str, Any]) -> Dict[str, Any]:
     prepared = _redact_record(row)
-    record_id = _string(prepared["record_id"])
     user_input = _string(prepared["user_input"])
     context = prepared["conversation_context"]
     tool_calls = prepared["tool_calls"]
-    task_type = _string(prepared["task_type"])
     canonical = " ".join(
         part
         for part in (
@@ -1404,8 +1400,10 @@ def _normalize_intent(row: Mapping[str, Any]) -> Dict[str, Any]:
         )
         if part and part != "tools "
     )
-    prepared["request_id"] = _string(prepared.get("request_id")) or record_id
-    prepared["route"] = _string(prepared.get("route")) or task_type
+    if "request_id" not in prepared:
+        prepared["request_id"] = prepared["record_id"]
+    if "route" not in prepared:
+        prepared["route"] = prepared["task_type"]
     prepared["canonical_intent_text"] = canonical
     prepared["tool_names"] = _tool_names(tool_calls)
     return prepared
@@ -1423,8 +1421,8 @@ def _validate_normalized_identity(
         zip(normalized_rows, source_rows),
         start=1,
     ):
-        record_id = _string(normalized.get("record_id"))
-        source_id = _string(source.get("record_id")) or "<missing>"
+        record_id = normalized.get("record_id")
+        source_id = source.get("record_id", "<missing>")
         if record_id in seen:
             first_row, first_source_id = seen[record_id]
             raise ValueError(
@@ -2480,6 +2478,21 @@ def _provider_cause_summary(cause: Exception) -> str:
     return "provider operation failed"
 
 
+def _provider_cause_label(cause: Exception) -> str:
+    """Map provider exceptions to fixed labels safe for persistence."""
+    if isinstance(cause, TimeoutError):
+        return "TimeoutError"
+    if isinstance(cause, PermissionError):
+        return "PermissionError"
+    if isinstance(cause, ConnectionError):
+        return "ConnectionError"
+    if isinstance(cause, ValueError):
+        return "ValueError"
+    if isinstance(cause, RuntimeError):
+        return "RuntimeError"
+    return "ProviderError"
+
+
 CONTENT_FIELD_NAMES = frozenset(
     {
         "arguments",
@@ -2506,7 +2519,15 @@ CONTENT_FIELD_NAMES = frozenset(
 )
 PRESERVED_NAMED_FIELDS = frozenset(
     {
+        "application",
+        "application_version",
+        "call_id",
+        "created_at",
+        "deployment",
+        "deployment_id",
+        "environment",
         "group_id",
+        "id",
         "intent_id",
         "intent_label",
         "model",
@@ -2514,14 +2535,31 @@ PRESERVED_NAMED_FIELDS = frozenset(
         "provider",
         "provider_name",
         "record_id",
+        "region",
         "request_id",
         "route",
         "schema_version",
+        "session_id",
+        "source",
+        "source_system",
+        "source_version",
+        "span_id",
         "task_type",
+        "timestamp",
         "tool",
+        "tool_call_id",
         "tool_name",
+        "tools_available",
+        "trace_id",
+        "type",
+        "updated_at",
+        "version",
     }
 )
+MESSAGE_STRUCTURE_FIELDS = frozenset(
+    {"conversation_context", "message", "messages"}
+)
+TOOL_STRUCTURE_FIELDS = frozenset({"function", "tool_calls", "tools"})
 
 
 def _redact_record(row: Mapping[str, Any]) -> Dict[str, Any]:
@@ -2548,28 +2586,38 @@ def _redact_record(row: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def _redact_messages(value: Any) -> Any:
-    if not isinstance(value, list):
-        return value
+    if isinstance(value, Mapping):
+        value = [value]
+        unwrap = True
+    elif isinstance(value, list):
+        unwrap = False
+    else:
+        return _redact_value(value)
     messages = []
     for item in value:
         if not isinstance(item, Mapping):
-            messages.append(item)
+            messages.append(_redact_named_content(item))
             continue
         message = dict(item)
         for key, nested in tuple(message.items()):
-            if key == "role":
+            if key == "role" or str(key).lower() in PRESERVED_NAMED_FIELDS:
                 continue
             if key in CONTENT_FIELD_NAMES:
                 message[key] = _redact_value(nested)
             else:
                 message[key] = _redact_named_content(nested)
         messages.append(message)
-    return messages
+    return messages[0] if unwrap else messages
 
 
 def _redact_tool_calls(value: Any) -> Any:
-    if not isinstance(value, list):
-        return value
+    if isinstance(value, Mapping):
+        value = [value]
+        unwrap = True
+    elif isinstance(value, list):
+        unwrap = False
+    else:
+        return _redact_value(value)
     calls = []
     for item in value:
         if not isinstance(item, Mapping):
@@ -2577,14 +2625,17 @@ def _redact_tool_calls(value: Any) -> Any:
             continue
         call = dict(item)
         for key, nested in tuple(call.items()):
-            if key in {"name", "tool"}:
+            if key in {"name", "tool"} or str(key).lower() in PRESERVED_NAMED_FIELDS:
+                continue
+            if str(key).lower() in TOOL_STRUCTURE_FIELDS:
+                call[key] = _redact_tool_calls(nested)
                 continue
             if key in {"arguments", "result", "error"}:
                 call[key] = _redact_value(nested)
             else:
                 call[key] = _redact_named_content(nested)
         calls.append(call)
-    return calls
+    return calls[0] if unwrap else calls
 
 
 def _redact_feedback(value: Any) -> Any:
@@ -2599,27 +2650,25 @@ def _redact_feedback(value: Any) -> Any:
     return feedback
 
 
-def _redact_named_content(value: Any, *, redact_all: bool = False) -> Any:
+def _redact_named_content(value: Any) -> Any:
+    """Redact unknown runtime/metadata strings while preserving schema fields."""
     if isinstance(value, str):
-        return _redact_text(value) if redact_all else value
+        return _redact_text(value)
     if isinstance(value, list):
-        return [
-            _redact_named_content(item, redact_all=redact_all) for item in value
-        ]
+        return [_redact_named_content(item) for item in value]
     if isinstance(value, Mapping):
-        return {
-            key: (
-                item
-                if str(key).lower() in PRESERVED_NAMED_FIELDS
-                else _redact_named_content(
-                    item,
-                    redact_all=(
-                        redact_all or str(key).lower() in CONTENT_FIELD_NAMES
-                    ),
-                )
-            )
-            for key, item in value.items()
-        }
+        redacted = {}
+        for key, item in value.items():
+            field = str(key).lower()
+            if field in MESSAGE_STRUCTURE_FIELDS:
+                redacted[key] = _redact_messages(item)
+            elif field in TOOL_STRUCTURE_FIELDS:
+                redacted[key] = _redact_tool_calls(item)
+            elif field in PRESERVED_NAMED_FIELDS:
+                redacted[key] = item
+            else:
+                redacted[key] = _redact_named_content(item)
+        return redacted
     return value
 
 

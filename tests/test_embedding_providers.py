@@ -49,6 +49,32 @@ def test_openai_embedding_provider_batches_and_preserves_order():
     assert client.embeddings.calls[1]["input"] == ["xy"]
 
 
+def test_openai_embedding_provider_rejects_cross_batch_dimension_drift() -> None:
+    """Successive SDK batches cannot concatenate incompatible vector shapes."""
+
+    class DriftingEmbeddings:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def create(self, **kwargs):
+            self.calls += 1
+            dimension = self.calls + 1
+            return SimpleNamespace(
+                data=[
+                    SimpleNamespace(
+                        index=0,
+                        embedding=[1.0] + [0.0] * (dimension - 1),
+                    )
+                ]
+            )
+
+    client = SimpleNamespace(embeddings=DriftingEmbeddings())
+    provider = OpenAIEmbeddingProvider(batch_size=1, client=client)
+
+    with pytest.raises(ValueError, match="consistent dimension"):
+        provider.embed_texts(["first", "second"])
+
+
 def test_openai_embedding_provider_requires_api_key_without_client(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     provider = OpenAIEmbeddingProvider()

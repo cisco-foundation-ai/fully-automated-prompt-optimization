@@ -184,17 +184,17 @@ def test_normalization_preserves_structural_fields_and_redacts_content() -> None
     """Schema structure survives while content-bearing PII is redacted."""
     row = {
         "schema_version": "fapo-evaluation-input-v1",
-        "record_id": "record.owner@example.com",
-        "group_id": "group.owner@example.com",
-        "request_id": "request.owner@example.com",
-        "task_type": "task.owner@example.com",
-        "route": "route.owner@example.com",
-        "intent_label": "intent.owner@example.com",
+        "record_id": " record.owner@example.com ",
+        "group_id": " group.owner@example.com ",
+        "request_id": " request.owner@example.com ",
+        "task_type": " task.owner@example.com ",
+        "route": " route.owner@example.com ",
+        "intent_label": " intent.owner@example.com ",
         "user_input": "Contact user@example.com from 192.0.2.1.",
         "assistant_output": "Reached assistant@example.com at 192.0.2.2.",
         "conversation_context": [
             {
-                "role": "role.owner@example.com",
+                "role": " role.owner@example.com ",
                 "content": "Earlier user@example.com at 192.0.2.3.",
                 "metadata": {
                     "intent_label": "context.owner@example.com",
@@ -204,7 +204,7 @@ def test_normalization_preserves_structural_fields_and_redacts_content() -> None
         ],
         "tool_calls": [
             {
-                "name": "lookup.owner@example.com",
+                "name": " lookup.owner@example.com ",
                 "arguments": {
                     "address": "argument@example.com",
                     "nested": ["192.0.2.4"],
@@ -214,17 +214,44 @@ def test_normalization_preserves_structural_fields_and_redacts_content() -> None
             }
         ],
         "runtime": {
-            "model": "model.owner@example.com",
+            "model": " model.owner@example.com ",
+            "unknown_leaf": "runtime-unknown@example.com",
             "request": {
                 "content": "Runtime payload runtime@example.com",
-                "model": "nested-model.owner@example.com",
-                "provider": "nested-provider.owner@example.com",
-                "route": "nested-route.owner@example.com",
+                "model": " nested-model.owner@example.com ",
+                "provider": " nested-provider.owner@example.com ",
+                "route": " nested-route.owner@example.com ",
+            },
+            "nested_structures": {
+                "messages": [
+                    {
+                        "role": " nested-role.owner@example.com ",
+                        "content": "Nested message nested-message@example.com",
+                        "metadata": {
+                            "unknown_leaf": "nested-message-metadata@example.com"
+                        },
+                    }
+                ],
+                "tool_calls": [
+                    {
+                        "id": " nested-call.owner@example.com ",
+                        "type": "function",
+                        "function": {
+                            "name": " nested-tool.owner@example.com ",
+                            "arguments": {"email": "nested-argument@example.com"},
+                        },
+                        "metadata": {
+                            "unknown_leaf": "nested-tool-metadata@example.com"
+                        },
+                    }
+                ],
             },
         },
         "metadata": {
-            "source_system": "source.owner@example.com",
-            "intent_label": "metadata.owner@example.com",
+            "source_system": " source.owner@example.com ",
+            "source_version": " source-version.owner@example.com ",
+            "intent_label": " metadata.owner@example.com ",
+            "unknown_leaf": "metadata-unknown@example.com",
             "nested": {"note": "Metadata metadata@example.com"},
         },
         "feedback": {
@@ -263,9 +290,23 @@ def test_normalization_preserves_structural_fields_and_redacts_content() -> None
         assert normalized["metadata"]["source_system"] == row["metadata"][
             "source_system"
         ]
+        assert normalized["metadata"]["source_version"] == row["metadata"][
+            "source_version"
+        ]
         assert normalized["metadata"]["intent_label"] == row["metadata"][
             "intent_label"
         ]
+        assert normalized["runtime"]["nested_structures"]["messages"][0][
+            "role"
+        ] == row["runtime"]["nested_structures"]["messages"][0]["role"]
+        assert normalized["runtime"]["nested_structures"]["tool_calls"][0][
+            "id"
+        ] == row["runtime"]["nested_structures"]["tool_calls"][0]["id"]
+        assert normalized["runtime"]["nested_structures"]["tool_calls"][0][
+            "function"
+        ]["name"] == row["runtime"]["nested_structures"]["tool_calls"][0][
+            "function"
+        ]["name"]
         serialized = json.dumps(normalized, sort_keys=True)
         for secret in (
             "user@example.com",
@@ -276,6 +317,12 @@ def test_normalization_preserves_structural_fields_and_redacts_content() -> None
             "error@example.com",
             "runtime@example.com",
             "metadata@example.com",
+            "runtime-unknown@example.com",
+            "metadata-unknown@example.com",
+            "nested-message@example.com",
+            "nested-message-metadata@example.com",
+            "nested-argument@example.com",
+            "nested-tool-metadata@example.com",
             "192.0.2.1",
             "192.0.2.2",
             "192.0.2.3",
@@ -287,6 +334,31 @@ def test_normalization_preserves_structural_fields_and_redacts_content() -> None
     assert "correction@example.com" not in feedback_serialized
 
 
+def test_normalization_defaults_preserve_exact_canonical_source_strings() -> None:
+    """Omitted request and route fields inherit source strings without trimming."""
+    row = {
+        "schema_version": "fapo-evaluation-input-v1",
+        "record_id": " exact-record-id ",
+        "group_id": " exact-group-id ",
+        "task_type": " exact-task-type ",
+        "intent_label": " exact-intent-label ",
+        "user_input": "Request",
+        "assistant_output": "Response",
+        "conversation_context": [],
+        "tool_calls": [],
+        "runtime": {},
+        "metadata": {},
+        "feedback": {"polarity": "positive", "rationale": "Correct"},
+    }
+
+    feedback = _normalize_feedback(row)
+    intent = _normalize_intent({key: value for key, value in row.items() if key != "feedback"})
+
+    for normalized in (feedback, intent):
+        assert normalized["request_id"] == " exact-record-id "
+        assert normalized["route"] == " exact-task-type "
+
+
 def test_prepare_inputs_rejects_normalized_duplicate_with_both_sources(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -294,7 +366,7 @@ def test_prepare_inputs_rejects_normalized_duplicate_with_both_sources(
     """A faulty normalizer collision reports both originating rows and IDs."""
     tenants_root = tmp_path / "tenants"
     feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
-    _write_extension_feedback(feedback, ["source-one", "source-two"])
+    _write_extension_feedback(feedback, [" source-one ", " source-two "])
     pipeline = EvaluationAssetPipeline.create(
         tenants_root,
         EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
@@ -307,7 +379,7 @@ def test_prepare_inputs_rejects_normalized_duplicate_with_both_sources(
 
     def collide(row):
         normalized = original(row)
-        normalized["record_id"] = "canonical-collision"
+        normalized["record_id"] = " canonical-collision "
         return normalized
 
     monkeypatch.setattr(pipeline_module, "_normalize_feedback", collide)
@@ -315,8 +387,8 @@ def test_prepare_inputs_rejects_normalized_duplicate_with_both_sources(
     with pytest.raises(
         ValueError,
         match=(
-            r"normalized feedback.*canonical-collision.*"
-            r"row 1.*source-one.*row 2.*source-two"
+            r"normalized feedback.*' canonical-collision '.*"
+            r"row 1.*' source-one '.*row 2.*' source-two '"
         ),
     ):
         pipeline._prepare_inputs()
@@ -386,6 +458,61 @@ def test_stage_one_accepts_one_cluster_per_record_and_effective_route(
         "feedback_records": 1,
         "unlabeled_records": 2,
     }
+
+
+@pytest.mark.parametrize(
+    ("copied_input", "expected_detail"),
+    [
+        ("feedback", "missing required field 'group_id'"),
+        ("unlabeled", "'conversation_context[0].content' is required"),
+    ],
+)
+def test_stage_one_revalidates_each_copied_input_before_provider_calls(
+    tmp_path: Path,
+    copied_input: str,
+    expected_detail: str,
+) -> None:
+    """A copied v1 contract violation fails Stage 1 with its exact location."""
+    tenants_root = tmp_path / "tenants"
+    feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
+    rubric_provider = FakeRubricProvider()
+    embedding_provider = FakeEmbeddingProvider()
+    pipeline = EvaluationAssetPipeline.create(
+        tenants_root,
+        EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
+        feedback,
+        unlabeled,
+        rubric_provider=rubric_provider,
+        embedding_provider=embedding_provider,
+    )
+    copied_path = (
+        pipeline.layout.feedback_path
+        if copied_input == "feedback"
+        else pipeline.layout.unlabeled_path
+    )
+    row = _read_test_jsonl(copied_path)[0]
+    if copied_input == "feedback":
+        del row["group_id"]
+    else:
+        row["conversation_context"] = [{"role": "user"}]
+    copied_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    expected_error = f"{copied_path}:1: {expected_detail}"
+
+    with pytest.raises(ValueError) as caught:
+        pipeline.run()
+
+    assert str(caught.value) == expected_error
+    state = pipeline.layout.load_state()
+    raw_stage = next(
+        stage for stage in state.stages if stage.stage == PipelineStage.RAW_INPUTS.value
+    )
+    assert state.status == "failed"
+    assert state.current_stage == PipelineStage.RAW_INPUTS.value
+    assert state.error == expected_error
+    assert raw_stage.status == "failed"
+    assert raw_stage.message == expected_error
+    assert rubric_provider.calls == 0
+    assert embedding_provider.calls == 0
 
 
 @pytest.mark.parametrize(
@@ -478,6 +605,43 @@ def test_provider_failure_persists_only_sanitized_causal_summary(
     assert "sk-live-secret-token" not in persisted
     assert "raw_response" not in persisted
     assert "private@example.com" not in persisted
+
+
+def test_provider_failure_never_persists_dynamic_exception_class_name(
+    tmp_path: Path,
+) -> None:
+    """Only fixed exception categories cross the persistence boundary."""
+    secret_class_name = "SecretCredentialClass_A1B2C3"
+    secret_exception = type(secret_class_name, (Exception,), {})
+
+    class DynamicFailureProvider(FakeRubricProvider):
+        def generate_json(self, system_prompt, payload):
+            raise secret_exception("raw-secret-value")
+
+    tenants_root = tmp_path / "tenants"
+    feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
+    pipeline = EvaluationAssetPipeline.create(
+        tenants_root,
+        EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
+        feedback,
+        unlabeled,
+        rubric_provider=DynamicFailureProvider(),
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+
+    with pytest.raises(Exception) as caught:
+        pipeline.run()
+
+    assert caught.value.__cause__.__class__.__name__ == secret_class_name
+    assert "raw-secret-value" in str(caught.value.__cause__)
+    persisted = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in pipeline.layout.root.rglob("*")
+        if path.is_file()
+    )
+    assert "cause=ProviderError" in persisted
+    assert secret_class_name not in persisted
+    assert "raw-secret-value" not in persisted
 
 
 def test_rubric_normalization_accepts_list_form_tool_expectations() -> None:

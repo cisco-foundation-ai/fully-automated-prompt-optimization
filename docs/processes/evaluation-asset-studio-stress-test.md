@@ -238,7 +238,7 @@ EA-07 is absent because Section 14 reclassifies the scorer handoff as a P1 readi
 
 **Example.** `git check-ignore` returned status 1 for the real Stage 1 feedback path, meaning Git did not ignore it. The obsolete path was ignored.
 
-**Fix and check.** Ignore the entire current asset runtime tree—raw files, stages, state, history, manifests (asset summaries), parent–child records, and review queues—except intentional placeholders. Add a test that runs `git check-ignore` on representative protected paths. If Google Cloud Storage or another backend is promised, implement it or clearly document that storage is currently local.
+~~**Fix and check.** Ignore the entire current asset runtime tree—raw files, stages, state, history, manifests (asset summaries), parent–child records, and review queues—except intentional placeholders. Add a test that runs `git check-ignore` on representative protected paths. If Google Cloud Storage or another backend is promised, implement it or clearly document that storage is currently local.~~
 
 #### EA-04: redaction can merge different records
 
@@ -246,7 +246,7 @@ EA-07 is absent because Section 14 reclassifies the scorer handoff as a P1 readi
 
 **Example.** The record IDs `alice@example.com` and `bob@example.com` both became `<email>`; the group IDs `10.0.0.1` and `10.0.0.2` both became `<ip_address>`. Two distinct records or conversations can therefore look identical.
 
-**Fix and check.** Make redaction schema-aware (apply it only to approved content fields), preserve identity and routing fields byte-for-byte, and recheck unique IDs and groups afterward. The privacy policy also needs broader coverage: the current code finds only email and IPv4, not names, phones, addresses, credentials, tokens, health or payment data, or IPv6.
+~~**Fix and check.** Make redaction schema-aware (apply it only to approved content fields), preserve identity and routing fields byte-for-byte, and recheck unique IDs and groups afterward.~~ The privacy policy also needs broader coverage: the current code finds only email and IPv4, not names, phones, addresses, credentials, tokens, health or payment data, or IPv6.
 
 #### EA-05: “completed” does not mean fixed or intact
 
@@ -280,7 +280,7 @@ EA-07 is absent because Section 14 reclassifies the scorer handoff as a P1 readi
 
 **Example.** Trusted and synthetic cases with `group_id="shared"` landed in validation and train. The main Stage 8 kept them together and automatically built a trusted regression set. The alternate intent command also accepted non-v1 input and used a 0.35 match threshold instead of 0.6.
 
-**Fix and check.** Remove or deprecate the alternate commands, or route them through the same contract, matching rules, global splitter, and regression builder. Every public entry point should reject the same invalid input and produce the same groups, regression set, and defaults.
+~~**Fix and check.** Remove or deprecate the alternate commands, or route them through the same contract, matching rules, global splitter, and regression builder. Every public entry point should reject the same invalid input and produce the same groups, regression set, and defaults.~~
 
 ### 14. Further immediate engineering improvements
 
@@ -306,11 +306,11 @@ The synthetic filter performs mechanical checks: required fields, nonempty conte
 
 #### Fail before paid model work
 
-The code checks whether `cluster_count` fits the data only in Stage 4, after paid Stage 3 model calls. Check data-dependent settings in Stage 1. Also reject embedding results with missing or repeated positions, missing or infinite numbers, or inconsistent vector sizes, and preserve a safe version of the provider's real error.
+~~The code checks whether `cluster_count` fits the data only in Stage 4, after paid Stage 3 model calls. Check data-dependent settings in Stage 1. Also reject embedding results with missing or repeated positions, missing or infinite numbers, or inconsistent vector sizes, and preserve a safe version of the provider's real error.~~
 
 #### Fix persisted-default drift
 
-The default unlabeled-to-trusted ratio is `20.0`, but reading a saved config without that field produces `None` and silently disables the safety limit. Missing fields should restore documented defaults; an explicit `null` should either be rejected or clearly mean “disabled.” Test defaults after saving and loading, not only at object creation.
+~~The default unlabeled-to-trusted ratio is `20.0`, but reading a saved config without that field produces `None` and silently disables the safety limit. Missing fields should restore documented defaults; an explicit `null` should either be rejected or clearly mean “disabled.” Test defaults after saving and loading, not only at object creation.~~
 
 #### Record enough build history to measure change
 
@@ -322,7 +322,7 @@ The pipeline loads whole files, sends all evidence for one request type in one g
 
 #### Strengthen tenant and user-interface security boundaries
 
-The service accepts any source file in the workspace, so one tenant can copy another tenant's data. Its HTTP server has no authentication; it can preview files and change assets, and users may bind it beyond the local machine. Restrict sources to the chosen tenant unless an explicit import is approved. Before remote use, add authentication, cross-site request forgery (CSRF) protection (which stops a malicious site from making the user's browser submit changes), and `Cache-Control: no-store`. Treat trace text as untrusted instructions when sending it to a model; JSON formatting does not make malicious text harmless.
+The service accepts any source file in the workspace, so one tenant can copy another tenant's data. Its HTTP server has no authentication; it can preview files and change assets, and users may bind it beyond the local machine. ~~Restrict sources to the chosen tenant unless an explicit import is approved.~~ Before remote use, add authentication, ~~cross-site request forgery (CSRF) protection (which stops a malicious site from making the user's browser submit changes)~~, and ~~`Cache-Control: no-store`~~. Treat trace text as untrusted instructions when sending it to a model; JSON formatting does not make malicious text harmless.
 
 ### 15. Inherited FAPO runtime findings
 
@@ -467,8 +467,8 @@ The audit also found narrower problems than initially suspected:
 
 #### P0: required before merge or use with protected data
 
-1. **Prevent data exposure.** Ignore the full asset runtime tree, test protected paths with `git check-ignore`, allow imports only into the correct tenant, and document where files really live.
-2. **Preserve IDs.** Redact only content fields, then recheck record IDs and groups. Add a broader privacy screen and review hold.
+~~1. **Prevent data exposure.** Ignore the full asset runtime tree, test protected paths with `git check-ignore`, allow imports only into the correct tenant, and document where files really live.~~
+2. ~~**Preserve IDs.** Redact only content fields, then recheck record IDs and groups.~~ Add a broader privacy screen and review hold.
 3. **Keep saved evaluation feedback out of training rules.** Split trusted groups before learning guidelines; build training-visible rules only from training feedback. Use cross-fitting where a group-specific rule is needed.
 4. **Require approval before publication.** Store fixed review decisions and exclude every pending inferred or synthetic case from train, validation, and test.
 5. **Treat released assets as read-only.** Separate draft from released states, create a child ID for every change, and publish through a versioned pointer or content fingerprint.
@@ -478,10 +478,10 @@ The audit also found narrower problems than initially suspected:
 #### P1: required before claiming optimization readiness
 
 1. **Complete scoring.** Provide a shared scorer that runs supported guideline checks, or require each tenant scorer to declare its capabilities against a strict registry of executable checks and pass calibration against trusted judgments.
-2. **Give every public command the same rules.** Remove alternate commands or route them through the same contract, matching policy, splitter, and regression builder.
+~~2. **Give every public command the same rules.** Remove alternate commands or route them through the same contract, matching policy, splitter, and regression builder.~~
 3. **Group near-duplicates before splitting.** Search across trusted, inferred, and synthetic sources and save the duplicate audit.
 4. **Rerun work whenever any dependency changes.** Fingerprint full guidelines, matches, providers, settings, and parent files; do not reuse stale outputs.
-5. **Validate generated data deeply.** Require unique guideline IDs, nonempty scoreable rubrics, valid nested fields, sound embedding shapes/indices, and accurate filter labels.
+5. **Validate generated data deeply.** Require unique guideline IDs, nonempty scoreable rubrics, valid nested fields, ~~sound embedding shapes/indices~~, and accurate filter labels.
 6. **Record enough build history.** Save code and prompt fingerprints, resolved defaults, provider revisions, random settings, request/response IDs, usage, and stage fingerprints.
 7. **Handle large inputs.** Stream files, combine evidence in stages, reuse average group vectors, and enforce provider input/token limits before calls.
 8. **Repair inherited FAPO checks.** Preserve diagnostic evidence, reject duplicate case IDs, compare only compatible runs, keep original startup errors, and distinguish successful, degraded, and failed runs.
@@ -601,9 +601,10 @@ After those fixes, the decisive question is simple: do Studio-built cases preser
 ## Successor remediation annotation
 
 This successor section records remediation status after the historical
-`ce7f832f` audit. Every preceding observation remains the verbatim historical
-record except for the explicit strike-through on the inaccurate atomic-write
-non-finding above. Checked items below are limited to behavior verified in PR1;
+`ce7f832f` audit. Every preceding observation remains verbatim inside explicit
+strike-through markup, which marks only the bounded remediation verified in
+PR1; unresolved portions remain unstruck. Checked items below are likewise
+limited to behavior verified in PR1;
 unchecked items remain required or research-dependent. `PR_LINK_PLACEHOLDER`
 will be replaced with published PR and commit traceability in Task 10.
 
@@ -631,14 +632,14 @@ agreement, locking, or crash-recovery work assigned to PR2.
 - [ ] Add cross-process locking, durable rebuild intent, stage dependency/output verification, mismatch recovery, and generation-wide atomic publication (EA-05; PR2).
 - [ ] Hold weak, contradictory, unsafe, or privacy-blocked feedback before guideline generation (EA-06).
 - [ ] Group near-duplicate trusted, inferred, and synthetic cases globally before splitting and persist the duplicate audit (EA-08).
-- [ ] Remove/deprecate alternate asset commands or route them through the same contract, matching, splitting, and regression policies (EA-09).
+- [x] Remove/deprecate alternate asset commands or route them through the same contract, matching, splitting, and regression policies (EA-09). PR: `PR_LINK_PLACEHOLDER`; test: `test_assets_help_exposes_only_canonical_pipeline_commands`.
 - [ ] Provide or capability-check executable scorers for every supported guideline evaluator and calibrate them against trusted judgments.
 - [ ] Fingerprint complete guideline/match/provider/setting/parent dependencies and rerun extension outputs whenever any dependency changes.
 - [ ] Reject or safely merge duplicate guideline IDs and hold inferred rubrics without an applicable scoreable requirement.
 - [ ] Narrow synthetic-filter documentation to its mechanical guarantees and send semantic correctness, solvability, tool compatibility, and indirect leakage to executable or human review.
-- [x] Revalidate copied inputs and reject impossible unlabeled-count/effective-route cluster allocations in Stage 1 before rubric or embedding calls. PR: `PR_LINK_PLACEHOLDER`; tests: `test_stage_one_rejects_infeasible_clustering_before_provider_calls`, `test_stage_one_accepts_one_cluster_per_record_and_effective_route`.
-- [x] Validate raw and injected embedding batches for exact count and unique indices, finite real non-boolean coordinates, consistent positive dimension, and nonzero vectors at Stages 4 and 5. PR: `PR_LINK_PLACEHOLDER`; tests: `test_openai_embedding_response_rejects_malformed_batches`, `test_pipeline_validates_injected_embedding_batches_at_every_stage`.
-- [x] Persist only a stable, allowlisted provider failure summary while retaining the original exception chain in memory. PR: `PR_LINK_PLACEHOLDER`; test: `test_provider_failure_persists_only_sanitized_causal_summary`.
+- [x] Revalidate copied inputs and reject impossible unlabeled-count/effective-route cluster allocations in Stage 1 before rubric or embedding calls. PR: `PR_LINK_PLACEHOLDER`; tests: `test_stage_one_revalidates_each_copied_input_before_provider_calls`, `test_stage_one_rejects_infeasible_clustering_before_provider_calls`, `test_stage_one_accepts_one_cluster_per_record_and_effective_route`.
+- [x] Validate raw and injected embedding batches for exact count and unique indices, finite real non-boolean coordinates, consistent positive dimension, and nonzero vectors at Stages 4 and 5. PR: `PR_LINK_PLACEHOLDER`; tests: `test_openai_embedding_response_rejects_malformed_batches`, `test_openai_embedding_provider_rejects_cross_batch_dimension_drift`, `test_pipeline_validates_injected_embedding_batches_at_every_stage`.
+- [x] Persist only a stable, allowlisted provider failure summary while retaining the original exception chain in memory. PR: `PR_LINK_PLACEHOLDER`; tests: `test_provider_failure_persists_only_sanitized_causal_summary`, `test_provider_failure_never_persists_dynamic_exception_class_name`.
 - [x] Restore documented defaults when persisted fields are absent while preserving the explicit-null decision. PR: `PR_LINK_PLACEHOLDER`; test: `test_config_round_trip_distinguishes_missing_ratio_from_explicit_null`.
 - [x] Make individual JSON, JSONL, Markdown/text, copy, event, and history writes failure-safe and clean temporary files; do not represent this as a multi-file transaction. PR: `PR_LINK_PLACEHOLDER`; tests: `test_atomic_jsonl_preserves_existing_bytes_and_cleans_temp_on_generator_failure`, `test_layout_writers_preserve_previous_artifact_when_replace_fails`, `test_markdown_reports_preserve_previous_artifact_when_replace_fails`.
 - [ ] Record code and prompt fingerprints, resolved defaults, provider/API revisions, request/response IDs, random settings, usage, and stage fingerprints (Task 10 for published traceability).

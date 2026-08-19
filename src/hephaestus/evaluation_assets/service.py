@@ -150,7 +150,7 @@ class EvaluationAssetRunManager:
         try:
             pipeline.run()
         except Exception:
-            # The pipeline persists the full error and failed stage before raising.
+            # The pipeline persists the safe failed-stage/error-summary contract.
             return
         finally:
             with self._lock:
