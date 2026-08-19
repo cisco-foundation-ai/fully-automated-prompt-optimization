@@ -1513,13 +1513,11 @@ def test_extension_rejects_unauthorized_addition_before_initializing_child(
     tenants_root = tmp_path / "tenants"
     feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
     parent = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
-    state = parent.initialize(
+    parent.initialize(
         EvaluationAssetConfig(tenant_id="tenant_a"),
         feedback,
         unlabeled,
     )
-    state.status = "completed"
-    parent.save_state(state)
     other_feedback = (
         tenants_root / "tenant_b" / "source_artifacts" / "feedback.jsonl"
     )
@@ -1568,13 +1566,11 @@ def test_service_create_and_extend_share_tenant_source_boundary(
     ).exists()
 
     parent = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
-    state = parent.initialize(
+    parent.initialize(
         EvaluationAssetConfig(tenant_id="tenant_a"),
         feedback,
         unlabeled,
     )
-    state.status = "completed"
-    parent.save_state(state)
     with pytest.raises(ValueError, match="selected tenant"):
         manager.extend(
             "tenant_a",
@@ -1822,7 +1818,7 @@ def test_extend_asset_keeps_clustering_and_extracts_only_new_rubrics(
         embedding_provider=FakeEmbeddingProvider(),
     ).run()
 
-    assert child_state.status == "completed"
+    assert child_state.status == "released"
     assert child_provider.feedback_record_ids == ["u1"]
     assert child_layout.artifact_path(
         PipelineStage.INTENT_CLUSTERING,
@@ -1892,7 +1888,7 @@ def test_extend_asset_refreshes_clustering_for_new_unlabeled_records(
         embedding_provider=FakeEmbeddingProvider(),
     ).run()
 
-    assert state.status == "completed"
+    assert state.status == "released"
     assert child_provider.feedback_record_ids == []
     assert state.counts["unlabeled_records"] == 3
     assert state.counts["intent_clusters"] == 2
@@ -2088,7 +2084,7 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
     state = pipeline.run()
     layout = pipeline.layout
 
-    assert state.status == "completed"
+    assert state.status == "released"
     assert all(stage.status == "completed" for stage in state.stages)
     assert layout.feedback_path.exists()
     assert layout.unlabeled_path.exists()

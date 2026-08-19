@@ -9,11 +9,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import shutil
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, Iterator, Mapping, Optional, Sequence
+
+from filelock import FileLock, Timeout
 
 from src.hephaestus.artifact_io import (
     atomic_append_jsonl,
@@ -24,10 +27,25 @@ from src.hephaestus.artifact_io import (
 from src.hephaestus.artifact_io import (
     atomic_write_text as atomic_write_text,
 )
+from src.hephaestus.evaluation_assets.durability import (
+    STAGE_SPECIFICATIONS,
+    EvaluationAssetBusyError,
+    EvaluationAssetImmutableError,
+    EvaluationAssetIntegrityError,
+    EvaluationAssetLegacyError,
+    build_stage_receipt,
+    file_sha256,
+    persisted_json_sha256,
+    released_parent_evidence,
+    validate_legacy_release_candidate,
+    verify_receipt_chain,
+    verify_released_asset,
+)
 from src.hephaestus.evaluation_assets.input_contract import validate_input_records
 from src.hephaestus.evaluation_assets.models import (
     CONFIG_STAGE_DEPENDENCIES,
     STAGE_COUNT_KEYS,
+    STATE_SCHEMA_VERSION,
     EvaluationAssetConfig,
     PipelineStage,
     PipelineState,
@@ -93,6 +111,39 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _fault_point(name: str) -> None:
+    """Provide a deterministic test seam between durable transaction phases."""
+
+
+@contextmanager
+def _ordered_asset_locks(
+    layouts: Sequence["EvaluationAssetLayout"],
+    timeout: float,
+) -> Iterator[None]:
+    """Acquire unique asset locks by sorted absolute path and release in reverse."""
+    ordered = sorted(
+        {str(layout.lock_path.absolute()): layout for layout in layouts}.items()
+    )
+    acquired: list[FileLock] = []
+    current: Optional[EvaluationAssetLayout] = None
+    try:
+        for lock_name, current in ordered:
+            current.lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock = FileLock(lock_name, timeout=timeout)
+            try:
+                lock.acquire()
+            except Timeout as exc:
+                raise EvaluationAssetBusyError(
+                    current.tenant_id,
+                    current.asset_id,
+                ) from exc
+            acquired.append(lock)
+        yield
+    finally:
+        for lock in reversed(acquired):
+            lock.release()
+
+
 @dataclass(frozen=True)
 class EvaluationAssetLayout:
     """Canonical self-contained layout for one tenant asset version."""
@@ -120,8 +171,33 @@ class EvaluationAssetLayout:
         return self.assets_root / self.asset_id
 
     @property
+    def lock_path(self) -> Path:
+        """Return the deterministic collection-level lock for this asset."""
+        return self.assets_root / ".locks" / f"{self.asset_id}.lock"
+
+    @contextmanager
+    def asset_lock(self, timeout: float = 0) -> Iterator[None]:
+        """Hold the cross-process mutation lock for this asset."""
+        with _ordered_asset_locks((self,), timeout):
+            yield
+
+    @property
     def stages_root(self) -> Path:
         return self.root / "stages"
+
+    @property
+    def receipts_root(self) -> Path:
+        return self.root / "receipts"
+
+    def receipt_path(self, stage: PipelineStage | str) -> Path:
+        """Return the commit-marker path for one ordered stage."""
+        stage_name = stage.value if isinstance(stage, PipelineStage) else str(stage)
+        try:
+            stage_value = PipelineStage(stage_name)
+        except ValueError as exc:
+            raise ValueError(f"Unknown evaluation asset stage: {stage_name}") from exc
+        index = list(PipelineStage).index(stage_value) + 1
+        return self.receipts_root / f"{index:02d}_{stage_name}.json"
 
     @property
     def uses_stage_layout(self) -> bool:
@@ -232,6 +308,10 @@ class EvaluationAssetLayout:
         return self.root / "config_history.jsonl"
 
     @property
+    def recovery_journal_path(self) -> Path:
+        return self.root / "recovery_journal.jsonl"
+
+    @property
     def lineage_path(self) -> Path:
         return self.root / "lineage.json"
 
@@ -309,8 +389,30 @@ class EvaluationAssetLayout:
         config: EvaluationAssetConfig,
         feedback_source: Path,
         unlabeled_source: Path,
+        *,
+        initial_status: str = "draft",
+        lock_timeout: float = 0,
     ) -> PipelineState:
         """Copy raw inputs into the asset and persist initial config/state."""
+        with self.asset_lock(lock_timeout):
+            return self._initialize_locked(
+                config,
+                feedback_source,
+                unlabeled_source,
+                initial_status=initial_status,
+            )
+
+    def _initialize_locked(
+        self,
+        config: EvaluationAssetConfig,
+        feedback_source: Path,
+        unlabeled_source: Path,
+        *,
+        initial_status: str,
+    ) -> PipelineState:
+        """Initialize while the caller holds :attr:`lock_path`."""
+        if initial_status not in {"draft", "queued"}:
+            raise ValueError("initial_status must be draft or queued")
         if self.config_path.exists() or self.state_path.exists():
             raise FileExistsError(f"Evaluation asset already exists: {self.root}")
         feedback_source = self.resolve_input_source(feedback_source)
@@ -322,6 +424,7 @@ class EvaluationAssetLayout:
         _copy_jsonl(unlabeled_source, self.unlabeled_path)
         timestamp = utc_now()
         state = PipelineState.new(config, timestamp)
+        state.status = initial_status
         atomic_write_json(self.config_path, config.to_dict())
         atomic_write_json(self.state_path, state.to_dict())
         self._append_config_revision(
@@ -343,19 +446,37 @@ class EvaluationAssetLayout:
         additional_unlabeled: Optional[Path],
         clustering_mode: str,
         config_updates: Optional[Mapping[str, Any]] = None,
+        lock_timeout: float = 0,
     ) -> PipelineState:
-        """Create a new immutable asset version from a completed parent."""
+        """Create a child only after verifying its immutable released parent."""
+        with _ordered_asset_locks((parent, self), lock_timeout):
+            parent._recover_locked()
+            return self._initialize_extension_locked(
+                parent,
+                additional_feedback=additional_feedback,
+                additional_unlabeled=additional_unlabeled,
+                clustering_mode=clustering_mode,
+                config_updates=config_updates,
+            )
+
+    def _initialize_extension_locked(
+        self,
+        parent: "EvaluationAssetLayout",
+        *,
+        additional_feedback: Optional[Path],
+        additional_unlabeled: Optional[Path],
+        clustering_mode: str,
+        config_updates: Optional[Mapping[str, Any]],
+    ) -> PipelineState:
+        """Initialize an extension while both parent and child locks are held."""
         if clustering_mode not in {"keep", "refresh"}:
             raise ValueError("clustering_mode must be 'keep' or 'refresh'")
         if parent.tenant_id != self.tenant_id:
             raise ValueError("parent and child assets must belong to the same tenant")
         if parent.asset_id == self.asset_id:
             raise ValueError("extended asset must use a new asset_id")
-        if parent.load_state().status != "completed":
-            raise ValueError("parent evaluation asset must be completed")
         if self.config_path.exists() or self.state_path.exists():
             raise FileExistsError(f"Evaluation asset already exists: {self.root}")
-
         resolved_feedback = (
             self.resolve_input_source(additional_feedback)
             if additional_feedback is not None
@@ -385,6 +506,17 @@ class EvaluationAssetLayout:
                 "keep clustering accepts labeled additions only; "
                 "use refresh when adding unlabeled records"
             )
+
+        parent_state = parent.load_state()
+        if parent_state.legacy_completed:
+            raise EvaluationAssetLegacyError(
+                parent.tenant_id,
+                parent.asset_id,
+                "explicit verification and adoption are required before extension",
+            )
+        if parent_state.status != "released":
+            raise ValueError("parent evaluation asset must be released")
+        parent_release = released_parent_evidence(parent, parent_state)
 
         parent_config = parent.load_config()
         merged_config = parent_config.to_dict()
@@ -529,26 +661,6 @@ class EvaluationAssetLayout:
 
         timestamp = utc_now()
         state = PipelineState.new(config, timestamp)
-        if clustering_mode == "keep":
-            stage_state = next(
-                item
-                for item in state.stages
-                if item.stage == PipelineStage.INTENT_CLUSTERING.value
-            )
-            stage_state.status = "completed"
-            stage_state.started_at = timestamp
-            stage_state.completed_at = timestamp
-            stage_state.message = (
-                f"Reused from parent asset {parent.asset_id}"
-            )
-            state.counts["intent_clusters"] = len(
-                _read_jsonl_rows(
-                    self.artifact_path(
-                        PipelineStage.INTENT_CLUSTERING,
-                        "intent_inventory.jsonl",
-                    )
-                )
-            )
 
         lineage = {
             "asset_id": self.asset_id,
@@ -556,6 +668,7 @@ class EvaluationAssetLayout:
             "creation_mode": "incremental_feedback",
             "clustering_mode": clustering_mode,
             "created_at": timestamp,
+            "parent_release": parent_release,
             "added_labeled_record_ids": [
                 str(row["record_id"]) for row in extra_feedback
             ],
@@ -573,6 +686,7 @@ class EvaluationAssetLayout:
         }
         reuse_manifest = {
             "parent_asset_id": parent.asset_id,
+            "parent_release": parent_release,
             "parent_snapshot": {
                 "path": self.parent_snapshot.relative_to(self.root).as_posix(),
                 "artifacts": snapshot_artifacts,
@@ -618,6 +732,126 @@ class EvaluationAssetLayout:
         )
         return state
 
+    def adopt_legacy(self, *, lock_timeout: float = 0) -> PipelineState:
+        """Verify and explicitly adopt one pre-v2 completed asset."""
+        with self.asset_lock(lock_timeout):
+            recovered = self._recover_locked()
+            state = self.load_state()
+            if state.status == "released":
+                verify_released_asset(self, state)
+                if recovered:
+                    return state
+                raise EvaluationAssetImmutableError(self.tenant_id, self.asset_id)
+            if not state.legacy_completed:
+                raise EvaluationAssetLegacyError(
+                    self.tenant_id,
+                    self.asset_id,
+                    "only a pre-v2 completed state can be adopted",
+                )
+            try:
+                _validate_source_rows(self.feedback_path, labeled=True)
+                _validate_source_rows(self.unlabeled_path, labeled=False)
+                config = self.load_config()
+                counts = validate_legacy_release_candidate(
+                    self,
+                    state,
+                    config,
+                )
+                receipts: dict[PipelineStage, dict[str, Any]] = {}
+                timestamp = utc_now()
+                for stage in PipelineStage:
+                    stage_state = next(
+                        item for item in state.stages if item.stage == stage.value
+                    )
+                    completed_at = (
+                        stage_state.completed_at or state.updated_at or timestamp
+                    )
+                    stage_counts = {
+                        key: counts[key] for key in STAGE_COUNT_KEYS[stage]
+                    }
+                    receipts[stage] = build_stage_receipt(
+                        self,
+                        stage,
+                        config,
+                        stage_counts,
+                        completed_at=completed_at,
+                        prompt_values={},
+                        origin="legacy_adoption",
+                        historical_unavailable=True,
+                        upstream_receipts=receipts,
+                    )
+            except EvaluationAssetLegacyError:
+                raise
+            except (
+                EvaluationAssetIntegrityError,
+                KeyError,
+                OSError,
+                TypeError,
+                UnicodeError,
+                ValueError,
+            ) as exc:
+                raise EvaluationAssetLegacyError(
+                    self.tenant_id,
+                    self.asset_id,
+                    "required stage artifacts or manifests failed verification",
+                ) from exc
+
+            operation_id = uuid.uuid4().hex
+            target_state = PipelineState.from_dict(state.to_dict())
+            target_state.schema_version = STATE_SCHEMA_VERSION
+            target_state.status = "released"
+            target_state.current_stage = None
+            target_state.error = None
+            target_state.counts = counts
+            target_state.updated_at = timestamp
+            target_state.mutation_sequence = state.mutation_sequence + 1
+            target_state.last_operation_id = operation_id
+            for stage in PipelineStage:
+                stage_state = next(
+                    item
+                    for item in target_state.stages
+                    if item.stage == stage.value
+                )
+                stage_state.receipt_sha256 = persisted_json_sha256(
+                    receipts[stage]
+                )
+            event_entry = {
+                "timestamp": timestamp,
+                "event": "legacy_asset_adopted",
+                "tenant_id": self.tenant_id,
+                "asset_id": self.asset_id,
+                "operation_id": operation_id,
+                "details": {"previous_status": "completed"},
+            }
+            prepared = {
+                "schema_version": "fapo-recovery-journal-v1",
+                "operation_id": operation_id,
+                "kind": "legacy_adoption",
+                "phase": "prepared",
+                "prepared_at": timestamp,
+                "before": {
+                    "config_sha256": file_sha256(self.config_path),
+                    "state_sha256": file_sha256(self.state_path),
+                },
+                "target_receipts": {
+                    stage.value: receipts[stage] for stage in PipelineStage
+                },
+                "target_state": target_state.to_dict(),
+                "event_entry": event_entry,
+                "result": {"status": "released"},
+            }
+            self._append_journal_once(prepared)
+            _fault_point("after_prepared_journal")
+            self._install_adoption_receipts(prepared)
+            _fault_point("after_receipts_install")
+            verify_receipt_chain(self, target_state)
+            atomic_write_json(self.state_path, target_state.to_dict())
+            _fault_point("after_state_replace")
+            self._append_jsonl_once(self.events_path, event_entry)
+            _fault_point("after_event_append")
+            self._commit_journal_operation(prepared)
+            return target_state
+
     def load_config(self) -> EvaluationAssetConfig:
         """Load this asset's persisted configuration."""
         return EvaluationAssetConfig.from_dict(read_json(self.config_path))
@@ -631,8 +865,29 @@ class EvaluationAssetLayout:
         state.updated_at = utc_now()
         atomic_write_json(self.state_path, state.to_dict())
 
-    def revise_config(self, updates: Mapping[str, Any]) -> Dict[str, Any]:
+    def revise_config(
+        self,
+        updates: Mapping[str, Any],
+        *,
+        lock_timeout: float = 0,
+    ) -> Dict[str, Any]:
         """Persist decision changes and invalidate their dependent stages."""
+        with self.asset_lock(lock_timeout):
+            self._recover_locked()
+            return self._revise_config_locked(updates)
+
+    def _revise_config_locked(self, updates: Mapping[str, Any]) -> Dict[str, Any]:
+        """Revise configuration while the caller holds the asset lock."""
+        state = self.load_state()
+        if state.status == "released":
+            verify_released_asset(self, state)
+            raise EvaluationAssetImmutableError(self.tenant_id, self.asset_id)
+        if state.legacy_completed:
+            raise EvaluationAssetLegacyError(
+                self.tenant_id,
+                self.asset_id,
+                "explicit verification and adoption are required before revision",
+            )
         current = self.load_config()
         unknown = set(updates) - set(CONFIG_STAGE_DEPENDENCIES)
         if unknown:
@@ -664,25 +919,6 @@ class EvaluationAssetLayout:
             key=ordered_stages.index,
         )
         invalidated = ordered_stages[ordered_stages.index(earliest) :]
-        self._clear_stage_outputs(invalidated)
-
-        state = self.load_state()
-        invalidated_names = {stage.value for stage in invalidated}
-        invalidated_count_keys = {
-            key for stage in invalidated for key in STAGE_COUNT_KEYS[stage]
-        }
-        state.counts = {
-            key: value
-            for key, value in state.counts.items()
-            if key not in invalidated_count_keys
-        }
-        for stage_state in state.stages:
-            if stage_state.stage not in invalidated_names:
-                continue
-            stage_state.status = "pending"
-            stage_state.message = ""
-            stage_state.started_at = None
-            stage_state.completed_at = None
         resume_stage = next(
             (
                 stage
@@ -694,37 +930,266 @@ class EvaluationAssetLayout:
             ),
             earliest,
         )
-        state.status = "queued"
-        state.current_stage = resume_stage.value
-        state.error = None
-
-        atomic_write_json(self.config_path, revised.to_dict())
-        self.save_state(state)
         revision = self._config_revision_count() + 1
-        entry = {
-            "timestamp": utc_now(),
+        operation_id = uuid.uuid4().hex
+        timestamp = utc_now()
+        target_state = self._target_invalidated_state(
+            state,
+            invalidated,
+            resume_stage=resume_stage,
+            operation_id=operation_id,
+            timestamp=timestamp,
+        )
+        history_entry = {
+            "timestamp": timestamp,
             "revision": revision,
             "event": "configuration_updated",
+            "operation_id": operation_id,
             "changed_fields": changes,
             "invalidated_from_stage": earliest.value,
             "resume_from_stage": resume_stage.value,
         }
-        self._append_config_revision(entry)
-        self.append_event(
-            "configuration_updated",
-            {
+        event_entry = {
+            "timestamp": timestamp,
+            "event": "configuration_updated",
+            "tenant_id": self.tenant_id,
+            "asset_id": self.asset_id,
+            "operation_id": operation_id,
+            "details": {
                 "revision": revision,
                 "changed_fields": changes,
                 "invalidated_from_stage": earliest.value,
                 "resume_from_stage": resume_stage.value,
             },
-        )
-        return {
+        }
+        result = {
             "changed_fields": changes,
             "invalidated_from_stage": earliest.value,
             "resume_from_stage": resume_stage.value,
             "revision": revision,
         }
+        prepared = {
+            "schema_version": "fapo-recovery-journal-v1",
+            "operation_id": operation_id,
+            "kind": "configuration_revision",
+            "phase": "prepared",
+            "prepared_at": timestamp,
+            "before": {
+                "config_sha256": file_sha256(self.config_path),
+                "state_sha256": file_sha256(self.state_path),
+            },
+            "target_config": revised.to_dict(),
+            "target_state": target_state.to_dict(),
+            "history_entry": history_entry,
+            "event_entry": event_entry,
+            "invalidated_stages": [stage.value for stage in invalidated],
+            "result": result,
+        }
+        self._append_journal_once(prepared)
+        _fault_point("after_prepared_journal")
+        atomic_write_json(self.config_path, revised.to_dict())
+        _fault_point("after_config_replace")
+        atomic_write_json(self.state_path, target_state.to_dict())
+        _fault_point("after_state_replace")
+        self._append_jsonl_once(self.config_history_path, history_entry)
+        _fault_point("after_history_append")
+        self._append_jsonl_once(self.events_path, event_entry)
+        _fault_point("after_event_append")
+        _fault_point("before_cleanup")
+        self._clear_stage_outputs(invalidated)
+        self._commit_journal_operation(prepared)
+        return result
+
+    def recover(self, *, lock_timeout: float = 0) -> list[str]:
+        """Roll every prepared recovery operation forward exactly once."""
+        with self.asset_lock(lock_timeout):
+            return self._recover_locked()
+
+    def _recover_locked(self) -> list[str]:
+        """Recover prepared operations while the caller holds the asset lock."""
+        entries = self._read_control_log(self.recovery_journal_path)
+        committed = {
+            str(row.get("operation_id"))
+            for row in entries
+            if row.get("phase") == "committed"
+        }
+        recovered: list[str] = []
+        for entry in entries:
+            operation_id = str(entry.get("operation_id") or "")
+            if entry.get("phase") != "prepared" or operation_id in committed:
+                continue
+            self._roll_forward_prepared(entry)
+            recovered.append(operation_id)
+            committed.add(operation_id)
+        return recovered
+
+    def _roll_forward_prepared(self, entry: Mapping[str, Any]) -> None:
+        kind = entry.get("kind")
+        if kind == "legacy_adoption":
+            self._install_adoption_receipts(entry)
+            target_state = entry.get("target_state")
+            if not isinstance(target_state, Mapping):
+                raise EvaluationAssetIntegrityError(
+                    self.tenant_id,
+                    self.asset_id,
+                    "the recovery journal is missing target state",
+                )
+            recovered_state = PipelineState.from_dict(target_state)
+            verify_receipt_chain(self, recovered_state)
+            atomic_write_json(self.state_path, target_state)
+            event_entry = entry.get("event_entry")
+            if isinstance(event_entry, Mapping):
+                self._append_jsonl_once(self.events_path, event_entry)
+            self._commit_journal_operation(entry)
+            return
+        if kind not in {"configuration_revision", "checkpoint_rebuild"}:
+            raise EvaluationAssetIntegrityError(
+                self.tenant_id,
+                self.asset_id,
+                "the recovery journal contains an unsupported operation",
+            )
+        target_config = entry.get("target_config")
+        if isinstance(target_config, Mapping):
+            atomic_write_json(self.config_path, target_config)
+        target_state = entry.get("target_state")
+        if not isinstance(target_state, Mapping):
+            raise EvaluationAssetIntegrityError(
+                self.tenant_id,
+                self.asset_id,
+                "the recovery journal is missing target state",
+            )
+        atomic_write_json(self.state_path, target_state)
+        history_entry = entry.get("history_entry")
+        if isinstance(history_entry, Mapping):
+            self._append_jsonl_once(self.config_history_path, history_entry)
+        event_entry = entry.get("event_entry")
+        if isinstance(event_entry, Mapping):
+            self._append_jsonl_once(self.events_path, event_entry)
+        invalidated = entry.get("invalidated_stages")
+        if not isinstance(invalidated, list):
+            raise EvaluationAssetIntegrityError(
+                self.tenant_id,
+                self.asset_id,
+                "the recovery journal is missing its cleanup boundary",
+            )
+        try:
+            stages = [PipelineStage(str(stage)) for stage in invalidated]
+        except ValueError as exc:
+            raise EvaluationAssetIntegrityError(
+                self.tenant_id,
+                self.asset_id,
+                "the recovery journal has an invalid cleanup boundary",
+            ) from exc
+        self._clear_stage_outputs(stages)
+        self._commit_journal_operation(entry)
+
+    def _install_adoption_receipts(self, entry: Mapping[str, Any]) -> None:
+        receipts = entry.get("target_receipts")
+        if not isinstance(receipts, Mapping) or set(receipts) != {
+            stage.value for stage in PipelineStage
+        }:
+            raise EvaluationAssetIntegrityError(
+                self.tenant_id,
+                self.asset_id,
+                "the recovery journal has an incomplete receipt set",
+            )
+        for stage in PipelineStage:
+            receipt = receipts.get(stage.value)
+            if not isinstance(receipt, Mapping):
+                raise EvaluationAssetIntegrityError(
+                    self.tenant_id,
+                    self.asset_id,
+                    "the recovery journal has an invalid receipt",
+                )
+            atomic_write_json(self.receipt_path(stage), receipt)
+
+    def _commit_journal_operation(self, prepared: Mapping[str, Any]) -> None:
+        self._append_journal_once(
+            {
+                "schema_version": "fapo-recovery-journal-v1",
+                "operation_id": str(prepared["operation_id"]),
+                "kind": str(prepared["kind"]),
+                "phase": "committed",
+                "committed_at": utc_now(),
+            }
+        )
+
+    def _append_journal_once(self, payload: Mapping[str, Any]) -> None:
+        self._append_jsonl_once(
+            self.recovery_journal_path,
+            payload,
+            identity_fields=("operation_id", "phase"),
+        )
+
+    def _append_jsonl_once(
+        self,
+        path: Path,
+        payload: Mapping[str, Any],
+        *,
+        identity_fields: Sequence[str] = ("operation_id",),
+    ) -> None:
+        identity = tuple(payload.get(field) for field in identity_fields)
+        if any(
+            tuple(row.get(field) for field in identity_fields) == identity
+            for row in self._read_control_log(path)
+        ):
+            return
+        atomic_append_jsonl(path, payload)
+
+    def _read_control_log(self, path: Path) -> list[Dict[str, Any]]:
+        if not path.is_file():
+            return []
+        rows: list[Dict[str, Any]] = []
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                if not isinstance(row, dict):
+                    raise ValueError("control row is not an object")
+                rows.append(row)
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+            raise EvaluationAssetIntegrityError(
+                self.tenant_id,
+                self.asset_id,
+                "a durable control log is malformed",
+            ) from exc
+        return rows
+
+    def _target_invalidated_state(
+        self,
+        state: PipelineState,
+        invalidated: Sequence[PipelineStage],
+        *,
+        resume_stage: PipelineStage,
+        operation_id: str,
+        timestamp: str,
+    ) -> PipelineState:
+        target = PipelineState.from_dict(state.to_dict())
+        invalidated_names = {stage.value for stage in invalidated}
+        invalidated_count_keys = {
+            key for stage in invalidated for key in STAGE_COUNT_KEYS[stage]
+        }
+        target.counts = {
+            key: value
+            for key, value in target.counts.items()
+            if key not in invalidated_count_keys
+        }
+        for stage_state in target.stages:
+            if stage_state.stage not in invalidated_names:
+                continue
+            stage_state.status = "pending"
+            stage_state.message = ""
+            stage_state.started_at = None
+            stage_state.completed_at = None
+            stage_state.receipt_sha256 = None
+        target.status = "queued"
+        target.current_stage = resume_stage.value
+        target.error = None
+        target.updated_at = timestamp
+        target.mutation_sequence += 1
+        target.last_operation_id = operation_id
+        return target
 
     def config_revision_summary(self) -> Dict[str, Any]:
         """Return bounded configuration revision metadata for the Studio."""
@@ -767,29 +1232,76 @@ class EvaluationAssetLayout:
     def _clear_stage_outputs(self, stages: Iterable[PipelineStage]) -> None:
         stages = tuple(stages)
         for stage in stages:
-            if self.uses_stage_layout:
-                directory = self.stage_directory(stage)
-                if directory.exists():
-                    shutil.rmtree(directory)
-                directory.mkdir(parents=True, exist_ok=True)
-                continue
-            if stage == PipelineStage.DATASET_SPLITS:
-                directory = self.root / "dataset_splits"
-                if directory.exists():
-                    shutil.rmtree(directory)
-                directory.mkdir(parents=True, exist_ok=True)
-                continue
-            for relative_name in STAGE_ARTIFACTS.get(stage, ()):
+            specification = STAGE_SPECIFICATIONS[stage]
+            relative_names = list(specification.required_outputs)
+            relative_names.extend(specification.legacy_required_outputs)
+            if stage == PipelineStage.INTENT_CLUSTERING:
+                relative_names.append("cluster_lineage.jsonl")
+            for relative_name in relative_names:
                 path = self.artifact_path(stage, relative_name)
                 if path.is_file():
                     path.unlink()
-        if PipelineStage.DATASET_SPLITS in stages and self.manifest_path.is_file():
-            self.manifest_path.unlink()
-        if (
-            PipelineStage.DATASET_SPLITS in stages
-            and self.published_datasets.is_dir()
-        ):
-            shutil.rmtree(self.published_datasets)
+            for relative_name in specification.required_asset_outputs:
+                path = self.root / relative_name
+                if path.is_file():
+                    path.unlink()
+            for relative_name in specification.required_catalog_outputs:
+                path = self.published_datasets / relative_name
+                if path.is_file():
+                    path.unlink()
+            self.receipt_path(stage).unlink(missing_ok=True)
+        try:
+            self.published_datasets.rmdir()
+        except OSError:
+            pass
+
+    def _invalidate_checkpoints_locked(
+        self,
+        state: PipelineState,
+        boundary: PipelineStage,
+    ) -> PipelineState:
+        """Make a stage suffix nonauthoritative before best-effort cleanup."""
+        ordered_stages = list(PipelineStage)
+        invalidated = ordered_stages[ordered_stages.index(boundary) :]
+        operation_id = uuid.uuid4().hex
+        timestamp = utc_now()
+        target_state = self._target_invalidated_state(
+            state,
+            invalidated,
+            resume_stage=boundary,
+            operation_id=operation_id,
+            timestamp=timestamp,
+        )
+        event_entry = {
+            "timestamp": timestamp,
+            "event": "checkpoint_rebuild_started",
+            "tenant_id": self.tenant_id,
+            "asset_id": self.asset_id,
+            "operation_id": operation_id,
+            "details": {"stage": boundary.value},
+        }
+        prepared = {
+            "schema_version": "fapo-recovery-journal-v1",
+            "operation_id": operation_id,
+            "kind": "checkpoint_rebuild",
+            "phase": "prepared",
+            "prepared_at": timestamp,
+            "before": {"state_sha256": file_sha256(self.state_path)},
+            "target_state": target_state.to_dict(),
+            "event_entry": event_entry,
+            "invalidated_stages": [stage.value for stage in invalidated],
+            "result": {"resume_from_stage": boundary.value},
+        }
+        self._append_journal_once(prepared)
+        _fault_point("after_prepared_journal")
+        atomic_write_json(self.state_path, target_state.to_dict())
+        _fault_point("after_state_replace")
+        self._append_jsonl_once(self.events_path, event_entry)
+        _fault_point("after_event_append")
+        _fault_point("before_cleanup")
+        self._clear_stage_outputs(invalidated)
+        self._commit_journal_operation(prepared)
+        return target_state
 
     def artifact_summary(self) -> Dict[str, Any]:
         """Return API-safe paths and file counts for the canonical directories."""

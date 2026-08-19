@@ -230,6 +230,39 @@ def test_extend_evaluation_asset_endpoint_accepts_refresh_plan(
     )
 
 
+def test_adopt_evaluation_asset_endpoint_uses_thin_service_api(
+    tmp_path: Path,
+) -> None:
+    class FakeManager:
+        received = None
+
+        def adopt(self, tenant_id, asset_id):
+            self.received = (tenant_id, asset_id)
+            return {"status": "released", "asset_id": asset_id}
+
+    manager = FakeManager()
+    handler = type(
+        "_TestHandler",
+        (_Handler,),
+        {"store": TenantStore(tmp_path / "tenants"), "asset_manager": manager},
+    )
+    instance = object.__new__(handler)
+    sent = {}
+    instance._send_json = lambda body, status=200: sent.update(
+        {"body": body, "status": status}
+    )
+
+    instance._route_adopt_evaluation_asset(
+        {"tenant": "tenant_a", "asset": "legacy-v1"}
+    )
+
+    assert manager.received == ("tenant_a", "legacy-v1")
+    assert sent == {
+        "body": {"status": "released", "asset_id": "legacy-v1"},
+        "status": 202,
+    }
+
+
 def test_serve_rejects_non_loopback_bind_before_server_start(
     tmp_path: Path,
     monkeypatch,

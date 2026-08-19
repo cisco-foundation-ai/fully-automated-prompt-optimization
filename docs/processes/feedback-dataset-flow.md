@@ -31,7 +31,7 @@ The workflow has three entry points backed by the same persisted state:
 | Entry point | Use |
 |---|---|
 | Evaluation Asset Studio at `/evaluation-assets/` | Create assets, choose models, cluster count, and match threshold, inspect every pipeline stage, preview artifacts, monitor progress, and resume failures |
-| `python -m hephaestus.cli assets ...` | Scriptable create, run, status, and resume-compatible execution |
+| `python -m hephaestus.cli assets ...` | Scriptable create, run/resume, status, verified extension, and explicit legacy adoption |
 | Evaluation Asset Assistant (`.claude/agents/` or `.codex/agents/`) | Trigger the core workflow, poll state, validate artifacts, diagnose failures, and explain human review decisions |
 
 FAPO Explorer remains at `/`. It shows a read-only evaluation-asset summary and
@@ -102,10 +102,15 @@ canonical folder, and behavior are **Evaluation guideline creation**. Existing
 legacy contract.
 
 Every stage persists `pending`, `running`, `completed`, or `failed`, timestamps,
-a human-readable message, and cumulative counts. `events.jsonl` provides an
-append-only operational history. A failure preserves completed checkpoints;
-after its cause is corrected, rerunning resumes from the first incomplete
-stage.
+a human-readable message, cumulative counts, and the hash of its atomic receipt
+commit marker. The top-level asset lifecycle is separately restricted to
+`draft`, `queued`, `running`, `awaiting_review`, `released`, or `failed`.
+`completed` is accepted only as a visible pre-v2 legacy sentinel and is never
+written for a new build or silently treated as released. `events.jsonl`
+provides append-only operational history. A mutable resume verifies the
+completed receipt prefix and rebuilds from the first incomplete or invalid
+stage; a released asset is immutable and fails closed on any receipt or
+artifact mismatch.
 
 Provider transport plus semantic response validation and normalization share
 one sanitized boundary. Failures retain their original exception as an
@@ -115,11 +120,18 @@ allowlisted causal summary. Raw provider messages, request/response bodies,
 credentials, and arbitrary payload text are never persisted.
 
 Individual Studio JSON, JSONL, Markdown/text, copied, event, and configuration
-history files use same-directory temporary files, flush and `fsync`, and
-`os.replace`. A failed producer, serializer, copy, or replacement leaves the
-previous single file intact and removes its temporary file. This is a
-single-file guarantee; generation-wide publication, state/pointer agreement,
-locking, and multi-file recovery remain separate lifecycle work.
+history files use same-directory temporary files, flush and `fsync`,
+`os.replace`, and a POSIX parent-directory sync. A failed producer, serializer,
+copy, or pre-replacement write leaves the previous single file intact and
+removes its temporary file. One deterministic collection-level file lock per
+asset protects every high-level mutation across processes. Configuration
+revision, checkpoint rebuild, and legacy adoption use an append-only recovery
+journal whose prepared payload rolls forward idempotently.
+
+These are single-file and authority-ordering guarantees. Stage 8 verifies all
+four current catalog copies before `released`, but Task 3 does not make those
+four replacements one atomic publication switch. Content-addressed generations
+and the final atomic release pointer are separate release-publication work.
 
 ### Updating decisions on resume
 
@@ -129,12 +141,16 @@ set of decisions. The Studio's **Edit decisions & resume** form and optional
 
 1. Validate the requested settings and compare them with `config.json`.
 2. Select the earliest stage affected by an actual change.
-3. Preserve every earlier completed checkpoint.
-4. Reset the affected stage and all downstream stages to `pending`.
-5. Remove their stale artifacts and the stale final manifest.
+3. Verify and preserve every earlier receipt-backed checkpoint.
+4. Durably append a prepared recovery operation containing the complete target
+   configuration, state, audit rows, and cleanup boundary.
+5. Replace the configuration and state, marking the affected suffix `pending`
+   and clearing its receipt references.
 6. Append the old and new values plus the restart stage to
    `config_history.jsonl` and `events.jsonl`.
-7. Resume the normal core runner.
+7. Remove stale suffix artifacts and receipts, then commit the journal operation.
+8. Resume the normal core runner. An interruption first rolls the prepared
+   operation forward without duplicating history or events.
 
 | Changed decision | Earliest stage rebuilt |
 |---|---|
@@ -149,13 +165,18 @@ rejected while the same asset has an active background runner. If the pipeline
 already has an incomplete stage earlier than the decision's dependency, the
 audit records both boundaries and execution resumes at that earlier stage.
 
-### Extending a completed asset
+### Extending a released asset
 
 Extension creates a complete new asset version without modifying or rerunning
-the parent version. The child records `lineage.json`, `reuse_manifest.json`,
-and the parent asset ID. The small parent artifacts required for incremental
-comparison are copied into `stages/01_raw_inputs/parent_snapshot/` with hashes,
-so the child has no runtime dependency on the parent directory.
+the parent version. Under parent and child locks acquired by sorted absolute
+lock path, the core first requires `released` and verifies the complete parent
+receipt chain, raw source hashes, lineage/reuse metadata, and every artifact to
+be copied. A legacy `completed` parent points to explicit adoption; corruption
+leaves the child root absent. The child records `lineage.json`,
+`reuse_manifest.json`, the parent Stage 8 receipt hash, released-state hash, and
+source-lineage hash. Parent snapshot artifacts are copied into
+`stages/01_raw_inputs/parent_snapshot/` with hashes, so the child has no runtime
+dependency on the parent directory.
 
 The Studio and `assets extend` CLI expose two modes:
 
@@ -430,10 +451,13 @@ copies; they participate in a separate `customer-data --scope derived` sync
 only when the tenant storage configuration places `datasets/` inside its
 `derived_local` tree.
 
-Assets created before the stage-oriented layout remain readable and resumable
-through the compatibility mapper. They keep their existing `raw_inputs/`,
+Assets created before the stage-oriented layout remain readable through the
+compatibility mapper. Mutable legacy work rebuilds status-only checkpoints
+because no receipt exists. A pre-v2 top-level `completed` asset is not usable as
+a release until explicit adoption validates all eight stages, source hashes,
+manifests, and current catalog copies. Existing `raw_inputs/`,
 `prepared_inputs/`, `decision_assets/`, `review_queues/`, and
-`dataset_splits/` directories and are not migrated automatically.
+`dataset_splits/` directories are not moved.
 
 ## CLI Workflow
 
@@ -490,8 +514,21 @@ python -m hephaestus.cli assets status \
 ```
 
 The Explorer UI calls the same core service. Completed stages are persisted and
-skipped on resume; model settings and the fixed cluster count are recorded in
-the asset manifest.
+skipped only when their receipts verify on resume; model settings and the fixed
+cluster count are recorded in the asset manifest.
+
+Explicitly verify and adopt a legacy top-level `completed` asset:
+
+```bash
+python -m hephaestus.cli assets adopt \
+  --tenant <tenant_id> \
+  --asset-id <legacy_asset_id>
+```
+
+Successful adoption writes historical receipts with unavailable provenance for
+facts the old build did not record, then transitions to `released`. Invalid
+adoption changes no authority and directs the operator to repair or create a
+new asset. The Studio exposes the same locked core operation.
 
 Pass optional decision flags to revise and resume in one command:
 
@@ -717,8 +754,9 @@ Recommended score keys:
 
 ## Downstream Use and Refresh
 
-The eight-stage pipeline ends when the evaluation asset and its dataset splits
-are complete. FAPO can then consume the asset in a separate lifecycle:
+The eight-stage pipeline ends when the evaluation asset and its verified
+dataset splits are `released`. FAPO can then consume the asset in a separate
+lifecycle:
 
 1. Run baseline evaluations against the new dataset version.
 2. Optimize prompts or skills using its training split.

@@ -10,6 +10,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
 
+from src.hephaestus.evaluation_assets.durability import EvaluationAssetBusyError
 from src.hephaestus.evaluation_assets.models import EvaluationAssetConfig
 from src.hephaestus.evaluation_assets.pipeline import EvaluationAssetPipeline
 from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
@@ -40,15 +41,22 @@ class EvaluationAssetRunManager:
                 config,
                 feedback_source,
                 unlabeled_source,
+                initial_status="queued",
             )
+            acquired = threading.Event()
+            result: Dict[str, Exception] = {}
             thread = threading.Thread(
                 target=self._run_pipeline,
-                args=(key, pipeline),
+                args=(key, pipeline, acquired, result, None),
                 name=f"evaluation-asset-{config.tenant_id}-{config.asset_id}",
                 daemon=True,
             )
             self._threads[key] = thread
             thread.start()
+        if not acquired.wait(5):
+            raise RuntimeError("evaluation asset pipeline lock handshake timed out")
+        if "error" in result:
+            raise result["error"]
         return pipeline.layout.load_state().to_dict()
 
     def resume(
@@ -64,28 +72,23 @@ class EvaluationAssetRunManager:
             if existing is not None and existing.is_alive():
                 raise RuntimeError("evaluation asset pipeline is already running")
             layout = EvaluationAssetLayout(self.tenants_root, tenant_id, asset_id)
-            revision = layout.revise_config(config_updates or {})
-            layout.append_event(
-                "pipeline_resume_requested",
-                {
-                    "changed_fields": revision["changed_fields"],
-                    "invalidated_from_stage": revision[
-                        "invalidated_from_stage"
-                    ],
-                    "resume_from_stage": revision["resume_from_stage"],
-                },
-            )
             pipeline = EvaluationAssetPipeline(layout)
+            acquired = threading.Event()
+            result: Dict[str, Exception] = {}
             thread = threading.Thread(
                 target=self._run_pipeline,
-                args=(key, pipeline),
+                args=(key, pipeline, acquired, result, dict(config_updates or {})),
                 name=f"evaluation-asset-{tenant_id}-{asset_id}",
                 daemon=True,
             )
             self._threads[key] = thread
             thread.start()
+        if not acquired.wait(5):
+            raise RuntimeError("evaluation asset pipeline lock handshake timed out")
+        if "error" in result:
+            raise result["error"]
         response = layout.load_state().to_dict()
-        response["resume"] = revision
+        response["resume"] = pipeline.last_revision
         return response
 
     def extend(
@@ -99,7 +102,7 @@ class EvaluationAssetRunManager:
         clustering_mode: str,
         config_updates: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Create and run a new asset version derived from a completed parent."""
+        """Create and run a new asset version derived from a released parent."""
         key = (tenant_id, asset_id)
         with self._lock:
             for candidate in ((tenant_id, parent_asset_id), key):
@@ -126,15 +129,26 @@ class EvaluationAssetRunManager:
                 config_updates=config_updates,
             )
             pipeline = EvaluationAssetPipeline(layout)
+            acquired = threading.Event()
+            result: Dict[str, Exception] = {}
             thread = threading.Thread(
                 target=self._run_pipeline,
-                args=(key, pipeline),
+                args=(key, pipeline, acquired, result, None),
                 name=f"evaluation-asset-{tenant_id}-{asset_id}",
                 daemon=True,
             )
             self._threads[key] = thread
             thread.start()
+        if not acquired.wait(5):
+            raise RuntimeError("evaluation asset pipeline lock handshake timed out")
+        if "error" in result:
+            raise result["error"]
         return layout.load_state().to_dict()
+
+    def adopt(self, tenant_id: str, asset_id: str) -> Dict[str, Any]:
+        """Verify and adopt a legacy completion through the locked core."""
+        layout = EvaluationAssetLayout(self.tenants_root, tenant_id, asset_id)
+        return layout.adopt_legacy().to_dict()
 
     def is_running(self, tenant_id: str, asset_id: str) -> bool:
         """Return whether this process currently owns a live pipeline thread."""
@@ -146,11 +160,23 @@ class EvaluationAssetRunManager:
         self,
         key: Tuple[str, str],
         pipeline: EvaluationAssetPipeline,
+        acquired: threading.Event,
+        result: Dict[str, Exception],
+        config_updates: Optional[Mapping[str, Any]],
     ) -> None:
         try:
-            pipeline.run()
-        except Exception:
+            pipeline.run(
+                config_updates=config_updates,
+                _lock_acquired_callback=acquired.set,
+            )
+        except EvaluationAssetBusyError as exc:
+            result["error"] = exc
+            acquired.set()
+        except Exception as exc:
             # The pipeline persists the safe failed-stage/error-summary contract.
+            if not acquired.is_set():
+                result["error"] = exc
+                acquired.set()
             return
         finally:
             with self._lock:

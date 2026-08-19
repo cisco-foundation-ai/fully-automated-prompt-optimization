@@ -104,6 +104,7 @@ def _atomic_write_text(
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_path, path)
+        _sync_parent_directory(path.parent)
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
@@ -128,6 +129,19 @@ def _atomic_write_binary(
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_path, path)
+        _sync_parent_directory(path.parent)
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
+
+
+def _sync_parent_directory(directory: Path) -> None:
+    """Persist a successful rename in directory metadata on POSIX systems."""
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)

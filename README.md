@@ -171,6 +171,8 @@ tenants/<tenant_id>/evaluation_assets/<asset_id>/
 ├── config_history.jsonl
 ├── pipeline_state.json
 ├── events.jsonl
+├── recovery_journal.jsonl
+├── receipts/
 ├── lineage.json                 # extended versions only
 ├── reuse_manifest.json          # extended versions only
 ├── asset_manifest.json
@@ -205,9 +207,21 @@ the Studio has no remote persistence backend for this workspace.
 | 7. Expand coverage | Optionally generate and filter a configured number of synthetic cases per supported cluster. |
 | 8. Build splits | Create group-safe train, validation, and test splits plus an automatic, trusted-only 20% regression gate, then publish those four datasets to the tenant dataset catalog. |
 
-Stages are checkpointed in `pipeline_state.json`, with an append-only history in
-`events.jsonl`. If a run fails, fix the input, credential, model-access, or core
-error and run it again; completed stages are skipped.
+The top-level lifecycle is exactly `draft`, `queued`, `running`,
+`awaiting_review`, `released`, or `failed`. Each completed stage has an atomic
+receipt commit marker under `receipts/`; `pipeline_state.json` references its
+hash, and `events.jsonl` retains the append-only history. Resume verifies the
+completed receipt prefix and rebuilds from its first invalid boundary. Missing
+or corrupt immutable raw snapshots require repair or a new asset. A released
+asset is read-only: verification fails closed, and changes require a child
+version.
+
+Configuration revisions and checkpoint rebuilds first append a durable
+prepared record to `recovery_journal.jsonl`, then make stale stage state
+nonauthoritative, and only afterward remove stale files. A later run rolls any
+prepared operation forward idempotently before it evaluates the receipt chain.
+One cross-process per-asset lock protects create, run/resume, revision,
+adoption, and extension mutations across library, CLI, and Studio callers.
 
 After Stage 8 succeeds, the authoritative split artifacts remain inside the
 asset workspace and four consumer-facing copies are published to:
@@ -226,6 +240,12 @@ files are local copies in the ordinary tenant dataset catalog. The Studio does
 not upload them. A separate `customer-data --scope derived` operation can sync
 them only when that tenant's storage configuration includes `datasets/` in its
 configured `derived_local` tree.
+
+Each catalog file is replaced atomically, and Stage 8 is receipted before the
+asset becomes `released`. The four-file publication is not yet one atomic
+switch: an interrupted mutable build can leave stale catalog files that are not
+authoritative because the asset is not released. Content-addressed generations
+and a single atomic release pointer are separate lifecycle work.
 
 ### Use the Evaluation Asset Studio
 
@@ -254,7 +274,7 @@ friendly name and purpose beside every filename. If a run stops, the Studio
 can resume with the existing decisions or edit them first. FAPO automatically
 reruns from the earliest affected stage and preserves earlier checkpoints.
 
-Completed assets also expose **Extend asset**, which creates a new immutable
+Released assets also expose **Extend asset**, which creates a new immutable
 version from additional canonical data:
 
 - **Keep original clustering** accepts labeled additions only. It reuses the
@@ -265,7 +285,9 @@ version from additional canonical data:
   current clusters.
 
 Both modes recalculate coverage, inferred labels, optional synthesis, and
-complete dataset splits in the new version. The parent asset is never changed.
+complete dataset splits in the new version. Parent and child locks are acquired
+in deterministic order; the parent receipt and source-lineage evidence must
+verify before the child root is created. The parent asset is never changed.
 
 ### Use the CLI
 
@@ -293,7 +315,7 @@ python -m hephaestus.cli assets status \
   --asset-id v1
 ```
 
-Extend a completed version from the CLI:
+Extend a verified released version from the CLI:
 
 ```bash
 python -m hephaestus.cli assets extend \
@@ -306,6 +328,22 @@ python -m hephaestus.cli assets extend \
 
 Use `--additional-unlabeled <additional_unlabeled.jsonl>
 --clustering-mode refresh` when the intent landscape must be rebuilt.
+
+Assets created by an older build may retain the pre-v2 top-level status
+`completed`. It is a legacy sentinel, not an alias for `released`. Verify and
+adopt it explicitly before extension:
+
+```bash
+python -m hephaestus.cli assets adopt \
+  --tenant <tenant_id> \
+  --asset-id <legacy_asset_id>
+```
+
+Adoption accepts only pre-v2 `completed`, validates all eight stages, raw source
+hashes, both manifests, and the current four catalog copies, records unavailable
+historical prompt/provider/code facts honestly, builds receipts, and changes the
+status to `released` only after the complete receipt chain verifies. Failure
+leaves the legacy authority unchanged and requires repair or a new asset.
 
 Add `--enable-synthetic-coverage --synthetic-cases-per-cluster <count>` to
 enable Stage 7. Use `--embedding-model tfidf` for deterministic local
@@ -325,9 +363,10 @@ python -m hephaestus.cli assets run \
 
 Guideline-model changes restart at Stage 3; embedding or cluster-count changes
 at Stage 4; matching changes at Stage 5; synthetic settings at Stage 7; and
-split settings at Stage 8. Each revision is appended to
-`config_history.jsonl` and `events.jsonl` before stale downstream outputs are
-removed and rebuilt.
+split settings at Stage 8. Each revision is prepared in the recovery journal,
+then applied to `config.json`, `pipeline_state.json`, `config_history.jsonl`,
+and `events.jsonl`; stale downstream outputs are cleaned only after their state
+and receipt references are nonauthoritative.
 
 ### Troubleshoot OpenAI SSL connections
 

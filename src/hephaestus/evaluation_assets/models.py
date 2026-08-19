@@ -13,6 +13,18 @@ from typing import Any, Dict, List, Mapping, Optional
 from src.hephaestus.datasets.embedding_providers import DEFAULT_OPENAI_EMBEDDING_MODEL
 from src.hephaestus.datasets.rubric_providers import DEFAULT_OPENAI_RUBRIC_MODEL
 
+STATE_SCHEMA_VERSION = "fapo-evaluation-asset-state-v2"
+LEGACY_STATE_SCHEMA_VERSION = "fapo-evaluation-asset-state-v1"
+TOP_LEVEL_STATUSES = (
+    "draft",
+    "queued",
+    "running",
+    "awaiting_review",
+    "released",
+    "failed",
+)
+LEGACY_COMPLETED_STATUS = "completed"
+
 
 class PipelineStage(str, Enum):
     """Ordered stages in the core evaluation asset pipeline."""
@@ -196,6 +208,7 @@ class StageState:
     message: str = ""
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
+    receipt_sha256: Optional[str] = None
 
 
 @dataclass
@@ -204,16 +217,28 @@ class PipelineState:
 
     tenant_id: str
     asset_id: str
-    status: str = "queued"
+    schema_version: str = STATE_SCHEMA_VERSION
+    status: str = "draft"
     current_stage: Optional[str] = None
     created_at: str = ""
     updated_at: str = ""
     error: Optional[str] = None
     counts: Dict[str, int] = field(default_factory=dict)
     stages: List[StageState] = field(default_factory=list)
+    mutation_sequence: int = 0
+    last_operation_id: Optional[str] = None
+
+    @property
+    def legacy_completed(self) -> bool:
+        """Return whether this state still carries the pre-v2 completion sentinel."""
+        return (
+            self.schema_version == LEGACY_STATE_SCHEMA_VERSION
+            and self.status == LEGACY_COMPLETED_STATUS
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize run state for persistence and APIs."""
+        _validate_pipeline_status(self.schema_version, self.status)
         return asdict(self)
 
     @classmethod
@@ -233,6 +258,14 @@ class PipelineState:
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "PipelineState":
         """Load state written by :meth:`to_dict`."""
+        raw_schema = raw.get("schema_version")
+        schema_version = (
+            str(raw_schema)
+            if raw_schema
+            else LEGACY_STATE_SCHEMA_VERSION
+        )
+        status = str(raw.get("status") or "queued")
+        _validate_pipeline_status(schema_version, status)
         stages = [
             StageState(**dict(item))
             for item in list(raw.get("stages") or [])
@@ -251,7 +284,8 @@ class PipelineState:
         return cls(
             tenant_id=str(raw["tenant_id"]),
             asset_id=str(raw["asset_id"]),
-            status=str(raw.get("status") or "queued"),
+            schema_version=schema_version,
+            status=status,
             current_stage=(
                 str(raw["current_stage"]) if raw.get("current_stage") else None
             ),
@@ -263,4 +297,21 @@ class PipelineState:
                 for key, value in dict(raw.get("counts") or {}).items()
             },
             stages=stages,
+            mutation_sequence=int(raw.get("mutation_sequence") or 0),
+            last_operation_id=(
+                str(raw["last_operation_id"])
+                if raw.get("last_operation_id")
+                else None
+            ),
         )
+
+
+def _validate_pipeline_status(schema_version: str, status: str) -> None:
+    if status in TOP_LEVEL_STATUSES:
+        return
+    if (
+        schema_version == LEGACY_STATE_SCHEMA_VERSION
+        and status == LEGACY_COMPLETED_STATUS
+    ):
+        return
+    raise ValueError(f"Unsupported evaluation asset status: {status}")

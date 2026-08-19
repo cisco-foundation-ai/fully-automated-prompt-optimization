@@ -155,6 +155,14 @@ def build_parser() -> argparse.ArgumentParser:
     extend_asset_parser.add_argument("--clusters", type=int)
     extend_asset_parser.add_argument("--tenants-root", default="tenants")
 
+    adopt_asset_parser = assets_subparsers.add_parser(
+        "adopt",
+        help="Verify and adopt a pre-v2 completed evaluation asset",
+    )
+    adopt_asset_parser.add_argument("--tenant", required=True)
+    adopt_asset_parser.add_argument("--asset-id", default="v1")
+    adopt_asset_parser.add_argument("--tenants-root", default="tenants")
+
     status_asset_parser = assets_subparsers.add_parser(
         "status",
         help="Read persisted evaluation asset pipeline progress",
@@ -372,9 +380,23 @@ def main() -> None:
                 }.items()
                 if value is not None
             }
-            if updates:
-                layout.revise_config(updates)
-            state = EvaluationAssetPipeline(layout).run()
+            state = EvaluationAssetPipeline(layout).run(config_updates=updates)
+            print(json_mod.dumps(state.to_dict(), indent=2, sort_keys=True))
+            return
+
+        if args.assets_command == "adopt":
+            import json as json_mod
+
+            from src.hephaestus.evaluation_assets.workspace import (
+                EvaluationAssetLayout,
+            )
+
+            layout = EvaluationAssetLayout(
+                Path(args.tenants_root),
+                args.tenant,
+                args.asset_id,
+            )
+            state = layout.adopt_legacy()
             print(json_mod.dumps(state.to_dict(), indent=2, sort_keys=True))
             return
 

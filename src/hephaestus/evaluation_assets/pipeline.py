@@ -54,6 +54,15 @@ from src.hephaestus.datasets.intent_assets import (
     match_to_dict,
 )
 from src.hephaestus.datasets.rubric_providers import OpenAIRubricProvider
+from src.hephaestus.evaluation_assets.durability import (
+    EvaluationAssetImmutableError,
+    EvaluationAssetLegacyError,
+    build_stage_receipt,
+    file_sha256,
+    mutable_rebuild_boundary,
+    verify_receipt_chain,
+    verify_released_asset,
+)
 from src.hephaestus.evaluation_assets.input_contract import (
     effective_route,
     validate_input_records,
@@ -131,6 +140,15 @@ non-attributable, mutually distinct, and materially different from
 representatives. Do not include an answer, rubric, feedback rationale, private
 identifier, secret, or invented tool result.
 """
+
+STAGE_PROMPTS = {
+    PipelineStage.RUBRIC_EXTRACTION: {
+        "evidence_extraction": EVIDENCE_EXTRACTION_PROMPT,
+        "guideline_synthesis": GUIDELINE_SYNTHESIS_PROMPT,
+    },
+    PipelineStage.LABEL_INFERENCE: {"label_inference": INFERENCE_PROMPT},
+    PipelineStage.SYNTHETIC_COVERAGE: {"synthetic_coverage": SYNTHETIC_PROMPT},
+}
 
 EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
 IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
@@ -265,6 +283,7 @@ class EvaluationAssetPipeline:
         unlabeled_source: Path,
         rubric_provider: Optional[RubricProvider] = None,
         embedding_provider: Optional[EmbeddingProvider] = None,
+        initial_status: str = "draft",
     ) -> "EvaluationAssetPipeline":
         """Create a self-contained workspace by copying both source files."""
         layout = EvaluationAssetLayout(
@@ -272,16 +291,72 @@ class EvaluationAssetPipeline:
             tenant_id=config.tenant_id,
             asset_id=config.asset_id,
         )
-        layout.initialize(config, feedback_source, unlabeled_source)
+        layout.initialize(
+            config,
+            feedback_source,
+            unlabeled_source,
+            initial_status=initial_status,
+        )
         return cls(layout, rubric_provider=rubric_provider, embedding_provider=embedding_provider)
 
-    def run(self) -> PipelineState:
+    def run(
+        self,
+        *,
+        config_updates: Optional[Mapping[str, Any]] = None,
+        lock_timeout: float = 0,
+        _lock_acquired_callback: Optional[Callable[[], None]] = None,
+    ) -> PipelineState:
         """Run or resume all incomplete stages."""
+        with self.layout.asset_lock(lock_timeout):
+            self.layout._recover_locked()
+            state = self.layout.load_state()
+            if state.status == "released":
+                verify_released_asset(self.layout, state)
+                raise EvaluationAssetImmutableError(
+                    self.layout.tenant_id,
+                    self.layout.asset_id,
+                )
+            if state.legacy_completed:
+                raise EvaluationAssetLegacyError(
+                    self.layout.tenant_id,
+                    self.layout.asset_id,
+                    "explicit verification and adoption are required",
+                )
+            self.last_revision = (
+                self.layout._revise_config_locked(config_updates)
+                if config_updates is not None
+                else None
+            )
+            self.config = self.layout.load_config()
+            return self._run_locked(_lock_acquired_callback)
+
+    def _run_locked(
+        self,
+        lock_acquired_callback: Optional[Callable[[], None]] = None,
+    ) -> PipelineState:
+        """Run while the caller holds the asset mutation lock."""
         state = self.layout.load_state()
+        state.schema_version = "fapo-evaluation-asset-state-v2"
+        boundary = mutable_rebuild_boundary(
+            self.layout,
+            state,
+            self.config,
+            STAGE_PROMPTS,
+        )
+        if boundary is not None:
+            boundary_index = list(PipelineStage).index(boundary)
+            suffix_states = state.stages[boundary_index:]
+            if any(
+                item.status != "pending" or item.receipt_sha256
+                for item in suffix_states
+            ):
+                state = self.layout._invalidate_checkpoints_locked(state, boundary)
         state.status = "running"
         state.error = None
         self.layout.save_state(state)
         self.layout.append_event("pipeline_started")
+        if lock_acquired_callback is not None:
+            lock_acquired_callback()
 
         for stage in PipelineStage:
             stage_state = next(item for item in state.stages if item.stage == stage.value)
@@ -308,8 +383,21 @@ class EvaluationAssetPipeline:
                 )
                 raise
             state.counts.update(counts)
+            completed_at = utc_now()
+            receipt = build_stage_receipt(
+                self.layout,
+                stage,
+                self.config,
+                counts,
+                completed_at=completed_at,
+                prompt_values=STAGE_PROMPTS.get(stage, {}),
+            )
+            atomic_write_json(self.layout.receipt_path(stage), receipt)
+            stage_state.receipt_sha256 = file_sha256(
+                self.layout.receipt_path(stage)
+            )
             stage_state.status = "completed"
-            stage_state.completed_at = utc_now()
+            stage_state.completed_at = completed_at
             stage_state.message = _stage_message(stage, counts)
             self.layout.save_state(state)
             self.layout.append_event(
@@ -317,11 +405,12 @@ class EvaluationAssetPipeline:
                 {"stage": stage.value, "counts": counts},
             )
 
-        state.status = "completed"
+        verify_receipt_chain(self.layout, state)
+        state.status = "released"
         state.current_stage = None
         state.error = None
         self.layout.save_state(state)
-        self.layout.append_event("pipeline_completed", {"counts": state.counts})
+        self.layout.append_event("pipeline_released", {"counts": state.counts})
         return state
 
     def _run_stage(self, stage: PipelineStage) -> Dict[str, int]:
@@ -568,6 +657,23 @@ class EvaluationAssetPipeline:
         }
 
     def _cluster_intents(self) -> Dict[str, int]:
+        inventory_path = self.layout.artifact_path(
+            PipelineStage.INTENT_CLUSTERING,
+            "intent_inventory.jsonl",
+        )
+        lineage_path = self.layout.artifact_path(
+            PipelineStage.INTENT_CLUSTERING,
+            "cluster_lineage.jsonl",
+        )
+        if (
+            self.lineage.get("clustering_mode") == "keep"
+            and inventory_path.is_file()
+            and lineage_path.is_file()
+        ):
+            clusters = [_intent_cluster(row) for row in _load_jsonl(inventory_path)]
+            assert_unique_cluster_ids(clusters)
+            _load_jsonl(lineage_path)
+            return {"intent_clusters": len(clusters)}
         rows = _load_jsonl(
             self.layout.artifact_path(
                 PipelineStage.PREPARED_INPUTS,
@@ -596,10 +702,7 @@ class EvaluationAssetPipeline:
             vectors=vectors,
         )
         write_jsonl(
-            self.layout.artifact_path(
-                PipelineStage.INTENT_CLUSTERING,
-                "intent_inventory.jsonl",
-            ),
+            inventory_path,
             [cluster_to_dict(cluster) for cluster in clusters],
         )
         if self.lineage:

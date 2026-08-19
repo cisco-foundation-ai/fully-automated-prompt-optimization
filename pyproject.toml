@@ -10,6 +10,7 @@ license = {text = "Apache-2.0"}
 authors = [{name = "Paul Kassianik"}]
 requires-python = ">=3.10"
 dependencies = [
+  "filelock>=3.13,<4",
   "openai>=1.0",
   "pytest>=7.0",
   "datasets>=2.0",

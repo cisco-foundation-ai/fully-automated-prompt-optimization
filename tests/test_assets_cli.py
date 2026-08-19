@@ -24,7 +24,7 @@ def test_assets_help_exposes_only_canonical_pipeline_commands() -> None:
 
     assert "intent-inventory" not in help_text
     assert "assemble" not in help_text
-    for command in ("create", "run", "extend", "status"):
+    for command in ("create", "run", "extend", "adopt", "status"):
         assert command in help_text
     with pytest.raises(SystemExit):
         parser.parse_args(["assets", "intent-inventory"])
@@ -119,7 +119,7 @@ def test_assets_create_and_status_use_evaluation_assets_workspace(
     )
     main()
 
-    assert '"status": "queued"' in capsys.readouterr().out
+    assert '"status": "draft"' in capsys.readouterr().out
 
 
 def test_assets_create_cli_rejects_other_tenant_source_before_writes(
@@ -197,13 +197,11 @@ def test_assets_extend_cli_rejects_other_tenant_source_before_writes(
         encoding="utf-8",
     )
     parent = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
-    state = parent.initialize(
+    parent.initialize(
         EvaluationAssetConfig(tenant_id="tenant_a"),
         feedback,
         unlabeled,
     )
-    state.status = "completed"
-    parent.save_state(state)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -259,6 +257,51 @@ def test_assets_extend_cli_parses_incremental_clustering_options() -> None:
     assert args.clustering_mode == "refresh"
     assert args.embedding_model == "tfidf"
     assert args.clusters == 12
+
+
+def test_assets_adopt_cli_exposes_explicit_legacy_transition(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    from src.hephaestus.evaluation_assets.models import (
+        EvaluationAssetConfig,
+        PipelineState,
+    )
+    from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
+
+    state = PipelineState.new(
+        EvaluationAssetConfig(tenant_id="tenant_a", asset_id="legacy-v1"),
+        "2026-08-19T00:00:00+00:00",
+    )
+    state.status = "released"
+    received = []
+
+    def adopt(layout: EvaluationAssetLayout, *, lock_timeout: float = 0) -> PipelineState:
+        received.append((layout.tenant_id, layout.asset_id, lock_timeout))
+        return state
+
+    monkeypatch.setattr(EvaluationAssetLayout, "adopt_legacy", adopt)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "hephaestus",
+            "assets",
+            "adopt",
+            "--tenant",
+            "tenant_a",
+            "--asset-id",
+            "legacy-v1",
+            "--tenants-root",
+            str(tmp_path / "tenants"),
+        ],
+    )
+
+    main()
+
+    assert received == [("tenant_a", "legacy-v1", 0)]
+    assert '"status": "released"' in capsys.readouterr().out
 
 
 def _evaluation_input(record_id: str, *, labeled: bool) -> dict:

@@ -31,6 +31,7 @@ Routes:
     POST /api/evaluation-assets/start              -> create and run an asset
     POST /api/evaluation-assets/extend             -> create an incremental version
     POST /api/tenants/<t>/evaluation-assets/<a>/resume -> revise and resume an asset
+    POST /api/tenants/<t>/evaluation-assets/<a>/adopt -> adopt legacy completion
 """
 
 from __future__ import annotations
@@ -147,6 +148,13 @@ class _Handler(BaseHTTPRequestHandler):
         )
         if params is not None:
             self._route_resume_evaluation_asset(params)
+            return
+        params = _match(
+            "/api/tenants/{tenant}/evaluation-assets/{asset}/adopt",
+            parsed.path,
+        )
+        if params is not None:
+            self._route_adopt_evaluation_asset(params)
             return
         self._send_json({"error": "not found", "path": parsed.path}, status=404)
 
@@ -420,6 +428,20 @@ class _Handler(BaseHTTPRequestHandler):
         except FileExistsError as exc:
             self._send_json({"error": str(exc)}, status=409)
             return
+        except RuntimeError as exc:
+            self._send_json({"error": str(exc)}, status=409)
+            return
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        self._send_json(state, status=202)
+
+    def _route_adopt_evaluation_asset(self, params: Dict[str, str]) -> None:
+        try:
+            state = self.asset_manager.adopt(
+                params["tenant"],
+                params["asset"],
+            )
         except RuntimeError as exc:
             self._send_json({"error": str(exc)}, status=409)
             return
