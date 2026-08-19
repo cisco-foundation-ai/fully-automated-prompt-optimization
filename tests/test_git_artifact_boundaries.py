@@ -74,7 +74,18 @@ def test_stress_report_preserves_history_and_marks_verified_remediation() -> Non
     report = (
         repo_root / "docs/processes/evaluation-asset-studio-stress-test.md"
     ).read_text(encoding="utf-8")
-    historical_lines = report.splitlines(keepends=True)[:599]
+    license_header = (
+        "<!--\n"
+        "Copyright 2026 Cisco Systems, Inc. and its affiliates\n"
+        "\n"
+        "SPDX-License-Identifier: Apache-2.0\n"
+        "-->\n"
+        "\n"
+    )
+    assert report.startswith(license_header)
+    historical_lines = report.removeprefix(license_header).splitlines(
+        keepends=True
+    )[:599]
     restored_history = "".join(historical_lines).replace("~~", "")
 
     assert hashlib.sha256(restored_history.encode("utf-8")).hexdigest() == (
