@@ -10,12 +10,20 @@ import hashlib
 import json
 import re
 import shutil
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
+from src.hephaestus.artifact_io import (
+    atomic_append_jsonl,
+    atomic_copy_file,
+    atomic_write_json,
+    atomic_write_jsonl,
+)
+from src.hephaestus.artifact_io import (
+    atomic_write_text as atomic_write_text,
+)
 from src.hephaestus.evaluation_assets.input_contract import validate_input_records
 from src.hephaestus.evaluation_assets.models import (
     CONFIG_STAGE_DEPENDENCIES,
@@ -417,8 +425,8 @@ class EvaluationAssetLayout:
             source="unlabeled input",
         )
         self.ensure()
-        _atomic_write_jsonl(self.feedback_path, feedback_rows)
-        _atomic_write_jsonl(self.unlabeled_path, unlabeled_rows)
+        atomic_write_jsonl(self.feedback_path, feedback_rows)
+        atomic_write_jsonl(self.unlabeled_path, unlabeled_rows)
 
         guideline_artifacts = (
             "feedback_evidence.jsonl",
@@ -440,8 +448,7 @@ class EvaluationAssetLayout:
             if not source.is_file():
                 raise FileNotFoundError(source)
             destination = self.artifact_path(PipelineStage.RUBRIC_EXTRACTION, name)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
+            atomic_copy_file(source, destination)
             seeded_artifacts.append(name)
 
         snapshot_sources = {
@@ -479,8 +486,7 @@ class EvaluationAssetLayout:
             if not source.is_file():
                 raise FileNotFoundError(source)
             destination = self.parent_snapshot / name
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
+            atomic_copy_file(source, destination)
             snapshot_artifacts.append(
                 {
                     "file": name,
@@ -500,7 +506,7 @@ class EvaluationAssetLayout:
                 PipelineStage.INTENT_CLUSTERING,
                 "intent_inventory.jsonl",
             )
-            shutil.copy2(source, destination)
+            atomic_copy_file(source, destination)
             reused_artifacts.append("intent_inventory.jsonl")
             clusters = _read_jsonl_rows(destination)
             lineage_rows = [
@@ -512,7 +518,7 @@ class EvaluationAssetLayout:
                 }
                 for row in clusters
             ]
-            _atomic_write_jsonl(
+            atomic_write_jsonl(
                 self.artifact_path(
                     PipelineStage.INTENT_CLUSTERING,
                     "cluster_lineage.jsonl",
@@ -742,9 +748,7 @@ class EvaluationAssetLayout:
             "asset_id": self.asset_id,
             "details": dict(details or {}),
         }
-        self.events_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.events_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+        atomic_append_jsonl(self.events_path, payload)
 
     def _config_revision_count(self) -> int:
         if not self.config_history_path.is_file():
@@ -758,9 +762,7 @@ class EvaluationAssetLayout:
         )
 
     def _append_config_revision(self, payload: Mapping[str, Any]) -> None:
-        self.config_history_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.config_history_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(dict(payload), sort_keys=True) + "\n")
+        atomic_append_jsonl(self.config_history_path, payload)
 
     def _clear_stage_outputs(self, stages: Iterable[PipelineStage]) -> None:
         stages = tuple(stages)
@@ -880,41 +882,13 @@ def read_json(path: Path) -> Dict[str, Any]:
     return raw
 
 
-def atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
-    """Write JSON using an atomic same-directory replacement."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as handle:
-        json.dump(dict(payload), handle, indent=2, sort_keys=True)
-        handle.write("\n")
-        temporary_path = Path(handle.name)
-    temporary_path.replace(path)
-
-
 def _copy_jsonl(source: Path, destination: Path) -> None:
     source = source.resolve()
     if not source.is_file():
         raise FileNotFoundError(source)
     if source.suffix.lower() != ".jsonl":
         raise ValueError(f"Evaluation asset inputs must be JSONL: {source}")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "wb",
-        dir=destination.parent,
-        prefix=f".{destination.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as handle:
-        with source.open("rb") as source_handle:
-            shutil.copyfileobj(source_handle, handle)
-        temporary_path = Path(handle.name)
-    temporary_path.replace(destination)
+    atomic_copy_file(source, destination)
 
 
 def _read_jsonl_rows(path: Optional[Path]) -> list[Dict[str, Any]]:
@@ -974,25 +948,6 @@ def _merge_jsonl_rows(
         seen.add(record_id)
         merged.append(dict(row))
     return merged
-
-
-def _atomic_write_jsonl(
-    path: Path,
-    rows: Sequence[Mapping[str, Any]],
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as handle:
-        for row in rows:
-            handle.write(json.dumps(dict(row), sort_keys=True) + "\n")
-        temporary_path = Path(handle.name)
-    temporary_path.replace(path)
 
 
 def _sha256_path(path: Path) -> str:

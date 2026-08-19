@@ -81,7 +81,9 @@ TF-IDF fallback. Selecting TF-IDF records `embedding_provider: tfidf` in the
 asset config and makes no embedding API calls. Starting a pipeline copies both
 source files into an independent
 `evaluation_assets/<asset_id>/stages/01_raw_inputs/` workspace before
-background processing begins.
+background processing begins. Stage 1 revalidates those copies and checks that
+the requested exact cluster count fits the unlabeled row and effective-route
+counts before any guideline or embedding provider work starts.
 
 Selecting a tenant visualizes all eight preparation stages, live status,
 selected models, requested clusters, match threshold, synthetic settings,
@@ -98,6 +100,14 @@ or an edited model, embedding, cluster count, match threshold, or synthetic
 coverage configuration. The Studio shows which stage each setting affects;
 the core preserves earlier checkpoints and rebuilds the affected stage and all
 downstream artifacts.
+
+Failed-stage summaries are safe to display: provider failures expose the stage,
+configured provider/model, exception class, and a bounded causal category, but
+not raw provider messages, payloads, credentials, or response bodies. Detailed
+provider diagnostics remain available only through the in-memory chained
+exception or protected operator logging. Each individual state, event/history,
+JSONL, copied, or Markdown artifact is atomically replaced; the UI does not
+claim an all-or-nothing transaction across an entire release.
 
 Completed versions can be extended from the tenant asset view. The extension
 wizard accepts additional labeled feedback and optional unlabeled records,

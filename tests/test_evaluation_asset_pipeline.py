@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from src.hephaestus.datasets.intent_assets import IntentCluster, IntentMatch
+from src.hephaestus.evaluation_assets import pipeline as pipeline_module
 from src.hephaestus.evaluation_assets.models import (
     STAGE_COUNT_KEYS,
     EvaluationAssetConfig,
@@ -20,6 +21,8 @@ from src.hephaestus.evaluation_assets.pipeline import (
     EvaluationAssetPipeline,
     _build_labeling_queue,
     _compile_evaluation_guidelines,
+    _normalize_feedback,
+    _normalize_intent,
     _normalize_rubric,
     _rubric_from_guidelines,
 )
@@ -30,8 +33,31 @@ from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
 class FakeEmbeddingProvider:
     model = "fake-embedding"
 
+    def __init__(self):
+        self.calls = 0
+
     def embed_texts(self, texts):
+        self.calls += 1
         return [[1.0, 0.0] for _ in texts]
+
+
+class MalformedEmbeddingProvider(FakeEmbeddingProvider):
+    def __init__(self, malformed_call: int):
+        super().__init__()
+        self.malformed_call = malformed_call
+
+    def embed_texts(self, texts):
+        self.calls += 1
+        if self.calls == self.malformed_call:
+            return [[0.0, 0.0] for _ in texts]
+        return [[1.0, 0.0] for _ in texts]
+
+
+class SecretFailingEmbeddingProvider(FakeEmbeddingProvider):
+    def embed_texts(self, texts):
+        raise RuntimeError(
+            'sk-live-secret-token raw_response={"email":"private@example.com"}'
+        )
 
 
 class FakeRubricProvider:
@@ -40,8 +66,10 @@ class FakeRubricProvider:
     def __init__(self):
         self.synthetic_calls = 0
         self.feedback_record_ids = []
+        self.calls = 0
 
     def generate_json(self, system_prompt, payload):
+        self.calls += 1
         if "records" in payload:
             self.feedback_record_ids.extend(
                 row["record_id"] for row in payload["records"]
@@ -143,6 +171,313 @@ class FakeRubricProvider:
                 for row in payload["clusters"]
             ]
         }
+
+
+class SecretFailingRubricProvider(FakeRubricProvider):
+    def generate_json(self, system_prompt, payload):
+        raise RuntimeError(
+            'sk-live-secret-token raw_response={"email":"private@example.com"}'
+        )
+
+
+def test_normalization_preserves_structural_fields_and_redacts_content() -> None:
+    """Schema structure survives while content-bearing PII is redacted."""
+    row = {
+        "schema_version": "fapo-evaluation-input-v1",
+        "record_id": "record.owner@example.com",
+        "group_id": "group.owner@example.com",
+        "request_id": "request.owner@example.com",
+        "task_type": "task.owner@example.com",
+        "route": "route.owner@example.com",
+        "intent_label": "intent.owner@example.com",
+        "user_input": "Contact user@example.com from 192.0.2.1.",
+        "assistant_output": "Reached assistant@example.com at 192.0.2.2.",
+        "conversation_context": [
+            {
+                "role": "role.owner@example.com",
+                "content": "Earlier user@example.com at 192.0.2.3.",
+                "metadata": {
+                    "intent_label": "context.owner@example.com",
+                    "note": "Escalate to context@example.com.",
+                },
+            }
+        ],
+        "tool_calls": [
+            {
+                "name": "lookup.owner@example.com",
+                "arguments": {
+                    "address": "argument@example.com",
+                    "nested": ["192.0.2.4"],
+                },
+                "result": {"owner": "result@example.com"},
+                "error": "Tool error for error@example.com",
+            }
+        ],
+        "runtime": {
+            "model": "model.owner@example.com",
+            "request": {
+                "content": "Runtime payload runtime@example.com",
+                "model": "nested-model.owner@example.com",
+                "provider": "nested-provider.owner@example.com",
+                "route": "nested-route.owner@example.com",
+            },
+        },
+        "metadata": {
+            "source_system": "source.owner@example.com",
+            "intent_label": "metadata.owner@example.com",
+            "nested": {"note": "Metadata metadata@example.com"},
+        },
+        "feedback": {
+            "polarity": "negative",
+            "source": "source.owner@example.com",
+            "rationale": "Wrong for rationale@example.com",
+            "correction": {"text": "Use correction@example.com"},
+        },
+    }
+
+    feedback = _normalize_feedback(row)
+    intent = _normalize_intent({key: value for key, value in row.items() if key != "feedback"})
+
+    for normalized in (feedback, intent):
+        assert normalized["schema_version"] == row["schema_version"]
+        assert normalized["record_id"] == row["record_id"]
+        assert normalized["group_id"] == row["group_id"]
+        assert normalized["request_id"] == row["request_id"]
+        assert normalized["task_type"] == row["task_type"]
+        assert normalized["route"] == row["route"]
+        assert normalized["intent_label"] == row["intent_label"]
+        assert normalized["conversation_context"][0]["role"] == row[
+            "conversation_context"
+        ][0]["role"]
+        assert normalized["tool_calls"][0]["name"] == row["tool_calls"][0]["name"]
+        assert normalized["runtime"]["model"] == row["runtime"]["model"]
+        assert normalized["runtime"]["request"]["model"] == row["runtime"][
+            "request"
+        ]["model"]
+        assert normalized["runtime"]["request"]["provider"] == row[
+            "runtime"
+        ]["request"]["provider"]
+        assert normalized["runtime"]["request"]["route"] == row["runtime"][
+            "request"
+        ]["route"]
+        assert normalized["metadata"]["source_system"] == row["metadata"][
+            "source_system"
+        ]
+        assert normalized["metadata"]["intent_label"] == row["metadata"][
+            "intent_label"
+        ]
+        serialized = json.dumps(normalized, sort_keys=True)
+        for secret in (
+            "user@example.com",
+            "assistant@example.com",
+            "context@example.com",
+            "argument@example.com",
+            "result@example.com",
+            "error@example.com",
+            "runtime@example.com",
+            "metadata@example.com",
+            "192.0.2.1",
+            "192.0.2.2",
+            "192.0.2.3",
+            "192.0.2.4",
+        ):
+            assert secret not in serialized
+    feedback_serialized = json.dumps(feedback, sort_keys=True)
+    assert "rationale@example.com" not in feedback_serialized
+    assert "correction@example.com" not in feedback_serialized
+
+
+def test_prepare_inputs_rejects_normalized_duplicate_with_both_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A faulty normalizer collision reports both originating rows and IDs."""
+    tenants_root = tmp_path / "tenants"
+    feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
+    _write_extension_feedback(feedback, ["source-one", "source-two"])
+    pipeline = EvaluationAssetPipeline.create(
+        tenants_root,
+        EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
+        feedback,
+        unlabeled,
+        rubric_provider=FakeRubricProvider(),
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+    original = pipeline_module._normalize_feedback
+
+    def collide(row):
+        normalized = original(row)
+        normalized["record_id"] = "canonical-collision"
+        return normalized
+
+    monkeypatch.setattr(pipeline_module, "_normalize_feedback", collide)
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"normalized feedback.*canonical-collision.*"
+            r"row 1.*source-one.*row 2.*source-two"
+        ),
+    ):
+        pipeline._prepare_inputs()
+
+
+@pytest.mark.parametrize(
+    ("routes", "cluster_count", "message"),
+    [
+        (["route_a"], 2, "cannot exceed the number of unlabeled records"),
+        (
+            ["route_a", "route_b"],
+            1,
+            "must be at least the number of distinct effective routes",
+        ),
+    ],
+)
+def test_stage_one_rejects_infeasible_clustering_before_provider_calls(
+    tmp_path: Path,
+    routes: list[str],
+    cluster_count: int,
+    message: str,
+) -> None:
+    """Data-dependent clustering failures stop before paid provider work."""
+    tenants_root = tmp_path / "tenants"
+    feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
+    _write_unlabeled_routes(unlabeled, routes)
+    rubric_provider = FakeRubricProvider()
+    embedding_provider = FakeEmbeddingProvider()
+    pipeline = EvaluationAssetPipeline.create(
+        tenants_root,
+        EvaluationAssetConfig(
+            tenant_id="tenant_a",
+            cluster_count=cluster_count,
+        ),
+        feedback,
+        unlabeled,
+        rubric_provider=rubric_provider,
+        embedding_provider=embedding_provider,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        pipeline.run()
+
+    state = pipeline.layout.load_state()
+    assert state.current_stage == PipelineStage.RAW_INPUTS.value
+    assert rubric_provider.calls == 0
+    assert embedding_provider.calls == 0
+
+
+def test_stage_one_accepts_one_cluster_per_record_and_effective_route(
+    tmp_path: Path,
+) -> None:
+    """The exact feasibility boundary remains accepted in Stage 1."""
+    tenants_root = tmp_path / "tenants"
+    feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
+    _write_unlabeled_routes(unlabeled, ["route_a", "route_b"])
+    pipeline = EvaluationAssetPipeline.create(
+        tenants_root,
+        EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=2),
+        feedback,
+        unlabeled,
+        rubric_provider=FakeRubricProvider(),
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+
+    assert pipeline._validate_raw_inputs() == {
+        "feedback_records": 1,
+        "unlabeled_records": 2,
+    }
+
+
+@pytest.mark.parametrize(
+    ("malformed_call", "expected_stage"),
+    [
+        (1, PipelineStage.INTENT_CLUSTERING),
+        (2, PipelineStage.COVERAGE_DECISIONS),
+    ],
+)
+def test_pipeline_validates_injected_embedding_batches_at_every_stage(
+    tmp_path: Path,
+    malformed_call: int,
+    expected_stage: PipelineStage,
+) -> None:
+    """Custom providers cannot bypass Stage 4 or Stage 5 vector validation."""
+    tenants_root = tmp_path / "tenants"
+    feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
+    embedding_provider = MalformedEmbeddingProvider(malformed_call)
+    pipeline = EvaluationAssetPipeline.create(
+        tenants_root,
+        EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
+        feedback,
+        unlabeled,
+        rubric_provider=FakeRubricProvider(),
+        embedding_provider=embedding_provider,
+    )
+
+    with pytest.raises(ValueError, match="embedding provider.*nonzero"):
+        pipeline.run()
+
+    state = pipeline.layout.load_state()
+    assert state.current_stage == expected_stage.value
+    assert embedding_provider.calls == malformed_call
+
+
+@pytest.mark.parametrize(
+    ("failure_kind", "expected_stage"),
+    [
+        ("rubric", PipelineStage.RUBRIC_EXTRACTION),
+        ("embedding", PipelineStage.INTENT_CLUSTERING),
+    ],
+)
+def test_provider_failure_persists_only_sanitized_causal_summary(
+    tmp_path: Path,
+    failure_kind: str,
+    expected_stage: PipelineStage,
+) -> None:
+    """Provider payloads stay in the chained cause and out of artifacts."""
+    tenants_root = tmp_path / "tenants"
+    feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
+    rubric_provider = (
+        SecretFailingRubricProvider()
+        if failure_kind == "rubric"
+        else FakeRubricProvider()
+    )
+    embedding_provider = (
+        SecretFailingEmbeddingProvider()
+        if failure_kind == "embedding"
+        else FakeEmbeddingProvider()
+    )
+    pipeline = EvaluationAssetPipeline.create(
+        tenants_root,
+        EvaluationAssetConfig(
+            tenant_id="tenant_a",
+            cluster_count=1,
+            rubric_model="safe-rubric-model",
+            embedding_model="safe-embedding-model",
+        ),
+        feedback,
+        unlabeled,
+        rubric_provider=rubric_provider,
+        embedding_provider=embedding_provider,
+    )
+
+    with pytest.raises(Exception) as caught:
+        pipeline.run()
+
+    assert caught.value.__class__.__name__ == "ProviderCallError"
+    assert isinstance(caught.value.__cause__, RuntimeError)
+    assert "sk-live-secret-token" in str(caught.value.__cause__)
+    persisted = (
+        pipeline.layout.state_path.read_text(encoding="utf-8")
+        + pipeline.layout.events_path.read_text(encoding="utf-8")
+    )
+    assert expected_stage.value in persisted
+    assert "provider=openai" in persisted
+    assert "model=safe-" in persisted
+    assert "cause=RuntimeError" in persisted
+    assert "summary=provider operation failed" in persisted
+    assert "sk-live-secret-token" not in persisted
+    assert "raw_response" not in persisted
+    assert "private@example.com" not in persisted
 
 
 def test_rubric_normalization_accepts_list_form_tool_expectations() -> None:
@@ -1334,6 +1669,31 @@ def _write_extension_unlabeled(path: Path, record_ids: list[str]) -> None:
         }
         for record_id in record_ids
     ]
+    path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
+def _write_unlabeled_routes(path: Path, routes: list[str]) -> None:
+    rows = [
+        {
+            "schema_version": "fapo-evaluation-input-v1",
+            "record_id": f"u{index}",
+            "group_id": f"group-u{index}",
+            "task_type": route,
+            "route": route if index % 2 else None,
+            "user_input": f"Request u{index}",
+            "conversation_context": [],
+            "tool_calls": [],
+            "runtime": {},
+            "metadata": {},
+        }
+        for index, route in enumerate(routes, start=1)
+    ]
+    for row in rows:
+        if row["route"] is None:
+            del row["route"]
     path.write_text(
         "".join(json.dumps(row) + "\n" for row in rows),
         encoding="utf-8",
