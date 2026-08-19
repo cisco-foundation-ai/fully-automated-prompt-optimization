@@ -37,7 +37,7 @@ to stop.
 | Flag | Default | Description |
 |---|---|---|
 | `--tenants-root` | `tenants` | Path to the tenants directory to browse |
-| `--host` | `127.0.0.1` | Bind host |
+| `--host` | `127.0.0.1` | Loopback bind host (`localhost`, `127.0.0.0/8`, or `::1`) |
 | `--port` | `8765` | Bind port |
 
 Example — serve a different tenants root on a custom port:
@@ -81,7 +81,11 @@ TF-IDF fallback. Selecting TF-IDF records `embedding_provider: tfidf` in the
 asset config and makes no embedding API calls. Starting a pipeline copies both
 source files into an independent
 `evaluation_assets/<asset_id>/stages/01_raw_inputs/` workspace before
-background processing begins.
+background processing begins. Stage 1 revalidates those copies and checks that
+the requested exact cluster count fits the unlabeled row and effective-route
+counts before any guideline or embedding provider work starts. The complete
+Studio workspace and its checkpoints are local-only; the Studio does not
+persist them to GCS or another remote backend.
 
 Selecting a tenant visualizes all eight preparation stages, live status,
 selected models, requested clusters, match threshold, synthetic settings,
@@ -98,6 +102,15 @@ or an edited model, embedding, cluster count, match threshold, or synthetic
 coverage configuration. The Studio shows which stage each setting affects;
 the core preserves earlier checkpoints and rebuilds the affected stage and all
 downstream artifacts.
+
+Failed-stage summaries are safe to display: provider transport and semantic
+response validation failures expose the stage, configured provider/model,
+fixed exception category, and a bounded causal summary, but not raw provider
+messages, payloads, credentials, or response bodies. Detailed provider
+diagnostics remain available only through the in-memory chained exception or
+protected operator logging. Each individual state, event/history, JSONL,
+copied, or Markdown artifact is atomically replaced; the UI does not claim an
+all-or-nothing transaction across an entire release.
 
 Completed versions can be extended from the tenant asset view. The extension
 wizard accepts additional labeled feedback and optional unlabeled records,
@@ -203,14 +216,26 @@ The frontend is backed by these read-only endpoints (useful for scripting too):
 ## Notes
 
 - **Narrow writes:** the UI only creates/resumes evaluation assets. All other
-  tenant views remain read-only. Input paths must resolve inside the FAPO
-  workspace and are copied into `stages/01_raw_inputs/` before processing.
+  tenant views remain read-only. Inputs must be regular `.jsonl` files beneath
+  the selected tenant's `source_artifacts/` or ordinary `datasets/` directory;
+  generated evaluation-asset datasets and symlink escapes are rejected before
+  the input contract is validated and files are copied.
 - **Audited resume edits:** the resume endpoint accepts a JSON object containing
   any editable pipeline decision, including model and batch settings,
   embedding and clustering settings, trusted-coverage thresholds, synthetic
   settings, and the split seed. The failed-stage view shows only the parameters
   relevant to that stage. Revisions are recorded in `config_history.jsonl` and
   `events.jsonl`.
-- **Local by default:** it binds to `127.0.0.1`. Change `--host` only if you
-  understand the exposure, since it serves whatever is under the tenants root.
+- **Loopback only:** the server rejects non-loopback bind hosts. Studio routes
+  also require a loopback `Host`; mutation requests require an absent `Origin`
+  or an HTTP origin matching `Host`. Studio HTML and JSON responses use
+  `Cache-Control: no-store`. Explorer's generic dataset list/read endpoints and
+  case details inherit the loopback-Host and no-store policy whenever they can
+  expose a published `datasets/evaluation_assets/` file. Ordinary-only dataset
+  catalogs and reads retain normal Explorer behavior.
+- **Local Studio state:** copied inputs, checkpoints, state, events, and stage
+  artifacts under `evaluation_assets/` are local-only. Published Stage 8 copies
+  under `datasets/evaluation_assets/` are ordinary local derived datasets; only
+  a separate tenant-configured `customer-data --scope derived` operation can
+  sync them.
 - **No external dependencies:** standard-library server, no frontend build step.

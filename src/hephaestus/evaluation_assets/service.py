@@ -20,7 +20,6 @@ class EvaluationAssetRunManager:
 
     def __init__(self, tenants_root: Path) -> None:
         self.tenants_root = tenants_root.resolve()
-        self.workspace_root = self.tenants_root.parent
         self._threads: Dict[Tuple[str, str], threading.Thread] = {}
         self._lock = threading.Lock()
 
@@ -31,8 +30,6 @@ class EvaluationAssetRunManager:
         unlabeled_source: Path,
     ) -> Dict[str, Any]:
         """Copy inputs, persist the job, and start it in a background thread."""
-        feedback_source = self._allowed_input(feedback_source)
-        unlabeled_source = self._allowed_input(unlabeled_source)
         key = (config.tenant_id, config.asset_id)
         with self._lock:
             existing = self._threads.get(key)
@@ -103,16 +100,6 @@ class EvaluationAssetRunManager:
         config_updates: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Create and run a new asset version derived from a completed parent."""
-        feedback_path = (
-            self._allowed_input(additional_feedback)
-            if additional_feedback is not None
-            else None
-        )
-        unlabeled_path = (
-            self._allowed_input(additional_unlabeled)
-            if additional_unlabeled is not None
-            else None
-        )
         key = (tenant_id, asset_id)
         with self._lock:
             for candidate in ((tenant_id, parent_asset_id), key):
@@ -133,8 +120,8 @@ class EvaluationAssetRunManager:
             )
             layout.initialize_extension(
                 parent,
-                additional_feedback=feedback_path,
-                additional_unlabeled=unlabeled_path,
+                additional_feedback=additional_feedback,
+                additional_unlabeled=additional_unlabeled,
                 clustering_mode=clustering_mode,
                 config_updates=config_updates,
             )
@@ -155,16 +142,6 @@ class EvaluationAssetRunManager:
             thread = self._threads.get((tenant_id, asset_id))
             return bool(thread and thread.is_alive())
 
-    def _allowed_input(self, path: Path) -> Path:
-        resolved = path.expanduser().resolve()
-        if self.workspace_root not in resolved.parents:
-            raise ValueError(
-                f"input path must be inside the FAPO workspace: {self.workspace_root}"
-            )
-        if not resolved.is_file():
-            raise FileNotFoundError(resolved)
-        return resolved
-
     def _run_pipeline(
         self,
         key: Tuple[str, str],
@@ -173,7 +150,7 @@ class EvaluationAssetRunManager:
         try:
             pipeline.run()
         except Exception:
-            # The pipeline persists the full error and failed stage before raising.
+            # The pipeline persists the safe failed-stage/error-summary contract.
             return
         finally:
             with self._lock:

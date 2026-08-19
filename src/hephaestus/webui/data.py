@@ -742,6 +742,21 @@ class TenantStore:
         ground_truth = self._ground_truth_for(tenant_id, run_dir, case.get("case_id"))
         return {"index": index, "case": case, "ground_truth": ground_truth}
 
+    def run_uses_evaluation_asset_dataset(
+        self,
+        tenant_id: str,
+        run_dir_rel: str,
+    ) -> bool:
+        """Return whether case detail would join a published Studio dataset."""
+        run_dir = self._resolve_run_dir(tenant_id, run_dir_rel)
+        if run_dir is None:
+            return False
+        dataset_rel = self._run_dataset_rel(tenant_id, run_dir)
+        return bool(
+            dataset_rel
+            and self.is_evaluation_asset_dataset(tenant_id, dataset_rel)
+        )
+
     def _ground_truth_for(
         self, tenant_id: str, run_dir: Path, case_id: Optional[str]
     ) -> Optional[Dict[str, Any]]:
@@ -820,6 +835,35 @@ class TenantStore:
         if not datasets_dir.is_dir():
             return []
         return sorted(p for p in datasets_dir.rglob("*.jsonl") if p.is_file())
+
+    def has_evaluation_asset_datasets(self, tenant_id: str) -> bool:
+        """Return whether a dataset listing would include published Studio data."""
+        tenant_dir = self._tenant_dir(tenant_id)
+        if tenant_dir is None:
+            return False
+        datasets_dir = (tenant_dir / "datasets").resolve()
+        published_dir = (datasets_dir / "evaluation_assets").resolve()
+        if datasets_dir not in published_dir.parents or not published_dir.is_dir():
+            return False
+        return any(
+            path.is_file()
+            for path in published_dir.rglob("*.jsonl")
+        )
+
+    def is_evaluation_asset_dataset(
+        self,
+        tenant_id: str,
+        dataset_rel: str,
+    ) -> bool:
+        """Return whether a requested dataset resolves under the Studio catalog."""
+        tenant_dir = self._tenant_dir(tenant_id)
+        if tenant_dir is None:
+            return False
+        path = (tenant_dir / dataset_rel).resolve()
+        published_dir = (
+            tenant_dir / "datasets" / "evaluation_assets"
+        ).resolve()
+        return published_dir in path.parents
 
     def list_datasets(self, tenant_id: str) -> List[Dict[str, Any]]:
         tenant_dir = self._tenant_dir(tenant_id)

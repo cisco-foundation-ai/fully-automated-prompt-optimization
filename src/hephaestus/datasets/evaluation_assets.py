@@ -13,6 +13,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence
 
+from src.hephaestus.artifact_io import (
+    atomic_write_json,
+    atomic_write_jsonl,
+    atomic_write_text,
+)
 from src.hephaestus.datasets.intent_assets import IntentCluster, IntentMatch
 
 REQUIRED_CASE_KEYS = {"case_id", "task_type", "context", "expected", "metadata"}
@@ -324,16 +329,13 @@ def assemble_dataset_bundle(
         },
     )
     manifest_path = output_dir / "dataset_manifest.json"
-    manifest_path.write_text(json.dumps(manifest.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+    atomic_write_json(manifest_path, manifest.to_dict())
     return manifest
 
 
 def write_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:
     """Write mappings as JSONL with deterministic object key order."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(dict(row), sort_keys=True) + "\n")
+    atomic_write_jsonl(path, rows)
 
 
 def write_coverage_report(
@@ -392,8 +394,7 @@ def write_coverage_report(
     else:
         lines.append("- No trusted-evidence gaps found.")
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines) + "\n")
 
 
 def synthetic_issue_to_dict(issue: SyntheticFilterIssue) -> Dict[str, Any]:

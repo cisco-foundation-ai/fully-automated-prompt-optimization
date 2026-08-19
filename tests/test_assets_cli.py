@@ -8,216 +8,28 @@ import json
 import sys
 from pathlib import Path
 
-import src.hephaestus.datasets.embedding_providers as embedding_providers
+import pytest
+
 from src.hephaestus.cli import build_parser, main
 
 
-def test_assets_intent_inventory_cli_uses_openai_vectorizer(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    """assets intent-inventory can use the OpenAI embedding vectorizer path."""
-    records = tmp_path / "records.jsonl"
-    trusted = tmp_path / "trusted_intents.jsonl"
-    output_dir = tmp_path / "inventory"
-    records.write_text(
-        json.dumps(
-            {
-                "record_id": "r1",
-                "canonical_intent_text": "category alpha request",
-                "route": "route_a",
-            }
-        )
-        + "\n",
-        encoding="utf-8",
+def test_assets_help_exposes_only_canonical_pipeline_commands() -> None:
+    """Legacy assembly commands are absent from public parser help and choices."""
+    parser = build_parser()
+    command_action = next(
+        action for action in parser._actions if action.dest == "command"
     )
-    trusted.write_text(
-        json.dumps(
-            {
-                "intent_id": "trusted-alpha",
-                "label": "category alpha",
-                "texts": ["category alpha example"],
-                "route": "route_a",
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    assets_parser = command_action.choices["assets"]
+    help_text = assets_parser.format_help()
 
-    class DummyEmbeddingProvider:
-        created_with = None
-
-        def __init__(self, **kwargs):
-            DummyEmbeddingProvider.created_with = kwargs
-
-        def embed_texts(self, texts):
-            return [[1.0, 0.0] if "alpha" in text else [0.0, 1.0] for text in texts]
-
-    monkeypatch.setattr(
-        embedding_providers,
-        "OpenAIEmbeddingProvider",
-        DummyEmbeddingProvider,
-    )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "hephaestus",
-            "assets",
-            "intent-inventory",
-            "--records",
-            str(records),
-            "--trusted-intents",
-            str(trusted),
-            "--output-dir",
-            str(output_dir),
-            "--id-field",
-            "record_id",
-            "--text-field",
-            "canonical_intent_text",
-            "--route-field",
-            "route",
-            "--vectorizer",
-            "openai",
-            "--embedding-model",
-            "test-embedding-model",
-        ],
-    )
-
-    main()
-
-    output = capsys.readouterr().out
-    matches = [
-        json.loads(line)
-        for line in (output_dir / "intent_matches.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
-    assert "Wrote" in output
-    assert DummyEmbeddingProvider.created_with["model"] == "test-embedding-model"
-    assert matches[0]["status"] == "matched_trusted_intent"
-
-
-def test_assets_intent_inventory_cli_uses_statistical_coverage_policy(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    """assets intent-inventory writes under-covered matches when policy requires more examples."""
-    records = tmp_path / "records.jsonl"
-    trusted = tmp_path / "trusted_intents.jsonl"
-    output_dir = tmp_path / "inventory"
-    records.write_text(
-        "\n".join(
-            json.dumps(
-                {
-                    "record_id": f"r{index}",
-                    "canonical_intent_text": "category alpha request",
-                    "route": "route_a",
-                }
-            )
-            for index in range(5)
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    trusted.write_text(
-        json.dumps(
-            {
-                "intent_id": "trusted-alpha",
-                "label": "category alpha",
-                "texts": ["category alpha request"],
-                "route": "route_a",
-                "metadata": {"trusted_example_count": 1},
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "hephaestus",
-            "assets",
-            "intent-inventory",
-            "--records",
-            str(records),
-            "--trusted-intents",
-            str(trusted),
-            "--output-dir",
-            str(output_dir),
-            "--id-field",
-            "record_id",
-            "--text-field",
-            "canonical_intent_text",
-            "--route-field",
-            "route",
-            "--vectorizer",
-            "tfidf",
-            "--min-trusted-examples",
-            "2",
-            "--match-threshold",
-            "0.1",
-        ],
-    )
-
-    main()
-
-    output = capsys.readouterr().out
-    matches = [
-        json.loads(line)
-        for line in (output_dir / "intent_matches.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
-    assert "Wrote" in output
-    assert matches[0]["status"] == "needs_more_trusted_examples"
-    assert matches[0]["trusted_example_count"] == 1
-
-
-def test_assets_assemble_cli_writes_bundle(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    """assets assemble writes split files, manifest, and filter audit files."""
-    trusted = tmp_path / "trusted.jsonl"
-    synthetic = tmp_path / "synthetic.jsonl"
-    output_dir = tmp_path / "out"
-    trusted.write_text(
-        json.dumps(_case("trusted-1", message="request alpha")) + "\n",
-        encoding="utf-8",
-    )
-    synthetic.write_text(
-        json.dumps(_case("synth-1", message="request beta", thread="s1")) + "\n",
-        encoding="utf-8",
-    )
-
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "hephaestus",
-            "assets",
-            "assemble",
-            "--trusted-cases",
-            str(trusted),
-            "--synthetic-cases",
-            str(synthetic),
-            "--output-dir",
-            str(output_dir),
-            "--dataset-version",
-            "v1",
-        ],
-    )
-
-    main()
-
-    output = capsys.readouterr().out
-    manifest = json.loads((output_dir / "dataset_manifest.json").read_text(encoding="utf-8"))
-    assert "accepted synthetic=1" in output
-    assert manifest["dataset_version"] == "v1"
-    assert (output_dir / "synthetic_filter_issues.jsonl").exists()
-    assert (output_dir / "train.jsonl").exists()
+    assert "intent-inventory" not in help_text
+    assert "assemble" not in help_text
+    for command in ("create", "run", "extend", "status"):
+        assert command in help_text
+    with pytest.raises(SystemExit):
+        parser.parse_args(["assets", "intent-inventory"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["assets", "assemble"])
 
 
 def test_assets_create_and_status_use_evaluation_assets_workspace(
@@ -226,10 +38,18 @@ def test_assets_create_and_status_use_evaluation_assets_workspace(
     capsys,
 ) -> None:
     tenants_root = tmp_path / "tenants"
-    feedback = tmp_path / "feedback.jsonl"
-    unlabeled = tmp_path / "unlabeled.jsonl"
-    feedback.write_text('{"id":"f1"}\n', encoding="utf-8")
-    unlabeled.write_text('{"id":"u1"}\n', encoding="utf-8")
+    sources = tenants_root / "bootstrap" / "source_artifacts"
+    sources.mkdir(parents=True)
+    feedback = sources / "feedback.jsonl"
+    unlabeled = sources / "unlabeled.jsonl"
+    feedback.write_text(
+        json.dumps(_evaluation_input("f1", labeled=True)) + "\n",
+        encoding="utf-8",
+    )
+    unlabeled.write_text(
+        json.dumps(_evaluation_input("u1", labeled=False)) + "\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -302,6 +122,116 @@ def test_assets_create_and_status_use_evaluation_assets_workspace(
     assert '"status": "queued"' in capsys.readouterr().out
 
 
+def test_assets_create_cli_rejects_other_tenant_source_before_writes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The CLI create path enforces the same selected-tenant source boundary."""
+    tenants_root = tmp_path / "tenants"
+    other_sources = tenants_root / "tenant_b" / "source_artifacts"
+    selected_sources = tenants_root / "tenant_a" / "source_artifacts"
+    other_sources.mkdir(parents=True)
+    selected_sources.mkdir(parents=True)
+    feedback = other_sources / "feedback.jsonl"
+    unlabeled = selected_sources / "unlabeled.jsonl"
+    feedback.write_text(
+        json.dumps(_evaluation_input("f1", labeled=True)) + "\n",
+        encoding="utf-8",
+    )
+    unlabeled.write_text(
+        json.dumps(_evaluation_input("u1", labeled=False)) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "hephaestus",
+            "assets",
+            "create",
+            "--tenant",
+            "tenant_a",
+            "--feedback",
+            str(feedback),
+            "--unlabeled",
+            str(unlabeled),
+            "--tenants-root",
+            str(tenants_root),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="selected tenant"):
+        main()
+
+    assert not (
+        tenants_root / "tenant_a" / "evaluation_assets" / "v1"
+    ).exists()
+
+
+def test_assets_extend_cli_rejects_other_tenant_source_before_writes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The CLI extend path enforces the selected-tenant source boundary."""
+    from src.hephaestus.evaluation_assets.models import EvaluationAssetConfig
+    from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
+
+    tenants_root = tmp_path / "tenants"
+    selected_sources = tenants_root / "tenant_a" / "source_artifacts"
+    other_sources = tenants_root / "tenant_b" / "source_artifacts"
+    selected_sources.mkdir(parents=True)
+    other_sources.mkdir(parents=True)
+    feedback = selected_sources / "feedback.jsonl"
+    unlabeled = selected_sources / "unlabeled.jsonl"
+    addition = other_sources / "additional.jsonl"
+    feedback.write_text(
+        json.dumps(_evaluation_input("f1", labeled=True)) + "\n",
+        encoding="utf-8",
+    )
+    unlabeled.write_text(
+        json.dumps(_evaluation_input("u1", labeled=False)) + "\n",
+        encoding="utf-8",
+    )
+    addition.write_text(
+        json.dumps(_evaluation_input("f2", labeled=True)) + "\n",
+        encoding="utf-8",
+    )
+    parent = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    state = parent.initialize(
+        EvaluationAssetConfig(tenant_id="tenant_a"),
+        feedback,
+        unlabeled,
+    )
+    state.status = "completed"
+    parent.save_state(state)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "hephaestus",
+            "assets",
+            "extend",
+            "--tenant",
+            "tenant_a",
+            "--parent-asset-id",
+            "v1",
+            "--asset-id",
+            "v2",
+            "--additional-feedback",
+            str(addition),
+            "--tenants-root",
+            str(tenants_root),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="selected tenant"):
+        main()
+
+    assert not (
+        tenants_root / "tenant_a" / "evaluation_assets" / "v2"
+    ).exists()
+
+
 def test_assets_extend_cli_parses_incremental_clustering_options() -> None:
     args = build_parser().parse_args(
         [
@@ -331,11 +261,26 @@ def test_assets_extend_cli_parses_incremental_clustering_options() -> None:
     assert args.clusters == 12
 
 
-def _case(case_id: str, message: str, thread: str = "t1") -> dict:
-    return {
-        "case_id": case_id,
+def _evaluation_input(record_id: str, *, labeled: bool) -> dict:
+    row = {
+        "schema_version": "fapo-evaluation-input-v1",
+        "record_id": record_id,
+        "group_id": f"group-{record_id}",
         "task_type": "generic",
-        "context": {"messages_json": json.dumps([{"role": "user", "content": message}])},
-        "expected": {"rubric": {"must": ["answer the request"]}},
-        "metadata": {"group_id": thread},
+        "user_input": "Process the supplied input.",
+        "conversation_context": [],
+        "tool_calls": [],
+        "runtime": {},
+        "metadata": {},
     }
+    if labeled:
+        row.update(
+            {
+                "assistant_output": "A previous response.",
+                "feedback": {
+                    "polarity": "positive",
+                    "rationale": "The response satisfied the request.",
+                },
+            }
+        )
+    return row

@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from src.hephaestus.datasets.intent_assets import (
     CoveragePolicy,
     IntentCluster,
@@ -47,6 +49,77 @@ def test_fixed_count_clustering_is_exact_and_deterministic() -> None:
     assert sorted(record_id for cluster in first for record_id in cluster.record_ids) == [
         f"r{index}" for index in range(6)
     ]
+
+
+def test_fixed_count_clustering_keeps_legacy_ids_for_unique_route_slugs() -> None:
+    """Unique route slugs retain the historical cluster-ID format."""
+    records = [
+        IntentRecord("r1", "first request", route="route_a"),
+        IntentRecord("r2", "second request", route="route_b"),
+    ]
+
+    clusters = cluster_records_fixed_count(records, 2)
+
+    assert [cluster.cluster_id for cluster in clusters] == [
+        "route-a-001",
+        "route-b-001",
+    ]
+
+
+def test_colliding_route_slugs_remain_distinct_through_coverage() -> None:
+    """Exact routes with one slug cannot overwrite cluster coverage keys."""
+    records = [
+        IntentRecord("space", "space route request", route="foo bar"),
+        IntentRecord("hyphen", "hyphen route request", route="foo-bar"),
+    ]
+    trusted = [
+        TrustedIntent(
+            intent_id="trusted-space",
+            label="space route",
+            texts=["space route request"],
+            route="foo bar",
+        ),
+        TrustedIntent(
+            intent_id="trusted-hyphen",
+            label="hyphen route",
+            texts=["hyphen route request"],
+            route="foo-bar",
+        ),
+    ]
+
+    clusters = cluster_records_fixed_count(records, 2)
+    match_texts = build_intent_match_texts(clusters, records, trusted)
+    matches = match_clusters_to_trusted_intents(
+        clusters,
+        records,
+        trusted,
+        match_threshold=0.1,
+    )
+
+    assert len({cluster.cluster_id for cluster in clusters}) == 2
+    assert len(match_texts) == 4
+    assert {match.cluster_id for match in matches} == {
+        cluster.cluster_id for cluster in clusters
+    }
+    assert {match.matched_intent_id for match in matches} == {
+        "trusted-space",
+        "trusted-hyphen",
+    }
+
+
+def test_coverage_rejects_duplicate_cluster_ids_before_early_return() -> None:
+    """Even coverage without trusted intents rejects ambiguous cluster keys."""
+    clusters = [
+        IntentCluster("duplicate", "route-a", ["a"], ["a"], []),
+        IntentCluster("duplicate", "route-b", ["b"], ["b"], []),
+    ]
+    records = [
+        IntentRecord("a", "first request", route="route-a"),
+        IntentRecord("b", "second request", route="route-b"),
+    ]
+
+    with pytest.raises(ValueError, match="duplicate cluster_id"):
+        match_clusters_to_trusted_intents(clusters, records, [])
 
 
 def test_canonical_intent_text_extracts_nested_fields():

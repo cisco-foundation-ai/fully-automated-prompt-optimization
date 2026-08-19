@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+import math
 import os
 import time
+from numbers import Real
 from typing import Any, Callable, List, Optional, Sequence
 
 DEFAULT_OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
@@ -50,7 +52,11 @@ class OpenAIEmbeddingProvider:
         for start in range(0, len(texts), self.batch_size):
             batch = [str(text) for text in texts[start : start + self.batch_size]]
             embeddings.extend(self._embed_batch(client, batch))
-        return embeddings
+        return validate_embedding_vectors(
+            embeddings,
+            expected_count=len(texts),
+            source="OpenAI embedding response",
+        )
 
     def _create_client(self) -> Any:
         from openai import OpenAI
@@ -93,22 +99,84 @@ def _extract_embedding_vectors(response: Any, expected_count: int) -> List[List[
         data = response.get("data")
     if not isinstance(data, list):
         raise ValueError("OpenAI embedding response missing data list")
+    if len(data) != expected_count:
+        raise ValueError(
+            f"OpenAI embedding response returned {len(data)} vectors; "
+            f"expected {expected_count}"
+        )
 
-    indexed = []
-    for default_index, item in enumerate(data):
-        index = _item_value(item, "index", default_index)
+    indexed: List[tuple[int, Sequence[float]]] = []
+    for item in data:
+        index = _item_value(item, "index", None)
+        if not isinstance(index, int) or isinstance(index, bool):
+            raise ValueError(
+                "OpenAI embedding response items require an integer index"
+            )
         embedding = _item_value(item, "embedding", None)
         if not isinstance(embedding, list):
             raise ValueError("OpenAI embedding response item missing embedding list")
-        indexed.append((int(index), [float(value) for value in embedding]))
+        indexed.append((index, embedding))
 
+    indices = [index for index, _ in indexed]
+    if len(set(indices)) != len(indices):
+        raise ValueError("OpenAI embedding response requires unique indices")
+    expected_indices = set(range(expected_count))
+    if set(indices) != expected_indices:
+        raise ValueError(
+            "OpenAI embedding response requires indices exactly "
+            f"0..{expected_count - 1}"
+        )
     indexed.sort(key=lambda item: item[0])
     vectors = [embedding for _, embedding in indexed]
+    return validate_embedding_vectors(
+        vectors,
+        expected_count=expected_count,
+        source="OpenAI embedding response",
+    )
+
+
+def validate_embedding_vectors(
+    vectors: Sequence[Sequence[float]],
+    *,
+    expected_count: int,
+    source: str,
+) -> List[List[float]]:
+    """Validate one embedding batch and return normalized float vectors."""
+    if isinstance(vectors, (str, bytes)) or not isinstance(vectors, Sequence):
+        raise ValueError(f"{source} must return a sequence of vectors")
     if len(vectors) != expected_count:
         raise ValueError(
-            f"OpenAI embedding response returned {len(vectors)} vectors; expected {expected_count}"
+            f"{source} returned {len(vectors)} vectors; expected {expected_count}"
         )
-    return vectors
+    if not vectors:
+        return []
+
+    dimension: Optional[int] = None
+    normalized: List[List[float]] = []
+    for vector_index, vector in enumerate(vectors):
+        if isinstance(vector, (str, bytes)) or not isinstance(vector, Sequence):
+            raise ValueError(f"{source} vector {vector_index} must be a sequence")
+        if dimension is None:
+            dimension = len(vector)
+            if dimension < 1:
+                raise ValueError(f"{source} vectors must have positive dimension")
+        elif len(vector) != dimension:
+            raise ValueError(f"{source} vectors must have one consistent dimension")
+
+        normalized_vector: List[float] = []
+        for coordinate in vector:
+            if isinstance(coordinate, bool) or not isinstance(coordinate, Real):
+                raise ValueError(
+                    f"{source} coordinates must be real numeric values"
+                )
+            numeric = float(coordinate)
+            if not math.isfinite(numeric):
+                raise ValueError(f"{source} coordinates must be finite")
+            normalized_vector.append(numeric)
+        if not any(value != 0.0 for value in normalized_vector):
+            raise ValueError(f"{source} vector {vector_index} must be nonzero")
+        normalized.append(normalized_vector)
+    return normalized
 
 
 def _item_value(item: Any, key: str, default: Any) -> Any:

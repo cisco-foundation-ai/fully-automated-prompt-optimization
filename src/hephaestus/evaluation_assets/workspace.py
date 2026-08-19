@@ -10,12 +10,21 @@ import hashlib
 import json
 import re
 import shutil
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
+from src.hephaestus.artifact_io import (
+    atomic_append_jsonl,
+    atomic_copy_file,
+    atomic_write_json,
+    atomic_write_jsonl,
+)
+from src.hephaestus.artifact_io import (
+    atomic_write_text as atomic_write_text,
+)
+from src.hephaestus.evaluation_assets.input_contract import validate_input_records
 from src.hephaestus.evaluation_assets.models import (
     CONFIG_STAGE_DEPENDENCIES,
     STAGE_COUNT_KEYS,
@@ -254,6 +263,47 @@ class EvaluationAssetLayout:
         for path in paths:
             path.mkdir(parents=True, exist_ok=True)
 
+    def resolve_input_source(self, path: Path) -> Path:
+        """Resolve one authorized JSONL source for this selected tenant."""
+        requested = path.expanduser().absolute()
+        try:
+            resolved = requested.resolve(strict=True)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(requested) from exc
+        if not resolved.is_file():
+            raise ValueError(
+                f"Evaluation asset input must be a regular file: {requested}"
+            )
+        if requested.suffix != ".jsonl" or resolved.suffix != ".jsonl":
+            raise ValueError(f"Evaluation asset inputs must use .jsonl: {requested}")
+
+        source_root = (self.tenant_root / "source_artifacts").resolve()
+        datasets_root = (self.tenant_root / "datasets").resolve()
+        generated_root = (datasets_root / "evaluation_assets").resolve()
+        if not _is_beneath(resolved, self.tenant_root):
+            raise ValueError(
+                "Evaluation asset input must remain inside the selected tenant "
+                f"after symlink resolution: {requested}"
+            )
+        if _is_beneath(requested, generated_root) or _is_beneath(
+            resolved,
+            generated_root,
+        ):
+            raise ValueError(
+                "Evaluation asset inputs cannot use generated "
+                f"datasets/evaluation_assets files: {requested}"
+            )
+        if not (
+            _is_beneath(resolved, source_root)
+            or _is_beneath(resolved, datasets_root)
+        ):
+            raise ValueError(
+                "Evaluation asset input must be a regular .jsonl file under "
+                "the selected tenant's source_artifacts/ or datasets/: "
+                f"{requested}"
+            )
+        return resolved
+
     def initialize(
         self,
         config: EvaluationAssetConfig,
@@ -261,9 +311,13 @@ class EvaluationAssetLayout:
         unlabeled_source: Path,
     ) -> PipelineState:
         """Copy raw inputs into the asset and persist initial config/state."""
-        self.ensure()
         if self.config_path.exists() or self.state_path.exists():
             raise FileExistsError(f"Evaluation asset already exists: {self.root}")
+        feedback_source = self.resolve_input_source(feedback_source)
+        unlabeled_source = self.resolve_input_source(unlabeled_source)
+        _validate_source_rows(feedback_source, labeled=True)
+        _validate_source_rows(unlabeled_source, labeled=False)
+        self.ensure()
         _copy_jsonl(feedback_source, self.feedback_path)
         _copy_jsonl(unlabeled_source, self.unlabeled_path)
         timestamp = utc_now()
@@ -299,12 +353,29 @@ class EvaluationAssetLayout:
             raise ValueError("extended asset must use a new asset_id")
         if parent.load_state().status != "completed":
             raise ValueError("parent evaluation asset must be completed")
-        self.ensure()
         if self.config_path.exists() or self.state_path.exists():
             raise FileExistsError(f"Evaluation asset already exists: {self.root}")
 
-        extra_feedback = _read_jsonl_rows(additional_feedback)
-        extra_unlabeled = _read_jsonl_rows(additional_unlabeled)
+        resolved_feedback = (
+            self.resolve_input_source(additional_feedback)
+            if additional_feedback is not None
+            else None
+        )
+        resolved_unlabeled = (
+            self.resolve_input_source(additional_unlabeled)
+            if additional_unlabeled is not None
+            else None
+        )
+        extra_feedback = (
+            _validate_source_rows(resolved_feedback, labeled=True)
+            if resolved_feedback is not None
+            else []
+        )
+        extra_unlabeled = (
+            _validate_source_rows(resolved_unlabeled, labeled=False)
+            if resolved_unlabeled is not None
+            else []
+        )
         if not extra_feedback and not extra_unlabeled:
             raise ValueError(
                 "extension requires additional labeled or unlabeled records"
@@ -353,8 +424,9 @@ class EvaluationAssetLayout:
             extra_unlabeled,
             source="unlabeled input",
         )
-        _atomic_write_jsonl(self.feedback_path, feedback_rows)
-        _atomic_write_jsonl(self.unlabeled_path, unlabeled_rows)
+        self.ensure()
+        atomic_write_jsonl(self.feedback_path, feedback_rows)
+        atomic_write_jsonl(self.unlabeled_path, unlabeled_rows)
 
         guideline_artifacts = (
             "feedback_evidence.jsonl",
@@ -376,8 +448,7 @@ class EvaluationAssetLayout:
             if not source.is_file():
                 raise FileNotFoundError(source)
             destination = self.artifact_path(PipelineStage.RUBRIC_EXTRACTION, name)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
+            atomic_copy_file(source, destination)
             seeded_artifacts.append(name)
 
         snapshot_sources = {
@@ -415,8 +486,7 @@ class EvaluationAssetLayout:
             if not source.is_file():
                 raise FileNotFoundError(source)
             destination = self.parent_snapshot / name
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
+            atomic_copy_file(source, destination)
             snapshot_artifacts.append(
                 {
                     "file": name,
@@ -436,7 +506,7 @@ class EvaluationAssetLayout:
                 PipelineStage.INTENT_CLUSTERING,
                 "intent_inventory.jsonl",
             )
-            shutil.copy2(source, destination)
+            atomic_copy_file(source, destination)
             reused_artifacts.append("intent_inventory.jsonl")
             clusters = _read_jsonl_rows(destination)
             lineage_rows = [
@@ -448,7 +518,7 @@ class EvaluationAssetLayout:
                 }
                 for row in clusters
             ]
-            _atomic_write_jsonl(
+            atomic_write_jsonl(
                 self.artifact_path(
                     PipelineStage.INTENT_CLUSTERING,
                     "cluster_lineage.jsonl",
@@ -678,9 +748,7 @@ class EvaluationAssetLayout:
             "asset_id": self.asset_id,
             "details": dict(details or {}),
         }
-        self.events_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.events_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+        atomic_append_jsonl(self.events_path, payload)
 
     def _config_revision_count(self) -> int:
         if not self.config_history_path.is_file():
@@ -694,9 +762,7 @@ class EvaluationAssetLayout:
         )
 
     def _append_config_revision(self, payload: Mapping[str, Any]) -> None:
-        self.config_history_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.config_history_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(dict(payload), sort_keys=True) + "\n")
+        atomic_append_jsonl(self.config_history_path, payload)
 
     def _clear_stage_outputs(self, stages: Iterable[PipelineStage]) -> None:
         stages = tuple(stages)
@@ -816,63 +882,67 @@ def read_json(path: Path) -> Dict[str, Any]:
     return raw
 
 
-def atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
-    """Write JSON using an atomic same-directory replacement."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as handle:
-        json.dump(dict(payload), handle, indent=2, sort_keys=True)
-        handle.write("\n")
-        temporary_path = Path(handle.name)
-    temporary_path.replace(path)
-
-
 def _copy_jsonl(source: Path, destination: Path) -> None:
     source = source.resolve()
     if not source.is_file():
         raise FileNotFoundError(source)
     if source.suffix.lower() != ".jsonl":
         raise ValueError(f"Evaluation asset inputs must be JSONL: {source}")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "wb",
-        dir=destination.parent,
-        prefix=f".{destination.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as handle:
-        with source.open("rb") as source_handle:
-            shutil.copyfileobj(source_handle, handle)
-        temporary_path = Path(handle.name)
-    temporary_path.replace(destination)
+    atomic_copy_file(source, destination)
 
 
 def _read_jsonl_rows(path: Optional[Path]) -> list[Dict[str, Any]]:
+    rows, _ = _read_jsonl_rows_with_line_numbers(path)
+    return rows
+
+
+def _read_jsonl_rows_with_line_numbers(
+    path: Optional[Path],
+) -> tuple[list[Dict[str, Any]], list[int]]:
     if path is None:
-        return []
+        return [], []
     resolved = path.resolve()
     if not resolved.is_file():
         raise FileNotFoundError(resolved)
     if resolved.suffix.lower() != ".jsonl":
         raise ValueError(f"Evaluation asset inputs must be JSONL: {resolved}")
     rows: list[Dict[str, Any]] = []
+    row_numbers: list[int] = []
     for line_number, line in enumerate(
         resolved.read_text(encoding="utf-8").splitlines(),
         start=1,
     ):
         if not line.strip():
             continue
-        row = json.loads(line)
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"{resolved}:{line_number}: invalid JSON: {exc.msg}"
+            ) from exc
         if not isinstance(row, dict):
             raise ValueError(f"Expected JSON object at {resolved}:{line_number}")
         rows.append(row)
+        row_numbers.append(line_number)
+    return rows, row_numbers
+
+
+def _validate_source_rows(path: Path, *, labeled: bool) -> list[Dict[str, Any]]:
+    rows, row_numbers = _read_jsonl_rows_with_line_numbers(path)
+    if not rows:
+        kind = "labeled feedback" if labeled else "unlabeled"
+        raise ValueError(f"{path}: {kind} input is empty")
+    validate_input_records(
+        rows,
+        labeled=labeled,
+        path=path,
+        row_numbers=row_numbers,
+    )
     return rows
+
+
+def _is_beneath(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
 
 
 def _merge_jsonl_rows(
@@ -892,25 +962,6 @@ def _merge_jsonl_rows(
         seen.add(record_id)
         merged.append(dict(row))
     return merged
-
-
-def _atomic_write_jsonl(
-    path: Path,
-    rows: Sequence[Mapping[str, Any]],
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as handle:
-        for row in rows:
-            handle.write(json.dumps(dict(row), sort_keys=True) + "\n")
-        temporary_path = Path(handle.name)
-    temporary_path.replace(path)
 
 
 def _sha256_path(path: Path) -> str:

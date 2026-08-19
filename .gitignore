@@ -48,11 +48,8 @@ tenants/*/source_artifacts/*
 !tenants/*/source_artifacts/.gitkeep
 tenants/*/datasets/*
 !tenants/*/datasets/.gitkeep
-# Evaluation asset payloads and run state are local/GCS-backed, not git-tracked.
-tenants/*/evaluation_assets/*/raw_inputs/*
-tenants/*/evaluation_assets/*/prepared_inputs/*
-tenants/*/evaluation_assets/*/decision_assets/*
-tenants/*/evaluation_assets/*/dataset_splits/*
-tenants/*/evaluation_assets/*/events.jsonl
-tenants/*/evaluation_assets/*/pipeline_state.json
+# Evaluation Asset Studio runtime/checkpoint state is local-only, not git-tracked.
+tenants/*/evaluation_assets/**
+# Published Studio dataset copies are untracked derived data.
+tenants/*/datasets/evaluation_assets/**
 .DS_Store

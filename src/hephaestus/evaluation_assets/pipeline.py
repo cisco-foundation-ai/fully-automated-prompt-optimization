@@ -11,10 +11,26 @@ import json
 import math
 import re
 from collections import Counter
+from functools import partial
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+    Sequence,
+    TypeVar,
+)
 
-from src.hephaestus.datasets.embedding_providers import OpenAIEmbeddingProvider
+from src.hephaestus.artifact_io import atomic_write_text
+from src.hephaestus.datasets.embedding_providers import (
+    OpenAIEmbeddingProvider,
+    validate_embedding_vectors,
+)
 from src.hephaestus.datasets.evaluation_assets import (
     filter_synthetic_cases,
     sha256_file,
@@ -29,6 +45,7 @@ from src.hephaestus.datasets.intent_assets import (
     IntentMatch,
     IntentRecord,
     TrustedIntent,
+    assert_unique_cluster_ids,
     build_intent_match_texts,
     cluster_records_fixed_count,
     cluster_to_dict,
@@ -37,7 +54,10 @@ from src.hephaestus.datasets.intent_assets import (
     match_to_dict,
 )
 from src.hephaestus.datasets.rubric_providers import OpenAIRubricProvider
-from src.hephaestus.evaluation_assets.input_contract import validate_input_records
+from src.hephaestus.evaluation_assets.input_contract import (
+    effective_route,
+    validate_input_records,
+)
 from src.hephaestus.evaluation_assets.models import (
     EvaluationAssetConfig,
     PipelineStage,
@@ -115,6 +135,7 @@ identifier, secret, or invented tool result.
 EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
 IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 DEFAULT_REGRESSION_FRACTION = 0.2
+RubricResponseT = TypeVar("RubricResponseT")
 
 
 class RubricProvider(Protocol):
@@ -137,6 +158,26 @@ class EmbeddingProvider(Protocol):
 
     def embed_texts(self, texts: Sequence[str]) -> Sequence[Sequence[float]]:
         """Return one vector per input."""
+
+
+class ProviderCallError(RuntimeError):
+    """Safe provider failure whose original exception remains its cause."""
+
+    def __init__(
+        self,
+        *,
+        stage: PipelineStage,
+        provider: str,
+        model: str,
+        cause: Exception,
+    ) -> None:
+        cause_name = _provider_cause_label(cause)
+        summary = _provider_cause_summary(cause)
+        super().__init__(
+            "Provider call failed: "
+            f"stage={stage.value}, provider={provider}, model={model}, "
+            f"cause={cause_name}, summary={summary}"
+        )
 
 
 class EvaluationAssetPipeline:
@@ -177,6 +218,43 @@ class EvaluationAssetPipeline:
             self.embedding_provider = OpenAIEmbeddingProvider(
                 model=self.config.embedding_model
             )
+
+    def _call_rubric_provider(
+        self,
+        stage: PipelineStage,
+        system_prompt: str,
+        payload: Mapping[str, Any],
+        normalize: Callable[[Mapping[str, Any]], RubricResponseT],
+    ) -> RubricResponseT:
+        try:
+            response = self.rubric_provider.generate_json(system_prompt, payload)
+            if not isinstance(response, Mapping):
+                raise ValueError("Rubric provider response must be a JSON object")
+            return normalize(response)
+        except Exception as exc:
+            raise ProviderCallError(
+                stage=stage,
+                provider=self.config.rubric_provider,
+                model=self.config.rubric_model,
+                cause=exc,
+            ) from exc
+
+    def _call_embedding_provider(
+        self,
+        stage: PipelineStage,
+        texts: Sequence[str],
+    ) -> Sequence[Sequence[float]]:
+        if self.embedding_provider is None:
+            return []
+        try:
+            return self.embedding_provider.embed_texts(texts)
+        except Exception as exc:
+            raise ProviderCallError(
+                stage=stage,
+                provider=self.config.embedding_provider,
+                model=self.config.embedding_model,
+                cause=exc,
+            ) from exc
 
     @classmethod
     def create(
@@ -260,8 +338,12 @@ class EvaluationAssetPipeline:
         return handlers[stage]()
 
     def _validate_raw_inputs(self) -> Dict[str, int]:
-        feedback = _load_jsonl(self.layout.feedback_path)
-        unlabeled = _load_jsonl(self.layout.unlabeled_path)
+        feedback, feedback_row_numbers = _load_jsonl_with_line_numbers(
+            self.layout.feedback_path
+        )
+        unlabeled, unlabeled_row_numbers = _load_jsonl_with_line_numbers(
+            self.layout.unlabeled_path
+        )
         if not feedback:
             raise ValueError("labeled feedback input is empty")
         if not unlabeled:
@@ -270,12 +352,15 @@ class EvaluationAssetPipeline:
             feedback,
             labeled=True,
             path=self.layout.feedback_path,
+            row_numbers=feedback_row_numbers,
         )
         validate_input_records(
             unlabeled,
             labeled=False,
             path=self.layout.unlabeled_path,
+            row_numbers=unlabeled_row_numbers,
         )
+        _validate_stage_one_feasibility(unlabeled, self.config.cluster_count)
         manifest = {
             "inputs": {
                 "labeled_feedback": {
@@ -297,10 +382,26 @@ class EvaluationAssetPipeline:
         return {"feedback_records": len(feedback), "unlabeled_records": len(unlabeled)}
 
     def _prepare_inputs(self) -> Dict[str, int]:
-        feedback_rows = _load_jsonl(self.layout.feedback_path)
-        unlabeled_rows = _load_jsonl(self.layout.unlabeled_path)
+        feedback_rows, feedback_row_numbers = _load_jsonl_with_line_numbers(
+            self.layout.feedback_path
+        )
+        unlabeled_rows, unlabeled_row_numbers = _load_jsonl_with_line_numbers(
+            self.layout.unlabeled_path
+        )
         normalized = [_normalize_feedback(row) for row in feedback_rows]
         intents = [_normalize_intent(row) for row in unlabeled_rows]
+        _validate_normalized_identity(
+            normalized,
+            feedback_rows,
+            output_name="normalized feedback",
+            row_numbers=feedback_row_numbers,
+        )
+        _validate_normalized_identity(
+            intents,
+            unlabeled_rows,
+            output_name="normalized unlabeled intent",
+            row_numbers=unlabeled_row_numbers,
+        )
         write_jsonl(
             self.layout.artifact_path(
                 PipelineStage.PREPARED_INPUTS,
@@ -361,32 +462,30 @@ class EvaluationAssetPipeline:
         )
         new_evidence: List[Dict[str, Any]] = []
         for batch in _batches(pending, self.config.batch_size):
-            response = self.rubric_provider.generate_json(
-                EVIDENCE_EXTRACTION_PROMPT,
-                {
-                    "records": [
-                        {
-                            "record_id": row["record_id"],
-                            "task_type": row["task_type"],
-                            "user_input": row["user_input"],
-                            "assistant_output": row["assistant_output"],
-                            "tool_calls": row["tool_calls"],
-                            "feedback": row["feedback"],
-                        }
-                        for row in batch
-                    ]
-                },
-            )
-            returned = _indexed_items(response, "evidence", "record_id")
-            for row in batch:
-                record_id = str(row["record_id"])
-                if record_id not in returned:
-                    raise ValueError(f"Evidence response omitted {record_id}")
-                new_evidence.append(
-                    _normalize_feedback_evidence(
-                        returned[record_id], row, self.config.rubric_model
-                    )
+            new_evidence.extend(
+                self._call_rubric_provider(
+                    PipelineStage.RUBRIC_EXTRACTION,
+                    EVIDENCE_EXTRACTION_PROMPT,
+                    {
+                        "records": [
+                            {
+                                "record_id": row["record_id"],
+                                "task_type": row["task_type"],
+                                "user_input": row["user_input"],
+                                "assistant_output": row["assistant_output"],
+                                "tool_calls": row["tool_calls"],
+                                "feedback": row["feedback"],
+                            }
+                            for row in batch
+                        ]
+                    },
+                    partial(
+                        _normalize_feedback_evidence_response,
+                        batch=batch,
+                        rubric_model=self.config.rubric_model,
+                    ),
                 )
+            )
 
         evidence = _replace_by_key(
             existing_evidence,
@@ -399,6 +498,7 @@ class EvaluationAssetPipeline:
             evidence_by_route.setdefault(str(item["route"]), []).append(item)
 
         candidates: List[Dict[str, Any]] = []
+        guidelines: List[Dict[str, Any]] = []
         for route in sorted(evidence_by_route):
             route_evidence = sorted(
                 evidence_by_route[route], key=lambda item: str(item["record_id"])
@@ -406,7 +506,8 @@ class EvaluationAssetPipeline:
             source_records = [
                 normalized_by_id[str(item["record_id"])] for item in route_evidence
             ]
-            response = self.rubric_provider.generate_json(
+            route_candidates, route_guidelines = self._call_rubric_provider(
+                PipelineStage.RUBRIC_EXTRACTION,
                 GUIDELINE_SYNTHESIS_PROMPT,
                 {
                     "route": route,
@@ -421,21 +522,16 @@ class EvaluationAssetPipeline:
                         for row in source_records
                     ],
                 },
+                partial(
+                    _normalize_guideline_response,
+                    route=route,
+                    evidence=route_evidence,
+                    rubric_model=self.config.rubric_model,
+                ),
             )
-            items = response.get("guidelines")
-            if not isinstance(items, list):
-                raise ValueError("Guideline response missing guidelines array")
-            candidates.extend(
-                {**dict(item), "route": route}
-                for item in items
-                if isinstance(item, Mapping)
-            )
-
-        guidelines = _compile_evaluation_guidelines(
-            candidates,
-            evidence,
-            self.config.rubric_model,
-        )
+            candidates.extend(route_candidates)
+            guidelines.extend(route_guidelines)
+        guidelines.sort(key=lambda item: str(item["guideline_id"]))
         guideline_by_record = _guidelines_by_source_record(guidelines)
         trusted_intents = [
             _trusted_intent_from_guideline(guideline, normalized_by_id)
@@ -481,11 +577,18 @@ class EvaluationAssetPipeline:
         records = [_intent_record(row) for row in rows]
         vectors = None
         if self.embedding_provider is not None:
+            texts = [record.text for record in records]
+            embeddings = validate_embedding_vectors(
+                self._call_embedding_provider(
+                    PipelineStage.INTENT_CLUSTERING,
+                    texts,
+                ),
+                expected_count=len(texts),
+                source="embedding provider result",
+            )
             vectors = dense_vectors_to_sparse(
                 [record.record_id for record in records],
-                self.embedding_provider.embed_texts(
-                    [record.text for record in records]
-                ),
+                embeddings,
             )
         clusters = cluster_records_fixed_count(
             records,
@@ -514,6 +617,8 @@ class EvaluationAssetPipeline:
             self.layout.parent_snapshot / "parent_intent_inventory.jsonl"
         )
         previous = [_intent_cluster(row) for row in parent_rows]
+        assert_unique_cluster_ids(previous)
+        assert_unique_cluster_ids(clusters)
         rows = _cluster_lineage(previous, clusters)
         write_jsonl(
             self.layout.artifact_path(
@@ -577,11 +682,18 @@ class EvaluationAssetPipeline:
         match_texts = build_intent_match_texts(clusters, records, trusted)
         vectors = None
         if self.embedding_provider is not None:
-            vectors = dense_vectors_to_sparse(
-                list(match_texts),
-                self.embedding_provider.embed_texts(
-                    [match_texts[key] for key in match_texts]
+            embedding_keys = list(match_texts)
+            embeddings = validate_embedding_vectors(
+                self._call_embedding_provider(
+                    PipelineStage.COVERAGE_DECISIONS,
+                    [match_texts[key] for key in embedding_keys]
                 ),
+                expected_count=len(embedding_keys),
+                source="embedding provider result",
+            )
+            vectors = dense_vectors_to_sparse(
+                embedding_keys,
+                embeddings,
             )
         policy = CoveragePolicy(
             min_match_score=self.config.match_threshold,
@@ -677,6 +789,7 @@ class EvaluationAssetPipeline:
                 )
             )
         ]
+        assert_unique_cluster_ids(clusters)
         matches = [
             _intent_match(row)
             for row in _load_jsonl(
@@ -724,55 +837,50 @@ class EvaluationAssetPipeline:
             if cluster.cluster_id in changed_cluster_ids
         ]
         for batch in _batches(changed_matched, self.config.batch_size):
-            response = self.rubric_provider.generate_json(
-                INFERENCE_PROMPT,
-                {
-                    "clusters": [
-                        {
-                            "cluster_id": cluster.cluster_id,
-                            "route": cluster.route,
-                            "representative_requests": [
-                                row_by_id[record_id]["user_input"]
-                                for record_id in cluster.representative_ids
-                            ],
-                            "trusted_requests": [
-                                normalized_by_id[record_id]["user_input"]
-                                for record_id in guideline_by_id[
+            cluster_rubrics.extend(
+                self._call_rubric_provider(
+                    PipelineStage.LABEL_INFERENCE,
+                    INFERENCE_PROMPT,
+                    {
+                        "clusters": [
+                            {
+                                "cluster_id": cluster.cluster_id,
+                                "route": cluster.route,
+                                "representative_requests": [
+                                    row_by_id[record_id]["user_input"]
+                                    for record_id in cluster.representative_ids
+                                ],
+                                "trusted_requests": [
+                                    normalized_by_id[record_id]["user_input"]
+                                    for record_id in guideline_by_id[
+                                        str(
+                                            match_by_cluster[
+                                                cluster.cluster_id
+                                            ].matched_intent_id
+                                        )
+                                    ]["source_record_ids"]
+                                ],
+                                "trusted_evaluation_guideline": guideline_by_id[
                                     str(
                                         match_by_cluster[
                                             cluster.cluster_id
                                         ].matched_intent_id
                                     )
-                                ]["source_record_ids"]
-                            ],
-                            "trusted_evaluation_guideline": guideline_by_id[
-                                str(
-                                    match_by_cluster[
-                                        cluster.cluster_id
-                                    ].matched_intent_id
-                                )
-                            ],
-                            "match_score": match_by_cluster[cluster.cluster_id].score,
-                        }
-                        for cluster in batch
-                    ]
-                },
-            )
-            returned = _indexed_items(response, "rubrics", "cluster_id")
-            for cluster in batch:
-                if cluster.cluster_id not in returned:
-                    raise ValueError(
-                        f"Inferred rubric response omitted {cluster.cluster_id}"
-                    )
-                cluster_rubrics.append(
-                    _normalize_rubric(
-                        returned[cluster.cluster_id],
-                        "cluster_id",
-                        cluster.cluster_id,
-                        "inferred_from_trusted_feedback",
-                        self.config.rubric_model,
-                    )
+                                ],
+                                "match_score": match_by_cluster[
+                                    cluster.cluster_id
+                                ].score,
+                            }
+                            for cluster in batch
+                        ]
+                    },
+                    partial(
+                        _normalize_inferred_rubric_response,
+                        batch=batch,
+                        rubric_model=self.config.rubric_model,
+                    ),
                 )
+            )
 
         labels, inferred_cases = _inferred_cases(
             clusters,
@@ -1044,6 +1152,7 @@ class EvaluationAssetPipeline:
             )
         )
         clusters = [_intent_cluster(row) for row in cluster_rows]
+        assert_unique_cluster_ids(clusters)
         row_by_id = {row["record_id"]: row for row in intent_rows}
         rubric_by_cluster = {row["cluster_id"]: row for row in rubric_rows}
         matched = [
@@ -1084,49 +1193,35 @@ class EvaluationAssetPipeline:
             ]
         candidates: List[Dict[str, Any]] = []
         for batch in _batches(matched, self.config.batch_size):
-            response = self.rubric_provider.generate_json(
-                SYNTHETIC_PROMPT,
-                {
-                    "clusters": [
-                        {
-                            "cluster_id": cluster.cluster_id,
-                            "route": cluster.route,
-                            "representatives": [
-                                row_by_id[record_id]["user_input"]
-                                for record_id in cluster.representative_ids
-                            ],
-                            "rubric": rubric_by_cluster[cluster.cluster_id],
-                            "case_count": self.config.synthetic_cases_per_cluster,
-                        }
-                        for cluster in batch
-                    ]
-                },
+            candidates.extend(
+                self._call_rubric_provider(
+                    PipelineStage.SYNTHETIC_COVERAGE,
+                    SYNTHETIC_PROMPT,
+                    {
+                        "clusters": [
+                            {
+                                "cluster_id": cluster.cluster_id,
+                                "route": cluster.route,
+                                "representatives": [
+                                    row_by_id[record_id]["user_input"]
+                                    for record_id in cluster.representative_ids
+                                ],
+                                "rubric": rubric_by_cluster[cluster.cluster_id],
+                                "case_count": (
+                                    self.config.synthetic_cases_per_cluster
+                                ),
+                            }
+                            for cluster in batch
+                        ]
+                    },
+                    partial(
+                        _normalize_synthetic_response,
+                        batch=batch,
+                        rubric_by_cluster=rubric_by_cluster,
+                        config=self.config,
+                    ),
+                )
             )
-            returned = _grouped_items(response, "cases", "cluster_id")
-            for cluster in batch:
-                generated_cases = returned.get(cluster.cluster_id, [])
-                if (
-                    len(generated_cases)
-                    != self.config.synthetic_cases_per_cluster
-                ):
-                    raise ValueError(
-                        "Synthetic response returned "
-                        f"{len(generated_cases)} cases for {cluster.cluster_id}; "
-                        f"expected {self.config.synthetic_cases_per_cluster}"
-                    )
-                for candidate_index, generated in enumerate(
-                    generated_cases,
-                    start=1,
-                ):
-                    candidates.append(
-                        _synthetic_case(
-                            cluster,
-                            generated,
-                            rubric_by_cluster[cluster.cluster_id],
-                            self.config.asset_id,
-                            candidate_index,
-                        )
-                    )
         trusted = _load_jsonl(
             self.layout.artifact_path(
                 PipelineStage.RUBRIC_EXTRACTION,
@@ -1185,15 +1280,29 @@ class EvaluationAssetPipeline:
 
 
 def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
+    rows, _ = _load_jsonl_with_line_numbers(path)
+    return rows
+
+
+def _load_jsonl_with_line_numbers(
+    path: Path,
+) -> tuple[List[Dict[str, Any]], List[int]]:
     rows: List[Dict[str, Any]] = []
+    row_numbers: List[int] = []
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
             continue
-        row = json.loads(line)
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"{path}:{line_number}: invalid JSON: {exc.msg}"
+            ) from exc
         if not isinstance(row, dict):
             raise ValueError(f"Expected JSON object at {path}:{line_number}")
         rows.append(row)
-    return rows
+        row_numbers.append(line_number)
+    return rows, row_numbers
 
 
 def _replace_by_key(
@@ -1292,21 +1401,18 @@ def _cluster_lineage(
 
 
 def _normalize_feedback(row: Mapping[str, Any]) -> Dict[str, Any]:
-    prepared = dict(_redact_value(row))
-    record_id = _string(prepared["record_id"])
-    task_type = _string(row["task_type"])
-    prepared["request_id"] = _string(prepared.get("request_id")) or record_id
-    prepared["route"] = _string(prepared.get("route")) or task_type
+    prepared = _redact_record(row)
+    if "request_id" not in prepared:
+        prepared["request_id"] = prepared["record_id"]
+    prepared["route"] = effective_route(prepared)
     return prepared
 
 
 def _normalize_intent(row: Mapping[str, Any]) -> Dict[str, Any]:
-    prepared = dict(_redact_value(row))
-    record_id = _string(prepared["record_id"])
+    prepared = _redact_record(row)
     user_input = _string(prepared["user_input"])
     context = prepared["conversation_context"]
     tool_calls = prepared["tool_calls"]
-    task_type = _string(prepared["task_type"])
     canonical = " ".join(
         part
         for part in (
@@ -1316,11 +1422,62 @@ def _normalize_intent(row: Mapping[str, Any]) -> Dict[str, Any]:
         )
         if part and part != "tools "
     )
-    prepared["request_id"] = _string(prepared.get("request_id")) or record_id
-    prepared["route"] = _string(prepared.get("route")) or task_type
+    if "request_id" not in prepared:
+        prepared["request_id"] = prepared["record_id"]
+    prepared["route"] = effective_route(prepared)
     prepared["canonical_intent_text"] = canonical
     prepared["tool_names"] = _tool_names(tool_calls)
     return prepared
+
+
+def _validate_normalized_identity(
+    normalized_rows: Sequence[Mapping[str, Any]],
+    source_rows: Sequence[Mapping[str, Any]],
+    *,
+    output_name: str,
+    row_numbers: Optional[Sequence[int]] = None,
+) -> None:
+    """Reject canonical identity collisions with both source locations."""
+    if row_numbers is not None and len(row_numbers) != len(source_rows):
+        raise ValueError("row_numbers must identify every source record")
+    seen: Dict[str, tuple[int, str]] = {}
+    for logical_index, (normalized, source) in enumerate(
+        zip(normalized_rows, source_rows)
+    ):
+        row_number = (
+            row_numbers[logical_index]
+            if row_numbers is not None
+            else logical_index + 1
+        )
+        record_id = normalized.get("record_id")
+        source_id = source.get("record_id", "<missing>")
+        if record_id in seen:
+            first_row, first_source_id = seen[record_id]
+            raise ValueError(
+                f"{output_name} duplicate record_id '{record_id}': "
+                f"row {first_row} source record_id '{first_source_id}' and "
+                f"row {row_number} source record_id '{source_id}'"
+            )
+        seen[record_id] = (row_number, source_id)
+
+
+def _validate_stage_one_feasibility(
+    unlabeled_rows: Sequence[Mapping[str, Any]],
+    cluster_count: int,
+) -> None:
+    """Reject fixed-count route allocations that the data cannot satisfy."""
+    record_count = len(unlabeled_rows)
+    if cluster_count > record_count:
+        raise ValueError(
+            "cluster_count cannot exceed the number of unlabeled records "
+            f"({record_count})"
+        )
+    routes = {effective_route(row) for row in unlabeled_rows}
+    if cluster_count < len(routes):
+        raise ValueError(
+            "cluster_count must be at least the number of distinct effective "
+            f"routes ({len(routes)}); one route-local cluster per route is required"
+        )
 
 
 def _normalize_feedback_evidence(
@@ -1359,6 +1516,51 @@ def _normalize_feedback_evidence(
     }
 
 
+def _normalize_feedback_evidence_response(
+    response: Mapping[str, Any],
+    *,
+    batch: Sequence[Mapping[str, Any]],
+    rubric_model: str,
+) -> List[Dict[str, Any]]:
+    returned = _indexed_items(response, "evidence", "record_id")
+    evidence: List[Dict[str, Any]] = []
+    for row in batch:
+        record_id = str(row["record_id"])
+        if record_id not in returned:
+            raise ValueError(f"Evidence response omitted {record_id}")
+        evidence.append(
+            _normalize_feedback_evidence(
+                returned[record_id],
+                row,
+                rubric_model,
+            )
+        )
+    return evidence
+
+
+def _normalize_guideline_response(
+    response: Mapping[str, Any],
+    *,
+    route: str,
+    evidence: Sequence[Mapping[str, Any]],
+    rubric_model: str,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    items = response.get("guidelines")
+    if not isinstance(items, list):
+        raise ValueError("Guideline response missing guidelines array")
+    candidates = [
+        {**dict(item), "route": route}
+        for item in items
+        if isinstance(item, Mapping)
+    ]
+    guidelines = _compile_evaluation_guidelines(
+        candidates,
+        evidence,
+        rubric_model,
+    )
+    return candidates, guidelines
+
+
 def _compile_evaluation_guidelines(
     candidates: Sequence[Mapping[str, Any]],
     evidence: Sequence[Mapping[str, Any]],
@@ -1368,7 +1570,7 @@ def _compile_evaluation_guidelines(
     represented: set[str] = set()
     provisional: List[Dict[str, Any]] = []
     for raw in candidates:
-        route = _string(raw.get("route"))
+        route = effective_route(raw)
         source_ids = sorted(
             {
                 value
@@ -1736,6 +1938,31 @@ def _normalize_rubric(
     return rubric
 
 
+def _normalize_inferred_rubric_response(
+    response: Mapping[str, Any],
+    *,
+    batch: Sequence[IntentCluster],
+    rubric_model: str,
+) -> List[Dict[str, Any]]:
+    returned = _indexed_items(response, "rubrics", "cluster_id")
+    rubrics: List[Dict[str, Any]] = []
+    for cluster in batch:
+        if cluster.cluster_id not in returned:
+            raise ValueError(
+                f"Inferred rubric response omitted {cluster.cluster_id}"
+            )
+        rubrics.append(
+            _normalize_rubric(
+                returned[cluster.cluster_id],
+                "cluster_id",
+                cluster.cluster_id,
+                "inferred_from_trusted_feedback",
+                rubric_model,
+            )
+        )
+    return rubrics
+
+
 def _expected(rubric: Mapping[str, Any]) -> Dict[str, Any]:
     expected = {
         "label_source": rubric["label_source"],
@@ -1826,6 +2053,36 @@ def _synthetic_case(
     }
     validate_fapo_case(case)
     return case
+
+
+def _normalize_synthetic_response(
+    response: Mapping[str, Any],
+    *,
+    batch: Sequence[IntentCluster],
+    rubric_by_cluster: Mapping[str, Mapping[str, Any]],
+    config: EvaluationAssetConfig,
+) -> List[Dict[str, Any]]:
+    returned = _grouped_items(response, "cases", "cluster_id")
+    cases: List[Dict[str, Any]] = []
+    for cluster in batch:
+        generated_cases = returned.get(cluster.cluster_id, [])
+        if len(generated_cases) != config.synthetic_cases_per_cluster:
+            raise ValueError(
+                "Synthetic response returned "
+                f"{len(generated_cases)} cases for {cluster.cluster_id}; "
+                f"expected {config.synthetic_cases_per_cluster}"
+            )
+        for candidate_index, generated in enumerate(generated_cases, start=1):
+            cases.append(
+                _synthetic_case(
+                    cluster,
+                    generated,
+                    rubric_by_cluster[cluster.cluster_id],
+                    config.asset_id,
+                    candidate_index,
+                )
+            )
+    return cases
 
 
 def _inferred_cases(
@@ -2004,14 +2261,14 @@ def _write_missing_report(path: Path, rows: Sequence[Mapping[str, Any]]) -> None
         for example in row["representative_examples"]:
             lines.append(f"  - `{example['record_id']}`: {example['user_input']}")
         lines.append("")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines) + "\n")
 
 
 def _intent_record(row: Mapping[str, Any]) -> IntentRecord:
     return IntentRecord(
         record_id=str(row["record_id"]),
         text=str(row["canonical_intent_text"]),
-        route=str(row["route"]),
+        route=effective_route(row),
         group_id=str(row["group_id"]),
         metadata={"task_type": row["task_type"]},
     )
@@ -2061,13 +2318,13 @@ def _intent_match(row: Mapping[str, Any]) -> IntentMatch:
 
 
 def _context(user_input: Any, prior: Any, tools: Any, runtime: Any) -> Dict[str, str]:
-    messages = list(_redact_value(prior) or []) + [
+    messages = list(_redact_messages(prior) or []) + [
         {"role": "user", "content": _redact_text(_string(user_input))}
     ]
     return {
         "messages_json": json.dumps(messages, sort_keys=True),
-        "tool_context_json": json.dumps(_redact_value(tools), sort_keys=True),
-        "runtime_json": json.dumps(_redact_value(runtime), sort_keys=True),
+        "tool_context_json": json.dumps(_redact_tool_calls(tools), sort_keys=True),
+        "runtime_json": json.dumps(_redact_named_content(runtime), sort_keys=True),
     }
 
 
@@ -2333,13 +2590,285 @@ def _redact_text(text: str) -> str:
     return IPV4_RE.sub("<ip_address>", EMAIL_RE.sub("<email>", text))
 
 
+def _provider_cause_summary(cause: Exception) -> str:
+    """Return only an allowlisted provider-failure category."""
+    if isinstance(cause, TimeoutError):
+        return "provider request timed out"
+    if isinstance(cause, PermissionError):
+        return "provider access denied"
+    if isinstance(cause, ConnectionError):
+        return "provider connection failed"
+    if isinstance(cause, ValueError):
+        return "provider returned an invalid response"
+    return "provider operation failed"
+
+
+def _provider_cause_label(cause: Exception) -> str:
+    """Map provider exceptions to fixed labels safe for persistence."""
+    if isinstance(cause, TimeoutError):
+        return "TimeoutError"
+    if isinstance(cause, PermissionError):
+        return "PermissionError"
+    if isinstance(cause, ConnectionError):
+        return "ConnectionError"
+    if isinstance(cause, ValueError):
+        return "ValueError"
+    if isinstance(cause, RuntimeError):
+        return "RuntimeError"
+    return "ProviderError"
+
+
+CONTENT_FIELD_NAMES = frozenset(
+    {
+        "arguments",
+        "body",
+        "content",
+        "correction",
+        "data",
+        "description",
+        "error",
+        "input",
+        "message",
+        "messages",
+        "note",
+        "output",
+        "payload",
+        "prompt",
+        "query",
+        "rationale",
+        "request",
+        "response",
+        "result",
+        "results",
+        "text",
+    }
+)
+PRESERVED_NAMED_FIELDS = frozenset(
+    {
+        "application",
+        "application_version",
+        "call_id",
+        "created_at",
+        "deployment",
+        "deployment_id",
+        "environment",
+        "group_id",
+        "id",
+        "intent_id",
+        "intent_label",
+        "model",
+        "model_name",
+        "provider",
+        "provider_name",
+        "record_id",
+        "region",
+        "request_id",
+        "route",
+        "schema_version",
+        "session_id",
+        "source",
+        "source_system",
+        "source_version",
+        "span_id",
+        "task_type",
+        "timestamp",
+        "tool",
+        "tool_call_id",
+        "tool_name",
+        "trace_id",
+        "type",
+        "updated_at",
+        "version",
+    }
+)
+MESSAGE_STRUCTURE_FIELDS = frozenset(
+    {"conversation_context", "message", "messages"}
+)
+STRUCTURAL_DESCRIPTOR_FIELDS = frozenset(
+    {
+        "application",
+        "deployment",
+        "environment",
+        "model",
+        "provider",
+        "region",
+        "source",
+        "source_system",
+    }
+)
+TOOL_STRUCTURE_FIELDS = frozenset(
+    {
+        "enabled_tools",
+        "function",
+        "tool",
+        "tool_calls",
+        "tool_names",
+        "tools",
+        "tools_available",
+    }
+)
+
+
+def _is_composite_value(value: Any) -> bool:
+    return isinstance(value, (Mapping, list))
+
+
+def _redact_record(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """Redact canonical content without rewriting identity or structure."""
+    prepared = dict(row)
+    for field in ("user_input", "assistant_output"):
+        if field in prepared:
+            prepared[field] = _redact_value(prepared[field])
+    if "conversation_context" in prepared:
+        prepared["conversation_context"] = _redact_messages(
+            prepared["conversation_context"]
+        )
+    if "tool_calls" in prepared:
+        prepared["tool_calls"] = _redact_tool_calls(prepared["tool_calls"])
+    for field in ("runtime", "metadata"):
+        if field in prepared:
+            prepared[field] = _redact_named_content(prepared[field])
+    if "feedback" in prepared:
+        prepared["feedback"] = _redact_feedback(prepared["feedback"])
+    for key, value in tuple(prepared.items()):
+        if key in CONTENT_FIELD_NAMES:
+            prepared[key] = _redact_value(value)
+    return prepared
+
+
+def _redact_messages(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        value = [value]
+        unwrap = True
+    elif isinstance(value, list):
+        unwrap = False
+    else:
+        return _redact_value(value)
+    messages = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            messages.append(_redact_named_content(item))
+            continue
+        message = dict(item)
+        for key, nested in tuple(message.items()):
+            field = str(key).lower()
+            if (
+                key == "role" or field in PRESERVED_NAMED_FIELDS
+            ) and not _is_composite_value(nested):
+                continue
+            if key in CONTENT_FIELD_NAMES:
+                message[key] = _redact_value(nested)
+            else:
+                message[key] = _redact_named_content(
+                    nested,
+                    structural_descriptor=field in STRUCTURAL_DESCRIPTOR_FIELDS,
+                )
+        messages.append(message)
+    return messages[0] if unwrap else messages
+
+
+def _redact_tool_calls(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        value = [value]
+        unwrap = True
+    elif isinstance(value, list):
+        unwrap = False
+    else:
+        return value
+    calls = []
+    for item in value:
+        if isinstance(item, list):
+            calls.append(_redact_tool_calls(item))
+            continue
+        if not isinstance(item, Mapping):
+            calls.append(item)
+            continue
+        call = dict(item)
+        for key, nested in tuple(call.items()):
+            field = str(key).lower()
+            if field in TOOL_STRUCTURE_FIELDS:
+                call[key] = _redact_tool_calls(nested)
+                continue
+            if (
+                key in {"name", "tool"} or field in PRESERVED_NAMED_FIELDS
+            ) and not _is_composite_value(nested):
+                continue
+            if key in {"arguments", "result", "error"}:
+                call[key] = _redact_value(nested)
+            else:
+                call[key] = _redact_named_content(
+                    nested,
+                    structural_descriptor=field in STRUCTURAL_DESCRIPTOR_FIELDS,
+                )
+        calls.append(call)
+    return calls[0] if unwrap else calls
+
+
+def _redact_feedback(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return value
+    feedback = dict(value)
+    for key, nested in tuple(feedback.items()):
+        if key in {"rationale", "correction"}:
+            feedback[key] = _redact_value(nested)
+        elif key not in {"polarity", "source"}:
+            feedback[key] = _redact_named_content(nested)
+    return feedback
+
+
+def _redact_named_content(
+    value: Any,
+    *,
+    structural_descriptor: bool = False,
+) -> Any:
+    """Redact unknown runtime/metadata strings while preserving schema fields."""
+    if isinstance(value, str):
+        return _redact_text(value)
+    if isinstance(value, list):
+        return [
+            _redact_named_content(
+                item,
+                structural_descriptor=structural_descriptor,
+            )
+            for item in value
+        ]
+    if isinstance(value, Mapping):
+        redacted = {}
+        for key, item in value.items():
+            field = str(key).lower()
+            if field in MESSAGE_STRUCTURE_FIELDS:
+                redacted[key] = _redact_messages(item)
+            elif field in TOOL_STRUCTURE_FIELDS:
+                redacted[key] = _redact_tool_calls(item)
+            elif field in CONTENT_FIELD_NAMES:
+                redacted[key] = _redact_value(item)
+            elif (
+                field == "name"
+                and structural_descriptor
+                and not _is_composite_value(item)
+            ):
+                redacted[key] = item
+            elif field in PRESERVED_NAMED_FIELDS and not _is_composite_value(item):
+                redacted[key] = item
+            else:
+                redacted[key] = _redact_named_content(
+                    item,
+                    structural_descriptor=(
+                        field in STRUCTURAL_DESCRIPTOR_FIELDS
+                    ),
+                )
+        return redacted
+    return value
+
+
 def _redact_value(value: Any) -> Any:
+    """Redact every string in an explicitly content-bearing subtree."""
     if isinstance(value, str):
         return _redact_text(value)
     if isinstance(value, list):
         return [_redact_value(item) for item in value]
     if isinstance(value, Mapping):
-        return {str(key): _redact_value(item) for key, item in value.items()}
+        return {key: _redact_value(item) for key, item in value.items()}
     return value
 
 
