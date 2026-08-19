@@ -180,6 +180,32 @@ class SecretFailingRubricProvider(FakeRubricProvider):
         )
 
 
+class SecretMalformedRubricProvider(FakeRubricProvider):
+    def __init__(self, malformed_response: str):
+        super().__init__()
+        self.malformed_response = malformed_response
+
+    def generate_json(self, system_prompt, payload):
+        response = super().generate_json(system_prompt, payload)
+        if self.malformed_response == "evidence" and "records" in payload:
+            response["evidence"][0]["confidence"] = "sk-live-secret-token"
+        elif self.malformed_response == "guideline" and "evidence" in payload:
+            response["guidelines"][0]["confidence"] = "sk-live-secret-token"
+        elif (
+            self.malformed_response == "inferred"
+            and "clusters" in payload
+            and "synthetic evaluation input" not in system_prompt
+        ):
+            response["rubrics"][0]["confidence"] = "sk-live-secret-token"
+        elif (
+            self.malformed_response == "synthetic"
+            and "synthetic evaluation input" in system_prompt
+        ):
+            response["cases"][0]["user_input"] = ""
+            response["cases"][0]["note"] = "sk-live-secret-token"
+        return response
+
+
 def test_normalization_preserves_structural_fields_and_redacts_content() -> None:
     """Schema structure survives while content-bearing PII is redacted."""
     row = {
@@ -278,15 +304,9 @@ def test_normalization_preserves_structural_fields_and_redacts_content() -> None
         ][0]["role"]
         assert normalized["tool_calls"][0]["name"] == row["tool_calls"][0]["name"]
         assert normalized["runtime"]["model"] == row["runtime"]["model"]
-        assert normalized["runtime"]["request"]["model"] == row["runtime"][
-            "request"
-        ]["model"]
-        assert normalized["runtime"]["request"]["provider"] == row[
-            "runtime"
-        ]["request"]["provider"]
-        assert normalized["runtime"]["request"]["route"] == row["runtime"][
-            "request"
-        ]["route"]
+        assert normalized["runtime"]["request"]["model"] == " <email> "
+        assert normalized["runtime"]["request"]["provider"] == " <email> "
+        assert normalized["runtime"]["request"]["route"] == " <email> "
         assert normalized["metadata"]["source_system"] == row["metadata"][
             "source_system"
         ]
@@ -316,6 +336,9 @@ def test_normalization_preserves_structural_fields_and_redacts_content() -> None
             "result@example.com",
             "error@example.com",
             "runtime@example.com",
+            "nested-model.owner@example.com",
+            "nested-provider.owner@example.com",
+            "nested-route.owner@example.com",
             "metadata@example.com",
             "runtime-unknown@example.com",
             "metadata-unknown@example.com",
@@ -672,6 +695,101 @@ def test_normalization_routes_singular_tool_descriptor_by_context() -> None:
         assert secret not in serialized
 
 
+@pytest.mark.parametrize(
+    ("field", "content"),
+    [
+        (
+            "payload",
+            {
+                "id": "payload-id-secret@example.com",
+                "source": "payload-source-secret@example.com",
+                "nested": [{"role": "payload-role-secret@example.com"}],
+            },
+        ),
+        (
+            "content",
+            [
+                {
+                    "record_id": "content-record-secret@example.com",
+                    "tool_name": "content-tool-secret@example.com",
+                }
+            ],
+        ),
+        (
+            "note",
+            {
+                "group_id": "note-group-secret@example.com",
+                "source_system": "note-source-secret@example.com",
+            },
+        ),
+        (
+            "arguments",
+            [
+                {
+                    "request_id": "arguments-request-secret@example.com",
+                    "name": "arguments-name-secret@example.com",
+                }
+            ],
+        ),
+        (
+            "results",
+            {
+                "id": "results-id-secret@example.com",
+                "provider": "results-provider-secret@example.com",
+            },
+        ),
+    ],
+)
+def test_normalization_redacts_every_descendant_of_explicit_content_fields(
+    field: str,
+    content: object,
+) -> None:
+    """Structural-looking descendants cannot escape explicit content context."""
+    row = {
+        "schema_version": "fapo-evaluation-input-v1",
+        "record_id": " canonical-record.owner@example.com ",
+        "group_id": " canonical-group.owner@example.com ",
+        "task_type": " canonical-task.owner@example.com ",
+        "route": " canonical-route.owner@example.com ",
+        "user_input": "Request",
+        "assistant_output": "Response",
+        "conversation_context": [
+            {
+                "role": " canonical-role.owner@example.com ",
+                "content": "Earlier request",
+            }
+        ],
+        "tool_calls": [
+            {
+                "name": " canonical-tool.owner@example.com ",
+                "arguments": {},
+            }
+        ],
+        "runtime": {"wrapper": {field: content}},
+        "metadata": {},
+        "feedback": {"polarity": "positive", "rationale": "Correct"},
+    }
+
+    normalized = _normalize_feedback(row)
+
+    assert normalized["record_id"] == row["record_id"]
+    assert normalized["group_id"] == row["group_id"]
+    assert normalized["task_type"] == row["task_type"]
+    assert normalized["route"] == row["route"]
+    assert normalized["conversation_context"][0]["role"] == row[
+        "conversation_context"
+    ][0]["role"]
+    assert normalized["tool_calls"][0]["name"] == row["tool_calls"][0]["name"]
+    serialized_content = json.dumps(normalized["runtime"]["wrapper"][field])
+    for secret in (
+        value
+        for value in json.dumps(content).replace('"', " ").split()
+        if "@example.com" in value
+    ):
+        assert secret.rstrip(",}] ") not in serialized_content
+    assert "<email>" in serialized_content
+
+
 def test_prepare_inputs_rejects_normalized_duplicate_with_both_sources(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -680,6 +798,11 @@ def test_prepare_inputs_rejects_normalized_duplicate_with_both_sources(
     tenants_root = tmp_path / "tenants"
     feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
     _write_extension_feedback(feedback, [" source-one ", " source-two "])
+    feedback_lines = feedback.read_text(encoding="utf-8").splitlines()
+    feedback.write_text(
+        f"{feedback_lines[0]}\n\n{feedback_lines[1]}\n",
+        encoding="utf-8",
+    )
     pipeline = EvaluationAssetPipeline.create(
         tenants_root,
         EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
@@ -701,7 +824,7 @@ def test_prepare_inputs_rejects_normalized_duplicate_with_both_sources(
         ValueError,
         match=(
             r"normalized feedback.*' canonical-collision '.*"
-            r"row 1.*' source-one '.*row 2.*' source-two '"
+            r"row 1.*' source-one '.*row 3.*' source-two '"
         ),
     ):
         pipeline._prepare_inputs()
@@ -771,6 +894,45 @@ def test_stage_one_accepts_one_cluster_per_record_and_effective_route(
         "feedback_records": 1,
         "unlabeled_records": 2,
     }
+
+
+def test_stage_one_treats_present_whitespace_routes_as_exact_bytes(
+    tmp_path: Path,
+) -> None:
+    """Distinct present route bytes fail feasibility before provider work."""
+    tenants_root = tmp_path / "tenants"
+    feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
+    _write_extension_unlabeled(unlabeled, ["u1", "u2"])
+    rows = _read_test_jsonl(unlabeled)
+    rows[0]["task_type"] = "shared-task"
+    rows[0]["route"] = "route"
+    rows[1]["task_type"] = "shared-task"
+    rows[1]["route"] = " route "
+    unlabeled.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    rubric_provider = FakeRubricProvider()
+    embedding_provider = FakeEmbeddingProvider()
+    pipeline = EvaluationAssetPipeline.create(
+        tenants_root,
+        EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
+        feedback,
+        unlabeled,
+        rubric_provider=rubric_provider,
+        embedding_provider=embedding_provider,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"number of distinct effective routes \(2\)",
+    ):
+        pipeline.run()
+
+    state = pipeline.layout.load_state()
+    assert state.current_stage == PipelineStage.RAW_INPUTS.value
+    assert rubric_provider.calls == 0
+    assert embedding_provider.calls == 0
 
 
 @pytest.mark.parametrize(
@@ -918,6 +1080,53 @@ def test_provider_failure_persists_only_sanitized_causal_summary(
     assert "sk-live-secret-token" not in persisted
     assert "raw_response" not in persisted
     assert "private@example.com" not in persisted
+
+
+@pytest.mark.parametrize(
+    ("malformed_response", "expected_stage"),
+    [
+        ("evidence", PipelineStage.RUBRIC_EXTRACTION),
+        ("guideline", PipelineStage.RUBRIC_EXTRACTION),
+        ("inferred", PipelineStage.LABEL_INFERENCE),
+        ("synthetic", PipelineStage.SYNTHETIC_COVERAGE),
+    ],
+)
+def test_malformed_rubric_responses_never_persist_provider_content(
+    tmp_path: Path,
+    malformed_response: str,
+    expected_stage: PipelineStage,
+) -> None:
+    """Semantic response failures cross the same sanitized provider boundary."""
+    tenants_root = tmp_path / "tenants"
+    feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
+    pipeline = EvaluationAssetPipeline.create(
+        tenants_root,
+        EvaluationAssetConfig(
+            tenant_id="tenant_a",
+            cluster_count=1,
+            rubric_model="safe-rubric-model",
+            synthetic_coverage_enabled=malformed_response == "synthetic",
+        ),
+        feedback,
+        unlabeled,
+        rubric_provider=SecretMalformedRubricProvider(malformed_response),
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+
+    with pytest.raises(Exception) as caught:
+        pipeline.run()
+
+    assert caught.value.__class__.__name__ == "ProviderCallError"
+    assert isinstance(caught.value.__cause__, ValueError)
+    persisted = b"\n".join(
+        path.read_bytes()
+        for path in pipeline.layout.root.rglob("*")
+        if path.is_file()
+    )
+    assert expected_stage.value.encode() in persisted
+    assert b"cause=ValueError" in persisted
+    assert b"summary=provider returned an invalid response" in persisted
+    assert b"sk-live-secret-token" not in persisted
 
 
 def test_provider_failure_never_persists_dynamic_exception_class_name(
@@ -1186,6 +1395,66 @@ def test_initialize_reports_source_file_and_row_before_creating_asset(
         )
 
     assert not layout.root.exists()
+
+
+def test_initialize_contract_error_uses_physical_row_after_leading_blanks(
+    tmp_path: Path,
+) -> None:
+    """Initialization diagnostics count skipped blank lines physically."""
+    tenants_root = tmp_path / "tenants"
+    sources = tenants_root / "tenant_a" / "source_artifacts"
+    sources.mkdir(parents=True)
+    feedback = sources / "feedback.jsonl"
+    unlabeled = sources / "unlabeled.jsonl"
+    feedback.write_text('\n\n{"record_id":"f1"}\n', encoding="utf-8")
+    _write_extension_unlabeled(unlabeled, ["u1"])
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+
+    with pytest.raises(
+        ValueError,
+        match=r"feedback\.jsonl:3: missing required field 'schema_version'",
+    ):
+        layout.initialize(
+            EvaluationAssetConfig(tenant_id="tenant_a"),
+            feedback,
+            unlabeled,
+        )
+
+    assert not layout.root.exists()
+
+
+def test_stage_one_contract_error_uses_copied_input_physical_row(
+    tmp_path: Path,
+) -> None:
+    """Stage-one diagnostics retain interior blank lines in copied inputs."""
+    tenants_root = tmp_path / "tenants"
+    feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
+    rubric_provider = FakeRubricProvider()
+    embedding_provider = FakeEmbeddingProvider()
+    pipeline = EvaluationAssetPipeline.create(
+        tenants_root,
+        EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
+        feedback,
+        unlabeled,
+        rubric_provider=rubric_provider,
+        embedding_provider=embedding_provider,
+    )
+    valid_row = pipeline.layout.feedback_path.read_text(
+        encoding="utf-8"
+    ).splitlines()[0]
+    pipeline.layout.feedback_path.write_text(
+        f'{valid_row}\n\n{{"record_id":"f2"}}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"labeled_feedback\.jsonl:3: missing required field 'schema_version'",
+    ):
+        pipeline.run()
+
+    assert rubric_provider.calls == 0
+    assert embedding_provider.calls == 0
 
 
 def test_layout_rejects_symlinked_tenant_source_root_escape(

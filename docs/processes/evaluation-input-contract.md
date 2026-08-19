@@ -27,14 +27,18 @@ Eight-stage evaluation-asset pipeline
 ```
 
 Stage 1 validates every record and stops on the first precise
-`file:row:field` error. Stage 2 consumes and preserves the canonical names
-below. It applies schema-aware redaction only to content-bearing fields, applies
-documented defaults, and may add derived fields, but it does not rename or
-rewrite source identity, routing, role, or structural tool-name fields. In
-particular, `schema_version`, `record_id`, `group_id`, `request_id`,
+`file:row:field` error. Blank lines are not records, but diagnostics retain the
+physical JSONL line number across source validation, copied-input validation,
+and normalized-identity checks. Stage 2 consumes and preserves the canonical
+names below. It applies schema-aware redaction only to content-bearing fields,
+including every nested string below an explicitly content-bearing mapping or
+list, applies documented defaults, and may add derived fields, but it does not
+rename or rewrite source identity, routing, role, or structural tool-name
+fields. In particular, `schema_version`, `record_id`, `group_id`, `request_id`,
 `task_type`, `route`, intent labels, message roles, and tool names remain
-byte-for-byte unchanged. Stage 2 rechecks normalized `record_id` uniqueness and
-reports both source rows and source IDs if a transformation creates a collision.
+byte-for-byte unchanged at their defined structural paths. Stage 2 rechecks
+normalized `record_id` uniqueness and reports both physical source rows and
+source IDs if a transformation creates a collision.
 
 ## Common Record
 
@@ -62,6 +66,13 @@ Optional common fields:
 
 `record_id` values must be unique within each file. `group_id` is mandatory;
 for a genuinely independent record, use its `record_id`.
+
+The effective routing identity is exact and shared by Stage 1 preflight,
+prepared records, clustering, and coverage matching. When `route` is present,
+its string is used byte-for-byte, including leading or trailing whitespace;
+only an absent `route` falls back to the exact `task_type`. Adapters should
+canonicalize routes before this boundary if whitespace distinctions are not
+meaningful in their source system.
 
 ## Conversation Messages
 
@@ -204,7 +215,7 @@ Stage 1 rejects:
 - Unlabeled records containing feedback.
 - A requested cluster count greater than the copied unlabeled row count.
 - A requested cluster count smaller than the number of distinct effective
-  routes, where the effective route is `route` or its `task_type` fallback.
+  routes, using the exact routing identity defined above.
 
 Stage 1 performs these checks against the copied Stage 1 files before any
 evaluation-guideline or embedding provider call.

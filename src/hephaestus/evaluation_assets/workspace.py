@@ -892,14 +892,22 @@ def _copy_jsonl(source: Path, destination: Path) -> None:
 
 
 def _read_jsonl_rows(path: Optional[Path]) -> list[Dict[str, Any]]:
+    rows, _ = _read_jsonl_rows_with_line_numbers(path)
+    return rows
+
+
+def _read_jsonl_rows_with_line_numbers(
+    path: Optional[Path],
+) -> tuple[list[Dict[str, Any]], list[int]]:
     if path is None:
-        return []
+        return [], []
     resolved = path.resolve()
     if not resolved.is_file():
         raise FileNotFoundError(resolved)
     if resolved.suffix.lower() != ".jsonl":
         raise ValueError(f"Evaluation asset inputs must be JSONL: {resolved}")
     rows: list[Dict[str, Any]] = []
+    row_numbers: list[int] = []
     for line_number, line in enumerate(
         resolved.read_text(encoding="utf-8").splitlines(),
         start=1,
@@ -915,15 +923,21 @@ def _read_jsonl_rows(path: Optional[Path]) -> list[Dict[str, Any]]:
         if not isinstance(row, dict):
             raise ValueError(f"Expected JSON object at {resolved}:{line_number}")
         rows.append(row)
-    return rows
+        row_numbers.append(line_number)
+    return rows, row_numbers
 
 
 def _validate_source_rows(path: Path, *, labeled: bool) -> list[Dict[str, Any]]:
-    rows = _read_jsonl_rows(path)
+    rows, row_numbers = _read_jsonl_rows_with_line_numbers(path)
     if not rows:
         kind = "labeled feedback" if labeled else "unlabeled"
         raise ValueError(f"{path}: {kind} input is empty")
-    validate_input_records(rows, labeled=labeled, path=path)
+    validate_input_records(
+        rows,
+        labeled=labeled,
+        path=path,
+        row_numbers=row_numbers,
+    )
     return rows
 
 

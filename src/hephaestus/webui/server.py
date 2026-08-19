@@ -193,8 +193,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "bad index"}, status=400)
             return
         run_rel = unquote(params["run"])
+        studio_data = self.store.run_uses_evaluation_asset_dataset(
+            params["tenant"],
+            run_rel,
+        )
+        if studio_data and not self._authorize_studio_request(no_store=True):
+            return
         data = self.store.get_case(params["tenant"], run_rel, index)
-        self._send_json_or_404(data)
+        self._send_json_or_404(data, no_store=studio_data)
 
     def _route_iterations(self, params: Dict[str, str], query: Dict[str, List[str]]) -> None:
         self._send_json(self.store.list_iterations(params["tenant"]))
@@ -222,17 +228,35 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json_or_404(data)
 
     def _route_datasets(self, params: Dict[str, str], query: Dict[str, List[str]]) -> None:
-        self._send_json(self.store.list_datasets(params["tenant"]))
+        studio_data = self.store.has_evaluation_asset_datasets(params["tenant"])
+        if studio_data and not self._authorize_studio_request(no_store=True):
+            return
+        self._send_json(
+            self.store.list_datasets(params["tenant"]),
+            no_store=studio_data,
+        )
 
     def _route_dataset(self, params: Dict[str, str], query: Dict[str, List[str]]) -> None:
         rel = (query.get("path") or [""])[0]
         if not rel:
             self._send_json({"error": "missing path"}, status=400)
             return
+        dataset_rel = unquote(rel)
+        studio_data = self.store.is_evaluation_asset_dataset(
+            params["tenant"],
+            dataset_rel,
+        )
+        if studio_data and not self._authorize_studio_request(no_store=True):
+            return
         offset = _int_param(query, "offset", 0)
         limit = _int_param(query, "limit", 100)
-        data = self.store.get_dataset(params["tenant"], unquote(rel), offset=offset, limit=limit)
-        self._send_json_or_404(data)
+        data = self.store.get_dataset(
+            params["tenant"],
+            dataset_rel,
+            offset=offset,
+            limit=limit,
+        )
+        self._send_json_or_404(data, no_store=studio_data)
 
     def _route_docs(self, params: Dict[str, str], query: Dict[str, List[str]]) -> None:
         self._send_json(self.store.list_docs(params["tenant"]))
@@ -406,18 +430,24 @@ class _Handler(BaseHTTPRequestHandler):
 
     # -- response helpers ------------------------------------------------
 
-    def _send_json_or_404(self, data: Any) -> None:
+    def _send_json_or_404(self, data: Any, *, no_store: bool = False) -> None:
         if data is None:
-            self._send_json({"error": "not found"}, status=404)
+            self._send_json({"error": "not found"}, status=404, no_store=no_store)
         else:
-            self._send_json(data)
+            self._send_json(data, no_store=no_store)
 
-    def _send_json(self, payload: Any, status: int = 200) -> None:
+    def _send_json(
+        self,
+        payload: Any,
+        status: int = 200,
+        *,
+        no_store: bool = False,
+    ) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        if _is_studio_path(urlparse(getattr(self, "path", "")).path):
+        if no_store or _is_studio_path(urlparse(getattr(self, "path", "")).path):
             self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
@@ -458,12 +488,18 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _authorize_studio_request(self, *, mutation: bool = False) -> bool:
+    def _authorize_studio_request(
+        self,
+        *,
+        mutation: bool = False,
+        no_store: bool = False,
+    ) -> bool:
         authority = self.headers.get("Host", "")
         if not _is_loopback_authority(authority):
             self._send_json(
                 {"error": "Evaluation Asset Studio requires a loopback Host"},
                 status=403,
+                no_store=no_store,
             )
             return False
         origin = self.headers.get("Origin")
@@ -471,6 +507,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(
                 {"error": "Evaluation Asset Studio mutation Origin must match Host"},
                 status=403,
+                no_store=no_store,
             )
             return False
         return True

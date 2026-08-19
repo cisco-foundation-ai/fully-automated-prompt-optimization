@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Mapping, Sequence
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 SCHEMA_VERSION = "fapo-evaluation-input-v1"
 FEEDBACK_POLARITIES = frozenset({"positive", "negative", "mixed"})
@@ -25,15 +25,29 @@ COMMON_REQUIRED_FIELDS = (
 )
 
 
+def effective_route(row: Mapping[str, Any]) -> str:
+    """Return the exact routing identity, falling back only when route is absent."""
+    value = row["route"] if "route" in row else row["task_type"]
+    return str(value)
+
+
 def validate_input_records(
     rows: Sequence[Mapping[str, Any]],
     *,
     labeled: bool,
     path: Path,
+    row_numbers: Optional[Sequence[int]] = None,
 ) -> None:
     """Validate canonical records and raise one precise contract error."""
+    if row_numbers is not None and len(row_numbers) != len(rows):
+        raise ValueError("row_numbers must identify every input record")
     seen_ids: set[str] = set()
-    for row_number, row in enumerate(rows, start=1):
+    for logical_index, row in enumerate(rows):
+        row_number = (
+            row_numbers[logical_index]
+            if row_numbers is not None
+            else logical_index + 1
+        )
         location = f"{path}:{row_number}"
         for field in COMMON_REQUIRED_FIELDS:
             if field not in row:

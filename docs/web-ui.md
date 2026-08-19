@@ -83,7 +83,9 @@ source files into an independent
 `evaluation_assets/<asset_id>/stages/01_raw_inputs/` workspace before
 background processing begins. Stage 1 revalidates those copies and checks that
 the requested exact cluster count fits the unlabeled row and effective-route
-counts before any guideline or embedding provider work starts.
+counts before any guideline or embedding provider work starts. The complete
+Studio workspace and its checkpoints are local-only; the Studio does not
+persist them to GCS or another remote backend.
 
 Selecting a tenant visualizes all eight preparation stages, live status,
 selected models, requested clusters, match threshold, synthetic settings,
@@ -101,13 +103,14 @@ coverage configuration. The Studio shows which stage each setting affects;
 the core preserves earlier checkpoints and rebuilds the affected stage and all
 downstream artifacts.
 
-Failed-stage summaries are safe to display: provider failures expose the stage,
-configured provider/model, exception class, and a bounded causal category, but
-not raw provider messages, payloads, credentials, or response bodies. Detailed
-provider diagnostics remain available only through the in-memory chained
-exception or protected operator logging. Each individual state, event/history,
-JSONL, copied, or Markdown artifact is atomically replaced; the UI does not
-claim an all-or-nothing transaction across an entire release.
+Failed-stage summaries are safe to display: provider transport and semantic
+response validation failures expose the stage, configured provider/model,
+fixed exception category, and a bounded causal summary, but not raw provider
+messages, payloads, credentials, or response bodies. Detailed provider
+diagnostics remain available only through the in-memory chained exception or
+protected operator logging. Each individual state, event/history, JSONL,
+copied, or Markdown artifact is atomically replaced; the UI does not claim an
+all-or-nothing transaction across an entire release.
 
 Completed versions can be extended from the tenant asset view. The extension
 wizard accepts additional labeled feedback and optional unlabeled records,
@@ -226,5 +229,13 @@ The frontend is backed by these read-only endpoints (useful for scripting too):
 - **Loopback only:** the server rejects non-loopback bind hosts. Studio routes
   also require a loopback `Host`; mutation requests require an absent `Origin`
   or an HTTP origin matching `Host`. Studio HTML and JSON responses use
-  `Cache-Control: no-store`.
+  `Cache-Control: no-store`. Explorer's generic dataset list/read endpoints and
+  case details inherit the loopback-Host and no-store policy whenever they can
+  expose a published `datasets/evaluation_assets/` file. Ordinary-only dataset
+  catalogs and reads retain normal Explorer behavior.
+- **Local Studio state:** copied inputs, checkpoints, state, events, and stage
+  artifacts under `evaluation_assets/` are local-only. Published Stage 8 copies
+  under `datasets/evaluation_assets/` are ordinary local derived datasets; only
+  a separate tenant-configured `customer-data --scope derived` operation can
+  sync them.
 - **No external dependencies:** standard-library server, no frontend build step.

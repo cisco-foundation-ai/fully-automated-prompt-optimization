@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -313,6 +314,7 @@ def cluster_records(
     records_by_route: Dict[str, List[IntentRecord]] = defaultdict(list)
     for record in records:
         records_by_route[record.route].append(record)
+    cluster_prefix_by_route = _cluster_prefixes_by_route(records_by_route)
 
     clusters: List[IntentCluster] = []
     for route in sorted(records_by_route):
@@ -331,7 +333,7 @@ def cluster_records(
                 centroids.append(vector)
 
         for index, record_ids in enumerate(route_clusters, start=1):
-            cluster_id = f"{_slug(route)}-{index:03d}"
+            cluster_id = f"{cluster_prefix_by_route[route]}-{index:03d}"
             representatives = _representative_ids(record_ids, vector_by_id, max_representatives)
             top_terms = _top_terms(_average_vectors(record_ids, vector_by_id), limit=8)
             clusters.append(
@@ -343,6 +345,7 @@ def cluster_records(
                     top_terms=top_terms,
                 )
             )
+    assert_unique_cluster_ids(clusters)
     return clusters
 
 
@@ -379,6 +382,7 @@ def cluster_records_fixed_count(
         {record.record_id: record.text for record in records}
     )
     allocation = _allocate_cluster_counts(records_by_route, cluster_count)
+    cluster_prefix_by_route = _cluster_prefixes_by_route(records_by_route)
     output: List[IntentCluster] = []
 
     for route in sorted(records_by_route):
@@ -390,7 +394,7 @@ def cluster_records_fixed_count(
             max_iterations=max_iterations,
         )
         for index, record_ids in enumerate(member_ids, start=1):
-            cluster_id = f"{_slug(route)}-{index:03d}"
+            cluster_id = f"{cluster_prefix_by_route[route]}-{index:03d}"
             output.append(
                 IntentCluster(
                     cluster_id=cluster_id,
@@ -407,6 +411,7 @@ def cluster_records_fixed_count(
                     ),
                 )
             )
+    assert_unique_cluster_ids(output)
     return output
 
 
@@ -419,6 +424,7 @@ def match_clusters_to_trusted_intents(
     vectors: Optional[Mapping[str, SparseVector]] = None,
 ) -> List[IntentMatch]:
     """Match intent clusters to trusted labeled intent evidence."""
+    assert_unique_cluster_ids(clusters)
     policy = coverage_policy or CoveragePolicy(min_match_score=match_threshold)
     if not clusters:
         return []
@@ -640,6 +646,7 @@ def build_intent_match_texts(
     trusted_intents: Sequence[TrustedIntent],
 ) -> Dict[str, str]:
     """Build comparable cluster and trusted-intent texts for matching."""
+    assert_unique_cluster_ids(clusters)
     record_by_id = {record.record_id: record for record in records}
     match_texts = {
         f"cluster:{cluster.cluster_id}": " ".join(
@@ -854,3 +861,36 @@ def _top_terms(vector: SparseVector, limit: int) -> List[str]:
 def _slug(text: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
     return slug or "default"
+
+
+def _cluster_prefixes_by_route(
+    records_by_route: Mapping[str, Sequence[IntentRecord]],
+) -> Dict[str, str]:
+    """Keep legacy route slugs unless exact route bytes collide on one slug."""
+    routes_by_slug: Dict[str, List[str]] = defaultdict(list)
+    for route in records_by_route:
+        routes_by_slug[_slug(route)].append(route)
+
+    prefixes: Dict[str, str] = {}
+    for slug, routes in routes_by_slug.items():
+        if len(routes) == 1:
+            prefixes[routes[0]] = slug
+            continue
+        for route in routes:
+            digest = hashlib.sha256(route.encode("utf-8")).hexdigest()[:12]
+            prefixes[route] = f"{slug}-{digest}"
+    if len(set(prefixes.values())) != len(prefixes):
+        raise ValueError("route-derived cluster prefixes must be unique")
+    return prefixes
+
+
+def assert_unique_cluster_ids(clusters: Sequence[IntentCluster]) -> None:
+    """Reject duplicate cluster identities before any keyed conversion."""
+    seen: Dict[str, str] = {}
+    for cluster in clusters:
+        if cluster.cluster_id in seen:
+            raise ValueError(
+                f"duplicate cluster_id '{cluster.cluster_id}' for routes "
+                f"'{seen[cluster.cluster_id]}' and '{cluster.route}'"
+            )
+        seen[cluster.cluster_id] = cluster.route

@@ -412,6 +412,140 @@ def test_studio_http_policy_and_cache_headers(tmp_path: Path) -> None:
         thread.join(timeout=2)
 
 
+def test_published_studio_datasets_inherit_studio_http_boundary(
+    tmp_path: Path,
+) -> None:
+    """Generic dataset and joined-case reads cannot bypass Studio policy."""
+    tenants_root = tmp_path / "tenants"
+    tenant = tenants_root / "tenant_a"
+    ordinary = tenant / "datasets" / "ordinary.jsonl"
+    published = (
+        tenant
+        / "datasets"
+        / "evaluation_assets"
+        / "v1"
+        / "train.jsonl"
+    )
+    run_dir = tenant / "evals" / "run-1"
+    ordinary.parent.mkdir(parents=True)
+    published.parent.mkdir(parents=True)
+    run_dir.mkdir(parents=True)
+    (tenant / "__init__.py").write_text("", encoding="utf-8")
+    ordinary.write_text('{"case_id":"ordinary"}\n', encoding="utf-8")
+    published.write_text(
+        '{"case_id":"studio-case","context":{"input":"private"},'
+        '"expected":{"answer":"protected"}}\n',
+        encoding="utf-8",
+    )
+    (run_dir / "results.jsonl").write_text(
+        '{"case_id":"studio-case","composite_score":1.0}\n',
+        encoding="utf-8",
+    )
+    (run_dir / "run_config.json").write_text(
+        json.dumps(
+            {
+                "dataset_path": (
+                    "tenants/tenant_a/datasets/"
+                    "evaluation_assets/v1/train.jsonl"
+                )
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    handler = type(
+        "_TestPublishedDatasetHTTPHandler",
+        (_Handler,),
+        {"store": TenantStore(tenants_root), "asset_manager": object()},
+    )
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    port = httpd.server_address[1]
+    local_host = f"127.0.0.1:{port}"
+
+    try:
+        for path in (
+            "/api/tenants/tenant_a/datasets",
+            (
+                "/api/tenants/tenant_a/dataset?path="
+                "datasets/evaluation_assets/v1/train.jsonl"
+            ),
+            "/api/tenants/tenant_a/runs/evals%2Frun-1/cases/0",
+        ):
+            status, headers = _http_request(
+                port,
+                "GET",
+                path,
+                headers={"Host": "example.com"},
+            )
+            assert status == 403
+            assert headers["cache-control"] == "no-store"
+
+            status, headers = _http_request(
+                port,
+                "GET",
+                path,
+                headers={"Host": local_host},
+            )
+            assert status == 200
+            assert headers["cache-control"] == "no-store"
+
+        status, headers = _http_request(
+            port,
+            "GET",
+            "/api/tenants/tenant_a/dataset?path=datasets/ordinary.jsonl",
+            headers={"Host": "example.com"},
+        )
+        assert status == 200
+        assert "cache-control" not in headers
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=2)
+
+
+def test_ordinary_dataset_catalog_remains_available_to_explorer_hosts(
+    tmp_path: Path,
+) -> None:
+    """An ordinary-only dataset catalog keeps the Explorer's existing policy."""
+    tenants_root = tmp_path / "tenants"
+    tenant = tenants_root / "tenant_a"
+    dataset = tenant / "datasets" / "ordinary.jsonl"
+    dataset.parent.mkdir(parents=True)
+    (tenant / "__init__.py").write_text("", encoding="utf-8")
+    dataset.write_text('{"case_id":"ordinary"}\n', encoding="utf-8")
+
+    handler = type(
+        "_TestOrdinaryDatasetHTTPHandler",
+        (_Handler,),
+        {"store": TenantStore(tenants_root), "asset_manager": object()},
+    )
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    port = httpd.server_address[1]
+
+    try:
+        for path in (
+            "/api/tenants/tenant_a/datasets",
+            "/api/tenants/tenant_a/dataset?path=datasets/ordinary.jsonl",
+        ):
+            status, headers = _http_request(
+                port,
+                "GET",
+                path,
+                headers={"Host": "example.com"},
+            )
+            assert status == 200
+            assert "cache-control" not in headers
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=2)
+
+
 def _http_request(
     port: int,
     method: str,

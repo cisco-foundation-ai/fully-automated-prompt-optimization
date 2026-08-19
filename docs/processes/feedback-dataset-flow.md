@@ -86,8 +86,8 @@ and are not additional evaluation-asset stages.
 
 | Stage | Inputs | What happens | Outputs |
 |---|---|---|---|
-| 1. `raw_inputs` — Validate raw inputs | Copied `labeled_feedback.jsonl` and `unlabeled.jsonl` | Reject empty inputs; revalidate every copied record against `fapo-evaluation-input-v1`; require feedback only on labeled records; reject cluster counts that exceed unlabeled rows or cannot allocate at least one cluster to every effective route; count rows and calculate source hashes. These checks finish before any provider call | `stages/01_raw_inputs/` |
-| 2. `prepared_inputs` — Prepare canonical inputs | Validated raw input files | Redact only content-bearing values, including nested tool arguments/results and named runtime/metadata content; preserve identity, routing, message-role, and tool-name fields byte-for-byte; default `request_id` to `record_id` and `route` to `task_type`; recheck normalized record-ID uniqueness; create canonical intent text for clustering | `stages/02_prepared_inputs/` |
+| 1. `raw_inputs` — Validate raw inputs | Copied `labeled_feedback.jsonl` and `unlabeled.jsonl` | Reject empty inputs; revalidate every copied record against `fapo-evaluation-input-v1` while retaining physical JSONL line numbers across blank lines; require feedback only on labeled records; reject cluster counts that exceed unlabeled rows or cannot allocate at least one cluster to every exact effective route; count rows and calculate source hashes. These checks finish before any provider call | `stages/01_raw_inputs/` |
+| 2. `prepared_inputs` — Prepare canonical inputs | Validated raw input files | Redact every descendant of content-bearing values, including nested tool arguments/results and named runtime/metadata content; preserve identity, exact routing, message-role, and tool-name fields byte-for-byte only at their structural paths; default `request_id` to `record_id` and an absent `route` to the exact `task_type`; recheck normalized record-ID uniqueness using physical source rows; create canonical intent text for clustering | `stages/02_prepared_inputs/` |
 | 3. `rubric_extraction` — Create evaluation guidelines | `normalized_feedback.jsonl`; configured guideline model | First extract atomic claims, corrections, and uncertainties directly supported by each feedback record. Then synthesize compatible evidence within each route into reusable guidelines and compile every criterion with provenance, applicability, severity, scoring, and a preferred evaluator type. Build trusted intents and cases from the compiled guidelines | `stages/03_evaluation_guidelines/` |
 | 4. `intent_clustering` — Mine intent clusters | `intent_records.jsonl`; configured embedding provider/model; exact cluster count | Vectorize canonical intent text with the selected OpenAI embedding model or local TF-IDF; allocate the configured cluster count across routes; cluster deterministically within each route; retain representative record IDs and top terms | `stages/04_intent_clustering/` |
 | 5. `coverage_decisions` — Apply coverage decisions | `intent_inventory.jsonl`, `intent_records.jsonl`, `trusted_intents.jsonl`; configured embedding provider/model and coverage parameters | Compare each mined cluster with trusted intents; apply the match threshold (default `0.6`) and trusted-support constraints; classify every cluster; sample centroid-near traces from under-supported and unsupported clusters for labeling | `stages/05_coverage_decisions/`, including `review_queue/` |
@@ -107,11 +107,12 @@ append-only operational history. A failure preserves completed checkpoints;
 after its cause is corrected, rerunning resumes from the first incomplete
 stage.
 
-Provider calls retain their original exception as an in-memory chained cause,
-but persisted state, stage messages, and events contain only the stage,
-configured provider and model, exception class, and an allowlisted causal
-category. Raw provider messages, request/response bodies, credentials, and
-arbitrary payload text are never persisted as the failure summary.
+Provider transport plus semantic response validation and normalization share
+one sanitized boundary. Failures retain their original exception as an
+in-memory chained cause, but persisted state, stage messages, and events contain
+only the stage, configured provider and model, fixed exception category, and an
+allowlisted causal summary. Raw provider messages, request/response bodies,
+credentials, and arbitrary payload text are never persisted.
 
 Individual Studio JSON, JSONL, Markdown/text, copied, event, and configuration
 history files use same-directory temporary files, flush and `fsync`, and
@@ -358,7 +359,8 @@ The core uses the following deterministic mechanics:
 
 1. Stage 2 builds `canonical_intent_text` from `user_input`, the latest
    conversation-context text, and observed tool names. It preserves the
-   supplied `route`, defaulting it to `task_type` only when omitted.
+   supplied `route` byte-for-byte, defaulting it to the exact `task_type` only
+   when `route` is absent. Present whitespace is significant routing identity.
 2. Stage 4 vectorizes that canonical text with the configured OpenAI embedding
    model or the explicit local TF-IDF fallback.
 3. The requested cluster count is allocated across routes, with at least one
@@ -366,6 +368,9 @@ The core uses the following deterministic mechanics:
    and must be at least the number of routes.
 4. Deterministic cosine k-means clusters records within each route and records
    member IDs, representative IDs, and top terms in `intent_inventory.jsonl`.
+   Legacy slug-based cluster IDs remain unchanged when route slugs are unique;
+   routes whose exact values collide after slugging receive a stable digest of
+   the exact route bytes so cluster IDs cannot overwrite one another.
 5. Stage 5 builds comparable text for clusters and trusted intents, vectorizes
    it with the same configured provider, chooses the best same-route trusted
    match by cosine similarity, and applies the configured coverage policy.
@@ -416,6 +421,14 @@ Each new asset contains:
 | `stages/07_synthetic_coverage/` | Candidate, accepted, rejected, and filter-audit synthetic artifacts |
 | `stages/08_dataset_splits/` | Authoritative component and combined train, validation, test, regression, and triage files |
 | `datasets/evaluation_assets/<asset_id>/` | Stage 8 copies of `train.jsonl`, `validation.jsonl`, `test.jsonl`, and `regression_trusted.jsonl` for evaluation consumers |
+
+The complete `evaluation_assets/<asset_id>/` runtime tree—including copied
+inputs, checkpoints, state, events, and stage artifacts—is local-only and has
+no Studio-managed remote backend. Stage 8 also writes local consumer copies
+under the ordinary tenant `datasets/` catalog. The Studio never uploads those
+copies; they participate in a separate `customer-data --scope derived` sync
+only when the tenant storage configuration places `datasets/` inside its
+`derived_local` tree.
 
 Assets created before the stage-oriented layout remain readable and resumable
 through the compatibility mapper. They keep their existing `raw_inputs/`,
