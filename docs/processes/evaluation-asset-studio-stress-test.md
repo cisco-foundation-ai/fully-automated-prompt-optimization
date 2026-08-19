@@ -1,3 +1,9 @@
+<!--
+Copyright 2026 Cisco Systems, Inc. and its affiliates
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Fully Automated Prompt Optimization and Evaluation Asset Studio: Tutorial and Stress Test
 
 This report analyzes the [FAPO paper, arXiv v2](https://arxiv.org/html/2606.19605), the repository's `main` snapshot at [`ed965ae5`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/tree/ed965ae5a08c8f04cfb36cb5170c0734cc1e3d6d), and the proposed `evaluation-asset-studio` snapshot at [`ce7f832f`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/tree/ce7f832fc96a4e8e7a5ef46fad49d1c24e15c50c). The feature branch is a direct five-commit descendant of `main`, changing 38 files by 12,928 insertions and 27 deletions. All runtime tests in this audit were offline; no live rubric-model, task-model, embedding, or tenant-data call was made.
