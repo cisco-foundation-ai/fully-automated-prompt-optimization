@@ -524,6 +524,154 @@ def test_normalization_traverses_nested_tool_name_collections() -> None:
     assert "function-secret@example.com" not in serialized
 
 
+def test_normalization_preserves_name_only_in_structural_descriptor_context() -> None:
+    """Descriptor-local names stay exact without globally exempting `name`."""
+    row = {
+        "schema_version": "fapo-evaluation-input-v1",
+        "record_id": "record-1",
+        "group_id": "group-1",
+        "task_type": "answer",
+        "user_input": "Request",
+        "assistant_output": "Response",
+        "conversation_context": [],
+        "tool_calls": [],
+        "runtime": {
+            "application": {
+                "name": " application.owner@example.com ",
+                "application_version": " application-version.owner@example.com ",
+                "description": "application-description-secret@example.com",
+                "details": {
+                    "name": "arbitrary-nested-name@example.com",
+                    "note": "application-details-secret@example.com",
+                },
+            },
+            "deployment": [
+                {
+                    "name": " deployment.owner@example.com ",
+                    "deployment_id": " deployment-id.owner@example.com ",
+                    "payload": "deployment-payload-secret@example.com",
+                }
+            ],
+            "provider": {
+                "name": " provider.owner@example.com ",
+                "provider_name": " provider-name.owner@example.com ",
+                "note": "provider-note-secret@example.com",
+            },
+            "model": {
+                "name": " model.owner@example.com ",
+                "model_name": " model-name.owner@example.com ",
+                "unknown_leaf": "model-secret@example.com",
+            },
+            "environment": {
+                "name": " environment.owner@example.com ",
+                "version": " environment-version.owner@example.com ",
+                "note": "environment-secret@example.com",
+            },
+            "custom": {
+                "name": "arbitrary-person@example.com",
+                "note": "arbitrary-note@example.com",
+            },
+        },
+        "metadata": {
+            "source": {
+                "name": " source.owner@example.com ",
+                "source_system": " source-system.owner@example.com ",
+                "description": "source-description-secret@example.com",
+            }
+        },
+        "feedback": {"polarity": "positive", "rationale": "Correct"},
+    }
+
+    normalized = _normalize_feedback(row)
+
+    assert normalized["runtime"]["application"]["name"] == (
+        " application.owner@example.com "
+    )
+    assert normalized["runtime"]["deployment"][0]["name"] == (
+        " deployment.owner@example.com "
+    )
+    assert normalized["runtime"]["provider"]["name"] == (
+        " provider.owner@example.com "
+    )
+    assert normalized["runtime"]["model"]["name"] == " model.owner@example.com "
+    assert normalized["runtime"]["environment"]["name"] == (
+        " environment.owner@example.com "
+    )
+    assert normalized["metadata"]["source"]["name"] == " source.owner@example.com "
+    assert normalized["runtime"]["application"]["application_version"] == (
+        " application-version.owner@example.com "
+    )
+    assert normalized["runtime"]["deployment"][0]["deployment_id"] == (
+        " deployment-id.owner@example.com "
+    )
+    assert normalized["runtime"]["provider"]["provider_name"] == (
+        " provider-name.owner@example.com "
+    )
+    assert normalized["runtime"]["model"]["model_name"] == (
+        " model-name.owner@example.com "
+    )
+    assert normalized["runtime"]["environment"]["version"] == (
+        " environment-version.owner@example.com "
+    )
+    assert normalized["metadata"]["source"]["source_system"] == (
+        " source-system.owner@example.com "
+    )
+    serialized = json.dumps(normalized, sort_keys=True)
+    for secret in (
+        "application-description-secret@example.com",
+        "arbitrary-nested-name@example.com",
+        "application-details-secret@example.com",
+        "deployment-payload-secret@example.com",
+        "provider-note-secret@example.com",
+        "model-secret@example.com",
+        "environment-secret@example.com",
+        "source-description-secret@example.com",
+        "arbitrary-person@example.com",
+        "arbitrary-note@example.com",
+    ):
+        assert secret not in serialized
+
+
+def test_normalization_routes_singular_tool_descriptor_by_context() -> None:
+    """A singular tool descriptor preserves only its structural name fields."""
+    row = {
+        "schema_version": "fapo-evaluation-input-v1",
+        "record_id": "record-1",
+        "group_id": "group-1",
+        "task_type": "answer",
+        "user_input": "Request",
+        "assistant_output": "Response",
+        "conversation_context": [],
+        "tool_calls": [],
+        "runtime": {
+            "tool": {
+                "name": " singular-tool.owner@example.com ",
+                "tool_name": " tool-alias.owner@example.com ",
+                "description": "tool-description-secret@example.com",
+                "arguments": {"email": "tool-argument-secret@example.com"},
+                "result": {"owner": "tool-result-secret@example.com"},
+                "content": "tool-content-secret@example.com",
+            }
+        },
+        "metadata": {},
+        "feedback": {"polarity": "positive", "rationale": "Correct"},
+    }
+
+    normalized = _normalize_feedback(row)
+
+    tool = normalized["runtime"]["tool"]
+    assert tool["name"] == " singular-tool.owner@example.com "
+    assert tool["tool_name"] == " tool-alias.owner@example.com "
+    serialized = json.dumps(normalized, sort_keys=True)
+    for secret in (
+        "tool-description-secret@example.com",
+        "tool-argument-secret@example.com",
+        "tool-result-secret@example.com",
+        "tool-content-secret@example.com",
+    ):
+        assert secret not in serialized
+
+
 def test_prepare_inputs_rejects_normalized_duplicate_with_both_sources(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

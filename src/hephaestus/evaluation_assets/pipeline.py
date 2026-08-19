@@ -2558,10 +2558,23 @@ PRESERVED_NAMED_FIELDS = frozenset(
 MESSAGE_STRUCTURE_FIELDS = frozenset(
     {"conversation_context", "message", "messages"}
 )
+STRUCTURAL_DESCRIPTOR_FIELDS = frozenset(
+    {
+        "application",
+        "deployment",
+        "environment",
+        "model",
+        "provider",
+        "region",
+        "source",
+        "source_system",
+    }
+)
 TOOL_STRUCTURE_FIELDS = frozenset(
     {
         "enabled_tools",
         "function",
+        "tool",
         "tool_calls",
         "tool_names",
         "tools",
@@ -2612,14 +2625,18 @@ def _redact_messages(value: Any) -> Any:
             continue
         message = dict(item)
         for key, nested in tuple(message.items()):
+            field = str(key).lower()
             if (
-                key == "role" or str(key).lower() in PRESERVED_NAMED_FIELDS
+                key == "role" or field in PRESERVED_NAMED_FIELDS
             ) and not _is_composite_value(nested):
                 continue
             if key in CONTENT_FIELD_NAMES:
                 message[key] = _redact_value(nested)
             else:
-                message[key] = _redact_named_content(nested)
+                message[key] = _redact_named_content(
+                    nested,
+                    structural_descriptor=field in STRUCTURAL_DESCRIPTOR_FIELDS,
+                )
         messages.append(message)
     return messages[0] if unwrap else messages
 
@@ -2653,7 +2670,10 @@ def _redact_tool_calls(value: Any) -> Any:
             if key in {"arguments", "result", "error"}:
                 call[key] = _redact_value(nested)
             else:
-                call[key] = _redact_named_content(nested)
+                call[key] = _redact_named_content(
+                    nested,
+                    structural_descriptor=field in STRUCTURAL_DESCRIPTOR_FIELDS,
+                )
         calls.append(call)
     return calls[0] if unwrap else calls
 
@@ -2670,12 +2690,22 @@ def _redact_feedback(value: Any) -> Any:
     return feedback
 
 
-def _redact_named_content(value: Any) -> Any:
+def _redact_named_content(
+    value: Any,
+    *,
+    structural_descriptor: bool = False,
+) -> Any:
     """Redact unknown runtime/metadata strings while preserving schema fields."""
     if isinstance(value, str):
         return _redact_text(value)
     if isinstance(value, list):
-        return [_redact_named_content(item) for item in value]
+        return [
+            _redact_named_content(
+                item,
+                structural_descriptor=structural_descriptor,
+            )
+            for item in value
+        ]
     if isinstance(value, Mapping):
         redacted = {}
         for key, item in value.items():
@@ -2684,10 +2714,21 @@ def _redact_named_content(value: Any) -> Any:
                 redacted[key] = _redact_messages(item)
             elif field in TOOL_STRUCTURE_FIELDS:
                 redacted[key] = _redact_tool_calls(item)
+            elif (
+                field == "name"
+                and structural_descriptor
+                and not _is_composite_value(item)
+            ):
+                redacted[key] = item
             elif field in PRESERVED_NAMED_FIELDS and not _is_composite_value(item):
                 redacted[key] = item
             else:
-                redacted[key] = _redact_named_content(item)
+                redacted[key] = _redact_named_content(
+                    item,
+                    structural_descriptor=(
+                        field in STRUCTURAL_DESCRIPTOR_FIELDS
+                    ),
+                )
         return redacted
     return value
 
