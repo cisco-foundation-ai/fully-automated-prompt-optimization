@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple
@@ -69,6 +70,10 @@ OPENAI_EMBEDDING_MODELS = {
     "text-embedding-3-large",
     "text-embedding-ada-002",
 }
+
+
+class _ThreadingHTTPServerV6(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -688,6 +693,16 @@ def serve(tenants_root: Path, host: str = "127.0.0.1", port: int = 8765) -> None
     """Start the UI server and block until interrupted."""
     if not _is_loopback_name(host):
         raise ValueError("Evaluation Asset Studio must bind to a loopback host")
+    bind_host = host.strip().strip("[]")
+    try:
+        bind_address = ipaddress.ip_address(bind_host)
+    except ValueError:
+        bind_address = None
+    server_type = (
+        _ThreadingHTTPServerV6
+        if isinstance(bind_address, ipaddress.IPv6Address)
+        else ThreadingHTTPServer
+    )
     store = TenantStore(tenants_root)
     asset_manager = EvaluationAssetRunManager(tenants_root)
 
@@ -696,9 +711,10 @@ def serve(tenants_root: Path, host: str = "127.0.0.1", port: int = 8765) -> None
         (_Handler,),
         {"store": store, "asset_manager": asset_manager},
     )
-    httpd = ThreadingHTTPServer((host, port), handler)
+    httpd = server_type((bind_host, port), handler)
 
-    url = f"http://{host}:{port}/"
+    url_host = f"[{bind_host}]" if isinstance(bind_address, ipaddress.IPv6Address) else bind_host
+    url = f"http://{url_host}:{httpd.server_address[1]}/"
     print(f"Hephaestus UI serving {tenants_root} at {url}")
     print("Press Ctrl+C to stop.")
     try:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import socket
 import threading
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -248,6 +249,35 @@ def test_serve_rejects_non_loopback_bind_before_server_start(
 
     with pytest.raises(ValueError, match="loopback"):
         serve(tmp_path / "tenants", host="0.0.0.0", port=8765)
+
+
+def test_serve_binds_ipv6_loopback_and_prints_bracketed_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    if not socket.has_ipv6:
+        pytest.skip("IPv6 is unavailable")
+
+    probe = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    try:
+        probe.bind(("::1", 0))
+    except OSError as exc:
+        pytest.skip(f"IPv6 loopback is unavailable: {exc}")
+    finally:
+        probe.close()
+
+    address_families: list[socket.AddressFamily] = []
+
+    def serve_once(server: ThreadingHTTPServer) -> None:
+        address_families.append(server.address_family)
+
+    monkeypatch.setattr(ThreadingHTTPServer, "serve_forever", serve_once)
+
+    serve(tmp_path / "tenants", host="::1", port=0)
+
+    assert address_families == [socket.AF_INET6]
+    assert "http://[::1]:" in capsys.readouterr().out
 
 
 def test_studio_http_policy_and_cache_headers(tmp_path: Path) -> None:
