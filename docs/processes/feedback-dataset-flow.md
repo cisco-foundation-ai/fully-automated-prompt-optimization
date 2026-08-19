@@ -48,8 +48,11 @@ Both JSONL files must follow the vendor-neutral
 asset creation. Vendor or application exports are converted outside the
 pipeline; the core has no downstream field-name mappings.
 
-Canonical JSONL files may begin anywhere inside the local FAPO workspace. The
-core pipeline immediately copies them into the self-contained asset workspace:
+Canonical JSONL files must be regular files beneath the selected tenant's
+`source_artifacts/` or ordinary `datasets/` directory. The core rejects other
+tenants, workspace-external files, symlink escapes, non-JSONL inputs, and
+generated `datasets/evaluation_assets/` outputs before it creates an asset
+workspace. It validates the input contract before copying the files into:
 
 `tenants/<tenant_id>/evaluation_assets/<asset_id>/stages/01_raw_inputs/`
 

@@ -35,6 +35,7 @@ Routes:
 
 from __future__ import annotations
 
+import ipaddress
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -84,6 +85,8 @@ class _Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         query = _parse_query(parsed.query)
+        if _is_studio_path(path) and not self._authorize_studio_request():
+            return
 
         if path in ("/", "/index.html"):
             self._send_html(INDEX_HTML)
@@ -123,6 +126,10 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 (http.server API)
         parsed = urlparse(self.path)
+        if _is_studio_path(parsed.path) and not self._authorize_studio_request(
+            mutation=True
+        ):
+            return
         if parsed.path == "/api/evaluation-assets/start":
             self._route_start_evaluation_asset()
             return
@@ -405,6 +412,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if _is_studio_path(urlparse(getattr(self, "path", "")).path):
+            self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -439,8 +448,27 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if _is_studio_path(urlparse(getattr(self, "path", "")).path):
+            self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _authorize_studio_request(self, *, mutation: bool = False) -> bool:
+        authority = self.headers.get("Host", "")
+        if not _is_loopback_authority(authority):
+            self._send_json(
+                {"error": "Evaluation Asset Studio requires a loopback Host"},
+                status=403,
+            )
+            return False
+        origin = self.headers.get("Origin")
+        if mutation and origin and not _is_same_http_origin(origin, authority):
+            self._send_json(
+                {"error": "Evaluation Asset Studio mutation Origin must match Host"},
+                status=403,
+            )
+            return False
+        return True
 
     def _send_file(self, path: Path, content_type: str) -> None:
         try:
@@ -578,8 +606,88 @@ def _match(pattern: str, path: str) -> Dict[str, str] | None:
     return params
 
 
+def _is_studio_path(path: str) -> bool:
+    if path in {"/api/overview", "/api/tenants"}:
+        return True
+    if path == "/evaluation-assets" or path.startswith("/evaluation-assets/"):
+        return True
+    if path == "/api/evaluation-assets" or path.startswith(
+        "/api/evaluation-assets/"
+    ):
+        return True
+    parts = path.strip("/").split("/")
+    return (
+        len(parts) >= 4
+        and parts[0] == "api"
+        and parts[1] == "tenants"
+        and parts[3] == "evaluation-assets"
+    )
+
+
+def _is_loopback_name(hostname: str) -> bool:
+    candidate = hostname.strip().strip("[]")
+    try:
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        return candidate.rstrip(".").lower() == "localhost"
+
+
+def _parsed_authority(authority: str) -> Tuple[str, int] | None:
+    if not authority or any(character.isspace() for character in authority):
+        return None
+    parsed = urlparse(f"//{authority}")
+    if parsed.username is not None or parsed.password is not None:
+        return None
+    try:
+        port = parsed.port or 80
+    except ValueError:
+        return None
+    if parsed.hostname is None or parsed.path:
+        return None
+    return _normalized_host(parsed.hostname), port
+
+
+def _normalized_host(hostname: str) -> str:
+    candidate = hostname.rstrip(".").lower()
+    try:
+        return ipaddress.ip_address(candidate).compressed
+    except ValueError:
+        return candidate
+
+
+def _is_loopback_authority(authority: str) -> bool:
+    parsed = _parsed_authority(authority)
+    return parsed is not None and _is_loopback_name(parsed[0])
+
+
+def _is_same_http_origin(origin: str, authority: str) -> bool:
+    request_authority = _parsed_authority(authority)
+    parsed = urlparse(origin)
+    if (
+        request_authority is None
+        or parsed.scheme.lower() != "http"
+        or not parsed.netloc
+        or parsed.path
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return False
+    try:
+        origin_port = parsed.port or 80
+    except ValueError:
+        return False
+    if parsed.hostname is None:
+        return False
+    return request_authority == (_normalized_host(parsed.hostname), origin_port)
+
+
 def serve(tenants_root: Path, host: str = "127.0.0.1", port: int = 8765) -> None:
     """Start the UI server and block until interrupted."""
+    if not _is_loopback_name(host):
+        raise ValueError("Evaluation Asset Studio must bind to a loopback host")
     store = TenantStore(tenants_root)
     asset_manager = EvaluationAssetRunManager(tenants_root)
 

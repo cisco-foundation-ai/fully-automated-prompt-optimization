@@ -49,10 +49,6 @@ tenants/*/source_artifacts/*
 tenants/*/datasets/*
 !tenants/*/datasets/.gitkeep
 # Evaluation asset payloads and run state are local/GCS-backed, not git-tracked.
-tenants/*/evaluation_assets/*/raw_inputs/*
-tenants/*/evaluation_assets/*/prepared_inputs/*
-tenants/*/evaluation_assets/*/decision_assets/*
-tenants/*/evaluation_assets/*/dataset_splits/*
-tenants/*/evaluation_assets/*/events.jsonl
-tenants/*/evaluation_assets/*/pipeline_state.json
+tenants/*/evaluation_assets/**
+tenants/*/datasets/evaluation_assets/**
 .DS_Store

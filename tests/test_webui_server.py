@@ -6,11 +6,22 @@
 
 from __future__ import annotations
 
+import http.client
 import json
+import threading
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
+import pytest
+
+import src.hephaestus.webui.server as server_module
 from src.hephaestus.webui.data import TenantStore
-from src.hephaestus.webui.server import _Handler, _overview_tenant_ids, _parse_query
+from src.hephaestus.webui.server import (
+    _Handler,
+    _overview_tenant_ids,
+    _parse_query,
+    serve,
+)
 
 
 def test_overview_tenant_filter_distinguishes_missing_from_empty() -> None:
@@ -216,3 +227,174 @@ def test_extend_evaluation_asset_endpoint_accepts_refresh_plan(
             },
         },
     )
+
+
+def test_serve_rejects_non_loopback_bind_before_server_start(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The combined UI cannot be bound to a non-loopback interface."""
+    class NoOpServer:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def serve_forever(self):
+            pass
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(server_module, "ThreadingHTTPServer", NoOpServer)
+
+    with pytest.raises(ValueError, match="loopback"):
+        serve(tmp_path / "tenants", host="0.0.0.0", port=8765)
+
+
+def test_studio_http_policy_and_cache_headers(tmp_path: Path) -> None:
+    """Studio routes enforce local authority, same origin, and no-store."""
+    class FakeManager:
+        def is_running(self, tenant_id, asset_id):
+            return False
+
+        def start(self, config, feedback_path, unlabeled_path):
+            return {
+                "tenant_id": config.tenant_id,
+                "asset_id": config.asset_id,
+                "status": "queued",
+            }
+
+    handler = type(
+        "_TestHTTPHandler",
+        (_Handler,),
+        {
+            "store": TenantStore(tmp_path / "tenants"),
+            "asset_manager": FakeManager(),
+        },
+    )
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    port = httpd.server_address[1]
+    local_host = f"127.0.0.1:{port}"
+    payload = json.dumps(
+        {
+            "tenant_id": "tenant_a",
+            "asset_id": "v1",
+            "feedback_path": "feedback.jsonl",
+            "unlabeled_path": "unlabeled.jsonl",
+            "cluster_count": 1,
+        }
+    )
+
+    try:
+        status, headers = _http_request(
+            port,
+            "GET",
+            "/evaluation-assets/",
+            headers={"Host": "example.com"},
+        )
+        assert status == 403
+        assert headers["cache-control"] == "no-store"
+
+        status, headers = _http_request(
+            port,
+            "GET",
+            "/",
+            headers={"Host": "example.com"},
+        )
+        assert status == 200
+        assert "cache-control" not in headers
+
+        status, headers = _http_request(
+            port,
+            "GET",
+            "/evaluation-assets/",
+            headers={"Host": local_host},
+        )
+        assert status == 200
+        assert headers["cache-control"] == "no-store"
+
+        status, headers = _http_request(
+            port,
+            "GET",
+            "/api/evaluation-assets/input-contract",
+            headers={"Host": local_host},
+        )
+        assert status == 200
+        assert headers["cache-control"] == "no-store"
+
+        status, headers = _http_request(
+            port,
+            "GET",
+            "/api/tenants",
+            headers={"Host": local_host},
+        )
+        assert status == 200
+        assert headers["cache-control"] == "no-store"
+
+        status, headers = _http_request(
+            port,
+            "GET",
+            "/api/overview",
+            headers={"Host": "example.com"},
+        )
+        assert status == 403
+        assert headers["cache-control"] == "no-store"
+
+        mutation_headers = {
+            "Host": local_host,
+            "Content-Type": "application/json",
+            "Origin": "http://example.com",
+        }
+        status, headers = _http_request(
+            port,
+            "POST",
+            "/api/evaluation-assets/start",
+            body=payload,
+            headers=mutation_headers,
+        )
+        assert status == 403
+        assert headers["cache-control"] == "no-store"
+
+        mutation_headers["Origin"] = f"http://{local_host}"
+        status, headers = _http_request(
+            port,
+            "POST",
+            "/api/evaluation-assets/start",
+            body=payload,
+            headers=mutation_headers,
+        )
+        assert status == 202
+        assert headers["cache-control"] == "no-store"
+
+        mutation_headers.pop("Origin")
+        status, _ = _http_request(
+            port,
+            "POST",
+            "/api/evaluation-assets/start",
+            body=payload,
+            headers=mutation_headers,
+        )
+        assert status == 202
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=2)
+
+
+def _http_request(
+    port: int,
+    method: str,
+    path: str,
+    *,
+    body: str | None = None,
+    headers: dict[str, str],
+) -> tuple[int, dict[str, str]]:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+    try:
+        connection.request(method, path, body=body, headers=headers)
+        response = connection.getresponse()
+        response.read()
+        return response.status, {key.lower(): value for key, value in response.headers.items()}
+    finally:
+        connection.close()

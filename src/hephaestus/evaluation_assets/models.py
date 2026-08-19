@@ -168,7 +168,11 @@ class EvaluationAssetConfig:
             max_unlabeled_to_trusted_ratio=(
                 float(raw["max_unlabeled_to_trusted_ratio"])
                 if raw.get("max_unlabeled_to_trusted_ratio") is not None
-                else None
+                else (
+                    None
+                    if "max_unlabeled_to_trusted_ratio" in raw
+                    else 20.0
+                )
             ),
             synthetic_coverage_enabled=bool(
                 raw.get("synthetic_coverage_enabled", False)

@@ -159,7 +159,11 @@ not require an existing chain, prompt, config, adapter, or legacy
 
 Both input files must already use the vendor-neutral
 [`fapo-evaluation-input-v1`](docs/processes/evaluation-input-contract.md)
-JSONL contract. FAPO copies them into a self-contained workspace at:
+JSONL contract. Each source must be a regular `.jsonl` file beneath the
+selected tenant's `source_artifacts/` or ordinary `datasets/` directory.
+Generated `datasets/evaluation_assets/` outputs, other tenants, external
+paths, and symlink escapes are rejected. FAPO validates the source contract,
+then copies the inputs into a self-contained workspace at:
 
 ```text
 tenants/<tenant_id>/evaluation_assets/<asset_id>/
@@ -784,7 +788,9 @@ Start it from the repository root:
 python -m hephaestus.cli ui
 ```
 
-By default, the UI serves `tenants/` at <http://127.0.0.1:8765/>. See [docs/web-ui.md](docs/web-ui.md) for options such as `--tenants-root`, `--host`, and `--port`.
+By default, the UI serves `tenants/` at <http://127.0.0.1:8765/>. The server
+accepts loopback bind hosts only. See [docs/web-ui.md](docs/web-ui.md) for
+options such as `--tenants-root`, `--host`, and `--port`.
 
 ---
 

@@ -37,7 +37,7 @@ to stop.
 | Flag | Default | Description |
 |---|---|---|
 | `--tenants-root` | `tenants` | Path to the tenants directory to browse |
-| `--host` | `127.0.0.1` | Bind host |
+| `--host` | `127.0.0.1` | Loopback bind host (`localhost`, `127.0.0.0/8`, or `::1`) |
 | `--port` | `8765` | Bind port |
 
 Example — serve a different tenants root on a custom port:
@@ -203,14 +203,18 @@ The frontend is backed by these read-only endpoints (useful for scripting too):
 ## Notes
 
 - **Narrow writes:** the UI only creates/resumes evaluation assets. All other
-  tenant views remain read-only. Input paths must resolve inside the FAPO
-  workspace and are copied into `stages/01_raw_inputs/` before processing.
+  tenant views remain read-only. Inputs must be regular `.jsonl` files beneath
+  the selected tenant's `source_artifacts/` or ordinary `datasets/` directory;
+  generated evaluation-asset datasets and symlink escapes are rejected before
+  the input contract is validated and files are copied.
 - **Audited resume edits:** the resume endpoint accepts a JSON object containing
   any editable pipeline decision, including model and batch settings,
   embedding and clustering settings, trusted-coverage thresholds, synthetic
   settings, and the split seed. The failed-stage view shows only the parameters
   relevant to that stage. Revisions are recorded in `config_history.jsonl` and
   `events.jsonl`.
-- **Local by default:** it binds to `127.0.0.1`. Change `--host` only if you
-  understand the exposure, since it serves whatever is under the tenants root.
+- **Loopback only:** the server rejects non-loopback bind hosts. Studio routes
+  also require a loopback `Host`; mutation requests require an absent `Origin`
+  or an HTTP origin matching `Host`. Studio HTML and JSON responses use
+  `Cache-Control: no-store`.
 - **No external dependencies:** standard-library server, no frontend build step.

@@ -23,6 +23,7 @@ from src.hephaestus.evaluation_assets.pipeline import (
     _normalize_rubric,
     _rubric_from_guidelines,
 )
+from src.hephaestus.evaluation_assets.service import EvaluationAssetRunManager
 from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
 
 
@@ -238,6 +239,275 @@ def test_evaluation_asset_optional_settings_have_safe_defaults() -> None:
     assert loaded.synthetic_cases_per_cluster == 1
 
 
+def test_config_round_trip_distinguishes_missing_ratio_from_explicit_null() -> None:
+    """A missing coverage ratio defaults while explicit null stays disabled."""
+    missing = EvaluationAssetConfig.from_dict({"tenant_id": "new_tenant"})
+    disabled = EvaluationAssetConfig.from_dict(
+        {
+            "tenant_id": "new_tenant",
+            "max_unlabeled_to_trusted_ratio": None,
+        }
+    )
+
+    assert missing.max_unlabeled_to_trusted_ratio == 20.0
+    assert EvaluationAssetConfig.from_dict(
+        missing.to_dict()
+    ).max_unlabeled_to_trusted_ratio == 20.0
+    assert disabled.max_unlabeled_to_trusted_ratio is None
+    assert EvaluationAssetConfig.from_dict(
+        disabled.to_dict()
+    ).max_unlabeled_to_trusted_ratio is None
+
+
+def test_layout_accepts_only_selected_tenant_source_jsonl(tmp_path: Path) -> None:
+    """Create accepts ordinary selected-tenant source and dataset JSONL files."""
+    tenants_root = tmp_path / "tenants"
+    feedback = (
+        tenants_root / "tenant_a" / "source_artifacts" / "feedback.jsonl"
+    )
+    unlabeled = tenants_root / "tenant_a" / "datasets" / "unlabeled.jsonl"
+    feedback.parent.mkdir(parents=True)
+    unlabeled.parent.mkdir(parents=True)
+    _write_extension_feedback(feedback, ["f1"])
+    _write_extension_unlabeled(unlabeled, ["u1"])
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+
+    layout.initialize(
+        EvaluationAssetConfig(tenant_id="tenant_a"),
+        feedback,
+        unlabeled,
+    )
+
+    assert layout.feedback_path.read_bytes() == feedback.read_bytes()
+    assert layout.unlabeled_path.read_bytes() == unlabeled.read_bytes()
+
+
+@pytest.mark.parametrize(
+    "source_kind",
+    [
+        "workspace_external",
+        "other_tenant",
+        "generated_dataset",
+        "directory",
+        "wrong_suffix",
+        "symlink_escape",
+    ],
+)
+def test_layout_rejects_unauthorized_sources_before_initializing(
+    tmp_path: Path,
+    source_kind: str,
+) -> None:
+    """Create rejects every source outside the selected tenant input boundary."""
+    tenants_root = tmp_path / "workspace" / "tenants"
+    selected_sources = tenants_root / "tenant_a" / "source_artifacts"
+    selected_sources.mkdir(parents=True)
+    unlabeled = selected_sources / "unlabeled.jsonl"
+    _write_extension_unlabeled(unlabeled, ["u1"])
+    outside = tmp_path / "outside.jsonl"
+    _write_extension_feedback(outside, ["f1"])
+
+    if source_kind == "workspace_external":
+        feedback = outside
+    elif source_kind == "other_tenant":
+        feedback = (
+            tenants_root / "tenant_b" / "source_artifacts" / "feedback.jsonl"
+        )
+        feedback.parent.mkdir(parents=True)
+        _write_extension_feedback(feedback, ["f1"])
+    elif source_kind == "generated_dataset":
+        feedback = (
+            tenants_root
+            / "tenant_a"
+            / "datasets"
+            / "evaluation_assets"
+            / "v0"
+            / "train.jsonl"
+        )
+        feedback.parent.mkdir(parents=True)
+        _write_extension_feedback(feedback, ["f1"])
+    elif source_kind == "directory":
+        feedback = selected_sources / "directory.jsonl"
+        feedback.mkdir()
+    elif source_kind == "wrong_suffix":
+        feedback = selected_sources / "feedback.json"
+        _write_extension_feedback(feedback, ["f1"])
+    else:
+        feedback = selected_sources / "feedback.jsonl"
+        feedback.symlink_to(outside)
+
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", source_kind)
+
+    with pytest.raises((OSError, ValueError)):
+        layout.initialize(
+            EvaluationAssetConfig(
+                tenant_id="tenant_a",
+                asset_id=source_kind,
+            ),
+            feedback,
+            unlabeled,
+        )
+
+    assert not layout.root.exists()
+
+
+def test_initialize_reports_source_file_and_row_before_creating_asset(
+    tmp_path: Path,
+) -> None:
+    """Contract failures identify the original source row without side effects."""
+    tenants_root = tmp_path / "tenants"
+    sources = tenants_root / "tenant_a" / "source_artifacts"
+    sources.mkdir(parents=True)
+    feedback = sources / "feedback.jsonl"
+    unlabeled = sources / "unlabeled.jsonl"
+    feedback.write_text('{"record_id":"f1"}\n', encoding="utf-8")
+    _write_extension_unlabeled(unlabeled, ["u1"])
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+
+    with pytest.raises(
+        ValueError,
+        match=r"feedback\.jsonl:1: missing required field 'schema_version'",
+    ):
+        layout.initialize(
+            EvaluationAssetConfig(tenant_id="tenant_a"),
+            feedback,
+            unlabeled,
+        )
+
+    assert not layout.root.exists()
+
+
+def test_layout_rejects_symlinked_tenant_source_root_escape(
+    tmp_path: Path,
+) -> None:
+    """A source_artifacts directory symlink cannot authorize external files."""
+    tenants_root = tmp_path / "workspace" / "tenants"
+    tenant_root = tenants_root / "tenant_a"
+    external = tmp_path / "external"
+    tenant_root.mkdir(parents=True)
+    external.mkdir()
+    (tenant_root / "source_artifacts").symlink_to(external, target_is_directory=True)
+    feedback = external / "feedback.jsonl"
+    unlabeled = external / "unlabeled.jsonl"
+    _write_extension_feedback(feedback, ["f1"])
+    _write_extension_unlabeled(unlabeled, ["u1"])
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+
+    with pytest.raises(ValueError, match="selected tenant"):
+        layout.initialize(
+            EvaluationAssetConfig(tenant_id="tenant_a"),
+            feedback,
+            unlabeled,
+        )
+
+    assert not layout.root.exists()
+
+
+def test_initialize_reports_source_file_and_row_for_malformed_json(
+    tmp_path: Path,
+) -> None:
+    """Malformed source JSON identifies its original file and physical row."""
+    tenants_root = tmp_path / "tenants"
+    sources = tenants_root / "tenant_a" / "source_artifacts"
+    sources.mkdir(parents=True)
+    feedback = sources / "feedback.jsonl"
+    unlabeled = sources / "unlabeled.jsonl"
+    feedback.write_text('{"record_id":\n', encoding="utf-8")
+    _write_extension_unlabeled(unlabeled, ["u1"])
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+
+    with pytest.raises(ValueError, match=r"feedback\.jsonl:1: invalid JSON"):
+        layout.initialize(
+            EvaluationAssetConfig(tenant_id="tenant_a"),
+            feedback,
+            unlabeled,
+        )
+
+    assert not layout.root.exists()
+
+
+def test_extension_rejects_unauthorized_addition_before_initializing_child(
+    tmp_path: Path,
+) -> None:
+    """Extension applies the same tenant source boundary before child writes."""
+    tenants_root = tmp_path / "tenants"
+    feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
+    parent = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    state = parent.initialize(
+        EvaluationAssetConfig(tenant_id="tenant_a"),
+        feedback,
+        unlabeled,
+    )
+    state.status = "completed"
+    parent.save_state(state)
+    other_feedback = (
+        tenants_root / "tenant_b" / "source_artifacts" / "feedback.jsonl"
+    )
+    other_feedback.parent.mkdir(parents=True)
+    _write_extension_feedback(other_feedback, ["f2"])
+    child = EvaluationAssetLayout(tenants_root, "tenant_a", "v2")
+
+    with pytest.raises(ValueError):
+        child.initialize_extension(
+            parent,
+            additional_feedback=other_feedback,
+            additional_unlabeled=None,
+            clustering_mode="keep",
+        )
+
+    assert not child.root.exists()
+
+
+def test_service_create_and_extend_share_tenant_source_boundary(
+    tmp_path: Path,
+) -> None:
+    """The service delegates create and extend authorization to core layout."""
+    workspace = tmp_path / "workspace"
+    tenants_root = workspace / "tenants"
+    feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
+    other_source = (
+        tenants_root / "tenant_b" / "source_artifacts" / "other.jsonl"
+    )
+    other_source.parent.mkdir(parents=True)
+    other_source.write_text('{"record_id":"other"}\n', encoding="utf-8")
+    manager = EvaluationAssetRunManager(tenants_root)
+
+    with pytest.raises(ValueError, match="selected tenant"):
+        manager.start(
+            EvaluationAssetConfig(
+                tenant_id="tenant_a",
+                asset_id="service-create",
+                embedding_provider="tfidf",
+                embedding_model="tfidf",
+            ),
+            other_source,
+            unlabeled,
+        )
+    assert not (
+        tenants_root / "tenant_a" / "evaluation_assets" / "service-create"
+    ).exists()
+
+    parent = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    state = parent.initialize(
+        EvaluationAssetConfig(tenant_id="tenant_a"),
+        feedback,
+        unlabeled,
+    )
+    state.status = "completed"
+    parent.save_state(state)
+    with pytest.raises(ValueError, match="selected tenant"):
+        manager.extend(
+            "tenant_a",
+            "v1",
+            "service-extend",
+            additional_feedback=other_source,
+            additional_unlabeled=None,
+            clustering_mode="keep",
+        )
+    assert not (
+        tenants_root / "tenant_a" / "evaluation_assets" / "service-extend"
+    ).exists()
+
+
 def test_layout_resolves_existing_legacy_artifact_paths(tmp_path: Path) -> None:
     layout = EvaluationAssetLayout(tmp_path / "tenants", "legacy_tenant", "v1")
     for name in (
@@ -278,12 +548,7 @@ def test_layout_resolves_previous_stage_three_directory(tmp_path: Path) -> None:
 
 def test_revise_config_invalidates_only_dependent_stages(tmp_path: Path) -> None:
     tenants_root = tmp_path / "tenants"
-    inputs = tmp_path / "inputs"
-    inputs.mkdir()
-    feedback = inputs / "feedback.jsonl"
-    unlabeled = inputs / "unlabeled.jsonl"
-    feedback.write_text("{}\n", encoding="utf-8")
-    unlabeled.write_text("{}\n", encoding="utf-8")
+    feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
     layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
     state = layout.initialize(
         EvaluationAssetConfig(
@@ -358,13 +623,9 @@ def test_revise_config_invalidates_only_dependent_stages(tmp_path: Path) -> None
 def test_revise_config_derives_embedding_provider_and_restarts_stage_four(
     tmp_path: Path,
 ) -> None:
-    inputs = tmp_path / "inputs"
-    inputs.mkdir()
-    feedback = inputs / "feedback.jsonl"
-    unlabeled = inputs / "unlabeled.jsonl"
-    feedback.write_text("{}\n", encoding="utf-8")
-    unlabeled.write_text("{}\n", encoding="utf-8")
-    layout = EvaluationAssetLayout(tmp_path / "tenants", "tenant_a", "v1")
+    tenants_root = tmp_path / "tenants"
+    feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
     state = layout.initialize(
         EvaluationAssetConfig(tenant_id="tenant_a"),
         feedback,
@@ -386,13 +647,9 @@ def test_revise_config_derives_embedding_provider_and_restarts_stage_four(
 def test_revise_config_with_unchanged_values_preserves_checkpoints(
     tmp_path: Path,
 ) -> None:
-    inputs = tmp_path / "inputs"
-    inputs.mkdir()
-    feedback = inputs / "feedback.jsonl"
-    unlabeled = inputs / "unlabeled.jsonl"
-    feedback.write_text("{}\n", encoding="utf-8")
-    unlabeled.write_text("{}\n", encoding="utf-8")
-    layout = EvaluationAssetLayout(tmp_path / "tenants", "tenant_a", "v1")
+    tenants_root = tmp_path / "tenants"
+    feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
     state = layout.initialize(
         EvaluationAssetConfig(tenant_id="tenant_a"),
         feedback,
@@ -415,13 +672,9 @@ def test_revise_config_with_unchanged_values_preserves_checkpoints(
 def test_revise_config_resumes_an_earlier_incomplete_stage(
     tmp_path: Path,
 ) -> None:
-    inputs = tmp_path / "inputs"
-    inputs.mkdir()
-    feedback = inputs / "feedback.jsonl"
-    unlabeled = inputs / "unlabeled.jsonl"
-    feedback.write_text("{}\n", encoding="utf-8")
-    unlabeled.write_text("{}\n", encoding="utf-8")
-    layout = EvaluationAssetLayout(tmp_path / "tenants", "tenant_a", "v1")
+    tenants_root = tmp_path / "tenants"
+    feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
     state = layout.initialize(
         EvaluationAssetConfig(tenant_id="tenant_a"),
         feedback,
@@ -445,8 +698,8 @@ def test_extend_asset_keeps_clustering_and_extracts_only_new_rubrics(
     tmp_path: Path,
 ) -> None:
     tenants_root = tmp_path / "tenants"
-    inputs = tmp_path / "inputs"
-    inputs.mkdir()
+    inputs = tenants_root / "tenant_a" / "source_artifacts"
+    inputs.mkdir(parents=True)
     feedback = inputs / "feedback.jsonl"
     unlabeled = inputs / "unlabeled.jsonl"
     added_feedback = inputs / "added-feedback.jsonl"
@@ -524,8 +777,8 @@ def test_extend_asset_refreshes_clustering_for_new_unlabeled_records(
     tmp_path: Path,
 ) -> None:
     tenants_root = tmp_path / "tenants"
-    inputs = tmp_path / "inputs"
-    inputs.mkdir()
+    inputs = tenants_root / "tenant_a" / "source_artifacts"
+    inputs.mkdir(parents=True)
     feedback = inputs / "feedback.jsonl"
     unlabeled = inputs / "unlabeled.jsonl"
     added_unlabeled = inputs / "added-unlabeled.jsonl"
@@ -578,8 +831,8 @@ def test_extend_asset_rejects_unlabeled_additions_when_clustering_is_kept(
     tmp_path: Path,
 ) -> None:
     tenants_root = tmp_path / "tenants"
-    inputs = tmp_path / "inputs"
-    inputs.mkdir()
+    inputs = tenants_root / "tenant_a" / "source_artifacts"
+    inputs.mkdir(parents=True)
     feedback = inputs / "feedback.jsonl"
     unlabeled = inputs / "unlabeled.jsonl"
     added_unlabeled = inputs / "added-unlabeled.jsonl"
@@ -673,8 +926,8 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
     expected_synthetic_cases: int,
 ) -> None:
     tenants_root = tmp_path / "tenants"
-    imports = tmp_path / "imports"
-    imports.mkdir()
+    imports = tenants_root / "new_tenant" / "source_artifacts"
+    imports.mkdir(parents=True)
     feedback = imports / "feedback.jsonl"
     unlabeled = imports / "unlabeled.jsonl"
     feedback.write_text(
@@ -1085,6 +1338,19 @@ def _write_extension_unlabeled(path: Path, record_ids: list[str]) -> None:
         "".join(json.dumps(row) + "\n" for row in rows),
         encoding="utf-8",
     )
+
+
+def _write_minimal_input_pair(
+    tenants_root: Path,
+    tenant_id: str,
+) -> tuple[Path, Path]:
+    source_root = tenants_root / tenant_id / "source_artifacts"
+    source_root.mkdir(parents=True, exist_ok=True)
+    feedback = source_root / "feedback.jsonl"
+    unlabeled = source_root / "unlabeled.jsonl"
+    _write_extension_feedback(feedback, ["f1"])
+    _write_extension_unlabeled(unlabeled, ["u1"])
+    return feedback, unlabeled
 
 
 def _read_test_jsonl(path: Path) -> list[dict]:
