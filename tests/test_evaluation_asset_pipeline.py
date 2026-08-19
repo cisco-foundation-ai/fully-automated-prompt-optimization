@@ -359,6 +359,171 @@ def test_normalization_defaults_preserve_exact_canonical_source_strings() -> Non
         assert normalized["route"] == " exact-task-type "
 
 
+def test_normalization_recurses_through_composite_structural_fields() -> None:
+    """Structural keys preserve scalars, never whole content-bearing subtrees."""
+    row = {
+        "schema_version": "fapo-evaluation-input-v1",
+        "record_id": "record-1",
+        "group_id": "group-1",
+        "task_type": "answer",
+        "user_input": "Request",
+        "assistant_output": "Response",
+        "conversation_context": [],
+        "tool_calls": [],
+        "runtime": {
+            "application": {
+                "application_version": " app-version.owner@example.com ",
+                "note": "application-secret@example.com",
+                "messages": [
+                    {
+                        "role": " nested-runtime-role.owner@example.com ",
+                        "content": "runtime-message-secret@example.com",
+                        "source": {
+                            "source_system": " message-source.owner@example.com ",
+                            "note": "message-source-secret@example.com",
+                        },
+                    }
+                ],
+            },
+            "deployment": [
+                {
+                    "deployment_id": " deployment.owner@example.com ",
+                    "content": "deployment-secret@example.com",
+                }
+            ],
+            "provider": {
+                "provider_name": " provider.owner@example.com ",
+                "metadata": {"unknown_leaf": "provider-secret@example.com"},
+            },
+            "tools_available": [
+                {
+                    "name": " lookup.owner@example.com ",
+                    "description": "tool-description-secret@example.com",
+                    "provider": {
+                        "provider_name": " tool-provider.owner@example.com ",
+                        "note": "tool-provider-secret@example.com",
+                    },
+                    "arguments": {"target": "tool-argument-secret@example.com"},
+                    "result": {"owner": "tool-result-secret@example.com"},
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": " nested-tool.owner@example.com ",
+                        "description": "nested-tool-secret@example.com",
+                        "arguments": {
+                            "target": "nested-tool-argument-secret@example.com"
+                        },
+                    },
+                },
+            ],
+        },
+        "metadata": {
+            "source": {
+                "source_system": " source-system.owner@example.com ",
+                "note": "source-secret@example.com",
+                "history": [
+                    {
+                        "source_version": " source-version.owner@example.com ",
+                        "content": "source-history-secret@example.com",
+                    }
+                ],
+            }
+        },
+        "feedback": {"polarity": "positive", "rationale": "Correct"},
+    }
+
+    feedback = _normalize_feedback(row)
+    intent = _normalize_intent({key: value for key, value in row.items() if key != "feedback"})
+
+    for normalized in (feedback, intent):
+        assert normalized["runtime"]["application"]["application_version"] == (
+            " app-version.owner@example.com "
+        )
+        runtime_message = normalized["runtime"]["application"]["messages"][0]
+        assert runtime_message["role"] == " nested-runtime-role.owner@example.com "
+        assert runtime_message["source"]["source_system"] == (
+            " message-source.owner@example.com "
+        )
+        assert normalized["runtime"]["deployment"][0]["deployment_id"] == (
+            " deployment.owner@example.com "
+        )
+        assert normalized["runtime"]["provider"]["provider_name"] == (
+            " provider.owner@example.com "
+        )
+        assert normalized["metadata"]["source"]["source_system"] == (
+            " source-system.owner@example.com "
+        )
+        assert normalized["metadata"]["source"]["history"][0][
+            "source_version"
+        ] == " source-version.owner@example.com "
+        tools = normalized["runtime"]["tools_available"]
+        assert tools[0]["name"] == " lookup.owner@example.com "
+        assert tools[0]["provider"]["provider_name"] == (
+            " tool-provider.owner@example.com "
+        )
+        assert tools[1]["function"]["name"] == " nested-tool.owner@example.com "
+        serialized = json.dumps(normalized, sort_keys=True)
+        for secret in (
+            "application-secret@example.com",
+            "runtime-message-secret@example.com",
+            "message-source-secret@example.com",
+            "deployment-secret@example.com",
+            "provider-secret@example.com",
+            "source-secret@example.com",
+            "source-history-secret@example.com",
+            "tool-description-secret@example.com",
+            "tool-provider-secret@example.com",
+            "tool-argument-secret@example.com",
+            "tool-result-secret@example.com",
+            "nested-tool-secret@example.com",
+            "nested-tool-argument-secret@example.com",
+        ):
+            assert secret not in serialized
+
+
+def test_normalization_traverses_nested_tool_name_collections() -> None:
+    """Tool collections keep names exact while redacting descriptive content."""
+    row = {
+        "schema_version": "fapo-evaluation-input-v1",
+        "record_id": "record-1",
+        "group_id": "group-1",
+        "task_type": "answer",
+        "user_input": "Request",
+        "assistant_output": "Response",
+        "conversation_context": [],
+        "tool_calls": [],
+        "runtime": {
+            "tools_available": [
+                " scalar-tool.owner@example.com ",
+                {
+                    "name": " object-tool.owner@example.com ",
+                    "description": "object-description-secret@example.com",
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": " function-tool.owner@example.com ",
+                        "arguments": {"email": "function-secret@example.com"},
+                    },
+                },
+            ]
+        },
+        "metadata": {},
+        "feedback": {"polarity": "positive", "rationale": "Correct"},
+    }
+
+    normalized = _normalize_feedback(row)
+
+    tools = normalized["runtime"]["tools_available"]
+    assert tools[0] == " scalar-tool.owner@example.com "
+    assert tools[1]["name"] == " object-tool.owner@example.com "
+    assert tools[2]["function"]["name"] == " function-tool.owner@example.com "
+    serialized = json.dumps(normalized, sort_keys=True)
+    assert "object-description-secret@example.com" not in serialized
+    assert "function-secret@example.com" not in serialized
+
+
 def test_prepare_inputs_rejects_normalized_duplicate_with_both_sources(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

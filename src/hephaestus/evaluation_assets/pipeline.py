@@ -2549,7 +2549,6 @@ PRESERVED_NAMED_FIELDS = frozenset(
         "tool",
         "tool_call_id",
         "tool_name",
-        "tools_available",
         "trace_id",
         "type",
         "updated_at",
@@ -2559,7 +2558,20 @@ PRESERVED_NAMED_FIELDS = frozenset(
 MESSAGE_STRUCTURE_FIELDS = frozenset(
     {"conversation_context", "message", "messages"}
 )
-TOOL_STRUCTURE_FIELDS = frozenset({"function", "tool_calls", "tools"})
+TOOL_STRUCTURE_FIELDS = frozenset(
+    {
+        "enabled_tools",
+        "function",
+        "tool_calls",
+        "tool_names",
+        "tools",
+        "tools_available",
+    }
+)
+
+
+def _is_composite_value(value: Any) -> bool:
+    return isinstance(value, (Mapping, list))
 
 
 def _redact_record(row: Mapping[str, Any]) -> Dict[str, Any]:
@@ -2600,7 +2612,9 @@ def _redact_messages(value: Any) -> Any:
             continue
         message = dict(item)
         for key, nested in tuple(message.items()):
-            if key == "role" or str(key).lower() in PRESERVED_NAMED_FIELDS:
+            if (
+                key == "role" or str(key).lower() in PRESERVED_NAMED_FIELDS
+            ) and not _is_composite_value(nested):
                 continue
             if key in CONTENT_FIELD_NAMES:
                 message[key] = _redact_value(nested)
@@ -2617,18 +2631,24 @@ def _redact_tool_calls(value: Any) -> Any:
     elif isinstance(value, list):
         unwrap = False
     else:
-        return _redact_value(value)
+        return value
     calls = []
     for item in value:
+        if isinstance(item, list):
+            calls.append(_redact_tool_calls(item))
+            continue
         if not isinstance(item, Mapping):
-            calls.append(_redact_value(item))
+            calls.append(item)
             continue
         call = dict(item)
         for key, nested in tuple(call.items()):
-            if key in {"name", "tool"} or str(key).lower() in PRESERVED_NAMED_FIELDS:
-                continue
-            if str(key).lower() in TOOL_STRUCTURE_FIELDS:
+            field = str(key).lower()
+            if field in TOOL_STRUCTURE_FIELDS:
                 call[key] = _redact_tool_calls(nested)
+                continue
+            if (
+                key in {"name", "tool"} or field in PRESERVED_NAMED_FIELDS
+            ) and not _is_composite_value(nested):
                 continue
             if key in {"arguments", "result", "error"}:
                 call[key] = _redact_value(nested)
@@ -2664,7 +2684,7 @@ def _redact_named_content(value: Any) -> Any:
                 redacted[key] = _redact_messages(item)
             elif field in TOOL_STRUCTURE_FIELDS:
                 redacted[key] = _redact_tool_calls(item)
-            elif field in PRESERVED_NAMED_FIELDS:
+            elif field in PRESERVED_NAMED_FIELDS and not _is_composite_value(item):
                 redacted[key] = item
             else:
                 redacted[key] = _redact_named_content(item)
