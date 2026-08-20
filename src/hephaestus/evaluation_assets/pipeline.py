@@ -61,10 +61,10 @@ from src.hephaestus.evaluation_assets.control_jsonl import (
 from src.hephaestus.evaluation_assets.durability import (
     STAGE_SPECIFICATIONS,
     EvaluationAssetImmutableError,
-    EvaluationAssetIntegrityError,
     EvaluationAssetLegacyError,
     build_stage_receipt,
     file_sha256,
+    load_completed_release_handoff_control,
     mutable_rebuild_boundary,
     verify_completed_release_candidate,
     verify_raw_snapshot_floor,
@@ -262,12 +262,8 @@ class EvaluationAssetPipeline:
         embedding_provider: Optional[EmbeddingProvider] = None,
     ) -> None:
         self.layout = layout
-        self.config = layout.load_config()
-        self.lineage = (
-            json.loads(layout.lineage_path.read_text(encoding="utf-8"))
-            if layout.lineage_path.is_file()
-            else {}
-        )
+        self.config: EvaluationAssetConfig | None = None
+        self.lineage: dict[str, Any] = {}
         self._injected_rubric_provider = rubric_provider
         self._injected_embedding_provider = embedding_provider
         self.rubric_provider = rubric_provider
@@ -558,8 +554,17 @@ class EvaluationAssetPipeline:
         with self.layout.asset_lock(lock_timeout):
             if _lock_acquired_callback is not None:
                 _lock_acquired_callback()
+            handoff_control = load_completed_release_handoff_control(self.layout)
             recovered = self.layout._recover_locked()
-            state = self.layout.load_state()
+            if recovered:
+                handoff_control = load_completed_release_handoff_control(
+                    self.layout
+                )
+            state = (
+                handoff_control[0]
+                if handoff_control is not None
+                else self.layout.load_state()
+            )
             if state.status == "released":
                 verify_released_asset(self.layout, state)
                 if recovered:
@@ -575,6 +580,22 @@ class EvaluationAssetPipeline:
                     "explicit verification and adoption are required",
                 )
             verify_raw_snapshot_floor(self.layout, state)
+            if handoff_control is not None and not config_updates:
+                self.config = handoff_control[1]
+                self.lineage = (
+                    json.loads(self.layout.lineage_path.read_text(encoding="utf-8"))
+                    if self.layout.lineage_path.is_file()
+                    else {}
+                )
+                return self._run_locked(
+                    _preflight_accepted_callback,
+                    completed_release_candidate=True,
+                )
+            self.config = (
+                handoff_control[1]
+                if handoff_control is not None
+                else self.layout.load_config()
+            )
             self._validate_injected_provider_identities()
             self.last_revision = (
                 self.layout._revise_config_locked(config_updates)
@@ -588,48 +609,38 @@ class EvaluationAssetPipeline:
                 else {}
             )
             self._configure_providers()
-            return self._run_locked(_preflight_accepted_callback)
+            return self._run_locked(
+                _preflight_accepted_callback,
+                completed_release_candidate=False,
+            )
 
     def _run_locked(
         self,
         preflight_accepted_callback: Optional[Callable[[], None]] = None,
+        *,
+        completed_release_candidate: bool,
     ) -> PipelineState:
         """Run while the caller holds the asset mutation lock."""
         state = self.layout.load_state()
         state.schema_version = "fapo-evaluation-asset-state-v2"
-        completed_release_candidate = (
-            state.status == "running"
-            and state.current_stage
-            in {None, PipelineStage.DATASET_SPLITS.value}
-            and state.error is None
-            and all(
-                item.status == "completed" and item.receipt_sha256
-                for item in state.stages
-            )
-        )
         if completed_release_candidate:
             self._pending_generation = verify_completed_release_candidate(
                 self.layout,
                 state,
             )
-        boundary = mutable_rebuild_boundary(
-            self.layout,
-            state,
-            self.config,
-            STAGE_PROMPTS,
-            {
-                stage: self._provider_identity_for_stage(stage)
-                for stage in PipelineStage
-            },
-        )
+            boundary = None
+        else:
+            boundary = mutable_rebuild_boundary(
+                self.layout,
+                state,
+                self.config,
+                STAGE_PROMPTS,
+                {
+                    stage: self._provider_identity_for_stage(stage)
+                    for stage in PipelineStage
+                },
+            )
         if boundary is not None:
-            if completed_release_candidate:
-                raise EvaluationAssetIntegrityError(
-                    self.layout.tenant_id,
-                    self.layout.asset_id,
-                    "completed release candidate evidence is invalid; "
-                    "restore it from a verified backup or rebuild a new asset version",
-                )
             boundary_index = list(PipelineStage).index(boundary)
             suffix_states = state.stages[boundary_index:]
             if any(
@@ -891,6 +902,8 @@ class EvaluationAssetPipeline:
         _publication_fault_point("after_stage_8_outputs_validated")
 
     def _validate_raw_inputs(self) -> Dict[str, int]:
+        if self.config is None:
+            self.config = self.layout.load_config()
         feedback, feedback_row_numbers = _load_jsonl_with_line_numbers(
             self.layout.feedback_path
         )

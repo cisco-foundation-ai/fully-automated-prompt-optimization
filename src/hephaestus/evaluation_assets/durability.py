@@ -36,6 +36,9 @@ from src.hephaestus.evaluation_assets.lineage_validation import (
 from src.hephaestus.evaluation_assets.models import (
     CONFIG_STAGE_DEPENDENCIES,
     STAGE_COUNT_KEYS,
+    STAGE_LABELS,
+    STATE_SCHEMA_VERSION,
+    TOP_LEVEL_STATUSES,
     EvaluationAssetConfig,
     PipelineStage,
     PipelineState,
@@ -314,6 +317,201 @@ def canonical_json_bytes(payload: Any) -> bytes:
 def canonical_sha256(payload: Any) -> str:
     """Hash one canonical JSON value."""
     return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+
+
+_PIPELINE_STATE_FIELDS = {
+    "asset_id",
+    "counts",
+    "created_at",
+    "current_stage",
+    "error",
+    "last_operation_id",
+    "mutation_sequence",
+    "schema_version",
+    "stages",
+    "status",
+    "tenant_id",
+    "updated_at",
+}
+_STAGE_STATE_FIELDS = {
+    "completed_at",
+    "label",
+    "message",
+    "receipt_sha256",
+    "stage",
+    "started_at",
+    "status",
+}
+_CONFIG_STRING_FIELDS = {
+    "asset_id",
+    "embedding_model",
+    "embedding_provider",
+    "rubric_model",
+    "rubric_provider",
+    "tenant_id",
+}
+_CONFIG_INTEGER_FIELDS = {
+    "batch_size",
+    "cluster_count",
+    "min_trusted_examples",
+    "min_trusted_groups",
+    "split_seed",
+    "synthetic_cases_per_cluster",
+}
+_CONFIG_FLOAT_FIELDS = {"match_threshold"}
+_CONFIG_OPTIONAL_FLOAT_FIELDS = {"max_unlabeled_to_trusted_ratio"}
+_CONFIG_BOOLEAN_FIELDS = {"synthetic_coverage_enabled"}
+_CONFIG_FIELDS = (
+    _CONFIG_STRING_FIELDS
+    | _CONFIG_INTEGER_FIELDS
+    | _CONFIG_FLOAT_FIELDS
+    | _CONFIG_OPTIONAL_FLOAT_FIELDS
+    | _CONFIG_BOOLEAN_FIELDS
+)
+_COMPLETED_COUNT_FIELDS = {
+    key for fields in STAGE_COUNT_KEYS.values() for key in fields
+}
+
+
+def _is_json_integer(value: Any) -> bool:
+    """Return whether a strict JSON scalar is an integer but not a boolean."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _exact_v2_state(raw: Mapping[str, Any]) -> PipelineState:
+    """Validate and load one closed, type-exact v2 state object."""
+    if set(raw) != _PIPELINE_STATE_FIELDS:
+        raise ValueError("v2 state field inventory is invalid")
+    if any(
+        not isinstance(raw.get(field), str)
+        for field in {
+            "asset_id",
+            "created_at",
+            "schema_version",
+            "status",
+            "tenant_id",
+            "updated_at",
+        }
+    ) or (
+        raw.get("schema_version") != STATE_SCHEMA_VERSION
+        or raw.get("status") not in TOP_LEVEL_STATUSES
+    ):
+        raise ValueError("v2 state scalar identity is invalid")
+    if not _canonical_utc_timestamp(raw["created_at"]) or not (
+        _canonical_utc_timestamp(raw["updated_at"])
+    ):
+        raise ValueError("v2 state timestamp identity is invalid")
+    if raw.get("current_stage") is not None and (
+        not isinstance(raw["current_stage"], str)
+        or raw["current_stage"] not in {stage.value for stage in PipelineStage}
+    ):
+        raise ValueError("v2 state stage cursor is invalid")
+    if raw.get("error") is not None and not isinstance(raw["error"], str):
+        raise ValueError("v2 state error identity is invalid")
+    if raw.get("last_operation_id") is not None and (
+        not isinstance(raw["last_operation_id"], str)
+        or not _OPERATION_ID.fullmatch(raw["last_operation_id"])
+    ):
+        raise ValueError("v2 state operation identity is invalid")
+    sequence = raw.get("mutation_sequence")
+    if not _is_json_integer(sequence) or sequence < 0:
+        raise ValueError("v2 state mutation identity is invalid")
+    counts = raw.get("counts")
+    if (
+        not isinstance(counts, dict)
+        or not set(counts) <= _COMPLETED_COUNT_FIELDS
+        or any(
+            not _is_json_integer(value) or value < 0
+            for value in counts.values()
+        )
+    ):
+        raise ValueError("v2 state count identity is invalid")
+    stages = raw.get("stages")
+    if not isinstance(stages, list) or len(stages) != len(PipelineStage):
+        raise ValueError("v2 state stage inventory is invalid")
+    for expected_stage, stage in zip(PipelineStage, stages):
+        if not isinstance(stage, dict) or set(stage) != _STAGE_STATE_FIELDS:
+            raise ValueError("v2 state stage schema is invalid")
+        if any(
+            not isinstance(stage.get(field), str)
+            for field in {"label", "message", "stage", "status"}
+        ):
+            raise ValueError("v2 state stage scalar identity is invalid")
+        if (
+            stage["stage"] != expected_stage.value
+            or stage["label"] != STAGE_LABELS[expected_stage]
+            or stage["status"] not in {"pending", "running", "completed", "failed"}
+        ):
+            raise ValueError("v2 state stage lifecycle is invalid")
+        if any(
+            stage.get(field) is not None and not isinstance(stage[field], str)
+            for field in {"completed_at", "receipt_sha256", "started_at"}
+        ):
+            raise ValueError("v2 state stage evidence type is invalid")
+        for field in {"completed_at", "started_at"}:
+            if stage.get(field) is not None and not _canonical_utc_timestamp(
+                stage[field]
+            ):
+                raise ValueError("v2 state stage timestamp is invalid")
+        if stage.get("receipt_sha256") is not None and not _SHA256.fullmatch(
+            stage["receipt_sha256"]
+        ):
+            raise ValueError("v2 state stage receipt identity is invalid")
+    state = PipelineState.from_dict(raw)
+    if canonical_json_bytes(raw) != canonical_json_bytes(state.to_dict()):
+        raise ValueError("v2 state model coercion is forbidden")
+    return state
+
+
+def _exact_completed_state(raw: Mapping[str, Any]) -> PipelineState:
+    """Validate and load one closed, type-exact completed v2 state object."""
+    state = _exact_v2_state(raw)
+    counts = raw["counts"]
+    if set(counts) != _COMPLETED_COUNT_FIELDS:
+        raise ValueError("completed state count inventory is invalid")
+    for stage in raw["stages"]:
+        if (
+            stage["status"] != "completed"
+            or not _canonical_utc_timestamp(stage.get("started_at"))
+            or not _canonical_utc_timestamp(stage.get("completed_at"))
+            or not isinstance(stage.get("receipt_sha256"), str)
+            or not _SHA256.fullmatch(stage["receipt_sha256"])
+        ):
+            raise ValueError("completed state stage evidence is invalid")
+    return state
+
+
+def _exact_evaluation_asset_config(
+    raw: Mapping[str, Any],
+) -> EvaluationAssetConfig:
+    """Validate and load one closed, type-exact evaluation asset config."""
+    if set(raw) != _CONFIG_FIELDS:
+        raise ValueError("evaluation asset configuration fields are invalid")
+    if any(
+        not isinstance(raw.get(field), str) for field in _CONFIG_STRING_FIELDS
+    ):
+        raise ValueError("evaluation asset configuration strings are invalid")
+    if any(
+        not _is_json_integer(raw.get(field)) for field in _CONFIG_INTEGER_FIELDS
+    ):
+        raise ValueError("evaluation asset configuration integers are invalid")
+    if any(
+        not isinstance(raw.get(field), float) for field in _CONFIG_FLOAT_FIELDS
+    ):
+        raise ValueError("evaluation asset configuration floats are invalid")
+    if any(
+        raw.get(field) is not None and not isinstance(raw[field], float)
+        for field in _CONFIG_OPTIONAL_FLOAT_FIELDS
+    ):
+        raise ValueError("evaluation asset optional configuration floats are invalid")
+    if any(
+        not isinstance(raw.get(field), bool) for field in _CONFIG_BOOLEAN_FIELDS
+    ):
+        raise ValueError("evaluation asset configuration booleans are invalid")
+    config = EvaluationAssetConfig.from_dict(raw)
+    if canonical_json_bytes(raw) != canonical_json_bytes(config.to_dict()):
+        raise ValueError("evaluation asset configuration coercion is forbidden")
+    return config
 
 
 def persisted_json_sha256(payload: Mapping[str, Any]) -> str:
@@ -604,8 +802,12 @@ def verify_completed_release_candidate(
     """Read-only verify a fully receipted native handoff before any resume write."""
     try:
         persisted_state = parse_strict_json_object(layout.state_path.read_bytes())
+        exact_state = _exact_completed_state(persisted_state)
         if (
-            persisted_state != state.to_dict()
+            canonical_json_bytes(persisted_state)
+            != canonical_json_bytes(state.to_dict())
+            or canonical_json_bytes(persisted_state)
+            != canonical_json_bytes(exact_state.to_dict())
             or state.schema_version != "fapo-evaluation-asset-state-v2"
             or state.status != "running"
             or state.error is not None
@@ -618,8 +820,8 @@ def verify_completed_release_candidate(
         ):
             raise ValueError("completed handoff lifecycle is invalid")
         raw_config = parse_strict_json_object(layout.config_path.read_bytes())
-        config = EvaluationAssetConfig.from_dict(raw_config)
-        if raw_config != config.to_dict() or (
+        config = _exact_evaluation_asset_config(raw_config)
+        if (
             config.tenant_id != layout.tenant_id
             or config.asset_id != layout.asset_id
         ):
@@ -684,6 +886,80 @@ def verify_completed_release_candidate(
             layout.tenant_id,
             layout.asset_id,
             "completed release candidate evidence is invalid; restore it from a "
+            "verified backup or rebuild a new asset version",
+        ) from exc
+
+
+def load_completed_release_handoff_control(
+    layout: Any,
+) -> tuple[PipelineState, EvaluationAssetConfig] | None:
+    """Load an exact native handoff before coercive models or provider setup.
+
+    A failed state with a retained receipt chain is an established mutable
+    checkpoint shape.  It is validated here, but deliberately returned to the
+    ordinary dependency-invalidation path instead of being treated as an
+    immutable historical handoff.
+    """
+    try:
+        raw_state = parse_strict_json_object(layout.state_path.read_bytes())
+        if (
+            "schema_version" not in raw_state
+            and raw_state.get("status") == "completed"
+            and PipelineState.from_dict(raw_state).legacy_completed
+        ):
+            return None
+        if raw_state.get("schema_version") != STATE_SCHEMA_VERSION:
+            return None
+        _exact_v2_state(raw_state)
+        raw_stages = raw_state.get("stages")
+        raw_counts = raw_state.get("counts")
+        complete_counts = isinstance(raw_counts, dict) and (
+            _COMPLETED_COUNT_FIELDS <= set(raw_counts)
+        )
+        regular_stage_inventory = (
+            isinstance(raw_stages, list)
+            and len(raw_stages) == len(PipelineStage)
+            and all(isinstance(stage, dict) for stage in raw_stages)
+        )
+        all_receipts = regular_stage_inventory and all(
+            stage.get("receipt_sha256") is not None for stage in raw_stages
+        )
+        all_completed = regular_stage_inventory and all(
+            stage.get("status") == "completed" for stage in raw_stages
+        )
+        if not complete_counts and not all_receipts and not all_completed:
+            return None
+        state = _exact_completed_state(raw_state)
+        if state.tenant_id != layout.tenant_id or state.asset_id != layout.asset_id:
+            raise ValueError("completed handoff state identity is invalid")
+        raw_config = parse_strict_json_object(layout.config_path.read_bytes())
+        config = _exact_evaluation_asset_config(raw_config)
+        if (
+            config.tenant_id != layout.tenant_id
+            or config.asset_id != layout.asset_id
+        ):
+            raise ValueError("completed handoff configuration is invalid")
+        if state.status in {"failed", "released"}:
+            return None
+        if (
+            state.status != "running"
+            or state.error is not None
+            or state.current_stage
+            not in {None, PipelineStage.DATASET_SPLITS.value}
+        ):
+            raise ValueError("completed handoff lifecycle is invalid")
+        return state, config
+    except (
+        KeyError,
+        OSError,
+        TypeError,
+        UnicodeError,
+        ValueError,
+    ) as exc:
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "completed release candidate control is invalid; restore it from a "
             "verified backup or rebuild a new asset version",
         ) from exc
 
@@ -1466,13 +1742,20 @@ def _validate_released_control_state(
         )
     raw_state = state.to_dict()
     if require_persisted_state:
-        raw_state = _read_json_object(layout.state_path)
-        if raw_state != state.to_dict():
+        raw_state = parse_strict_json_object(layout.state_path.read_bytes())
+        if canonical_json_bytes(raw_state) != canonical_json_bytes(state.to_dict()):
             raise EvaluationAssetIntegrityError(
                 layout.tenant_id,
                 layout.asset_id,
                 "the supplied state does not match persisted authority",
             )
+    exact_state = _exact_completed_state(raw_state)
+    if canonical_json_bytes(raw_state) != canonical_json_bytes(exact_state.to_dict()):
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "released state identity is inconsistent",
+        )
     if state.tenant_id != layout.tenant_id or state.asset_id != layout.asset_id:
         raise EvaluationAssetIntegrityError(
             layout.tenant_id,
@@ -1528,9 +1811,9 @@ def _validate_released_control_state(
             layout.asset_id,
             "released mutation identity is invalid",
         )
-    raw_config = _read_json_object(layout.config_path)
-    config = EvaluationAssetConfig.from_dict(raw_config)
-    if raw_config != config.to_dict() or (
+    raw_config = parse_strict_json_object(layout.config_path.read_bytes())
+    config = _exact_evaluation_asset_config(raw_config)
+    if (
         config.tenant_id != layout.tenant_id
         or config.asset_id != layout.asset_id
     ):

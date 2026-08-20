@@ -114,6 +114,10 @@ def _literal_mode(
     positional_index: int,
     assignments: Mapping[str, ast.AST],
 ) -> str | None:
+    if any(isinstance(argument, ast.Starred) for argument in node.args) or any(
+        keyword.arg is None for keyword in node.keywords
+    ):
+        return None
     arguments = list(node.args[positional_index : positional_index + 1])
     arguments.extend(
         keyword.value for keyword in node.keywords if keyword.arg == "mode"
@@ -138,7 +142,9 @@ def _os_write_flag_status(
         if left is True or right is True:
             return True
         return False if left is False and right is False else None
-    qualified = _qualified_ast_name(node, aliases, assignments)
+    qualified = _canonical_sink_name(
+        _qualified_ast_name(node, aliases, assignments)
+    )
     if qualified in {
         "os.O_WRONLY",
         "os.O_RDWR",
@@ -229,67 +235,616 @@ def _obvious_string_receiver(
     )
 
 
+_PERSISTENCE_METHOD_SINKS = {
+    "rename",
+    "replace",
+    "touch",
+    "truncate",
+    "write",
+    "write_bytes",
+    "write_text",
+    "writeheader",
+    "writerow",
+    "writerows",
+    "writelines",
+}
+_PERSISTENCE_COPY_SINKS = {
+    "shutil.copy",
+    "shutil.copy2",
+    "shutil.copyfile",
+    "shutil.copyfileobj",
+    "shutil.copytree",
+    "shutil.move",
+}
+_PERSISTENCE_LOW_LEVEL_SINKS = {
+    "os.copy_file_range",
+    "os.ftruncate",
+    "os.pwrite",
+    "os.pwritev",
+    "os.rename",
+    "os.replace",
+    "os.sendfile",
+    "os.splice",
+    "os.truncate",
+    "os.write",
+    "os.writev",
+}
+_PERSISTENCE_DUMP_SINKS = {
+    "json.dump",
+    "pickle.dump",
+    "toml.dump",
+    "yaml.dump",
+    "yaml.safe_dump",
+}
+_PERSISTENCE_CSV_FACTORIES = {"csv.DictWriter", "csv.writer"}
+_CALLABLE_FACTORIES = {"functools.partial"}
+_AUDITED_PIPELINE_PARTIAL_TARGETS = {
+    "_normalize_feedback_evidence_response",
+    "_normalize_guideline_response",
+    "_normalize_inferred_rubric_response",
+    "_normalize_synthetic_response",
+    (
+        "src.hephaestus.evaluation_assets.stage_three_contract."
+        "normalize_guideline_response"
+    ),
+}
+
+
+def _canonical_sink_name(name: str) -> str:
+    """Project platform-native persistence aliases onto the os namespace."""
+    for module in ("nt", "posix"):
+        prefix = f"{module}."
+        if name.startswith(prefix):
+            return f"os.{name.removeprefix(prefix)}"
+    return name
+
+
+def _expanded_factory_call(
+    node: ast.Call,
+    aliases: Mapping[str, str],
+    assignments: Mapping[str, ast.AST],
+) -> tuple[ast.Call, bool]:
+    """Expand a directly invoked callable factory into its bound sink call."""
+    resolved_func = _assigned_ast_node(node.func, assignments)
+    expanded = False
+    while True:
+        if isinstance(resolved_func, ast.Call) and (
+            _qualified_ast_name(resolved_func.func, aliases, assignments)
+            in _CALLABLE_FACTORIES
+        ):
+            factory_call = resolved_func
+            invocation_args = node.args
+            invocation_keywords = node.keywords
+        elif (
+            _qualified_ast_name(resolved_func, aliases, assignments)
+            in _CALLABLE_FACTORIES
+        ):
+            factory_call = node
+            invocation_args = []
+            invocation_keywords = []
+        else:
+            break
+        if not factory_call.args:
+            break
+        expanded = True
+        invocation_names = {
+            keyword.arg
+            for keyword in invocation_keywords
+            if keyword.arg is not None
+        }
+        node = ast.Call(
+            func=_assigned_ast_node(factory_call.args[0], assignments),
+            args=[*factory_call.args[1:], *invocation_args],
+            keywords=[
+                *invocation_keywords,
+                *(
+                    keyword
+                    for keyword in factory_call.keywords
+                    if keyword.arg not in invocation_names
+                ),
+            ],
+        )
+        resolved_func = _assigned_ast_node(node.func, assignments)
+    return node, expanded
+
+
+def _persistence_binding_score(
+    node: ast.AST,
+    aliases: Mapping[str, str],
+    assignments: Mapping[str, ast.AST],
+) -> int:
+    """Score whether one possible binding exposes a persistence-capable call."""
+    node = _assigned_ast_node(node, assignments)
+    if isinstance(node, ast.IfExp):
+        return max(
+            _persistence_binding_score(candidate, aliases, assignments)
+            for candidate in (node.body, node.orelse)
+        )
+    qualified = _canonical_sink_name(
+        _qualified_ast_name(node, aliases, assignments)
+    )
+    attribute = node.attr if isinstance(node, ast.Attribute) else ""
+    if (
+        qualified
+        in _PERSISTENCE_DUMP_SINKS
+        | _PERSISTENCE_COPY_SINKS
+        | _PERSISTENCE_LOW_LEVEL_SINKS
+        | _PERSISTENCE_CSV_FACTORIES
+        | _CALLABLE_FACTORIES
+        | {
+            "builtins.open",
+            "io.open",
+            "open",
+            "os.fdopen",
+            "os.open",
+            "tempfile.NamedTemporaryFile",
+        }
+        or attribute in _PERSISTENCE_METHOD_SINKS | {"dump", "open"}
+    ):
+        return 1
+    if isinstance(node, ast.Call) and (
+        _qualified_ast_name(node.func, aliases, assignments)
+        in _CALLABLE_FACTORIES
+    ):
+        return 1
+    return 0
+
+
+def _explicit_persistence_reference(
+    node: ast.AST,
+    aliases: Mapping[str, str],
+    assignments: Mapping[str, ast.AST],
+) -> bool:
+    """Return whether an expression visibly names a declared persistence sink."""
+    node = _assigned_ast_node(node, assignments)
+    if isinstance(node, ast.Call) and (
+        _qualified_ast_name(node.func, aliases, assignments)
+        in _CALLABLE_FACTORIES
+    ):
+        return bool(node.args) and _explicit_persistence_reference(
+            node.args[0],
+            aliases,
+            assignments,
+        )
+    qualified = _canonical_sink_name(
+        _qualified_ast_name(node, aliases, assignments)
+    )
+    attribute = node.attr if isinstance(node, ast.Attribute) else ""
+    return (
+        qualified
+        in _PERSISTENCE_DUMP_SINKS
+        | _PERSISTENCE_COPY_SINKS
+        | _PERSISTENCE_LOW_LEVEL_SINKS
+        | _PERSISTENCE_CSV_FACTORIES
+        | {
+            "builtins.open",
+            "io.open",
+            "open",
+            "os.fdopen",
+            "os.open",
+            "tempfile.NamedTemporaryFile",
+        }
+        or attribute in _PERSISTENCE_METHOD_SINKS | {"dump", "open", "safe_dump"}
+    )
+
+
+def _qualified_name_node(name: str) -> ast.AST:
+    """Build an AST attribute chain that no longer depends on an import alias."""
+    parts = name.split(".")
+    node: ast.AST = ast.Name(id=parts[0], ctx=ast.Load())
+    for part in parts[1:]:
+        node = ast.Attribute(value=node, attr=part, ctx=ast.Load())
+    return node
+
+
+class _CallBindingCollector(ast.NodeVisitor):
+    """Capture assignment bindings at each call without cross-scope rebinding."""
+
+    def __init__(self) -> None:
+        self.bindings: dict[str, ast.AST] = {}
+        self.aliases: dict[str, str] = {}
+        self.calls: dict[int, tuple[dict[str, ast.AST], dict[str, str]]] = {}
+        self.sink_stores: list[int] = []
+
+    def _bind(self, target: ast.AST, value: ast.AST) -> None:
+        if isinstance(target, (ast.Attribute, ast.Subscript)):
+            if _explicit_persistence_reference(
+                value,
+                self.aliases,
+                self.bindings,
+            ):
+                self.sink_stores.append(target.lineno)
+            return
+        if isinstance(target, ast.Name):
+            if isinstance(value, ast.IfExp):
+                candidates = (value.body, value.orelse)
+                persistence_candidates = [
+                    candidate
+                    for candidate in candidates
+                    if _persistence_binding_score(
+                        candidate,
+                        self.aliases,
+                        self.bindings,
+                    )
+                ]
+                identities = {
+                    _qualified_ast_name(
+                        candidate,
+                        self.aliases,
+                        self.bindings,
+                    )
+                    or ast.dump(candidate, include_attributes=False)
+                    for candidate in persistence_candidates
+                }
+                value = (
+                    _qualified_name_node("os.write")
+                    if len(identities) > 1
+                    else max(
+                        candidates,
+                        key=lambda candidate: _persistence_binding_score(
+                            candidate,
+                            self.aliases,
+                            self.bindings,
+                        ),
+                    )
+                )
+            elif (
+                isinstance(value, ast.Call)
+                and _qualified_ast_name(
+                    value.func,
+                    self.aliases,
+                    self.bindings,
+                )
+                not in _CALLABLE_FACTORIES
+                and any(
+                _explicit_persistence_reference(
+                    candidate,
+                    self.aliases,
+                    self.bindings,
+                )
+                for candidate in [
+                    *value.args,
+                    *(keyword.value for keyword in value.keywords),
+                ]
+                )
+            ):
+                value = _qualified_name_node("os.write")
+            elif isinstance(
+                value,
+                (
+                    ast.BoolOp,
+                    ast.Dict,
+                    ast.List,
+                    ast.Set,
+                    ast.Subscript,
+                    ast.Tuple,
+                ),
+            ) and any(
+                candidate is not value
+                and _persistence_binding_score(
+                    candidate,
+                    self.aliases,
+                    self.bindings,
+                )
+                for candidate in ast.walk(value)
+            ):
+                value = _qualified_name_node("os.write")
+            self.bindings[target.id] = value
+            self.aliases.pop(target.id, None)
+        elif (
+            isinstance(target, (ast.Tuple, ast.List))
+            and isinstance(value, (ast.Tuple, ast.List))
+            and len(target.elts) == len(value.elts)
+        ):
+            for item, item_value in zip(target.elts, value.elts):
+                self._bind(item, item_value)
+
+    def _snapshot(self) -> tuple[dict[str, ast.AST], dict[str, str]]:
+        return dict(self.bindings), dict(self.aliases)
+
+    def _restore(
+        self,
+        state: tuple[Mapping[str, ast.AST], Mapping[str, str]],
+    ) -> None:
+        self.bindings = dict(state[0])
+        self.aliases = dict(state[1])
+
+    def _run_statements(
+        self,
+        body: Sequence[ast.stmt],
+        start: tuple[Mapping[str, ast.AST], Mapping[str, str]],
+    ) -> tuple[dict[str, ast.AST], dict[str, str]]:
+        self._restore(start)
+        for statement in body:
+            self.visit(statement)
+        return self._snapshot()
+
+    def _select_branch(
+        self,
+        states: Sequence[tuple[dict[str, ast.AST], dict[str, str]]],
+    ) -> None:
+        merged_bindings: dict[str, ast.AST] = {}
+        merged_aliases: dict[str, str] = {}
+        names = sorted(
+            {
+                name
+                for bindings, aliases in states
+                for name in set(bindings) | set(aliases)
+            }
+        )
+        for name in names:
+            candidates = [
+                state
+                for state in states
+                if name in state[0] or name in state[1]
+            ]
+            persistence_candidates = [
+                state
+                for state in candidates
+                if _persistence_binding_score(
+                    ast.Name(id=name, ctx=ast.Load()),
+                    state[1],
+                    state[0],
+                )
+            ]
+            persistence_identities = {
+                (
+                    _qualified_ast_name(
+                        state[0][name],
+                        state[1],
+                        state[0],
+                    )
+                    or ast.dump(state[0][name], include_attributes=False)
+                )
+                if name in state[0]
+                else state[1][name]
+                for state in persistence_candidates
+            }
+            if len(persistence_identities) > 1:
+                merged_bindings[name] = _qualified_name_node("os.write")
+                continue
+            selected = max(
+                candidates,
+                key=lambda state: _persistence_binding_score(
+                    ast.Name(id=name, ctx=ast.Load()),
+                    state[1],
+                    state[0],
+                ),
+            )
+            bindings, aliases = selected
+            if name in bindings:
+                value = bindings[name]
+                qualified = _qualified_ast_name(value, aliases, bindings)
+                merged_bindings[name] = (
+                    _qualified_name_node(qualified) if qualified else value
+                )
+                for alias, target in aliases.items():
+                    merged_aliases.setdefault(alias, target)
+            else:
+                merged_aliases[name] = aliases[name]
+        self.bindings = merged_bindings
+        self.aliases = merged_aliases
+
+    def _visit_scoped_body(self, body: Sequence[ast.stmt]) -> None:
+        outer_bindings = self.bindings
+        outer_aliases = self.aliases
+        self.bindings = dict(outer_bindings)
+        self.aliases = dict(outer_aliases)
+        try:
+            for statement in body:
+                self.visit(statement)
+        finally:
+            self.bindings = outer_bindings
+            self.aliases = outer_aliases
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for default in [*node.args.defaults, *node.args.kw_defaults]:
+            if default is not None:
+                self.visit(default)
+        if node.returns is not None:
+            self.visit(node.returns)
+        self._visit_scoped_body(node.body)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for base in node.bases:
+            self.visit(base)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+        self._visit_scoped_body(node.body)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        for default in [*node.args.defaults, *node.args.kw_defaults]:
+            if default is not None:
+                self.visit(default)
+        outer_bindings = self.bindings
+        outer_aliases = self.aliases
+        self.bindings = dict(outer_bindings)
+        self.aliases = dict(outer_aliases)
+        try:
+            self.visit(node.body)
+        finally:
+            self.bindings = outer_bindings
+            self.aliases = outer_aliases
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for item in node.names:
+            name = item.asname or item.name.split(".", 1)[0]
+            self.bindings.pop(name, None)
+            self.aliases[name] = item.name
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.module is None:
+            return
+        for item in node.names:
+            name = item.asname or item.name
+            self.bindings.pop(name, None)
+            self.aliases[name] = f"{node.module}.{item.name}"
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self.visit(node.value)
+        for target in node.targets:
+            self.visit(target)
+            self._bind(target, node.value)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self.visit(node.annotation)
+        if node.value is not None:
+            self.visit(node.value)
+            self.visit(node.target)
+            self._bind(node.target, node.value)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self.visit(node.value)
+        self.visit(node.target)
+        if isinstance(node.target, ast.Name):
+            self._bind(
+                node.target,
+                ast.Name(id="__dynamic_assignment__", ctx=ast.Load()),
+            )
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self.visit(node.value)
+        self._bind(node.target, node.value)
+
+    def visit_If(self, node: ast.If) -> None:
+        self.visit(node.test)
+        start = self._snapshot()
+        body = self._run_statements(node.body, start)
+        alternative = (
+            self._run_statements(node.orelse, start) if node.orelse else start
+        )
+        self._select_branch([body, alternative])
+
+    def visit_Try(self, node: ast.Try) -> None:
+        start = self._snapshot()
+        self._restore(start)
+        prefixes = [start]
+        for statement in node.body:
+            self.visit(statement)
+            prefixes.append(self._snapshot())
+        success = prefixes[-1]
+        if node.orelse:
+            success = self._run_statements(node.orelse, success)
+        alternatives = [success]
+        for handler in node.handlers:
+            for prefix in prefixes:
+                self._restore(prefix)
+                if handler.type is not None:
+                    self.visit(handler.type)
+                alternatives.append(
+                    self._run_statements(handler.body, self._snapshot())
+                )
+        self._select_branch(alternatives)
+        for statement in node.finalbody:
+            self.visit(statement)
+
+    def visit_For(self, node: ast.For) -> None:
+        self.visit(node.iter)
+        self.visit(node.target)
+        start = self._snapshot()
+        body = self._run_statements(node.body, start)
+        alternatives = [start, body]
+        if node.orelse:
+            alternatives.extend(
+                [
+                    self._run_statements(node.orelse, start),
+                    self._run_statements(node.orelse, body),
+                ]
+            )
+        self._select_branch(alternatives)
+
+    visit_AsyncFor = visit_For
+
+    def visit_While(self, node: ast.While) -> None:
+        self.visit(node.test)
+        start = self._snapshot()
+        body = self._run_statements(node.body, start)
+        alternatives = [start, body]
+        if node.orelse:
+            alternatives.extend(
+                [
+                    self._run_statements(node.orelse, start),
+                    self._run_statements(node.orelse, body),
+                ]
+            )
+        self._select_branch(alternatives)
+
+    def visit_Match(self, node: ast.Match) -> None:
+        self.visit(node.subject)
+        start = self._snapshot()
+        alternatives = [start]
+        for case in node.cases:
+            self._restore(start)
+            if case.guard is not None:
+                self.visit(case.guard)
+            alternatives.append(
+                self._run_statements(case.body, self._snapshot())
+            )
+        self._select_branch(alternatives)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        self.calls[id(node)] = (dict(self.bindings), dict(self.aliases))
+        self.generic_visit(node)
+
+
+def _call_binding_snapshots(
+    tree: ast.AST,
+) -> tuple[
+    dict[int, tuple[dict[str, ast.AST], dict[str, str]]],
+    list[int],
+]:
+    collector = _CallBindingCollector()
+    collector.visit(tree)
+    return collector.calls, collector.sink_stores
+
+
 def _studio_writer_violations(path: Path, source: str) -> list[str]:
     """Find direct persistence calls, resolving qualified and imported aliases."""
     tree = ast.parse(source, filename=str(path))
-    aliases: dict[str, str] = {}
-    assignments: dict[str, ast.AST] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for item in node.names:
-                aliases[item.asname or item.name.split(".", 1)[0]] = item.name
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            for item in node.names:
-                aliases[item.asname or item.name] = f"{node.module}.{item.name}"
-        elif isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    assignments[target.id] = node.value
-                elif (
-                    isinstance(target, (ast.Tuple, ast.List))
-                    and isinstance(node.value, (ast.Tuple, ast.List))
-                    and len(target.elts) == len(node.value.elts)
-                ):
-                    assignments.update(
-                        {
-                            item.id: value
-                            for item, value in zip(target.elts, node.value.elts)
-                            if isinstance(item, ast.Name)
-                        }
-                    )
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            if node.value is not None:
-                assignments[node.target.id] = node.value
-        elif isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
-            assignments[node.target.id] = node.value
+    call_bindings, sink_store_lines = _call_binding_snapshots(tree)
 
     path_text = path.as_posix()
     artifact_seam = path_text.endswith("src/hephaestus/artifact_io.py")
     publication_seam = path_text.endswith(
         "src/hephaestus/evaluation_assets/publication.py"
     )
-    violations: list[str] = []
-    copy_calls = {
-        "shutil.copy",
-        "shutil.copy2",
-        "shutil.copyfile",
-        "shutil.copyfileobj",
-        "shutil.copytree",
-        "shutil.move",
-    }
-    low_level_calls = {
-        "os.write",
-        "os.pwrite",
-        "os.truncate",
-        "os.ftruncate",
-        "os.replace",
-        "os.rename",
-    }
+    violations: list[str] = [
+        f"{path.name}:{line}:os.write" for line in sink_store_lines
+    ]
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        resolved_func = _assigned_ast_node(node.func, assignments)
-        qualified = _qualified_ast_name(resolved_func, aliases, assignments)
+        assignments, aliases = call_bindings.get(id(node), ({}, {}))
+        for argument in [
+            *node.args,
+            *(keyword.value for keyword in node.keywords),
+        ]:
+            if _explicit_persistence_reference(
+                argument,
+                aliases,
+                assignments,
+            ):
+                visible = _canonical_sink_name(
+                    _qualified_ast_name(argument, aliases, assignments)
+                )
+                violations.append(
+                    f"{path.name}:{node.lineno}:{visible or 'os.write'}"
+                )
+        inspected_call, factory_expanded = _expanded_factory_call(
+            node,
+            aliases,
+            assignments,
+        )
+        resolved_func = _assigned_ast_node(inspected_call.func, assignments)
+        qualified = _canonical_sink_name(
+            _qualified_ast_name(resolved_func, aliases, assignments)
+        )
         attribute = (
             resolved_func.attr if isinstance(resolved_func, ast.Attribute) else ""
         )
@@ -297,28 +852,88 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
         if (
             qualified in {"getattr", "builtins.getattr"}
             and len(node.args) >= 2
-            and isinstance(node.args[1], ast.Constant)
-            and node.args[1].value
-            in {"dump", "open", "rename", "replace", "write", "write_bytes", "write_text"}
-        ):
-            violations.append(
-                f"{path.name}:{node.lineno}:getattr({node.args[1].value})"
+            and isinstance(
+                method_node := _assigned_ast_node(node.args[1], assignments),
+                ast.Constant,
             )
-            continue
+            and isinstance(method_node.value, str)
+        ):
+            receiver = _qualified_ast_name(
+                node.args[0],
+                aliases,
+                assignments,
+            )
+            sink = _canonical_sink_name(
+                f"{receiver}.{method_node.value}" if receiver else ""
+            )
+            recognized = (
+                sink in _PERSISTENCE_DUMP_SINKS
+                or sink in _PERSISTENCE_COPY_SINKS
+                or sink in _PERSISTENCE_LOW_LEVEL_SINKS
+                or sink in _PERSISTENCE_CSV_FACTORIES
+                or sink
+                in {
+                    "builtins.print",
+                    "builtins.open",
+                    "io.open",
+                    "os.fdopen",
+                    "os.open",
+                    "tempfile.NamedTemporaryFile",
+                }
+                or sink in _CALLABLE_FACTORIES
+                or method_node.value
+                in _PERSISTENCE_METHOD_SINKS | {"dump", "open"}
+            )
+            if recognized:
+                allowed = (
+                    artifact_seam
+                    and (
+                        sink in _PERSISTENCE_DUMP_SINKS
+                        or sink == "shutil.copyfileobj"
+                        or sink == "tempfile.NamedTemporaryFile"
+                        or sink == "os.replace"
+                        or method_node.value in {"write", "writelines", "truncate"}
+                    )
+                ) or (publication_seam and sink == "os.rename") or (
+                    path_text.endswith("src/hephaestus/webui/server.py")
+                    and receiver == "self.wfile"
+                    and method_node.value == "write"
+                )
+                if not allowed:
+                    operation = (
+                        sink
+                        if sink
+                        in _PERSISTENCE_DUMP_SINKS
+                        | _PERSISTENCE_COPY_SINKS
+                        | _PERSISTENCE_LOW_LEVEL_SINKS
+                        | _PERSISTENCE_CSV_FACTORIES
+                        | {"builtins.print", "tempfile.NamedTemporaryFile"}
+                        else (
+                            "partial(dynamic)"
+                            if sink in _CALLABLE_FACTORIES
+                            else f"getattr({method_node.value})"
+                        )
+                    )
+                    violations.append(f"{path.name}:{node.lineno}:{operation}")
+                continue
         if attribute in {"write_text", "write_bytes", "touch"}:
             violations.append(f"{path.name}:{node.lineno}:{attribute}")
             continue
-        if qualified in {"json.dump", "pickle.dump", "yaml.dump"} or (
-            attribute == "dump" and not qualified
-        ):
-            if not artifact_seam:
+        if qualified in _PERSISTENCE_DUMP_SINKS or attribute in {
+            "dump",
+            "safe_dump",
+        }:
+            if not (artifact_seam and qualified == "json.dump"):
                 violations.append(f"{path.name}:{node.lineno}:{qualified or 'dump'}")
             continue
-        if qualified in copy_calls:
+        if qualified in _PERSISTENCE_COPY_SINKS:
             if not (artifact_seam and qualified == "shutil.copyfileobj"):
                 violations.append(f"{path.name}:{node.lineno}:{qualified}")
             continue
-        if qualified in low_level_calls:
+        if qualified in _PERSISTENCE_CSV_FACTORIES:
+            violations.append(f"{path.name}:{node.lineno}:{qualified}")
+            continue
+        if qualified in _PERSISTENCE_LOW_LEVEL_SINKS:
             allowed = (artifact_seam and qualified == "os.replace") or (
                 publication_seam and qualified == "os.rename"
             )
@@ -331,10 +946,49 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
                     f"{path.name}:{node.lineno}:tempfile.NamedTemporaryFile"
                 )
             continue
-        if qualified == "os.open":
-            flags = node.args[1] if len(node.args) > 1 else next(
-                (keyword.value for keyword in node.keywords if keyword.arg == "flags"),
+        if qualified in {"builtins.print", "print"}:
+            dynamic_destination = any(
+                keyword.arg is None for keyword in inspected_call.keywords
+            )
+            destination = next(
+                (
+                    keyword.value
+                    for keyword in inspected_call.keywords
+                    if keyword.arg == "file"
+                ),
                 None,
+            )
+            if dynamic_destination or (
+                destination is not None
+                and _qualified_ast_name(
+                    destination,
+                    aliases,
+                    assignments,
+                )
+                not in {"sys.stderr", "sys.stdout"}
+            ):
+                violations.append(f"{path.name}:{node.lineno}:print(file)")
+            continue
+        if qualified == "os.open":
+            dynamic_arguments = any(
+                isinstance(argument, ast.Starred)
+                for argument in inspected_call.args
+            ) or any(keyword.arg is None for keyword in inspected_call.keywords)
+            flags = (
+                None
+                if dynamic_arguments
+                else (
+                    inspected_call.args[1]
+                    if len(inspected_call.args) > 1
+                    else next(
+                        (
+                            keyword.value
+                            for keyword in inspected_call.keywords
+                            if keyword.arg == "flags"
+                        ),
+                        None,
+                    )
+                )
             )
             status = (
                 _os_write_flag_status(flags, aliases, assignments)
@@ -355,7 +1009,7 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
             index = -1
         if index >= 0:
             mode = _literal_mode(
-                node,
+                inspected_call,
                 positional_index=index,
                 assignments=assignments,
             )
@@ -364,9 +1018,20 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
                     f"{path.name}:{node.lineno}:open({mode or 'dynamic'})"
                 )
             continue
-        if attribute == "write":
-            allowed = artifact_seam or (
+        if attribute in {
+            "write",
+            "writeheader",
+            "writerow",
+            "writerows",
+            "writelines",
+            "truncate",
+        }:
+            allowed = (
+                artifact_seam
+                and attribute in {"write", "writelines", "truncate"}
+            ) or (
                 path_text.endswith("src/hephaestus/webui/server.py")
+                and attribute == "write"
                 and isinstance(resolved_func, ast.Attribute)
                 and _qualified_ast_name(
                     resolved_func.value,
@@ -376,7 +1041,7 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
                 == "self.wfile"
             )
             if not allowed:
-                violations.append(f"{path.name}:{node.lineno}:write")
+                violations.append(f"{path.name}:{node.lineno}:{attribute}")
             continue
         if attribute in {"replace", "rename"}:
             receiver = resolved_func.value
@@ -384,6 +1049,18 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
                 violations.append(
                     f"{path.name}:{node.lineno}:path.{attribute}"
                 )
+            continue
+        if factory_expanded:
+            safe_target = _qualified_ast_name(
+                resolved_func,
+                aliases,
+                assignments,
+            )
+            allowed = path_text.endswith(
+                "src/hephaestus/evaluation_assets/pipeline.py"
+            ) and safe_target in _AUDITED_PIPELINE_PARTIAL_TARGETS
+            if not allowed:
+                violations.append(f"{path.name}:{node.lineno}:partial(dynamic)")
     return violations
 
 
@@ -465,9 +1142,331 @@ def test_studio_production_scope_has_no_direct_file_writers() -> None:
             "path.replace",
         ),
         ("getattr(handle, 'write')(b'body')", "getattr(write)"),
+        (
+            "method = 'write'\ngetattr(handle, method)(b'body')",
+            "getattr(write)",
+        ),
+        ("handle.writelines(lines)", "writelines"),
+        ("handle.truncate(0)", "truncate"),
+        ("import os\nos.writev(fd, buffers)", "os.writev"),
+        ("import os\nos.pwritev(fd, buffers, 0)", "os.pwritev"),
+        (
+            "import os\nos.copy_file_range(source_fd, target_fd, count)",
+            "os.copy_file_range",
+        ),
+        ("import os\nos.sendfile(target_fd, source_fd, 0, count)", "os.sendfile"),
+        ("from posix import write as emit\nemit(fd, b'body')", "os.write"),
+        (
+            "from posix import open as emit, O_WRONLY\n"
+            "emit('x', O_WRONLY)",
+            "os.open(write)",
+        ),
+        ("from posix import pwrite as emit\nemit(fd, b'body', 0)", "os.pwrite"),
+        (
+            "import posix\nposix.copy_file_range(source_fd, target_fd, count)",
+            "os.copy_file_range",
+        ),
+        (
+            "from posix import sendfile as emit\n"
+            "emit(target_fd, source_fd, 0, count)",
+            "os.sendfile",
+        ),
+        (
+            "from nt import open as emit, O_WRONLY\n"
+            "emit('x', O_WRONLY)",
+            "os.open(write)",
+        ),
+        ("import os\ngetattr(os, 'writev')(fd, buffers)", "os.writev"),
+        (
+            "import os\nmethod = 'sendfile'\n"
+            "getattr(os, method)(target_fd, source_fd, 0, count)",
+            "os.sendfile",
+        ),
+        (
+            "import posix\n"
+            "getattr(posix, 'copy_file_range')(source_fd, target_fd, count)",
+            "os.copy_file_range",
+        ),
+        (
+            "import shutil\ngetattr(shutil, 'copyfile')(source, target)",
+            "shutil.copyfile",
+        ),
+        (
+            "import tempfile\ngetattr(tempfile, 'NamedTemporaryFile')('w')",
+            "tempfile.NamedTemporaryFile",
+        ),
+        (
+            "from functools import partial\n"
+            "emit = partial(open, 'x', 'w')\n"
+            "emit()",
+            "open(w)",
+        ),
+        (
+            "import functools\n"
+            "mode = choose_mode()\n"
+            "emit = functools.partial(open, 'x', mode)\n"
+            "emit()",
+            "open(dynamic)",
+        ),
+        (
+            "from functools import partial\n"
+            "emit = partial(handle.writelines, lines)\n"
+            "emit()",
+            "writelines",
+        ),
+        (
+            "from functools import partial\n"
+            "emit = partial(open, 'x', mode='r')\n"
+            "emit(mode='w')",
+            "open(w)",
+        ),
+        (
+            "from functools import partial\n"
+            "partial(open, 'x', mode='r')(mode='w')",
+            "open(w)",
+        ),
+        (
+            "from functools import partial\n"
+            "import os\n"
+            "emit = partial(os.open, 'x', flags=os.O_RDONLY)\n"
+            "emit(flags=os.O_WRONLY)",
+            "os.open(write)",
+        ),
+        (
+            "from functools import partial\n"
+            "consumer(partial(open, 'x', 'w'))",
+            "open(w)",
+        ),
+        (
+            "from functools import partial\n"
+            "emit = partial(open, 'x', 'w')\n"
+            "consumer(emit)",
+            "open(w)",
+        ),
+        (
+            "from functools import partial\n"
+            "import os\n"
+            "consumer(partial(os.writev, fd, buffers))",
+            "os.writev",
+        ),
+        (
+            "from functools import partial\n"
+            "emit = partial(select_sink(), target)\n"
+            "emit(payload)",
+            "partial(dynamic)",
+        ),
+        (
+            "from functools import partial\n"
+            "consumer(partial(select_sink(), target))",
+            "partial(dynamic)",
+        ),
+        (
+            "from functools import partial\n"
+            "writer = writers[name]\n"
+            "consumer(partial(writer, target))",
+            "partial(dynamic)",
+        ),
         ("emit, other = handle.write, noop\nemit(b'body')", "write"),
         ("(emit := handle.write)(b'body')", "write"),
         ("(emit := open)('x', 'w')", "open(w)"),
+        (
+            "import os\nemit = os.write\nemit(fd, b'body')\nemit = noop",
+            "os.write",
+        ),
+        (
+            "import os\n"
+            "def bad():\n"
+            "    emit = os.write\n"
+            "    emit(fd, b'body')\n"
+            "def good():\n"
+            "    emit = noop\n",
+            "os.write",
+        ),
+        (
+            "import os\n"
+            "emit = os.write\n"
+            "def bad():\n"
+            "    emit(fd, b'body')\n",
+            "os.write",
+        ),
+        (
+            "from os import write as emit\n"
+            "emit(fd, b'body')\n"
+            "from math import sin as emit\n",
+            "os.write",
+        ),
+        (
+            "def bad():\n"
+            "    from os import write as emit\n"
+            "    emit(fd, b'body')\n"
+            "def good():\n"
+            "    from math import sin as emit\n",
+            "os.write",
+        ),
+        (
+            "from os import open as emit, O_WRONLY\n"
+            "emit('x', O_WRONLY)\n"
+            "from builtins import len as emit\n",
+            "os.open(write)",
+        ),
+        ("open('x', **{'mode': 'w'})", "open(dynamic)"),
+        ("kwargs = {'mode': 'w'}\nopen('x', **kwargs)", "open(dynamic)"),
+        ("Path('x').open(**{'mode': 'w'})", "open(dynamic)"),
+        ("import os\nos.fdopen(fd, **{'mode': 'w'})", "open(dynamic)"),
+        ("open(*('x', 'w'))", "open(dynamic)"),
+        ("serializer.dump(payload, handle)", "serializer.dump"),
+        ("toml.dump(payload, handle)", "toml.dump"),
+        ("yaml.safe_dump(payload, handle)", "yaml.safe_dump"),
+        (
+            "from functools import partial\n"
+            "partial(open, 'x', mode='r')(**{'mode': 'w'})",
+            "open(dynamic)",
+        ),
+        (
+            "from functools import partial\n"
+            "import os\n"
+            "partial(os.open, 'x', flags=os.O_RDONLY)"
+            "(**{'flags': os.O_WRONLY})",
+            "os.open(dynamic)",
+        ),
+        (
+            "from functools import partial\n"
+            "import os\n"
+            "opts = {'flags': os.O_WRONLY}\n"
+            "partial(os.open, 'x', flags=os.O_RDONLY)(**opts)",
+            "os.open(dynamic)",
+        ),
+        (
+            "if platform_ok:\n"
+            "    from os import write as emit\n"
+            "else:\n"
+            "    from math import sin as emit\n"
+            "emit(fd, b'body')",
+            "os.write",
+        ),
+        (
+            "import os\n"
+            "if platform_ok:\n"
+            "    emit = os.write\n"
+            "else:\n"
+            "    emit = noop\n"
+            "emit(fd, b'body')",
+            "os.write",
+        ),
+        (
+            "try:\n"
+            "    from os import write as emit\n"
+            "except ImportError:\n"
+            "    from math import sin as emit\n"
+            "emit(fd, b'body')",
+            "os.write",
+        ),
+        (
+            "import os\n"
+            "emit = os.write\n"
+            "for item in items:\n"
+            "    emit = noop\n"
+            "emit(fd, b'body')",
+            "os.write",
+        ),
+        (
+            "import os\n"
+            "emit = os.write\n"
+            "while condition:\n"
+            "    emit = noop\n"
+            "emit(fd, b'body')",
+            "os.write",
+        ),
+        (
+            "match platform_name:\n"
+            "    case 'writer':\n"
+            "        from os import write as emit\n"
+            "    case _:\n"
+            "        from math import sin as emit\n"
+            "emit(fd, b'body')",
+            "os.write",
+        ),
+        (
+            "import os\n"
+            "emit = os.write if condition else noop\n"
+            "emit(fd, b'body')",
+            "os.write",
+        ),
+        (
+            "import os\n"
+            "if condition:\n"
+            "    emit = os.write\n"
+            "else:\n"
+            "    emit = noop\n"
+            "    first = os.write\n"
+            "    second = os.write\n"
+            "emit(fd, b'body')",
+            "os.write",
+        ),
+        (
+            "import os\n"
+            "try:\n"
+            "    emit = os.write\n"
+            "    risky()\n"
+            "    emit = noop\n"
+            "except Exception:\n"
+            "    pass\n"
+            "emit(fd, b'body')",
+            "os.write",
+        ),
+        ("mode = 'r'\nmode += '+'\nopen('x', mode)", "open(dynamic)"),
+        (
+            "import os\n"
+            "flags = os.O_RDONLY\n"
+            "flags |= os.O_WRONLY\n"
+            "os.open('x', flags)",
+            "os.open(dynamic)",
+        ),
+        (
+            "import os\n"
+            "emit = condition and os.write or noop\n"
+            "emit(fd, b'body')",
+            "os.write",
+        ),
+        (
+            "import os\n"
+            "emit = {'writer': os.write, 'safe': noop}[choice]\n"
+            "emit(fd, b'body')",
+            "os.write",
+        ),
+        ("import os\nconsumer(os.write)", "os.write"),
+        (
+            "import os\nself.emit = os.write\nself.emit(fd, b'body')",
+            "os.write",
+        ),
+        (
+            "import os\n"
+            "writers['emit'] = os.write\n"
+            "writers['emit'](fd, b'body')",
+            "os.write",
+        ),
+        (
+            "import os\nemit = choose(os.write, noop)\nemit(fd, b'body')",
+            "os.write",
+        ),
+        ("print('body', file=handle)", "print(file)"),
+        ("print('body', **{'file': handle})", "print(file)"),
+        ("options = {'file': handle}\nprint('body', **options)", "print(file)"),
+        ("import csv\ncsv.writer(handle).writerow(row)", "csv.writer"),
+        (
+            "import csv\n"
+            "csv.DictWriter(handle, fields).writerows(rows)",
+            "csv.DictWriter",
+        ),
+        (
+            "import csv\nconsumer(getattr(csv, 'writer')(handle))",
+            "csv.writer",
+        ),
+        (
+            "import builtins\n"
+            "getattr(builtins, 'print')('body', file=handle)",
+            "builtins.print",
+        ),
     ],
 )
 def test_studio_writer_guard_rejects_qualified_and_aliased_forms(
@@ -483,6 +1482,106 @@ def test_studio_writer_guard_rejects_qualified_and_aliased_forms(
 
 
 @pytest.mark.parametrize(
+    ("source", "expected_lines"),
+    [
+        (
+            "import os\n"
+            "if condition:\n"
+            "    first = os.write\n"
+            "    second = noop\n"
+            "else:\n"
+            "    first = noop\n"
+            "    second = os.write\n"
+            "first(fd, b'body')\n"
+            "second(fd, b'body')",
+            {"8", "9"},
+        ),
+        (
+            "if condition:\n"
+            "    from os import write as first\n"
+            "    from math import sin as second\n"
+            "else:\n"
+            "    from math import sin as first\n"
+            "    from os import write as second\n"
+            "first(fd, b'body')\n"
+            "second(fd, b'body')",
+            {"7", "8"},
+        ),
+    ],
+)
+def test_studio_writer_guard_joins_each_possible_branch_binding(
+    source: str,
+    expected_lines: set[str],
+) -> None:
+    """Every name retains a persistence-capable binding across branch joins."""
+    violations = _studio_writer_violations(
+        Path("src/hephaestus/evaluation_assets/example.py"),
+        source,
+    )
+    assert {
+        violation.split(":", 2)[1]
+        for violation in violations
+        if violation.endswith(":os.write")
+    } >= expected_lines
+
+
+@pytest.mark.parametrize(
+    ("path", "source"),
+    [
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import json, pickle\n"
+            "if condition:\n"
+            "    emit = json.dump\n"
+            "else:\n"
+            "    emit = pickle.dump\n"
+            "emit(payload, handle)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/publication.py"),
+            "import os\n"
+            "if condition:\n"
+            "    emit = os.rename\n"
+            "else:\n"
+            "    emit = os.write\n"
+            "emit(source, target)",
+        ),
+        (
+            Path("src/hephaestus/webui/server.py"),
+            "if condition:\n"
+            "    emit = self.wfile.write\n"
+            "else:\n"
+            "    emit = other_handle.write\n"
+            "emit(body)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import json, pickle\n"
+            "emit = json.dump if condition else pickle.dump\n"
+            "emit(payload, handle)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/publication.py"),
+            "import os\n"
+            "emit = os.rename if condition else os.write\n"
+            "emit(source, target)",
+        ),
+        (
+            Path("src/hephaestus/webui/server.py"),
+            "emit = self.wfile.write if condition else other_handle.write\n"
+            "emit(body)",
+        ),
+    ],
+)
+def test_studio_writer_guard_rejects_ambiguous_exact_seam_bindings(
+    path: Path,
+    source: str,
+) -> None:
+    """An allowed seam cannot mask another viable forbidden branch binding."""
+    assert _studio_writer_violations(path, source)
+
+
+@pytest.mark.parametrize(
     ("path", "source"),
     [
         (
@@ -492,11 +1591,13 @@ def test_studio_writer_guard_rejects_qualified_and_aliased_forms(
             "handle.write('body')\n"
             "shutil.copyfileobj(source, handle)\n"
             "tempfile.NamedTemporaryFile('wb')\n"
-            "os.replace(source, target)",
+            "os.replace(source, target)\n"
+            "getattr(os, 'replace')(source, target)",
         ),
         (
             Path("src/hephaestus/evaluation_assets/publication.py"),
-            "import os\nos.rename(temporary, target)",
+            "import os\nos.rename(temporary, target)\n"
+            "getattr(os, 'rename')(temporary, target)",
         ),
         (
             Path("src/hephaestus/webui/server.py"),
@@ -506,6 +1607,14 @@ def test_studio_writer_guard_rejects_qualified_and_aliased_forms(
             Path("src/hephaestus/webui/data.py"),
             "import os\nopen(path, 'rb')\nPath(path).open('r')\n"
             "os.open(path, os.O_RDONLY)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/pipeline.py"),
+            "from functools import partial\n"
+            "partial(_normalize_feedback_evidence_response, batch=batch)\n"
+            "partial(_normalize_guideline_response, route=route)\n"
+            "partial(_normalize_inferred_rubric_response, batch=batch)\n"
+            "partial(_normalize_synthetic_response, batch=batch)",
         ),
     ],
 )
@@ -2345,6 +3454,23 @@ def test_legacy_completed_rejects_revision_before_any_mutation(tmp_path: Path) -
         with pytest.raises(EvaluationAssetLegacyError, match="Run assets adopt"):
             layout.revise_config(updates)
         assert _authority_bytes(layout) == before
+
+
+def test_legacy_completed_run_requires_adoption_without_mutation(tmp_path: Path) -> None:
+    """The strict native selector preserves the pre-v2 adoption sentinel."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+    before = _authority_bytes(layout)
+
+    with pytest.raises(
+        EvaluationAssetLegacyError,
+        match="explicit verification and adoption are required",
+    ):
+        EvaluationAssetPipeline(layout).run()
+
+    assert _authority_bytes(layout) == before
 
 
 def test_downstream_revision_keeps_projected_receipt_prefix_valid(
@@ -6154,6 +7280,695 @@ def test_reanchored_build_handoff_corruption_fails_before_any_resume_write(
         ).run()
 
     assert _authority_bytes(layout) == before
+
+
+_COMPLETED_STATE_INTEGER_FIELDS = (
+    "mutation_sequence",
+    "candidate_guidelines",
+    "dataset_cases",
+    "evaluation_guidelines",
+    "feedback_evidence",
+    "feedback_records",
+    "inferred_cases",
+    "intent_clusters",
+    "labeling_queue_clusters",
+    "labeling_queue_traces",
+    "matched_clusters",
+    "missing_label_clusters",
+    "needs_more_feedback_clusters",
+    "prepared_feedback",
+    "prepared_intents",
+    "regression_trusted_cases",
+    "rejected_synthetic_cases",
+    "review_clusters",
+    "synthetic_cases",
+    "test_cases",
+    "train_cases",
+    "triage_hold_cases",
+    "trusted_cases",
+    "unlabeled_records",
+    "validation_cases",
+)
+_COMPLETED_CONFIG_INTEGER_FIELDS = (
+    "batch_size",
+    "cluster_count",
+    "min_trusted_examples",
+    "min_trusted_groups",
+    "split_seed",
+    "synthetic_cases_per_cluster",
+)
+_COMPLETED_CONTROL_TYPE_SUBSTITUTIONS = (
+    *(f"state:{field}:float" for field in _COMPLETED_STATE_INTEGER_FIELDS),
+    *(f"config:{field}:float" for field in _COMPLETED_CONFIG_INTEGER_FIELDS),
+    "state:mutation_sequence:bool",
+    "state:intent_clusters:bool",
+    "config:synthetic_coverage_enabled:int",
+    "config:max_unlabeled_to_trusted_ratio:int",
+)
+
+
+@pytest.fixture(scope="module")
+def completed_handoff_template(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Path:
+    """Create one immutable Stage 8 handoff copied by scalar-schema probes."""
+    template_root = tmp_path_factory.mktemp("completed-handoff")
+    pipeline, _, _ = _create_pipeline(template_root)
+    original_fault_point = workspace_module._fault_point
+
+    def inject(name: str) -> None:
+        if name == "after_stage_8_receipt_state_complete":
+            raise _InjectedFault(name)
+
+    workspace_module._fault_point = inject
+    try:
+        with pytest.raises(
+            _InjectedFault,
+            match="after_stage_8_receipt_state_complete",
+        ):
+            pipeline.run()
+    finally:
+        workspace_module._fault_point = original_fault_point
+    return pipeline.layout.tenants_root
+
+
+@pytest.mark.parametrize(
+    "current_stage",
+    [PipelineStage.DATASET_SPLITS.value, None],
+    ids=["stage-8-handoff", "post-stage-event-handoff"],
+)
+@pytest.mark.parametrize(
+    "substitution",
+    _COMPLETED_CONTROL_TYPE_SUBSTITUTIONS,
+)
+def test_completed_control_scalar_substitution_fails_without_authority_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completed_handoff_template: Path,
+    current_stage: str | None,
+    substitution: str,
+) -> None:
+    """Equal-valued JSON scalar substitutions cannot be normalized into release."""
+    tenants_root = tmp_path / "tenants"
+    shutil.copytree(completed_handoff_template, tenants_root)
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    state_payload = json.loads(layout.state_path.read_text(encoding="utf-8"))
+    state_payload["current_stage"] = current_stage
+    target, field, replacement_type = substitution.split(":")
+    if target == "state":
+        container = (
+            state_payload
+            if field == "mutation_sequence"
+            else state_payload["counts"]
+        )
+    else:
+        container = json.loads(layout.config_path.read_text(encoding="utf-8"))
+    original = container[field]
+    if replacement_type == "float":
+        container[field] = float(original)
+    elif replacement_type == "bool":
+        assert original in {0, 1}
+        container[field] = bool(original)
+    else:
+        assert replacement_type == "int"
+        container[field] = int(original)
+    artifact_io.atomic_write_json(layout.state_path, state_payload)
+    if target == "config":
+        artifact_io.atomic_write_json(layout.config_path, container)
+    before = _authority_bytes(layout)
+    rubric = _SuccessfulRubricProvider()
+    embedding = _SuccessfulEmbeddingProvider()
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("invalid completed control reran pipeline work")
+
+    rubric.generate_json = forbidden  # type: ignore[method-assign]
+    embedding.embed_texts = forbidden  # type: ignore[method-assign]
+    monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", forbidden)
+
+    with pytest.raises(
+        EvaluationAssetIntegrityError,
+        match="completed release candidate",
+    ):
+        EvaluationAssetPipeline(
+            layout,
+            rubric_provider=rubric,
+            embedding_provider=embedding,
+        ).run()
+
+    assert _authority_bytes(layout) == before
+    assert rubric.calls == 0
+    assert embedding.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("status", "current_stage", "error"),
+    [
+        ("running", PipelineStage.RUBRIC_EXTRACTION.value, None),
+        ("running", PipelineStage.DATASET_SPLITS.value, "unexpected error"),
+    ],
+)
+def test_all_receipted_handoff_rejects_invalid_lifecycle_without_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completed_handoff_template: Path,
+    status: str,
+    current_stage: str,
+    error: str | None,
+) -> None:
+    """An unreachable running receipt chain enters strict handoff verification."""
+    tenants_root = tmp_path / "tenants"
+    shutil.copytree(completed_handoff_template, tenants_root)
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    payload = json.loads(layout.state_path.read_text(encoding="utf-8"))
+    payload.update(status=status, current_stage=current_stage, error=error)
+    artifact_io.atomic_write_json(layout.state_path, payload)
+    before = _authority_bytes(layout)
+    rubric = _SuccessfulRubricProvider()
+    embedding = _SuccessfulEmbeddingProvider()
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("invalid completed lifecycle reran pipeline work")
+
+    rubric.generate_json = forbidden  # type: ignore[method-assign]
+    embedding.embed_texts = forbidden  # type: ignore[method-assign]
+    monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", forbidden)
+
+    with pytest.raises(
+        EvaluationAssetIntegrityError,
+        match="completed release candidate",
+    ):
+        EvaluationAssetPipeline(
+            layout,
+            rubric_provider=rubric,
+            embedding_provider=embedding,
+        ).run()
+
+    assert _authority_bytes(layout) == before
+    assert rubric.calls == 0
+    assert embedding.calls == 0
+
+
+def test_receipt_bound_stage_status_corruption_fails_without_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completed_handoff_template: Path,
+) -> None:
+    """A retained receipt hash cannot be treated as an incomplete mutable stage."""
+    tenants_root = tmp_path / "tenants"
+    shutil.copytree(completed_handoff_template, tenants_root)
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    payload = json.loads(layout.state_path.read_text(encoding="utf-8"))
+    payload["stages"][-1]["status"] = True
+    artifact_io.atomic_write_json(layout.state_path, payload)
+    before = _authority_bytes(layout)
+    rubric = _SuccessfulRubricProvider()
+    embedding = _SuccessfulEmbeddingProvider()
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("receipt-bound status corruption reran pipeline work")
+
+    rubric.generate_json = forbidden  # type: ignore[method-assign]
+    embedding.embed_texts = forbidden  # type: ignore[method-assign]
+    monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", forbidden)
+
+    with pytest.raises(
+        EvaluationAssetIntegrityError,
+        match="completed release candidate",
+    ):
+        EvaluationAssetPipeline(
+            layout,
+            rubric_provider=rubric,
+            embedding_provider=embedding,
+        ).run()
+
+    assert _authority_bytes(layout) == before
+    assert rubric.calls == 0
+    assert embedding.calls == 0
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "null_receipt",
+        "missing_receipt",
+        "deleted_stage",
+        "deleted_stage_and_count",
+        "nonmapping",
+        "extra",
+    ],
+)
+def test_completed_stage_authority_downgrade_fails_without_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completed_handoff_template: Path,
+    damage: str,
+) -> None:
+    """Completed authority cannot downgrade through receipt or stage damage."""
+    tenants_root = tmp_path / "tenants"
+    shutil.copytree(completed_handoff_template, tenants_root)
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    payload = json.loads(layout.state_path.read_text(encoding="utf-8"))
+    if damage == "null_receipt":
+        payload["stages"][-1]["receipt_sha256"] = None
+    elif damage == "missing_receipt":
+        del payload["stages"][-1]["receipt_sha256"]
+    elif damage == "deleted_stage":
+        del payload["stages"][-1]
+    elif damage == "deleted_stage_and_count":
+        del payload["stages"][-1]
+        del payload["counts"]["dataset_cases"]
+    elif damage == "nonmapping":
+        payload["stages"][-1] = "not-a-stage-row"
+    else:
+        assert damage == "extra"
+        payload["stages"].append(dict(payload["stages"][-1]))
+    artifact_io.atomic_write_json(layout.state_path, payload)
+    before = _authority_bytes(layout)
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("damaged completed authority reran pipeline work")
+
+    monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", forbidden)
+
+    with pytest.raises(
+        EvaluationAssetIntegrityError,
+        match="completed release candidate control",
+    ):
+        EvaluationAssetPipeline(
+            layout,
+            rubric_provider=_SuccessfulRubricProvider(),
+            embedding_provider=_SuccessfulEmbeddingProvider(),
+        ).run()
+
+    assert _authority_bytes(layout) == before
+
+
+@pytest.mark.parametrize("replacement", [True, 1.0])
+def test_failed_all_receipted_config_coercion_fails_without_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completed_handoff_template: Path,
+    replacement: bool | float,
+) -> None:
+    """Mutable failed compatibility still authenticates raw control types first."""
+    tenants_root = tmp_path / "tenants"
+    shutil.copytree(completed_handoff_template, tenants_root)
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    state_payload = json.loads(layout.state_path.read_text(encoding="utf-8"))
+    state_payload.update(
+        status="failed",
+        current_stage=None,
+        error="interrupted test checkpoint",
+    )
+    artifact_io.atomic_write_json(layout.state_path, state_payload)
+    config_payload = json.loads(layout.config_path.read_text(encoding="utf-8"))
+    config_payload["cluster_count"] = replacement
+    artifact_io.atomic_write_json(layout.config_path, config_payload)
+    before = _authority_bytes(layout)
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("invalid failed control reran pipeline work")
+
+    monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", forbidden)
+
+    with pytest.raises(
+        EvaluationAssetIntegrityError,
+        match="completed release candidate control",
+    ):
+        EvaluationAssetPipeline(
+            layout,
+            rubric_provider=_SuccessfulRubricProvider(),
+            embedding_provider=_SuccessfulEmbeddingProvider(),
+        ).run()
+
+    assert _authority_bytes(layout) == before
+
+
+@pytest.mark.parametrize("field", ["tenant_id", "asset_id"])
+def test_completed_handoff_state_identity_mismatch_fails_without_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completed_handoff_template: Path,
+    field: str,
+) -> None:
+    """Completed state identity is bound to the selected asset before publication."""
+    tenants_root = tmp_path / "tenants"
+    shutil.copytree(completed_handoff_template, tenants_root)
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    payload = json.loads(layout.state_path.read_text(encoding="utf-8"))
+    payload[field] = f"substituted-{field}"
+    artifact_io.atomic_write_json(layout.state_path, payload)
+    before = _authority_bytes(layout)
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("identity-mismatched handoff reran pipeline work")
+
+    monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", forbidden)
+
+    with pytest.raises(
+        EvaluationAssetIntegrityError,
+        match="completed release candidate control",
+    ):
+        EvaluationAssetPipeline(
+            layout,
+            rubric_provider=_SuccessfulRubricProvider(),
+            embedding_provider=_SuccessfulEmbeddingProvider(),
+        ).run()
+
+    assert _authority_bytes(layout) == before
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("current_stage", "not_a_stage"),
+        ("last_operation_id", "not_an_operation"),
+    ],
+)
+def test_failed_all_receipted_state_domain_fails_without_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completed_handoff_template: Path,
+    field: str,
+    replacement: str,
+) -> None:
+    """Failed compatibility accepts only closed cursor and operation domains."""
+    tenants_root = tmp_path / "tenants"
+    shutil.copytree(completed_handoff_template, tenants_root)
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    payload = json.loads(layout.state_path.read_text(encoding="utf-8"))
+    payload.update(
+        status="failed",
+        current_stage=None,
+        error="interrupted test checkpoint",
+    )
+    payload[field] = replacement
+    artifact_io.atomic_write_json(layout.state_path, payload)
+    before = _authority_bytes(layout)
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("invalid failed state reran pipeline work")
+
+    monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", forbidden)
+
+    with pytest.raises(
+        EvaluationAssetIntegrityError,
+        match="completed release candidate control",
+    ):
+        EvaluationAssetPipeline(
+            layout,
+            rubric_provider=_SuccessfulRubricProvider(),
+            embedding_provider=_SuccessfulEmbeddingProvider(),
+        ).run()
+
+    assert _authority_bytes(layout) == before
+
+
+@pytest.mark.parametrize("updates", [{}, {"match_threshold": 0.2}])
+@pytest.mark.parametrize("damage", ["state_type", "state_identity", "config_type"])
+def test_completed_control_updates_cannot_bypass_raw_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completed_handoff_template: Path,
+    updates: dict[str, Any],
+    damage: str,
+) -> None:
+    """Even explicit revision requests authenticate completed raw control first."""
+    tenants_root = tmp_path / "tenants"
+    shutil.copytree(completed_handoff_template, tenants_root)
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    if damage == "config_type":
+        payload = json.loads(layout.config_path.read_text(encoding="utf-8"))
+        payload["cluster_count"] = True
+        artifact_io.atomic_write_json(layout.config_path, payload)
+    else:
+        payload = json.loads(layout.state_path.read_text(encoding="utf-8"))
+        if damage == "state_type":
+            payload["mutation_sequence"] = True
+        else:
+            assert damage == "state_identity"
+            payload["tenant_id"] = "substituted-tenant"
+        artifact_io.atomic_write_json(layout.state_path, payload)
+    before = _authority_bytes(layout)
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("invalid revised control reran pipeline work")
+
+    monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", forbidden)
+
+    with pytest.raises(
+        EvaluationAssetIntegrityError,
+        match="completed release candidate control",
+    ):
+        EvaluationAssetPipeline(
+            layout,
+            rubric_provider=_SuccessfulRubricProvider(),
+            embedding_provider=_SuccessfulEmbeddingProvider(),
+        ).run(config_updates=updates)
+
+    assert _authority_bytes(layout) == before
+
+
+@pytest.fixture(scope="module")
+def released_control_template(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Path:
+    """Create one released authority tree copied by final-control probes."""
+    template_root = tmp_path_factory.mktemp("released-control")
+    pipeline, _, _ = _create_pipeline(template_root)
+    pipeline.run()
+    return pipeline.layout.tenants_root
+
+
+@pytest.mark.parametrize("control", ["completed_handoff", "released"])
+def test_invalid_terminal_config_rejects_before_config_model_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completed_handoff_template: Path,
+    released_control_template: Path,
+    control: str,
+) -> None:
+    """Strict terminal control rejects config types before coercive construction."""
+    tenants_root = tmp_path / "tenants"
+    template = (
+        completed_handoff_template
+        if control == "completed_handoff"
+        else released_control_template
+    )
+    shutil.copytree(template, tenants_root)
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    payload = json.loads(layout.config_path.read_text(encoding="utf-8"))
+    payload["cluster_count"] = True
+    artifact_io.atomic_write_json(layout.config_path, payload)
+    before = _authority_bytes(layout)
+    model_calls = 0
+
+    def forbidden_model(
+        cls: type[EvaluationAssetConfig],
+        raw: Mapping[str, Any],
+    ) -> EvaluationAssetConfig:
+        del cls, raw
+        nonlocal model_calls
+        model_calls += 1
+        raise AssertionError("invalid terminal config reached coercive model")
+
+    monkeypatch.setattr(
+        EvaluationAssetConfig,
+        "from_dict",
+        classmethod(forbidden_model),
+    )
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        EvaluationAssetPipeline(layout).run()
+
+    assert model_calls == 0
+    assert _authority_bytes(layout) == before
+
+
+@pytest.mark.parametrize(
+    "substitution",
+    [
+        "state:mutation_sequence:float",
+        "state:intent_clusters:float",
+        "config:cluster_count:float",
+        "config:synthetic_coverage_enabled:int",
+        "config:max_unlabeled_to_trusted_ratio:int",
+    ],
+)
+def test_released_control_scalar_substitution_fails_without_writes(
+    tmp_path: Path,
+    released_control_template: Path,
+    substitution: str,
+) -> None:
+    """Final verification rejects type-coerced state and config authority."""
+    tenants_root = tmp_path / "tenants"
+    shutil.copytree(released_control_template, tenants_root)
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    target, field, replacement_type = substitution.split(":")
+    path = layout.state_path if target == "state" else layout.config_path
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    container = (
+        payload["counts"]
+        if target == "state" and field != "mutation_sequence"
+        else payload
+    )
+    original = container[field]
+    container[field] = (
+        float(original) if replacement_type == "float" else int(original)
+    )
+    artifact_io.atomic_write_json(path, payload)
+    before = _authority_bytes(layout)
+
+    with pytest.raises((EvaluationAssetIntegrityError, ValueError)):
+        durability_module._validate_released_control_state(
+            layout,
+            layout.load_state(),
+            require_persisted_state=True,
+        )
+
+    assert _authority_bytes(layout) == before
+
+
+@pytest.mark.parametrize(
+    "current_stage",
+    [PipelineStage.DATASET_SPLITS.value, None],
+    ids=["stage-8-handoff", "post-stage-event-handoff"],
+)
+@pytest.mark.parametrize("dependency_drift", ["source", "prompt", "provider"])
+@pytest.mark.parametrize(
+    "config_updates",
+    [None, {}],
+    ids=["no-update-argument", "empty-update-map"],
+)
+def test_completed_handoff_publishes_captured_generation_after_dependency_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completed_handoff_template: Path,
+    current_stage: str | None,
+    dependency_drift: str,
+    config_updates: dict[str, Any] | None,
+) -> None:
+    """Current dependencies cannot strand authenticated historical handoff evidence."""
+    tenants_root = tmp_path / "tenants"
+    shutil.copytree(completed_handoff_template, tenants_root)
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    state_payload = json.loads(layout.state_path.read_text(encoding="utf-8"))
+    state_payload["current_stage"] = current_stage
+    artifact_io.atomic_write_json(layout.state_path, state_payload)
+    receipt_path = layout.receipt_path(PipelineStage.DATASET_SPLITS)
+    receipt_before = receipt_path.read_bytes()
+    manifest = json.loads(
+        layout.artifact_path(
+            PipelineStage.DATASET_SPLITS,
+            "generation_manifest.json",
+        ).read_text(encoding="utf-8")
+    )
+    generation_id = manifest["generation_id"]
+    generation_before = _tree_bytes(layout.generations_root / generation_id)
+    rubric = _SuccessfulRubricProvider()
+    embedding = _SuccessfulEmbeddingProvider()
+
+    if dependency_drift == "source":
+        source_identity = durability_module._code_identity()
+        source_identity["members"][0]["sha256"] = "0" * 64
+        source_identity["fingerprint"] = canonical_sha256(
+            source_identity["members"]
+        )
+        monkeypatch.setattr(
+            durability_module,
+            "_code_identity",
+            lambda: source_identity,
+        )
+    elif dependency_drift == "prompt":
+        prompt_values = {
+            stage: dict(values)
+            for stage, values in pipeline_module.STAGE_PROMPTS.items()
+        }
+        prompt_values[PipelineStage.RUBRIC_EXTRACTION][
+            "evidence_extraction"
+        ] += "\nCurrent deployment prompt drift."
+        monkeypatch.setattr(pipeline_module, "STAGE_PROMPTS", prompt_values)
+    else:
+        assert dependency_drift == "provider"
+        rubric.model = "current-rubric-model"
+        embedding.model = "current-embedding-model"
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("completed handoff reran a stage or provider")
+
+    rubric.generate_json = forbidden  # type: ignore[method-assign]
+    embedding.embed_texts = forbidden  # type: ignore[method-assign]
+    monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", forbidden)
+
+    released = EvaluationAssetPipeline(
+        layout,
+        rubric_provider=rubric,
+        embedding_provider=embedding,
+    ).run(config_updates=config_updates)
+
+    assert released.status == "released"
+    assert rubric.calls == 0
+    assert embedding.calls == 0
+    assert receipt_path.read_bytes() == receipt_before
+    assert _tree_bytes(layout.generations_root / generation_id) == generation_before
+    release_rows = [
+        row
+        for row in _read_jsonl(layout.recovery_journal_path)
+        if row.get("kind") == "release_publication"
+    ]
+    assert [row["phase"] for row in release_rows] == ["prepared", "committed"]
+    release_events = [
+        row
+        for row in _read_jsonl(layout.events_path)
+        if row.get("event") == "pipeline_released"
+    ]
+    assert len(release_events) == 1
+    assert released.last_operation_id == release_rows[0]["operation_id"]
+    assert release_events[0]["operation_id"] == released.last_operation_id
+    verify_released_asset(layout, released)
+
+
+@pytest.mark.parametrize(
+    "current_stage",
+    [PipelineStage.DATASET_SPLITS.value, None],
+    ids=["stage-8-handoff", "post-stage-event-handoff"],
+)
+def test_completed_custom_provider_handoff_publishes_without_current_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completed_handoff_template: Path,
+    current_stage: str | None,
+) -> None:
+    """Historical provider evidence is sufficient after a provider is removed."""
+    tenants_root = tmp_path / "tenants"
+    shutil.copytree(completed_handoff_template, tenants_root)
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    state_payload = json.loads(layout.state_path.read_text(encoding="utf-8"))
+    state_payload["current_stage"] = current_stage
+    artifact_io.atomic_write_json(layout.state_path, state_payload)
+    receipt_path = layout.receipt_path(PipelineStage.DATASET_SPLITS)
+    receipt_before = receipt_path.read_bytes()
+    manifest = json.loads(
+        layout.artifact_path(
+            PipelineStage.DATASET_SPLITS,
+            "generation_manifest.json",
+        ).read_text(encoding="utf-8")
+    )
+    generation_id = manifest["generation_id"]
+    generation_before = _tree_bytes(layout.generations_root / generation_id)
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("completed provider handoff reran a stage")
+
+    monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", forbidden)
+
+    released = EvaluationAssetPipeline(layout).run()
+
+    assert released.status == "released"
+    assert receipt_path.read_bytes() == receipt_before
+    assert _tree_bytes(layout.generations_root / generation_id) == generation_before
+    verify_released_asset(layout, released)
 
 
 def test_generation_temp_created_fault_removes_owned_temporary_directory(
