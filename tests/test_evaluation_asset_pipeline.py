@@ -11,6 +11,7 @@ import pytest
 
 from src.hephaestus import artifact_io
 from src.hephaestus.datasets.intent_assets import IntentCluster, IntentMatch
+from src.hephaestus.datasets.jsonl_loader import load_cases
 from src.hephaestus.evaluation_assets import pipeline as pipeline_module
 from src.hephaestus.evaluation_assets.durability import (
     build_stage_receipt,
@@ -31,6 +32,9 @@ from src.hephaestus.evaluation_assets.pipeline import (
     _normalize_intent,
     _normalize_rubric,
     _rubric_from_guidelines,
+)
+from src.hephaestus.evaluation_assets.publication import (
+    resolve_evaluation_asset_release,
 )
 from src.hephaestus.evaluation_assets.service import EvaluationAssetRunManager
 from src.hephaestus.evaluation_assets.workspace import (
@@ -1651,6 +1655,7 @@ def _add_genuine_stage_one_receipt(
         embedding_provider=FakeEmbeddingProvider(),
     )
     counts = pipeline._validate_raw_inputs()
+    pipeline._finalize_stage_outputs(PipelineStage.RAW_INPUTS)
     completed_at = utc_now()
     receipt = build_stage_receipt(
         layout,
@@ -1706,9 +1711,13 @@ def test_revise_config_invalidates_only_dependent_stages(tmp_path: Path) -> None
     stage_four_artifact.write_text("{}\n", encoding="utf-8")
     stage_five_artifact.write_text("{}\n", encoding="utf-8")
     layout.manifest_path.write_text("{}\n", encoding="utf-8")
-    published_split = layout.published_datasets / "train.jsonl"
-    published_split.parent.mkdir(parents=True)
-    published_split.write_text("{}\n", encoding="utf-8")
+    release_pointer = layout.release_pointer_path
+    generation_split = (
+        layout.generations_root / f"sha256-{'0' * 64}" / "train.jsonl"
+    )
+    generation_split.parent.mkdir(parents=True)
+    release_pointer.write_text("{}\n", encoding="utf-8")
+    generation_split.write_text("{}\n", encoding="utf-8")
 
     revision = layout.revise_config({"match_threshold": 0.2})
 
@@ -1722,7 +1731,8 @@ def test_revise_config_invalidates_only_dependent_stages(tmp_path: Path) -> None
     assert stage_four_artifact.exists()
     assert not stage_five_artifact.exists()
     assert not layout.manifest_path.exists()
-    assert not layout.published_datasets.exists()
+    assert release_pointer.read_text(encoding="utf-8") == "{}\n"
+    assert generation_split.read_text(encoding="utf-8") == "{}\n"
     assert [
         item.status for item in revised_state.stages[:4]
     ] == ["completed"] * 4
@@ -2066,6 +2076,7 @@ def test_labeling_queue_samples_only_clusters_needing_trusted_labels() -> None:
 )
 def test_pipeline_is_self_contained_and_writes_canonical_layout(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     synthetic_coverage_enabled: bool,
     synthetic_cases_per_cluster: int,
     expected_synthetic_cases: int,
@@ -2172,6 +2183,7 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
     ).exists()
     assert layout.artifact_path("dataset_splits", "train.jsonl").exists()
     assert layout.manifest_path.exists()
+    release = resolve_evaluation_asset_release(layout.published_datasets)
     for split_name in (
         "train",
         "validation",
@@ -2182,8 +2194,9 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
             "dataset_splits",
             f"{split_name}.jsonl",
         )
-        published_split = layout.published_datasets / f"{split_name}.jsonl"
+        published_split = release.files[split_name]
         assert published_split.read_bytes() == stage_split.read_bytes()
+        assert not (layout.published_datasets / f"{split_name}.jsonl").exists()
     assert (layout.root / "stages" / "01_raw_inputs").is_dir()
     assert (layout.root / "stages" / "03_evaluation_guidelines").is_dir()
     assert not (layout.root / "stages" / "03_rubric_extraction").exists()
@@ -2302,15 +2315,19 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
         "selection": "deterministic_group_safe_random",
         "seed": 42,
     }
+    generation_directory = release.generation_dir.relative_to(
+        layout.tenants_root.parent
+    ).as_posix()
     assert dataset_manifest["published_datasets"] == {
         "directory": "datasets/evaluation_assets/v1",
+        "release_pointer": "datasets/evaluation_assets/v1/release.json",
+        "generation_id": release.generation_id,
+        "generation_manifest_sha256": release.generation_manifest_sha256,
+        "build_provenance_sha256": release.build_provenance_sha256,
+        "build_fingerprint": release.build_fingerprint,
         "files": {
-            "train": "datasets/evaluation_assets/v1/train.jsonl",
-            "validation": "datasets/evaluation_assets/v1/validation.jsonl",
-            "test": "datasets/evaluation_assets/v1/test.jsonl",
-            "regression_trusted": (
-                "datasets/evaluation_assets/v1/regression_trusted.jsonl"
-            ),
+            split: f"{generation_directory}/{split}.jsonl"
+            for split in ("train", "validation", "test", "regression_trusted")
         },
     }
     assert (
@@ -2427,6 +2444,10 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
         else:
             assert inferred_location == trusted_location
     assert state.counts["triage_hold_cases"] == len(triage_cases)
+    monkeypatch.chdir(layout.tenants_root.parent)
+    assert load_cases(
+        Path(dataset_manifest["published_datasets"]["files"]["train"])
+    )
 
 
 def test_layout_rejects_unsafe_tenant_and_asset_names(tmp_path: Path) -> None:

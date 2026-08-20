@@ -25,7 +25,9 @@ JOURNAL_SCHEMA_VERSION = "fapo-recovery-journal-v2"
 
 def canonical_jsonl_row_bytes(payload: Mapping[str, Any]) -> bytes:
     """Serialize one row exactly as the durable JSONL writer does."""
-    return (json.dumps(dict(payload), sort_keys=True) + "\n").encode("utf-8")
+    return (
+        json.dumps(dict(payload), sort_keys=True, allow_nan=False) + "\n"
+    ).encode("utf-8")
 
 
 def append_jsonl_bytes(before: bytes, payload: Mapping[str, Any]) -> bytes:
@@ -67,7 +69,9 @@ def derive_audit_transition(
 
 def persisted_sha256(payload: Mapping[str, Any]) -> str:
     """Hash the exact indented, sorted JSON representation used on disk."""
-    serialized = json.dumps(dict(payload), indent=2, sort_keys=True) + "\n"
+    serialized = (
+        json.dumps(dict(payload), indent=2, sort_keys=True, allow_nan=False) + "\n"
+    )
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
@@ -193,6 +197,7 @@ def derive_adoption_plan(
     before_config: Mapping[str, Any],
     before_state: Mapping[str, Any],
     target_receipts: Mapping[str, Mapping[str, Any]],
+    release_pointer: Mapping[str, Any],
     *,
     operation_id: str,
     prepared_at: str,
@@ -226,6 +231,13 @@ def derive_adoption_plan(
         )
         stage_state["receipt_sha256"] = receipt_hashes[stage.value]
     target_state["counts"] = counts
+    pointer = dict(release_pointer)
+    result = {
+        "status": "released",
+        "generation_id": pointer.get("generation_id"),
+        "release_sha256": persisted_sha256(pointer),
+        "stage_8_receipt_sha256": pointer.get("stage_8_receipt_sha256"),
+    }
     return {
         "target_state": target_state,
         "event_entry": {
@@ -236,8 +248,64 @@ def derive_adoption_plan(
             "operation_id": operation_id,
             "details": {"previous_status": "completed"},
         },
-        "result": {"status": "released"},
+        "result": result,
         "receipt_sha256": receipt_hashes,
+    }
+
+
+def derive_release_publication_plan(
+    before_config: Mapping[str, Any],
+    before_state: Mapping[str, Any],
+    release_pointer: Mapping[str, Any],
+    *,
+    operation_id: str,
+    prepared_at: str,
+) -> dict[str, Any]:
+    """Derive the only writer-reachable native release publication payload."""
+    del before_config
+    state = PipelineState.from_dict(dict(before_state))
+    if (
+        state.schema_version != STATE_SCHEMA_VERSION
+        or state.status != "running"
+        or state.current_stage is not None
+        or state.error is not None
+        or any(
+            item.status != "completed" or item.receipt_sha256 is None
+            for item in state.stages
+        )
+        or set(state.counts) != set().union(*STAGE_COUNT_KEYS.values())
+    ):
+        raise ValueError("release before state is not a complete running build")
+    pointer = dict(release_pointer)
+    generation_id = pointer.get("generation_id")
+    release_result = {
+        "status": "released",
+        "generation_id": generation_id,
+        "release_sha256": persisted_sha256(pointer),
+        "stage_8_receipt_sha256": pointer.get("stage_8_receipt_sha256"),
+    }
+    target_state = deepcopy(dict(before_state))
+    target_state["status"] = "released"
+    target_state["current_stage"] = None
+    target_state["error"] = None
+    target_state["updated_at"] = prepared_at
+    target_state["mutation_sequence"] = state.mutation_sequence + 1
+    target_state["last_operation_id"] = operation_id
+    return {
+        "target_state": target_state,
+        "event_entry": {
+            "timestamp": prepared_at,
+            "event": "pipeline_released",
+            "tenant_id": before_state["tenant_id"],
+            "asset_id": before_state["asset_id"],
+            "operation_id": operation_id,
+            "details": {
+                key: value
+                for key, value in release_result.items()
+                if key != "status"
+            },
+        },
+        "result": release_result,
     }
 
 

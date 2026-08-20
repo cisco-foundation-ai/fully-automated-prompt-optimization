@@ -60,10 +60,16 @@ _STATIC_SNAPSHOT_INPUTS = {
     ),
 }
 _HASH = re.compile(r"^[0-9a-f]{64}$")
+_GENERATION_ID = re.compile(r"^sha256-[0-9a-f]{64}$")
 _PARENT_RELEASE_FIELDS = {
     "stage_8_receipt_sha256",
     "released_state_sha256",
     "source_lineage_sha256",
+    "release_pointer_sha256",
+    "generation_id",
+    "generation_manifest_sha256",
+    "build_provenance_sha256",
+    "build_fingerprint",
 }
 
 
@@ -74,6 +80,59 @@ class ExtensionEvidence:
     lineage: dict[str, Any]
     reuse: dict[str, Any]
     stage_three_seeds: tuple[str, ...]
+
+
+def validate_parent_release_evidence(value: Any) -> dict[str, str]:
+    """Validate the exact immutable parent-release evidence schema."""
+    return _parent_release(value)
+
+
+def validate_provenance_lineage_identity(value: Any) -> dict[str, Any]:
+    """Validate the reduced extension lineage embedded in build provenance."""
+    row = _mapping(value)
+    _exact_keys(
+        row,
+        {
+            "parent_asset_id",
+            "clustering_mode",
+            "added_labeled_record_ids",
+            "added_unlabeled_record_ids",
+            "parent_input_counts",
+            "extended_input_counts",
+            "parent_generation_id",
+            "file_dependencies",
+        },
+    )
+    if not _safe_identifier(row["parent_asset_id"]) or row[
+        "clustering_mode"
+    ] not in {"keep", "refresh"}:
+        raise ValueError("provenance lineage identity is invalid")
+    added_labeled = _identifier_list(row["added_labeled_record_ids"])
+    added_unlabeled = _identifier_list(row["added_unlabeled_record_ids"])
+    if row["clustering_mode"] == "keep" and added_unlabeled:
+        raise ValueError("keep provenance lineage cannot add unlabeled records")
+    parent_counts = _counts(row["parent_input_counts"])
+    extended_counts = _counts(row["extended_input_counts"])
+    if extended_counts != {
+        "labeled": parent_counts["labeled"] + len(added_labeled),
+        "unlabeled": parent_counts["unlabeled"] + len(added_unlabeled),
+    }:
+        raise ValueError("provenance lineage input counts are inconsistent")
+    dependencies = _mapping(row["file_dependencies"])
+    _exact_keys(
+        dependencies,
+        {"lineage_sha256", "reuse_manifest_sha256", "parent_release"},
+    )
+    if any(
+        not isinstance(dependencies[field], str)
+        or not _HASH.fullmatch(dependencies[field])
+        for field in ("lineage_sha256", "reuse_manifest_sha256")
+    ):
+        raise ValueError("provenance lineage dependency hash is invalid")
+    parent_release = _parent_release(dependencies["parent_release"])
+    if row["parent_generation_id"] != parent_release["generation_id"]:
+        raise ValueError("provenance lineage generation is inconsistent")
+    return row
 
 
 def validate_extension_evidence(
@@ -292,7 +351,15 @@ def _jsonl_ids(path: Path) -> set[str]:
 def _parent_release(value: Any) -> dict[str, str]:
     row = _mapping(value)
     _exact_keys(row, _PARENT_RELEASE_FIELDS)
-    if any(not isinstance(row[field], str) or not _HASH.fullmatch(row[field]) for field in row):
+    if (
+        not isinstance(row["generation_id"], str)
+        or not _GENERATION_ID.fullmatch(row["generation_id"])
+        or any(
+            not isinstance(row[field], str) or not _HASH.fullmatch(row[field])
+            for field in row
+            if field != "generation_id"
+        )
+    ):
         raise ValueError("parent release evidence is invalid")
     return {field: str(row[field]) for field in _PARENT_RELEASE_FIELDS}
 

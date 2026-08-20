@@ -201,13 +201,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "bad index"}, status=400)
             return
         run_rel = unquote(params["run"])
-        studio_data = self.store.run_uses_evaluation_asset_dataset(
+        snapshot, studio_data = self.store.prepare_case(
             params["tenant"],
             run_rel,
+            index,
         )
         if studio_data and not self._authorize_studio_request(no_store=True):
             return
-        data = self.store.get_case(params["tenant"], run_rel, index)
+        data = self.store.materialize_case(snapshot)
         self._send_json_or_404(data, no_store=studio_data)
 
     def _route_iterations(self, params: Dict[str, str], query: Dict[str, List[str]]) -> None:
@@ -236,11 +237,14 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json_or_404(data)
 
     def _route_datasets(self, params: Dict[str, str], query: Dict[str, List[str]]) -> None:
-        studio_data = self.store.has_evaluation_asset_datasets(params["tenant"])
+        snapshots, studio_data = self.store.prepare_dataset_listing(
+            params["tenant"]
+        )
         if studio_data and not self._authorize_studio_request(no_store=True):
             return
+        datasets = self.store.materialize_dataset_listing(snapshots)
         self._send_json(
-            self.store.list_datasets(params["tenant"]),
+            datasets,
             no_store=studio_data,
         )
 
@@ -250,17 +254,16 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "missing path"}, status=400)
             return
         dataset_rel = unquote(rel)
-        studio_data = self.store.is_evaluation_asset_dataset(
+        offset = _int_param(query, "offset", 0)
+        limit = _int_param(query, "limit", 100)
+        snapshot, studio_data = self.store.prepare_dataset(
             params["tenant"],
             dataset_rel,
         )
         if studio_data and not self._authorize_studio_request(no_store=True):
             return
-        offset = _int_param(query, "offset", 0)
-        limit = _int_param(query, "limit", 100)
-        data = self.store.get_dataset(
-            params["tenant"],
-            dataset_rel,
+        data = self.store.materialize_dataset(
+            snapshot,
             offset=offset,
             limit=limit,
         )

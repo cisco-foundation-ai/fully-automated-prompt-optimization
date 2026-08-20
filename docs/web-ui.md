@@ -231,11 +231,17 @@ The frontend is backed by these read-only endpoints (useful for scripting too):
   or an HTTP origin matching `Host`. Studio HTML and JSON responses use
   `Cache-Control: no-store`. Explorer's generic dataset list/read endpoints and
   case details inherit the loopback-Host and no-store policy whenever they can
-  expose a published `datasets/evaluation_assets/` file. Ordinary-only dataset
-  catalogs and reads retain normal Explorer behavior.
+  expose a published `datasets/evaluation_assets/` file. Dataset discovery
+  lists ordinary files plus only the four files from each Studio asset's
+  strictly resolved `release.json`; it never recursively exposes old
+  generations, hidden temporaries, or legacy top-level copies. An explicit
+  immutable historical generation path remains readable only after its complete
+  generation manifest and file hashes validate. Corrupt pointers or generations
+  fail closed without hiding ordinary datasets.
 - **Local Studio state:** copied inputs, checkpoints, state, events, and stage
-  artifacts under `evaluation_assets/` are local-only. Published Stage 8 copies
-  under `datasets/evaluation_assets/` are ordinary local derived datasets; only
+  artifacts under `evaluation_assets/` are local-only. Published Stage 8
+  generations and their sole `release.json` authority under
+  `datasets/evaluation_assets/` are ordinary local derived datasets; only
   a separate tenant-configured `customer-data --scope derived` operation can
   sync them.
 - **No external dependencies:** standard-library server, no frontend build step.

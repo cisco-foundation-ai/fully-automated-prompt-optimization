@@ -36,6 +36,7 @@ from src.hephaestus.evaluation_assets.durability import (
     EvaluationAssetImmutableError,
     EvaluationAssetIntegrityError,
     EvaluationAssetLegacyError,
+    _replay_config_history,
     _verify_prospective_legacy_adoption_candidate,
     build_stage_receipt,
     file_sha256,
@@ -52,6 +53,7 @@ from src.hephaestus.evaluation_assets.journal_transitions import (
     derive_adoption_plan,
     derive_audit_transition,
     derive_rebuild_plan,
+    derive_release_publication_plan,
     derive_revision_plan,
 )
 from src.hephaestus.evaluation_assets.journal_validation import (
@@ -68,6 +70,18 @@ from src.hephaestus.evaluation_assets.models import (
     EvaluationAssetConfig,
     PipelineStage,
     PipelineState,
+)
+from src.hephaestus.evaluation_assets.provenance import (
+    build_legacy_provenance,
+    build_legacy_stage_provenance,
+)
+from src.hephaestus.evaluation_assets.publication import (
+    InstalledGeneration,
+    build_release_pointer,
+    install_generation,
+    resolve_evaluation_asset_release,
+    validate_historical_generation,
+    write_release_pointer,
 )
 
 SAFE_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$")
@@ -94,6 +108,13 @@ LEGACY_DIRECTORIES = (
 def utc_now() -> str:
     """Return a stable ISO-8601 UTC timestamp."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _persisted_json_bytes(payload: Mapping[str, Any]) -> bytes:
+    """Return the exact bytes emitted by ``atomic_write_json``."""
+    return (
+        json.dumps(dict(payload), indent=2, sort_keys=True, allow_nan=False) + "\n"
+    ).encode("utf-8")
 
 
 def _fault_point(name: str) -> None:
@@ -238,6 +259,7 @@ class EvaluationAssetLayout:
             raise ValueError("tenant_id must contain only letters, digits, '-' or '_'")
         if not SAFE_NAME.fullmatch(self.asset_id):
             raise ValueError("asset_id must contain only letters, digits, '-' or '_'")
+        object.__setattr__(self, "tenants_root", self.tenants_root.resolve())
 
     @property
     def tenant_root(self) -> Path:
@@ -350,23 +372,15 @@ class EvaluationAssetLayout:
         """Return the versioned tenant dataset directory published by Stage 8."""
         return self.tenant_root / "datasets" / "evaluation_assets" / self.asset_id
 
-    def publish_dataset_splits(
-        self,
-        split_names: Sequence[str],
-    ) -> Dict[str, str]:
-        """Copy selected Stage 8 splits into the tenant's dataset catalog."""
-        published: Dict[str, str] = {}
-        for split_name in split_names:
-            source = self.artifact_path(
-                PipelineStage.DATASET_SPLITS,
-                f"{split_name}.jsonl",
-            )
-            destination = self.published_datasets / f"{split_name}.jsonl"
-            _copy_jsonl(source, destination)
-            published[split_name] = destination.relative_to(
-                self.tenant_root
-            ).as_posix()
-        return published
+    @property
+    def generations_root(self) -> Path:
+        """Return the immutable generation catalog for this asset."""
+        return self.published_datasets / "generations"
+
+    @property
+    def release_pointer_path(self) -> Path:
+        """Return the sole mutable catalog authority pointer."""
+        return self.published_datasets / "release.json"
 
     @property
     def config_path(self) -> Path:
@@ -383,6 +397,10 @@ class EvaluationAssetLayout:
     @property
     def manifest_path(self) -> Path:
         return self.root / "asset_manifest.json"
+
+    @property
+    def build_provenance_path(self) -> Path:
+        return self.root / "build_provenance.json"
 
     @property
     def config_history_path(self) -> Path:
@@ -886,8 +904,22 @@ class EvaluationAssetLayout:
                     state,
                     config,
                 )
+                _replay_config_history(
+                    self,
+                    config,
+                    state,
+                    allow_pre_wal_history=True,
+                )
+                self._read_control_log(self.events_path)
                 receipts: dict[PipelineStage, dict[str, Any]] = {}
                 timestamp = utc_now()
+                generation, target_manifests = self._prepare_legacy_release_artifacts(
+                    config,
+                    timestamp,
+                )
+                artifact_overrides = self._adoption_manifest_overrides(
+                    target_manifests
+                )
                 for stage in PipelineStage:
                     stage_state = next(
                         item for item in state.stages if item.stage == stage.value
@@ -908,6 +940,7 @@ class EvaluationAssetLayout:
                         origin="legacy_adoption",
                         historical_unavailable=True,
                         upstream_receipts=receipts,
+                        artifact_overrides=artifact_overrides,
                     )
             except EvaluationAssetLegacyError:
                 raise
@@ -931,10 +964,24 @@ class EvaluationAssetLayout:
             target_receipts = {
                 stage.value: receipts[stage] for stage in PipelineStage
             }
+            stage_eight_receipt_sha256 = persisted_json_sha256(
+                receipts[PipelineStage.DATASET_SPLITS]
+            )
+            pointer = build_release_pointer(
+                tenant_id=self.tenant_id,
+                asset_id=self.asset_id,
+                generation=generation,
+                stage_8_receipt_sha256=stage_eight_receipt_sha256,
+                build_provenance_sha256=file_sha256(
+                    self.build_provenance_path
+                ),
+                published_at=timestamp,
+            )
             plan = derive_adoption_plan(
                 before_config,
                 before_state,
                 target_receipts,
+                pointer,
                 operation_id=operation_id,
                 prepared_at=timestamp,
             )
@@ -945,6 +992,7 @@ class EvaluationAssetLayout:
                     target_state,
                     receipts,
                     legacy_state=state,
+                    artifact_overrides=artifact_overrides,
                 )
             except (
                 EvaluationAssetIntegrityError,
@@ -965,19 +1013,44 @@ class EvaluationAssetLayout:
                 "kind": "legacy_adoption",
                 "phase": "prepared",
                 "prepared_at": timestamp,
-                "request": {},
+                "request": {"release_pointer": pointer},
                 "before_config": before_config,
                 "before_state": before_state,
                 "before": {
                     "config_sha256": file_sha256(self.config_path),
                     "state_sha256": file_sha256(self.state_path),
+                    "release": _file_descriptor(self.release_pointer_path),
                 },
                 "target": {
                     "config_sha256": file_sha256(self.config_path),
                     "state_sha256": persisted_json_sha256(plan["target_state"]),
                     "receipt_sha256": plan["receipt_sha256"],
+                    "release_sha256": persisted_json_sha256(pointer),
+                    "stage_8_receipt_sha256": stage_eight_receipt_sha256,
+                    "generation_manifest_sha256": (
+                        generation.generation_manifest_sha256
+                    ),
+                    "build_provenance_sha256": file_sha256(
+                        self.build_provenance_path
+                    ),
                 },
                 "target_receipts": target_receipts,
+                "before_manifests": {
+                    "asset_manifest": _file_descriptor(self.manifest_path),
+                    "dataset_manifest": _file_descriptor(
+                        self.artifact_path(
+                            PipelineStage.DATASET_SPLITS,
+                            "dataset_manifest.json",
+                        )
+                    ),
+                    "generation_manifest": _file_descriptor(
+                        self.artifact_path(
+                            PipelineStage.DATASET_SPLITS,
+                            "generation_manifest.json",
+                        )
+                    ),
+                },
+                "target_manifests": target_manifests,
                 "target_state": plan["target_state"],
                 "event_entry": plan["event_entry"],
                 "result": plan["result"],
@@ -988,8 +1061,29 @@ class EvaluationAssetLayout:
             }
             self._append_journal_once(prepared)
             _fault_point("after_prepared_journal")
+            self._install_adoption_manifests(prepared)
             self._install_adoption_receipts(prepared)
             _fault_point("after_receipts_install")
+            verify_release_candidate(
+                self,
+                target_state,
+                release_pointer=pointer,
+            )
+            write_release_pointer(self.published_datasets, pointer)
+            _fault_point("after_adoption_pointer_replace")
+            resolved = resolve_evaluation_asset_release(
+                self.published_datasets,
+                expected_tenant_id=self.tenant_id,
+                expected_asset_id=self.asset_id,
+                expected_stage_8_receipt_sha256=stage_eight_receipt_sha256,
+                trusted_root=self.tenant_root,
+            )
+            if resolved.pointer_sha256 != persisted_json_sha256(pointer):
+                raise EvaluationAssetIntegrityError(
+                    self.tenant_id,
+                    self.asset_id,
+                    "adoption release pointer does not match its WAL target",
+                )
             verify_release_candidate(self, target_state)
             atomic_write_json(self.state_path, plan["target_state"])
             _fault_point("after_state_replace")
@@ -998,6 +1092,102 @@ class EvaluationAssetLayout:
             _fault_point("after_event_append")
             self._commit_journal_operation(prepared)
             return target_state
+
+    def _prepare_legacy_release_artifacts(
+        self,
+        config: EvaluationAssetConfig,
+        timestamp: str,
+    ) -> tuple[InstalledGeneration, dict[str, Any]]:
+        """Convert verified pre-v2 outputs into historical provenance and a generation."""
+        for stage in PipelineStage:
+            atomic_write_json(
+                self.artifact_path(stage, "provenance.json"),
+                build_legacy_stage_provenance(stage.value),
+            )
+        input_manifest = read_json(
+            self.artifact_path(PipelineStage.RAW_INPUTS, "input_manifest.json")
+        )
+        copied_inputs = {}
+        for name, path in (
+            ("labeled_feedback", self.feedback_path),
+            ("unlabeled", self.unlabeled_path),
+        ):
+            details = input_manifest["inputs"][name]
+            copied_inputs[name] = {
+                "path": path.relative_to(self.root).as_posix(),
+                "bytes": path.stat().st_size,
+                "rows": details["rows"],
+                "sha256": details["sha256"],
+            }
+        lineage = read_json(self.lineage_path) if self.lineage_path.is_file() else None
+        provenance = build_legacy_provenance(
+            resolved_configuration=config.to_dict(),
+            copied_inputs=copied_inputs,
+            lineage=lineage,
+            split_seed=config.split_seed,
+            created_at=timestamp,
+        )
+        atomic_write_json(self.build_provenance_path, provenance)
+        generation = install_generation(
+            self.published_datasets,
+            tenant_id=self.tenant_id,
+            asset_id=self.asset_id,
+            split_paths={
+                split: self.artifact_path(
+                    PipelineStage.DATASET_SPLITS,
+                    f"{split}.jsonl",
+                )
+                for split in ("train", "validation", "test", "regression_trusted")
+            },
+            build_fingerprint=provenance["identity_sha256"],
+            fault_hook=_fault_point,
+            trusted_root=self.tenant_root,
+        )
+        generation_manifest = read_json(
+            generation.generation_dir / "generation_manifest.json"
+        )
+        manifest = read_json(self.manifest_path)
+        generation_directory = generation.generation_dir.relative_to(
+            self.tenants_root.parent
+        ).as_posix()
+        manifest["published_datasets"] = {
+            "directory": self.published_datasets.relative_to(
+                self.tenant_root
+            ).as_posix(),
+            "release_pointer": self.release_pointer_path.relative_to(
+                self.tenant_root
+            ).as_posix(),
+            "generation_id": generation.generation_id,
+            "generation_manifest_sha256": generation.generation_manifest_sha256,
+            "build_provenance_sha256": file_sha256(self.build_provenance_path),
+            "build_fingerprint": provenance["identity_sha256"],
+            "files": {
+                split: f"{generation_directory}/{split}.jsonl"
+                for split in ("train", "validation", "test", "regression_trusted")
+            },
+        }
+        return generation, {
+            "asset_manifest": manifest,
+            "dataset_manifest": manifest,
+            "generation_manifest": generation_manifest,
+        }
+
+    def _adoption_manifest_overrides(
+        self,
+        manifests: Mapping[str, Any],
+    ) -> dict[Path, bytes]:
+        """Return exact prospective bytes for pre-WAL adoption verification."""
+        return {
+            self.manifest_path: _persisted_json_bytes(manifests["asset_manifest"]),
+            self.artifact_path(
+                PipelineStage.DATASET_SPLITS,
+                "dataset_manifest.json",
+            ): _persisted_json_bytes(manifests["dataset_manifest"]),
+            self.artifact_path(
+                PipelineStage.DATASET_SPLITS,
+                "generation_manifest.json",
+            ): _persisted_json_bytes(manifests["generation_manifest"]),
+        }
 
     def load_config(self) -> EvaluationAssetConfig:
         """Load this asset's persisted configuration."""
@@ -1011,6 +1201,105 @@ class EvaluationAssetLayout:
         """Atomically persist run state."""
         state.updated_at = utc_now()
         atomic_write_json(self.state_path, state.to_dict())
+
+    def _publish_release_locked(
+        self,
+        state: PipelineState,
+        generation: InstalledGeneration,
+    ) -> PipelineState:
+        """Publish one complete generation through the authenticated v2 WAL."""
+        operation_id = uuid.uuid4().hex
+        timestamp = utc_now()
+        stage_eight_receipt_sha256 = file_sha256(
+            self.receipt_path(PipelineStage.DATASET_SPLITS)
+        )
+        pointer = build_release_pointer(
+            tenant_id=self.tenant_id,
+            asset_id=self.asset_id,
+            generation=generation,
+            stage_8_receipt_sha256=stage_eight_receipt_sha256,
+            build_provenance_sha256=file_sha256(self.build_provenance_path),
+            published_at=timestamp,
+        )
+        before_config = self.load_config().to_dict()
+        before_state = state.to_dict()
+        plan = derive_release_publication_plan(
+            before_config,
+            before_state,
+            pointer,
+            operation_id=operation_id,
+            prepared_at=timestamp,
+        )
+        release_before = _file_descriptor(self.release_pointer_path)
+        prepared = {
+            "schema_version": JOURNAL_SCHEMA_VERSION,
+            "operation_id": operation_id,
+            "kind": "release_publication",
+            "phase": "prepared",
+            "prepared_at": timestamp,
+            "request": {"release_pointer": pointer},
+            "before_config": before_config,
+            "before_state": before_state,
+            "before": {
+                "config_sha256": file_sha256(self.config_path),
+                "state_sha256": file_sha256(self.state_path),
+                "release": release_before,
+            },
+            "target": {
+                "config_sha256": file_sha256(self.config_path),
+                "state_sha256": persisted_json_sha256(plan["target_state"]),
+                "release_sha256": persisted_json_sha256(pointer),
+                "stage_8_receipt_sha256": stage_eight_receipt_sha256,
+                "generation_manifest_sha256": (
+                    generation.generation_manifest_sha256
+                ),
+                "build_provenance_sha256": file_sha256(
+                    self.build_provenance_path
+                ),
+            },
+            "target_state": plan["target_state"],
+            "event_entry": plan["event_entry"],
+            "result": plan["result"],
+            "audit": self._journal_audit_transitions(
+                history_entry=None,
+                event_entry=plan["event_entry"],
+            ),
+        }
+        self._append_journal_once(prepared)
+        _fault_point("after_release_publication_prepared")
+        target_state = PipelineState.from_dict(plan["target_state"])
+        verify_release_candidate(
+            self,
+            target_state,
+            release_pointer=pointer,
+        )
+        _fault_point("before_release_pointer_replace")
+        write_release_pointer(self.published_datasets, pointer)
+        _fault_point("after_release_pointer_replace")
+        resolved = resolve_evaluation_asset_release(
+            self.published_datasets,
+            expected_tenant_id=self.tenant_id,
+            expected_asset_id=self.asset_id,
+            expected_stage_8_receipt_sha256=stage_eight_receipt_sha256,
+            trusted_root=self.tenant_root,
+        )
+        if resolved.pointer_sha256 != prepared["target"]["release_sha256"]:
+            raise EvaluationAssetIntegrityError(
+                self.tenant_id,
+                self.asset_id,
+                "installed release pointer does not match its WAL target",
+            )
+        _fault_point("after_release_pointer_verify")
+        verify_release_candidate(self, target_state)
+        atomic_write_json(self.state_path, plan["target_state"])
+        _fault_point("after_released_state_replace")
+        verify_released_asset(self, target_state)
+        self._append_jsonl_once(self.events_path, plan["event_entry"])
+        _fault_point("after_release_event_append")
+        self._commit_journal_operation(prepared)
+        _fault_point("after_release_publication_commit")
+        verify_released_asset(self, target_state)
+        return target_state
 
     def revise_config(
         self,
@@ -1135,9 +1424,32 @@ class EvaluationAssetLayout:
             if outstanding is not None and outstanding.get("kind") == "legacy_adoption":
                 target_state = PipelineState.from_dict(outstanding["target_state"])
                 before_state = PipelineState.from_dict(outstanding["before_state"])
+                request = outstanding.get("request")
+                prepared_release = (
+                    request.get("release_pointer")
+                    if isinstance(request, Mapping)
+                    else None
+                )
+                if not isinstance(prepared_release, Mapping):
+                    raise ValueError("adoption release target is invalid")
+                _validate_source_rows(self.feedback_path, labeled=True)
+                _validate_source_rows(self.unlabeled_path, labeled=False)
                 target_receipts = outstanding.get("target_receipts")
                 if not isinstance(target_receipts, Mapping):
                     raise ValueError("adoption receipt target is invalid")
+                target_manifests = outstanding.get("target_manifests")
+                if not isinstance(target_manifests, Mapping):
+                    raise ValueError("adoption manifest target is invalid")
+                target_asset_manifest = target_manifests.get("asset_manifest")
+                if not isinstance(target_asset_manifest, Mapping):
+                    raise ValueError("adoption manifest target is invalid")
+                validate_legacy_release_candidate(
+                    self,
+                    before_state,
+                    self.load_config(),
+                    prepared_release=prepared_release,
+                    manifest_payload=target_asset_manifest,
+                )
                 _verify_prospective_legacy_adoption_candidate(
                     self,
                     target_state,
@@ -1146,6 +1458,9 @@ class EvaluationAssetLayout:
                         for stage in PipelineStage
                     },
                     legacy_state=before_state,
+                    artifact_overrides=self._adoption_manifest_overrides(
+                        target_manifests
+                    ),
                 )
         except (
             EvaluationAssetLegacyError,
@@ -1173,12 +1488,92 @@ class EvaluationAssetLayout:
             self._roll_forward_prepared(entry)
             recovered.append(operation_id)
             committed.add(operation_id)
+        current_state = self.load_state()
+        if current_state.status == "released":
+            verify_released_asset(self, current_state)
         return recovered
 
     def _roll_forward_prepared(self, entry: Mapping[str, Any]) -> None:
         kind = entry.get("kind")
+        if kind == "release_publication":
+            request = entry.get("request")
+            pointer = (
+                request.get("release_pointer")
+                if isinstance(request, Mapping)
+                else None
+            )
+            target_state = entry.get("target_state")
+            if not isinstance(pointer, Mapping) or not isinstance(
+                target_state, Mapping
+            ):
+                raise EvaluationAssetIntegrityError(
+                    self.tenant_id,
+                    self.asset_id,
+                    "the recovery journal is missing release targets",
+                )
+            generation_id = str(pointer.get("generation_id") or "")
+            generation = validate_historical_generation(
+                self.generations_root / generation_id,
+                expected_tenant_id=self.tenant_id,
+                expected_asset_id=self.asset_id,
+                trusted_root=self.tenant_root,
+            )
+            target = entry.get("target")
+            if not isinstance(target, Mapping) or (
+                generation.generation_manifest_sha256
+                != target.get("generation_manifest_sha256")
+            ):
+                raise EvaluationAssetIntegrityError(
+                    self.tenant_id,
+                    self.asset_id,
+                    "the recovery generation does not match its WAL target",
+                )
+            recovered_state = PipelineState.from_dict(target_state)
+            verify_release_candidate(
+                self,
+                recovered_state,
+                release_pointer=pointer,
+            )
+            write_release_pointer(self.published_datasets, pointer)
+            resolved = resolve_evaluation_asset_release(
+                self.published_datasets,
+                expected_tenant_id=self.tenant_id,
+                expected_asset_id=self.asset_id,
+                expected_stage_8_receipt_sha256=str(
+                    target.get("stage_8_receipt_sha256") or ""
+                ),
+                trusted_root=self.tenant_root,
+            )
+            if resolved.pointer_sha256 != target.get("release_sha256"):
+                raise EvaluationAssetIntegrityError(
+                    self.tenant_id,
+                    self.asset_id,
+                    "the recovered release pointer does not match its WAL target",
+                )
+            verify_release_candidate(self, recovered_state)
+            atomic_write_json(self.state_path, target_state)
+            verify_released_asset(self, recovered_state)
+            event_entry = entry.get("event_entry")
+            if isinstance(event_entry, Mapping):
+                self._append_jsonl_once(self.events_path, event_entry)
+            self._commit_journal_operation(entry)
+            verify_released_asset(self, recovered_state)
+            return
         if kind == "legacy_adoption":
+            self._install_adoption_manifests(entry)
             self._install_adoption_receipts(entry)
+            request = entry.get("request")
+            pointer = (
+                request.get("release_pointer")
+                if isinstance(request, Mapping)
+                else None
+            )
+            if not isinstance(pointer, Mapping):
+                raise EvaluationAssetIntegrityError(
+                    self.tenant_id,
+                    self.asset_id,
+                    "the recovery journal is missing its adoption pointer",
+                )
             target_state = entry.get("target_state")
             if not isinstance(target_state, Mapping):
                 raise EvaluationAssetIntegrityError(
@@ -1187,6 +1582,21 @@ class EvaluationAssetLayout:
                     "the recovery journal is missing target state",
                 )
             recovered_state = PipelineState.from_dict(target_state)
+            verify_release_candidate(
+                self,
+                recovered_state,
+                release_pointer=pointer,
+            )
+            write_release_pointer(self.published_datasets, pointer)
+            resolve_evaluation_asset_release(
+                self.published_datasets,
+                expected_tenant_id=self.tenant_id,
+                expected_asset_id=self.asset_id,
+                expected_stage_8_receipt_sha256=str(
+                    pointer.get("stage_8_receipt_sha256") or ""
+                ),
+                trusted_root=self.tenant_root,
+            )
             verify_release_candidate(self, recovered_state)
             atomic_write_json(self.state_path, target_state)
             verify_released_asset(self, recovered_state)
@@ -1255,6 +1665,50 @@ class EvaluationAssetLayout:
                     "the recovery journal has an invalid receipt",
                 )
             atomic_write_json(self.receipt_path(stage), receipt)
+
+    def _install_adoption_manifests(self, entry: Mapping[str, Any]) -> None:
+        manifests = entry.get("target_manifests")
+        if not isinstance(manifests, Mapping) or set(manifests) != {
+            "asset_manifest",
+            "dataset_manifest",
+            "generation_manifest",
+        }:
+            raise EvaluationAssetIntegrityError(
+                self.tenant_id,
+                self.asset_id,
+                "the recovery journal has an incomplete adoption manifest set",
+            )
+        targets = (
+            (self.manifest_path, manifests["asset_manifest"],
+             "after_adoption_asset_manifest_replace"),
+            (
+                self.artifact_path(
+                    PipelineStage.DATASET_SPLITS,
+                    "dataset_manifest.json",
+                ),
+                manifests["dataset_manifest"],
+                "after_adoption_dataset_manifest_replace",
+            ),
+            (
+                self.artifact_path(
+                    PipelineStage.DATASET_SPLITS,
+                    "generation_manifest.json",
+                ),
+                manifests["generation_manifest"],
+                "after_adoption_generation_manifest_replace",
+            ),
+        )
+        for path, payload, fault_name in targets:
+            if not isinstance(payload, Mapping):
+                raise EvaluationAssetIntegrityError(
+                    self.tenant_id,
+                    self.asset_id,
+                    "the recovery journal has an invalid adoption manifest",
+                )
+            target_bytes = _persisted_json_bytes(payload)
+            if not path.is_file() or path.read_bytes() != target_bytes:
+                atomic_write_json(path, payload)
+            _fault_point(fault_name)
 
     def _commit_journal_operation(self, prepared: Mapping[str, Any]) -> None:
         self._append_journal_once(
@@ -1382,15 +1836,7 @@ class EvaluationAssetLayout:
                 path = self.root / relative_name
                 if path.is_file():
                     path.unlink()
-            for relative_name in specification.required_catalog_outputs:
-                path = self.published_datasets / relative_name
-                if path.is_file():
-                    path.unlink()
             self.receipt_path(stage).unlink(missing_ok=True)
-        try:
-            self.published_datasets.rmdir()
-        except OSError:
-            pass
 
     def _invalidate_checkpoints_locked(
         self,
@@ -1538,6 +1984,21 @@ def read_json(path: Path) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError(f"Expected JSON object: {path}")
     return raw
+
+
+def _file_descriptor(path: Path) -> dict[str, Any]:
+    """Describe one optional regular release pointer for the recovery WAL."""
+    if path.is_symlink():
+        raise ValueError("release pointer cannot be a symlink")
+    if not path.exists():
+        return {"present": False, "bytes": 0, "sha256": None}
+    if not path.is_file():
+        raise ValueError("release pointer must be a regular file")
+    return {
+        "present": True,
+        "bytes": path.stat().st_size,
+        "sha256": file_sha256(path),
+    }
 
 
 def _copy_jsonl(source: Path, destination: Path) -> None:

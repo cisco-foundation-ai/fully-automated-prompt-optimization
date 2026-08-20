@@ -16,6 +16,12 @@ from pathlib import Path
 import pytest
 
 import src.hephaestus.webui.server as server_module
+from src.hephaestus.evaluation_assets.publication import (
+    LOGICAL_SPLITS,
+    build_release_pointer,
+    install_generation,
+    write_release_pointer,
+)
 from src.hephaestus.webui.data import TenantStore
 from src.hephaestus.webui.server import (
     _Handler,
@@ -452,24 +458,43 @@ def test_published_studio_datasets_inherit_studio_http_boundary(
     tenants_root = tmp_path / "tenants"
     tenant = tenants_root / "tenant_a"
     ordinary = tenant / "datasets" / "ordinary.jsonl"
-    published = (
-        tenant
-        / "datasets"
-        / "evaluation_assets"
-        / "v1"
-        / "train.jsonl"
-    )
     run_dir = tenant / "evals" / "run-1"
     ordinary.parent.mkdir(parents=True)
-    published.parent.mkdir(parents=True)
     run_dir.mkdir(parents=True)
     (tenant / "__init__.py").write_text("", encoding="utf-8")
     ordinary.write_text('{"case_id":"ordinary"}\n', encoding="utf-8")
-    published.write_text(
-        '{"case_id":"studio-case","context":{"input":"private"},'
-        '"expected":{"answer":"protected"}}\n',
-        encoding="utf-8",
+    split_sources = {}
+    for split in LOGICAL_SPLITS:
+        source = tenant / "workspace" / f"{split}.jsonl"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(
+            (
+                '{"case_id":"studio-case","context":{"input":"private"},'
+                '"expected":{"answer":"protected"}}\n'
+            ),
+            encoding="utf-8",
+        )
+        split_sources[split] = source
+    catalog = tenant / "datasets" / "evaluation_assets" / "v1"
+    generation = install_generation(
+        catalog,
+        tenant_id="tenant_a",
+        asset_id="v1",
+        split_paths=split_sources,
+        build_fingerprint="a" * 64,
     )
+    write_release_pointer(
+        catalog,
+        build_release_pointer(
+            tenant_id="tenant_a",
+            asset_id="v1",
+            generation=generation,
+            stage_8_receipt_sha256="b" * 64,
+            build_provenance_sha256="c" * 64,
+            published_at="2026-08-20T00:00:00+00:00",
+        ),
+    )
+    published_rel = generation.files["train"].relative_to(tenant).as_posix()
     (run_dir / "results.jsonl").write_text(
         '{"case_id":"studio-case","composite_score":1.0}\n',
         encoding="utf-8",
@@ -477,10 +502,9 @@ def test_published_studio_datasets_inherit_studio_http_boundary(
     (run_dir / "run_config.json").write_text(
         json.dumps(
             {
-                "dataset_path": (
-                    "tenants/tenant_a/datasets/"
-                    "evaluation_assets/v1/train.jsonl"
-                )
+                    "dataset_path": (
+                        f"tenants/tenant_a/{published_rel}"
+                    )
             }
         )
         + "\n",
@@ -502,9 +526,9 @@ def test_published_studio_datasets_inherit_studio_http_boundary(
         for path in (
             "/api/tenants/tenant_a/datasets",
             (
-                "/api/tenants/tenant_a/dataset?path="
-                "datasets/evaluation_assets/v1/train.jsonl"
-            ),
+                    "/api/tenants/tenant_a/dataset?path="
+                    f"{published_rel}"
+                ),
             "/api/tenants/tenant_a/runs/evals%2Frun-1/cases/0",
         ):
             status, headers = _http_request(
@@ -537,6 +561,105 @@ def test_published_studio_datasets_inherit_studio_http_boundary(
         httpd.shutdown()
         httpd.server_close()
         thread.join(timeout=2)
+
+
+def test_dataset_routes_use_one_data_and_policy_snapshot() -> None:
+    """A pointer appearing between policy and data reads cannot bypass auth."""
+    order = []
+
+    class FakeStore:
+        def prepare_dataset_listing(self, tenant_id):
+            assert tenant_id == "tenant_a"
+            order.append("prepare-list")
+            return (("list-snapshot",), True)
+
+        def materialize_dataset_listing(self, snapshot):
+            assert snapshot == ("list-snapshot",)
+            order.append("read-list")
+            return [{"path": "studio.jsonl"}]
+
+        def prepare_dataset(self, tenant_id, dataset_rel):
+            assert (tenant_id, dataset_rel) == (
+                "tenant_a",
+                "studio.jsonl",
+            )
+            order.append("prepare-dataset")
+            return ("dataset-snapshot", True)
+
+        def materialize_dataset(self, snapshot, offset, limit):
+            assert (snapshot, offset, limit) == ("dataset-snapshot", 0, 100)
+            order.append("read-dataset")
+            return {"rows": [{"case_id": "private"}]}
+
+    handler = type("_SnapshotHandler", (_Handler,), {"store": FakeStore()})
+    instance = object.__new__(handler)
+    authorized = []
+    sent = []
+    instance._authorize_studio_request = lambda no_store: authorized.append(
+        no_store
+    ) or order.append("authorize") or True
+    instance._send_json = lambda body, no_store=False: sent.append(
+        (body, no_store)
+    )
+    instance._send_json_or_404 = lambda body, no_store=False: sent.append(
+        (body, no_store)
+    )
+
+    instance._route_datasets({"tenant": "tenant_a"}, {})
+    instance._route_dataset(
+        {"tenant": "tenant_a"},
+        {"path": ["studio.jsonl"]},
+    )
+
+    assert authorized == [True, True]
+    assert order == [
+        "prepare-list",
+        "authorize",
+        "read-list",
+        "prepare-dataset",
+        "authorize",
+        "read-dataset",
+    ]
+    assert sent == [
+        ([{"path": "studio.jsonl"}], True),
+        ({"rows": [{"case_id": "private"}]}, True),
+    ]
+
+
+def test_case_route_uses_one_joined_data_and_policy_snapshot() -> None:
+    """Joined case details and their Studio classification share one read."""
+    order = []
+
+    class FakeStore:
+        def prepare_case(self, tenant_id, run_rel, index):
+            assert (tenant_id, run_rel, index) == ("tenant_a", "evals/run", 0)
+            order.append("prepare")
+            return ("case-snapshot", True)
+
+        def materialize_case(self, snapshot):
+            assert snapshot == "case-snapshot"
+            order.append("read")
+            return {"ground_truth": {"expected": "private"}}
+
+    handler = type("_CaseSnapshotHandler", (_Handler,), {"store": FakeStore()})
+    instance = object.__new__(handler)
+    authorized = []
+    sent = []
+    instance._authorize_studio_request = lambda no_store: authorized.append(
+        no_store
+    ) or order.append("authorize") or True
+    instance._send_json_or_404 = lambda body, no_store=False: sent.append(
+        (body, no_store)
+    )
+
+    instance._route_case(
+        {"tenant": "tenant_a", "run": "evals%2Frun", "index": "0"},
+        {},
+    )
+
+    assert authorized == [True]
+    assert order == ["prepare", "authorize", "read"]
+    assert sent == [({"ground_truth": {"expected": "private"}}, True)]
 
 
 def test_ordinary_dataset_catalog_remains_available_to_explorer_hosts(

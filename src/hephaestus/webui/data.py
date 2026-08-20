@@ -17,15 +17,120 @@ files on disk.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import stat
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from src.hephaestus.evaluation_assets.models import STAGE_LABELS, PipelineStage
+from src.hephaestus.evaluation_assets.publication import (
+    resolve_evaluation_asset_release,
+    validate_historical_generation,
+)
 from src.hephaestus.evaluation_assets.workspace import (
     EvaluationAssetLayout,
     list_asset_layouts,
 )
+
+
+def _path_is_within(path: Path, directory: Path) -> bool:
+    return path == directory or directory in path.parents
+
+
+@dataclass(frozen=True)
+class _FileSnapshot:
+    path: Path
+    display_path: str
+    device: int
+    inode: int
+    size: int
+    expected_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class _DeferredDatasetSnapshot:
+    tenant_dir: Path
+    dataset_rel: str
+
+
+@dataclass(frozen=True)
+class _DatasetListingSnapshot:
+    tenant_dir: Path
+    ordinary: tuple[_FileSnapshot, ...]
+    studio_catalogs: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class _CaseSnapshot:
+    results: _FileSnapshot
+    dataset: _FileSnapshot | _DeferredDatasetSnapshot | None
+    dataset_rel: str | None
+    index: int
+
+
+def _capture_file_snapshot(
+    path: Path,
+    display_path: str,
+    *,
+    expected_sha256: str | None = None,
+) -> _FileSnapshot:
+    resolved = path.resolve(strict=True)
+    if path.is_symlink() or resolved != path.absolute():
+        raise ValueError("dataset snapshot path cannot be a symlink")
+    details = path.stat(follow_symlinks=False)
+    if not stat.S_ISREG(details.st_mode):
+        raise ValueError("dataset snapshot path is not a regular file")
+    return _FileSnapshot(
+        path=path.absolute(),
+        display_path=display_path,
+        device=details.st_dev,
+        inode=details.st_ino,
+        size=details.st_size,
+        expected_sha256=expected_sha256,
+    )
+
+
+def _read_jsonl_snapshot(snapshot: _FileSnapshot) -> list[dict[str, Any]] | None:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(snapshot.path, flags)
+        details = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(details.st_mode)
+            or details.st_dev != snapshot.device
+            or details.st_ino != snapshot.inode
+            or details.st_size != snapshot.size
+        ):
+            return None
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        raw = b"".join(chunks)
+        if snapshot.expected_sha256 is not None and hashlib.sha256(
+            raw
+        ).hexdigest() != snapshot.expected_sha256:
+            return None
+        rows = []
+        for line in raw.decode("utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                return None
+            rows.append(row)
+        return rows
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 # Directory names probed inside each tenant when listing eval runs. The repo
 # convention is ``evals/``, but eval configs can point output_dir anywhere, so
@@ -498,7 +603,7 @@ class TenantStore:
                     "run_count": len(runs),
                     "iteration_count": len(iterations),
                     "prompt_count": len(self._prompt_paths(tenant_dir)),
-                    "dataset_count": len(self._dataset_paths(tenant_dir)),
+                    "dataset_count": len(self._ordinary_dataset_paths(tenant_dir)),
                     "config_count": len(self._config_paths(tenant_dir)),
                     "doc_count": len(self._doc_paths(tenant_dir)),
                     "has_readme": (tenant_dir / "README.md").exists(),
@@ -732,15 +837,104 @@ class TenantStore:
         }
 
     def get_case(self, tenant_id: str, run_dir_rel: str, index: int) -> Optional[Dict[str, Any]]:
+        snapshot, _ = self.prepare_case(tenant_id, run_dir_rel, index)
+        return self.materialize_case(snapshot)
+
+    def get_case_with_policy(
+        self,
+        tenant_id: str,
+        run_dir_rel: str,
+        index: int,
+    ) -> tuple[Optional[Dict[str, Any]], bool]:
+        """Compatibility wrapper around the two-phase protected case read."""
+        snapshot, studio_data = self.prepare_case(
+            tenant_id,
+            run_dir_rel,
+            index,
+        )
+        return self.materialize_case(snapshot), studio_data
+
+    def prepare_case(
+        self,
+        tenant_id: str,
+        run_dir_rel: str,
+        index: int,
+    ) -> tuple[_CaseSnapshot | None, bool]:
+        """Resolve case and dataset files without reading protected row bytes."""
         run_dir = self._resolve_run_dir(tenant_id, run_dir_rel)
         if run_dir is None:
+            return None, False
+        if index < 0:
+            return None, False
+        dataset_rel = self._run_dataset_rel(tenant_id, run_dir)
+        dataset_snapshot: _FileSnapshot | _DeferredDatasetSnapshot | None = None
+        studio_data = False
+        if dataset_rel is not None:
+            dataset_snapshot, studio_data = self.prepare_dataset(
+                tenant_id,
+                dataset_rel,
+            )
+        try:
+            results_snapshot = _capture_file_snapshot(
+                run_dir / "results.jsonl",
+                (run_dir / "results.jsonl").as_posix(),
+            )
+        except (OSError, ValueError):
+            return None, studio_data
+        return _CaseSnapshot(
+            results=results_snapshot,
+            dataset=dataset_snapshot,
+            dataset_rel=dataset_rel,
+            index=index,
+        ), studio_data
+
+    def materialize_case(
+        self,
+        snapshot: _CaseSnapshot | None,
+    ) -> Optional[Dict[str, Any]]:
+        """Read a previously classified case snapshot after authorization."""
+        if snapshot is None:
             return None
-        results = _read_jsonl(run_dir / "results.jsonl")
-        if index < 0 or index >= len(results):
+        results = _read_jsonl_snapshot(snapshot.results)
+        if results is None or snapshot.index >= len(results):
             return None
-        case = results[index]
-        ground_truth = self._ground_truth_for(tenant_id, run_dir, case.get("case_id"))
-        return {"index": index, "case": case, "ground_truth": ground_truth}
+        case = results[snapshot.index]
+        ground_truth = self._ground_truth_from_snapshot(
+            snapshot.dataset,
+            snapshot.dataset_rel,
+            case.get("case_id"),
+        )
+        return {
+            "index": snapshot.index,
+            "case": case,
+            "ground_truth": ground_truth,
+        }
+
+    def _ground_truth_from_snapshot(
+        self,
+        snapshot: _FileSnapshot | _DeferredDatasetSnapshot | None,
+        dataset_rel: str | None,
+        case_id: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        if snapshot is None or dataset_rel is None or case_id is None:
+            return None
+        rows = self._dataset_snapshot_rows(snapshot)
+        if rows is None:
+            return None
+        for row in rows:
+            if str(row.get("case_id")) == str(case_id):
+                return {
+                    "dataset": dataset_rel,
+                    "expected": row.get("expected"),
+                    "context": row.get("context"),
+                    "metadata": row.get("metadata"),
+                }
+        return {
+            "dataset": dataset_rel,
+            "expected": None,
+            "context": None,
+            "metadata": None,
+        }
 
     def run_uses_evaluation_asset_dataset(
         self,
@@ -758,7 +952,12 @@ class TenantStore:
         )
 
     def _ground_truth_for(
-        self, tenant_id: str, run_dir: Path, case_id: Optional[str]
+        self,
+        tenant_id: str,
+        run_dir: Path,
+        case_id: Optional[str],
+        *,
+        dataset_rel: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Look up the dataset row's ``expected`` block for a result case.
 
@@ -768,7 +967,8 @@ class TenantStore:
         """
         if case_id is None:
             return None
-        dataset_rel = self._run_dataset_rel(tenant_id, run_dir)
+        if dataset_rel is None:
+            dataset_rel = self._run_dataset_rel(tenant_id, run_dir)
         if dataset_rel is None:
             return None
         rows = self._dataset_rows(tenant_id, dataset_rel)
@@ -800,8 +1000,8 @@ class TenantStore:
             if resolved and tenant_dir in resolved.parents and resolved.is_file():
                 return resolved.relative_to(tenant_dir).as_posix()
         # Fall back to the tenant's datasets when config is absent or stale.
-        datasets = self._dataset_paths(tenant_dir)
-        if len(datasets) == 1:
+        datasets = self._ordinary_dataset_paths(tenant_dir)
+        if len(datasets) == 1 and not self._studio_catalogs(tenant_dir):
             return datasets[0].relative_to(tenant_dir).as_posix()
         return None
 
@@ -830,25 +1030,82 @@ class TenantStore:
 
     # -- datasets --------------------------------------------------------
 
-    def _dataset_paths(self, tenant_dir: Path) -> List[Path]:
+    def _ordinary_dataset_paths(self, tenant_dir: Path) -> List[Path]:
+        """Return ordinary datasets without opening Studio release evidence."""
         datasets_dir = tenant_dir / "datasets"
         if not datasets_dir.is_dir():
             return []
-        return sorted(p for p in datasets_dir.rglob("*.jsonl") if p.is_file())
+        published_dir = datasets_dir / "evaluation_assets"
+        try:
+            published_resolved = published_dir.resolve()
+        except (OSError, RuntimeError):
+            published_resolved = published_dir.absolute()
+        paths: list[Path] = []
+        for path in datasets_dir.rglob("*.jsonl"):
+            try:
+                resolved = path.resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            if (
+                path.is_file()
+                and published_dir not in path.parents
+                and not _path_is_within(resolved, published_resolved)
+            ):
+                paths.append(path)
+        return sorted(paths)
+
+    @staticmethod
+    def _studio_catalogs(tenant_dir: Path) -> tuple[Path, ...]:
+        """Classify possible Studio catalogs using directory metadata only."""
+        published_dir = tenant_dir / "datasets" / "evaluation_assets"
+        if published_dir.is_symlink() or not published_dir.is_dir():
+            return ()
+        return tuple(
+            catalog
+            for catalog in sorted(published_dir.iterdir())
+            if not catalog.is_symlink() and catalog.is_dir()
+        )
+
+    def _dataset_paths(self, tenant_dir: Path) -> List[Path]:
+        """Resolve all programmatic dataset paths with full Studio validation."""
+        paths = self._ordinary_dataset_paths(tenant_dir)
+        for catalog in self._studio_catalogs(tenant_dir):
+            try:
+                release = resolve_evaluation_asset_release(
+                    catalog,
+                    expected_tenant_id=tenant_dir.name,
+                    expected_asset_id=catalog.name,
+                    trusted_root=tenant_dir,
+                )
+            except (OSError, TypeError, UnicodeError, ValueError):
+                continue
+            paths.extend(release.files.values())
+        return sorted(paths)
 
     def has_evaluation_asset_datasets(self, tenant_id: str) -> bool:
         """Return whether a dataset listing would include published Studio data."""
         tenant_dir = self._tenant_dir(tenant_id)
         if tenant_dir is None:
             return False
-        datasets_dir = (tenant_dir / "datasets").resolve()
-        published_dir = (datasets_dir / "evaluation_assets").resolve()
-        if datasets_dir not in published_dir.parents or not published_dir.is_dir():
+        datasets_dir = tenant_dir / "datasets"
+        published_dir = datasets_dir / "evaluation_assets"
+        if published_dir.is_symlink() or not published_dir.is_dir():
             return False
-        return any(
-            path.is_file()
-            for path in published_dir.rglob("*.jsonl")
-        )
+        for catalog in published_dir.iterdir():
+            if catalog.is_symlink() or not catalog.is_dir():
+                continue
+            try:
+                release = resolve_evaluation_asset_release(
+                    catalog,
+                    expected_tenant_id=tenant_id,
+                    expected_asset_id=catalog.name,
+                    trusted_root=tenant_dir,
+                )
+            except (OSError, TypeError, UnicodeError, ValueError):
+                continue
+            if release.files:
+                return True
+        return False
 
     def is_evaluation_asset_dataset(
         self,
@@ -859,29 +1116,98 @@ class TenantStore:
         tenant_dir = self._tenant_dir(tenant_id)
         if tenant_dir is None:
             return False
-        path = (tenant_dir / dataset_rel).resolve()
-        published_dir = (
-            tenant_dir / "datasets" / "evaluation_assets"
-        ).resolve()
-        return published_dir in path.parents
+        try:
+            relative = Path(dataset_rel)
+            if relative.is_absolute() or ".." in relative.parts:
+                return False
+        except (OSError, ValueError):
+            return False
+        if relative.parts[:2] == ("datasets", "evaluation_assets"):
+            return True
+        try:
+            resolved = (tenant_dir / relative).resolve(strict=True)
+            published = (tenant_dir / "datasets" / "evaluation_assets").resolve()
+        except (OSError, RuntimeError):
+            return False
+        return _path_is_within(resolved, published)
 
     def list_datasets(self, tenant_id: str) -> List[Dict[str, Any]]:
+        snapshots, _ = self.prepare_dataset_listing(tenant_id)
+        return self.materialize_dataset_listing(snapshots)
+
+    def list_datasets_with_policy(
+        self,
+        tenant_id: str,
+    ) -> tuple[List[Dict[str, Any]], bool]:
+        """Compatibility wrapper around the two-phase protected listing read."""
+        snapshots, studio_data = self.prepare_dataset_listing(tenant_id)
+        return self.materialize_dataset_listing(snapshots), studio_data
+
+    def prepare_dataset_listing(
+        self,
+        tenant_id: str,
+    ) -> tuple[_DatasetListingSnapshot | None, bool]:
+        """Classify Studio catalogs without opening protected release bytes."""
         tenant_dir = self._tenant_dir(tenant_id)
         if tenant_dir is None:
-            return []
-        datasets: List[Dict[str, Any]] = []
-        for path in self._dataset_paths(tenant_dir):
+            return None, False
+        snapshots: list[_FileSnapshot] = []
+        for path in self._ordinary_dataset_paths(tenant_dir):
             rel = path.relative_to(tenant_dir).as_posix()
-            rows = _read_jsonl(path)
             try:
-                size = path.stat().st_size
-            except OSError:
-                size = 0
+                snapshots.append(_capture_file_snapshot(path, rel))
+            except (OSError, ValueError):
+                continue
+        studio_catalogs = self._studio_catalogs(tenant_dir)
+        return (
+            _DatasetListingSnapshot(
+                tenant_dir=tenant_dir,
+                ordinary=tuple(snapshots),
+                studio_catalogs=studio_catalogs,
+            ),
+            bool(studio_catalogs),
+        )
+
+    def materialize_dataset_listing(
+        self,
+        snapshot: _DatasetListingSnapshot | None,
+    ) -> List[Dict[str, Any]]:
+        if snapshot is None:
+            return []
+        snapshots = list(snapshot.ordinary)
+        for catalog in snapshot.studio_catalogs:
+            try:
+                release = resolve_evaluation_asset_release(
+                    catalog,
+                    expected_tenant_id=snapshot.tenant_dir.name,
+                    expected_asset_id=catalog.name,
+                    trusted_root=snapshot.tenant_dir,
+                )
+                snapshots.extend(
+                    _capture_file_snapshot(
+                        path,
+                        path.relative_to(snapshot.tenant_dir).as_posix(),
+                        expected_sha256=release.descriptor["logical_files"][split][
+                            "sha256"
+                        ],
+                    )
+                    for split, path in release.files.items()
+                )
+            except (OSError, TypeError, UnicodeError, ValueError):
+                continue
+        datasets: List[Dict[str, Any]] = []
+        for file_snapshot in sorted(
+            snapshots,
+            key=lambda item: item.display_path,
+        ):
+            rows = _read_jsonl_snapshot(file_snapshot)
+            if rows is None:
+                continue
             datasets.append(
                 {
-                    "path": rel,
-                    "name": path.name,
-                    "bytes": size,
+                    "path": file_snapshot.display_path,
+                    "name": file_snapshot.path.name,
+                    "bytes": file_snapshot.size,
                     "row_count": len(rows),
                 }
             )
@@ -891,37 +1217,168 @@ class TenantStore:
         tenant_dir = self._tenant_dir(tenant_id)
         if tenant_dir is None:
             return []
-        path = (tenant_dir / dataset_rel).resolve()
-        datasets_dir = (tenant_dir / "datasets").resolve()
-        if datasets_dir not in path.parents:
-            return []  # traversal guard
-        if path.suffix != ".jsonl" or not path.is_file():
+        path = self._resolve_dataset_path(tenant_dir, dataset_rel)
+        if path is None:
             return []
         return _read_jsonl(path)
 
     def get_dataset(
         self, tenant_id: str, dataset_rel: str, offset: int = 0, limit: int = 100
     ) -> Optional[Dict[str, Any]]:
+        snapshot, _ = self.prepare_dataset(
+            tenant_id,
+            dataset_rel,
+        )
+        return self.materialize_dataset(snapshot, offset=offset, limit=limit)
+
+    def get_dataset_with_policy(
+        self,
+        tenant_id: str,
+        dataset_rel: str,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> tuple[Optional[Dict[str, Any]], bool]:
+        """Compatibility wrapper around the two-phase protected dataset read."""
+        snapshot, studio_data = self.prepare_dataset(tenant_id, dataset_rel)
+        return (
+            self.materialize_dataset(snapshot, offset=offset, limit=limit),
+            studio_data,
+        )
+
+    def prepare_dataset(
+        self,
+        tenant_id: str,
+        dataset_rel: str,
+    ) -> tuple[_FileSnapshot | _DeferredDatasetSnapshot | None, bool]:
+        """Classify one dataset without opening protected Studio evidence."""
         tenant_dir = self._tenant_dir(tenant_id)
         if tenant_dir is None:
+            return None, False
+        studio_data = self.is_evaluation_asset_dataset(tenant_id, dataset_rel)
+        if studio_data:
+            return _DeferredDatasetSnapshot(tenant_dir, dataset_rel), True
+        path = self._resolve_dataset_path(tenant_dir, dataset_rel)
+        if path is None:
+            return None, studio_data
+        try:
+            return _capture_file_snapshot(path, dataset_rel), studio_data
+        except (OSError, ValueError):
+            return None, studio_data
+
+    def materialize_dataset(
+        self,
+        snapshot: _FileSnapshot | _DeferredDatasetSnapshot | None,
+        *,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> Optional[Dict[str, Any]]:
+        """Read one previously classified dataset snapshot after authorization."""
+        if snapshot is None:
             return None
-        path = (tenant_dir / dataset_rel).resolve()
-        datasets_dir = (tenant_dir / "datasets").resolve()
-        if datasets_dir not in path.parents:
-            return None  # traversal guard
-        if path.suffix != ".jsonl" or not path.is_file():
+        rows = self._dataset_snapshot_rows(snapshot)
+        if rows is None:
             return None
-        rows = _read_jsonl(path)
         total = len(rows)
         offset = max(0, offset)
         window = rows[offset : offset + max(0, limit)]
         return {
-            "path": dataset_rel,
+            "path": snapshot.dataset_rel
+            if isinstance(snapshot, _DeferredDatasetSnapshot)
+            else snapshot.display_path,
             "total": total,
             "offset": offset,
             "limit": limit,
             "rows": window,
         }
+
+    def _dataset_snapshot_rows(
+        self,
+        snapshot: _FileSnapshot | _DeferredDatasetSnapshot,
+    ) -> list[dict[str, Any]] | None:
+        if isinstance(snapshot, _FileSnapshot):
+            return _read_jsonl_snapshot(snapshot)
+        path = self._resolve_dataset_path(
+            snapshot.tenant_dir,
+            snapshot.dataset_rel,
+        )
+        if path is None:
+            return None
+        try:
+            expected_sha256 = self._studio_split_sha256(
+                snapshot.tenant_dir,
+                snapshot.dataset_rel,
+            )
+            file_snapshot = _capture_file_snapshot(
+                path,
+                snapshot.dataset_rel,
+                expected_sha256=expected_sha256,
+            )
+        except (OSError, TypeError, UnicodeError, ValueError):
+            return None
+        return _read_jsonl_snapshot(file_snapshot)
+
+    @staticmethod
+    def _studio_split_sha256(tenant_dir: Path, dataset_rel: str) -> str:
+        relative = Path(dataset_rel)
+        parts = relative.parts
+        generation = validate_historical_generation(
+            tenant_dir.joinpath(*parts[:5]),
+            expected_tenant_id=tenant_dir.name,
+            expected_asset_id=parts[2],
+            trusted_root=tenant_dir,
+        )
+        return str(
+            generation.descriptor["logical_files"][Path(parts[5]).stem]["sha256"]
+        )
+
+    def _resolve_dataset_path(
+        self,
+        tenant_dir: Path,
+        dataset_rel: str,
+    ) -> Optional[Path]:
+        """Resolve an ordinary dataset or one fully validated Studio generation."""
+        try:
+            relative = Path(dataset_rel)
+            if relative.is_absolute() or ".." in relative.parts:
+                return None
+        except (OSError, ValueError):
+            return None
+        if relative.parts[:2] == ("datasets", "evaluation_assets"):
+            parts = relative.parts
+            if (
+                len(parts) != 6
+                or parts[3] != "generations"
+                or parts[5]
+                not in {
+                    "train.jsonl",
+                    "validation.jsonl",
+                    "test.jsonl",
+                    "regression_trusted.jsonl",
+                }
+            ):
+                return None
+            generation_dir = tenant_dir.joinpath(*parts[:5])
+            try:
+                generation = validate_historical_generation(
+                    generation_dir,
+                    expected_tenant_id=tenant_dir.name,
+                    expected_asset_id=parts[2],
+                    trusted_root=tenant_dir,
+                )
+            except (OSError, TypeError, UnicodeError, ValueError):
+                return None
+            logical_split = Path(parts[5]).stem
+            return generation.files[logical_split]
+        path = (tenant_dir / relative).resolve()
+        datasets_dir = (tenant_dir / "datasets").resolve()
+        published_dir = (datasets_dir / "evaluation_assets").resolve()
+        if datasets_dir not in path.parents:
+            return None
+        if _path_is_within(path, published_dir):
+            return None
+        if path.suffix != ".jsonl" or not path.is_file():
+            return None
+        return path
 
     # -- iterations ------------------------------------------------------
 

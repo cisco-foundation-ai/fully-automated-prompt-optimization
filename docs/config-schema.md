@@ -13,7 +13,7 @@ Evaluation configs use the **LangGraph chain** format. The chain is a compiled `
   "tenant_id": "<tenant_id>",
   "provider": "<baseten|base10|sagemaker|openai>",
   "provider_settings": { "...": "..." },
-  "dataset": {"path": "tenants/<tenant_id>/datasets/datasets/cases.jsonl"},
+  "dataset": {"path": "tenants/<tenant_id>/datasets/cases.jsonl"},
   "chain": {
     "path": "tenants/<tenant_id>/chains/<chain_module>.py",
     "fn": "build_chain",
@@ -27,6 +27,20 @@ Evaluation configs use the **LangGraph chain** format. The chain is a compiled `
   "output_dir": "tenants/<tenant_id>/evals/tmp/<run-name>"
 }
 ```
+
+### `dataset` fields
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `path` | string | yes | — | Literal repository-relative path to one JSONL dataset file |
+
+The evaluation runtime does not resolve catalog pointers or directory aliases.
+For an Evaluation Asset Studio release, use the exact immutable file path from
+the asset manifest, for example
+`tenants/<tenant_id>/datasets/evaluation_assets/<asset_id>/generations/sha256-<hash>/test.jsonl`.
+`release.json` identifies the current generation for catalog readers, but it is
+not itself a dataset and must not be used as `dataset.path`. Keeping the config
+literal makes each evaluation run auditable against one immutable generation.
 
 ### `chain` fields
 

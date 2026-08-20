@@ -54,6 +54,10 @@ from src.hephaestus.datasets.intent_assets import (
     match_to_dict,
 )
 from src.hephaestus.datasets.rubric_providers import OpenAIRubricProvider
+from src.hephaestus.evaluation_assets import workspace as workspace_module
+from src.hephaestus.evaluation_assets.control_jsonl import (
+    read_strict_jsonl_objects,
+)
 from src.hephaestus.evaluation_assets.durability import (
     STAGE_SPECIFICATIONS,
     EvaluationAssetImmutableError,
@@ -62,7 +66,6 @@ from src.hephaestus.evaluation_assets.durability import (
     file_sha256,
     mutable_rebuild_boundary,
     verify_raw_snapshot_floor,
-    verify_release_candidate,
     verify_released_asset,
 )
 from src.hephaestus.evaluation_assets.input_contract import (
@@ -73,6 +76,24 @@ from src.hephaestus.evaluation_assets.models import (
     EvaluationAssetConfig,
     PipelineStage,
     PipelineState,
+)
+from src.hephaestus.evaluation_assets.provenance import (
+    build_algorithm_inventory,
+    build_provenance,
+    build_provider_call,
+    build_stage_provenance,
+    not_applicable,
+    provider_settings,
+    sanitize_call_metadata,
+    unavailable,
+    validate_build_provenance,
+    working_source_identity,
+    write_provider_call_ledger,
+)
+from src.hephaestus.evaluation_assets.publication import (
+    InstalledGeneration,
+    install_generation,
+    validate_historical_generation,
 )
 from src.hephaestus.evaluation_assets.stage_three_contract import (
     compile_evaluation_guidelines as _compile_evaluation_guidelines,  # noqa: F401
@@ -250,6 +271,10 @@ class EvaluationAssetPipeline:
         self.rubric_provider = rubric_provider
         self.embedding_provider = embedding_provider
         self._provider_identities: dict[str, dict[str, Any]] = {}
+        self._provider_settings: dict[str, dict[str, Any]] = {}
+        self._stage_call_rows: list[dict[str, Any]] = []
+        self._stage_eight_manifest: dict[str, Any] = {}
+        self._pending_generation: InstalledGeneration | None = None
         self.last_revision: Optional[Dict[str, Any]] = None
 
     def _configure_providers(self) -> None:
@@ -297,6 +322,20 @@ class EvaluationAssetPipeline:
                 configured_provider=self.config.embedding_provider,
                 configured_model=self.config.embedding_model,
                 source=embedding_source,
+            ),
+        }
+        self._provider_settings = {
+            "rubric": provider_settings(
+                self.rubric_provider,
+                role="rubric",
+                identity=self._provider_identities["rubric"],
+                pipeline_batch_size=self.config.batch_size,
+            ),
+            "embedding": provider_settings(
+                self.embedding_provider,
+                role="embedding",
+                identity=self._provider_identities["embedding"],
+                pipeline_batch_size=self.config.batch_size,
             ),
         }
 
@@ -399,10 +438,34 @@ class EvaluationAssetPipeline:
         if self.rubric_provider is None:
             raise RuntimeError("Rubric provider is not configured")
         try:
+            _discard_provider_metadata(self.rubric_provider)
             response = self.rubric_provider.generate_json(system_prompt, payload)
+            metadata = _drain_provider_metadata(self.rubric_provider)
             if not isinstance(response, Mapping):
                 raise ValueError("Rubric provider response must be a JSON object")
-            return normalize(response)
+            normalized = normalize(response)
+            identity = self._provider_identities["rubric"]
+            settings = self._provider_settings["rubric"]["settings"]
+            self._stage_call_rows.append(
+                build_provider_call(
+                    stage=stage.value,
+                    ordinal=len(self._stage_call_rows) + 1,
+                    provider_role="rubric",
+                    provider=identity["provider"],
+                    model=identity["model"],
+                    request={
+                        "interface": "generate_json-v1",
+                        "system_prompt": system_prompt,
+                        "payload": dict(payload),
+                        "provider": identity["provider"],
+                        "model": identity["model"],
+                        "settings": settings,
+                    },
+                    response=dict(response),
+                    metadata=metadata,
+                )
+            )
+            return normalized
         except Exception as exc:
             raise ProviderCallError(
                 stage=stage,
@@ -419,7 +482,9 @@ class EvaluationAssetPipeline:
         if self.embedding_provider is None:
             return []
         try:
-            return self.embedding_provider.embed_texts(texts)
+            _discard_provider_metadata(self.embedding_provider)
+            response = self.embedding_provider.embed_texts(texts)
+            metadata = _drain_provider_metadata(self.embedding_provider)
         except Exception as exc:
             raise ProviderCallError(
                 stage=stage,
@@ -427,6 +492,32 @@ class EvaluationAssetPipeline:
                 model=self._provider_identities["embedding"]["model"],
                 cause=exc,
             ) from exc
+        normalized = validate_embedding_vectors(
+            response,
+            expected_count=len(texts),
+            source="embedding provider result",
+        )
+        identity = self._provider_identities["embedding"]
+        settings = self._provider_settings["embedding"]["settings"]
+        self._stage_call_rows.append(
+            build_provider_call(
+                stage=stage.value,
+                ordinal=len(self._stage_call_rows) + 1,
+                provider_role="embedding",
+                provider=identity["provider"],
+                model=identity["model"],
+                request={
+                    "interface": "embed_texts-v1",
+                    "texts": [str(text) for text in texts],
+                    "provider": identity["provider"],
+                    "model": identity["model"],
+                    "settings": settings,
+                },
+                response=normalized,
+                metadata=metadata,
+            )
+        )
+        return normalized
 
     @classmethod
     def create(
@@ -465,10 +556,12 @@ class EvaluationAssetPipeline:
         with self.layout.asset_lock(lock_timeout):
             if _lock_acquired_callback is not None:
                 _lock_acquired_callback()
-            self.layout._recover_locked()
+            recovered = self.layout._recover_locked()
             state = self.layout.load_state()
             if state.status == "released":
                 verify_released_asset(self.layout, state)
+                if recovered:
+                    return state
                 raise EvaluationAssetImmutableError(
                     self.layout.tenant_id,
                     self.layout.asset_id,
@@ -538,8 +631,10 @@ class EvaluationAssetPipeline:
             stage_state.message = ""
             self.layout.save_state(state)
             self.layout.append_event("stage_started", {"stage": stage.value})
+            self._stage_call_rows = []
             try:
                 counts = self._run_stage(stage)
+                self._finalize_stage_outputs(stage)
             except Exception as exc:
                 stage_state.status = "failed"
                 stage_state.message = str(exc)
@@ -575,19 +670,25 @@ class EvaluationAssetPipeline:
                 {"stage": stage.value, "counts": counts},
             )
 
-        candidate = PipelineState.from_dict(state.to_dict())
-        candidate.status = "released"
-        candidate.current_stage = None
-        candidate.error = None
-        candidate.updated_at = utc_now()
-        verify_release_candidate(self.layout, candidate)
-        atomic_write_json(self.layout.state_path, candidate.to_dict())
-        verify_released_asset(self.layout, candidate)
-        self.layout.append_event(
-            "pipeline_released",
-            {"counts": candidate.counts},
-        )
-        return candidate
+        state.current_stage = None
+        state.error = None
+        self.layout.save_state(state)
+        generation = self._pending_generation
+        if generation is None:
+            manifest = json.loads(
+                self.layout.artifact_path(
+                    PipelineStage.DATASET_SPLITS,
+                    "generation_manifest.json",
+                ).read_text(encoding="utf-8")
+            )
+            generation_id = str(manifest.get("generation_id") or "")
+            generation = validate_historical_generation(
+                self.layout.generations_root / generation_id,
+                expected_tenant_id=self.layout.tenant_id,
+                expected_asset_id=self.layout.asset_id,
+                trusted_root=self.layout.tenant_root,
+            )
+        return self.layout._publish_release_locked(state, generation)
 
     def _run_stage(self, stage: PipelineStage) -> Dict[str, int]:
         handlers = {
@@ -601,6 +702,163 @@ class EvaluationAssetPipeline:
             PipelineStage.DATASET_SPLITS: self._build_splits,
         }
         return handlers[stage]()
+
+    def _finalize_stage_outputs(self, stage: PipelineStage) -> None:
+        """Persist stage-local provenance and complete Stage 8 release inputs."""
+        specification = STAGE_SPECIFICATIONS[stage]
+        calls: Sequence[Mapping[str, Any]] | None = None
+        if specification.provider_roles:
+            calls = list(self._stage_call_rows)
+            write_provider_call_ledger(
+                self.layout.artifact_path(stage, "provider_calls.jsonl"),
+                calls,
+                stage=stage.value,
+            )
+        stage_provenance = build_stage_provenance(
+            stage=stage.value,
+            provider_identity=self._provider_identity_for_stage(stage),
+            prompt_values=STAGE_PROMPTS.get(stage, {}),
+            calls=calls,
+            code=working_source_identity(Path(__file__).resolve().parents[3]),
+            seeds=_stage_seeds(
+                stage,
+                self.config,
+                call_count=len(calls or []),
+            ),
+            algorithms=_stage_algorithms(
+                stage,
+                self.config,
+                extension=bool(self.lineage),
+            ),
+        )
+        atomic_write_json(
+            self.layout.artifact_path(stage, "provenance.json"),
+            stage_provenance,
+        )
+        if stage == PipelineStage.DATASET_SPLITS:
+            self._finalize_stage_eight_artifacts()
+
+    def _finalize_stage_eight_artifacts(self) -> None:
+        """Build provenance, install a generation, and write immutable paths."""
+        calls: list[dict[str, Any]] = []
+        for stage in tuple(PipelineStage)[2:7]:
+            calls.extend(
+                read_strict_jsonl_objects(
+                    self.layout.artifact_path(stage, "provider_calls.jsonl")
+                )
+            )
+        input_manifest = json.loads(
+            self.layout.artifact_path(
+                PipelineStage.RAW_INPUTS,
+                "input_manifest.json",
+            ).read_text(encoding="utf-8")
+        )
+        copied_inputs = {}
+        for name, path in (
+            ("labeled_feedback", self.layout.feedback_path),
+            ("unlabeled", self.layout.unlabeled_path),
+        ):
+            details = input_manifest["inputs"][name]
+            copied_inputs[name] = {
+                "path": path.relative_to(self.layout.root).as_posix(),
+                "bytes": path.stat().st_size,
+                "rows": details["rows"],
+                "sha256": details["sha256"],
+            }
+        lineage_files = None
+        if self.lineage:
+            lineage_files = {
+                "lineage_sha256": file_sha256(self.layout.lineage_path),
+                "reuse_manifest_sha256": file_sha256(
+                    self.layout.reuse_manifest_path
+                ),
+                "parent_release": dict(self.lineage.get("parent_release") or {}),
+            }
+        prompts = {
+            name: value
+            for stage_prompts in STAGE_PROMPTS.values()
+            for name, value in stage_prompts.items()
+        }
+        provenance = build_provenance(
+            repository_root=Path(__file__).resolve().parents[3],
+            resolved_configuration=self.config.to_dict(),
+            copied_inputs=copied_inputs,
+            lineage=self.lineage,
+            providers=self._provider_settings,
+            prompt_values=prompts,
+            calls=calls,
+            seeds={
+                "split": self.config.split_seed,
+                "rubric_sampling": {
+                    "status": "not_applicable",
+                    "reason": "provider_does_not_use_sampling",
+                },
+                "embedding_sampling": {
+                    "status": "not_applicable",
+                    "reason": "provider_does_not_use_sampling",
+                },
+            },
+            algorithms=_build_algorithms(self.config, bool(self.lineage)),
+            lineage_files=lineage_files,
+            created_at=utc_now(),
+        )
+        validate_build_provenance(provenance)
+        atomic_write_json(self.layout.build_provenance_path, provenance)
+        split_paths = {
+            split: self.layout.artifact_path(
+                PipelineStage.DATASET_SPLITS,
+                f"{split}.jsonl",
+            )
+            for split in PUBLISHED_DATASET_SPLITS
+        }
+        generation = install_generation(
+            self.layout.published_datasets,
+            tenant_id=self.layout.tenant_id,
+            asset_id=self.layout.asset_id,
+            split_paths=split_paths,
+            build_fingerprint=provenance["identity_sha256"],
+            fault_hook=_publication_fault_point,
+            trusted_root=self.layout.tenant_root,
+        )
+        self._pending_generation = generation
+        atomic_copy_file(
+            generation.generation_dir / "generation_manifest.json",
+            self.layout.artifact_path(
+                PipelineStage.DATASET_SPLITS,
+                "generation_manifest.json",
+            ),
+        )
+        manifest = dict(self._stage_eight_manifest)
+        generation_directory = generation.generation_dir.relative_to(
+            self.layout.tenants_root.parent
+        ).as_posix()
+        manifest["published_datasets"] = {
+            "directory": self.layout.published_datasets.relative_to(
+                self.layout.tenant_root
+            ).as_posix(),
+            "release_pointer": self.layout.release_pointer_path.relative_to(
+                self.layout.tenant_root
+            ).as_posix(),
+            "generation_id": generation.generation_id,
+            "generation_manifest_sha256": generation.generation_manifest_sha256,
+            "build_provenance_sha256": file_sha256(
+                self.layout.build_provenance_path
+            ),
+            "build_fingerprint": provenance["identity_sha256"],
+            "files": {
+                split: f"{generation_directory}/{split}.jsonl"
+                for split in PUBLISHED_DATASET_SPLITS
+            },
+        }
+        atomic_write_json(
+            self.layout.artifact_path(
+                PipelineStage.DATASET_SPLITS,
+                "dataset_manifest.json",
+            ),
+            manifest,
+        )
+        atomic_write_json(self.layout.manifest_path, manifest)
+        _publication_fault_point("after_stage_8_outputs_validated")
 
     def _validate_raw_inputs(self) -> Dict[str, int]:
         feedback, feedback_row_numbers = _load_jsonl_with_line_numbers(
@@ -1289,10 +1547,6 @@ class EvaluationAssetPipeline:
                 ),
                 rows,
             )
-        published_datasets = self.layout.publish_dataset_splits(
-            PUBLISHED_DATASET_SPLITS
-        )
-
         input_manifest = json.loads(
             self.layout.artifact_path(
                 PipelineStage.RAW_INPUTS,
@@ -1373,7 +1627,7 @@ class EvaluationAssetPipeline:
                 "directory": self.layout.published_datasets.relative_to(
                     self.layout.tenant_root
                 ).as_posix(),
-                "files": published_datasets,
+                "files": {},
             },
             "split_counts": {name: len(rows) for name, rows in payloads.items()},
             "review_policy": {
@@ -1387,14 +1641,7 @@ class EvaluationAssetPipeline:
         }
         if self.lineage:
             manifest["lineage"] = dict(self.lineage)
-        atomic_write_json(
-            self.layout.artifact_path(
-                PipelineStage.DATASET_SPLITS,
-                "dataset_manifest.json",
-            ),
-            manifest,
-        )
-        atomic_write_json(self.layout.manifest_path, manifest)
+        self._stage_eight_manifest = manifest
         return {
             "dataset_cases": len(trusted) + len(inferred) + len(synthetic),
             "train_cases": len(payloads["train"]),
@@ -2172,6 +2419,66 @@ def _missing_clusters(
             }
         )
     return output
+
+
+def _discard_provider_metadata(provider: Any) -> None:
+    """Discard stale optional metadata without expanding the provider contract."""
+    drain = getattr(provider, "drain_call_metadata", None)
+    if callable(drain):
+        try:
+            drain()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _drain_provider_metadata(provider: Any) -> Any:
+    """Return sanitized optional metadata or one explicit unavailable marker."""
+    drain = getattr(provider, "drain_call_metadata", None)
+    if not callable(drain):
+        return None
+    try:
+        return sanitize_call_metadata(drain())
+    except Exception:  # noqa: BLE001
+        return unavailable("metadata_failed_validation")
+
+
+def _stage_seeds(
+    stage: PipelineStage,
+    config: EvaluationAssetConfig,
+    *,
+    call_count: int = 0,
+) -> dict[str, Any]:
+    if stage == PipelineStage.DATASET_SPLITS:
+        return {"split": config.split_seed}
+    if STAGE_SPECIFICATIONS[stage].provider_roles:
+        reason = (
+            "provider_does_not_use_sampling"
+            if call_count
+            else "stage_made_no_provider_calls"
+        )
+        return {"sampling": not_applicable(reason)}
+    return {"sampling": not_applicable("stage_has_no_provider_role")}
+
+
+def _stage_algorithms(
+    stage: PipelineStage,
+    config: EvaluationAssetConfig,
+    *,
+    extension: bool = False,
+) -> dict[str, Any]:
+    algorithms = _build_algorithms(config, extension)
+    return {"stage": stage.value, "revision": algorithms[stage.value]}
+
+
+def _build_algorithms(
+    config: EvaluationAssetConfig,
+    extension: bool,
+) -> dict[str, Any]:
+    return build_algorithm_inventory(config.to_dict(), extension=extension)
+
+
+def _publication_fault_point(name: str) -> None:
+    workspace_module._fault_point(name)
 
 
 def _write_missing_report(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:

@@ -25,6 +25,7 @@ from src.hephaestus.evaluation_assets.journal_transitions import (
     audit_descriptor,
     derive_adoption_plan,
     derive_rebuild_plan,
+    derive_release_publication_plan,
     derive_revision_plan,
 )
 from src.hephaestus.evaluation_assets.models import (
@@ -129,6 +130,24 @@ _PREPARED_FIELDS = {
         "before",
         "target",
         "target_receipts",
+        "before_manifests",
+        "target_manifests",
+        "target_state",
+        "event_entry",
+        "result",
+        "audit",
+    },
+    "release_publication": {
+        "schema_version",
+        "operation_id",
+        "kind",
+        "phase",
+        "prepared_at",
+        "request",
+        "before_config",
+        "before_state",
+        "before",
+        "target",
         "target_state",
         "event_entry",
         "result",
@@ -228,13 +247,33 @@ def _validate_prepared(
 ) -> None:
     operation_id = str(row["operation_id"])
     kind = str(row["kind"])
-    before = _hash_mapping(row["before"])
+    before_raw = _mapping(row["before"])
+    before_release = None
+    if kind in {"release_publication", "legacy_adoption"}:
+        _exact_keys(before_raw, {"config_sha256", "state_sha256", "release"})
+        before_release = _release_descriptor(before_raw["release"])
+        before = _hash_mapping(
+            {key: before_raw[key] for key in ("config_sha256", "state_sha256")}
+        )
+    else:
+        before = _hash_mapping(before_raw)
     target = _hash_mapping(row["target"])
-    expected_hash_fields = (
-        {"config_sha256", "state_sha256", "receipt_sha256"}
-        if kind == "legacy_adoption"
-        else {"config_sha256", "state_sha256"}
-    )
+    expected_hash_fields = {
+        "config_sha256",
+        "state_sha256",
+        "release_sha256",
+        "stage_8_receipt_sha256",
+        "generation_manifest_sha256",
+        "build_provenance_sha256",
+    } if kind == "release_publication" else {
+        "config_sha256",
+        "state_sha256",
+        "receipt_sha256",
+        "release_sha256",
+        "stage_8_receipt_sha256",
+        "generation_manifest_sha256",
+        "build_provenance_sha256",
+    } if kind == "legacy_adoption" else {"config_sha256", "state_sha256"}
     if set(before) != {"config_sha256", "state_sha256"} or set(target) != expected_hash_fields:
         raise ValueError("journal control hashes are incomplete")
 
@@ -321,21 +360,50 @@ def _validate_prepared(
             )
             _require_exact_plan(row, plan)
             _validate_rebuild(row, state, operation_id)
-        else:
+        elif kind == "legacy_adoption":
             request = _mapping(row["request"])
-            _exact_keys(request, set())
+            _exact_keys(request, {"release_pointer"})
+            pointer = _mapping(request["release_pointer"])
             receipts = _mapping(row["target_receipts"])
             plan = derive_adoption_plan(
                 before_config,
                 before_state,
                 receipts,
+                pointer,
                 operation_id=operation_id,
                 prepared_at=str(row["prepared_at"]),
             )
             _require_exact_plan(row, plan, excluded={"receipt_sha256"})
             if target.get("receipt_sha256") != plan["receipt_sha256"]:
                 raise ValueError("adoption target receipt hashes are inconsistent")
-            _validate_adoption(layout, row, state, operation_id, target)
+            _validate_adoption(
+                layout,
+                row,
+                state,
+                operation_id,
+                target,
+                pointer,
+            )
+        else:
+            request = _mapping(row["request"])
+            _exact_keys(request, {"release_pointer"})
+            pointer = _mapping(request["release_pointer"])
+            plan = derive_release_publication_plan(
+                before_config,
+                before_state,
+                pointer,
+                operation_id=operation_id,
+                prepared_at=str(row["prepared_at"]),
+            )
+            _require_exact_plan(row, plan)
+            _validate_release_publication(
+                layout,
+                row,
+                state,
+                operation_id,
+                target,
+                pointer,
+            )
 
     _validate_event(layout, row, operation_id)
     history_installed, event_installed = _validate_audit_authority(
@@ -345,6 +413,11 @@ def _validate_prepared(
     )
     installed_receipts: list[bool] = []
     if kind == "legacy_adoption":
+        manifests_installed = _validate_adoption_manifest_prefix(
+            layout,
+            row,
+            committed=not uncommitted,
+        )
         receipt_hashes = _mapping(target["receipt_sha256"])
         for stage in PipelineStage:
             path = layout.receipt_path(stage)
@@ -358,6 +431,8 @@ def _validate_prepared(
             index < prefix_length for index in range(len(PipelineStage))
         ]:
             raise ValueError("installed adoption receipts are not an ordered prefix")
+        if any(installed_receipts) and not manifests_installed:
+            raise ValueError("adoption receipts precede manifest authority")
     if not uncommitted:
         if kind == "legacy_adoption" and not all(installed_receipts):
             raise ValueError("committed adoption receipt authority is incomplete")
@@ -365,6 +440,10 @@ def _validate_prepared(
             if not final_operation:
                 raise ValueError("committed adoption is not terminal")
             _validate_committed_adoption_terminal(layout, row, target)
+        elif kind == "release_publication":
+            if not final_operation:
+                raise ValueError("committed release publication is not terminal")
+            _validate_committed_release_terminal(layout, row, target)
         elif final_operation:
             _validate_committed_mutation_terminal(layout, row, target)
         return
@@ -375,12 +454,29 @@ def _validate_prepared(
         target,
         history_installed=history_installed,
         event_installed=event_installed,
+        before_release=before_release,
     )
     if kind == "legacy_adoption":
         if _file_sha256(layout.state_path) == target["state_sha256"] and not all(
             installed_receipts
         ):
             raise ValueError("adoption state precedes its receipt authority")
+        current_release = _current_release_descriptor(layout.release_pointer_path)
+        pointer = _mapping(_mapping(row["request"])["release_pointer"])
+        target_release = {
+            "present": True,
+            "bytes": len(_persisted_json_bytes(pointer)),
+            "sha256": target["release_sha256"],
+        }
+        if current_release != before_release and current_release != target_release:
+            raise ValueError("adoption pointer is outside reachable intermediates")
+        if current_release == target_release and not all(installed_receipts):
+            raise ValueError("adoption pointer precedes its receipt authority")
+        if (
+            _file_sha256(layout.state_path) == target["state_sha256"]
+            and current_release != target_release
+        ):
+            raise ValueError("adoption state precedes its pointer authority")
 
 
 def _validate_revision(
@@ -484,7 +580,35 @@ def _validate_adoption(
     state: PipelineState,
     operation_id: str,
     target: Mapping[str, Any],
+    pointer: Mapping[str, Any],
 ) -> None:
+    before_manifests = _mapping(row["before_manifests"])
+    _exact_keys(
+        before_manifests,
+        {"asset_manifest", "dataset_manifest", "generation_manifest"},
+    )
+    for descriptor in before_manifests.values():
+        _release_descriptor(descriptor)
+    manifests = _mapping(row["target_manifests"])
+    _exact_keys(
+        manifests,
+        {"asset_manifest", "dataset_manifest", "generation_manifest"},
+    )
+    asset_manifest = _mapping(manifests["asset_manifest"])
+    dataset_manifest = _mapping(manifests["dataset_manifest"])
+    generation_manifest = _mapping(manifests["generation_manifest"])
+    published = _mapping(asset_manifest.get("published_datasets"))
+    if (
+        asset_manifest != dataset_manifest
+        or published.get("generation_id") != pointer.get("generation_id")
+        or published.get("generation_manifest_sha256")
+        != target.get("generation_manifest_sha256")
+        or published.get("build_provenance_sha256")
+        != target.get("build_provenance_sha256")
+        or _persisted_sha256(generation_manifest)
+        != target.get("generation_manifest_sha256")
+    ):
+        raise ValueError("adoption manifest targets are inconsistent")
     receipts = _mapping(row["target_receipts"])
     receipt_hashes = _mapping(target["receipt_sha256"])
     expected = {stage.value for stage in PipelineStage}
@@ -518,7 +642,20 @@ def _validate_adoption(
         or state.status != "released"
         or state.current_stage is not None
         or state.error is not None
-        or row["result"] != {"status": "released"}
+        or row["result"]
+        != {
+            "status": "released",
+            "generation_id": pointer.get("generation_id"),
+            "release_sha256": target["release_sha256"],
+            "stage_8_receipt_sha256": target["stage_8_receipt_sha256"],
+        }
+        or pointer.get("stage_8_receipt_sha256")
+        != target["stage_8_receipt_sha256"]
+        or pointer.get("generation_manifest_sha256")
+        != target["generation_manifest_sha256"]
+        or pointer.get("build_provenance_sha256")
+        != target["build_provenance_sha256"]
+        or _persisted_sha256(pointer) != target["release_sha256"]
         or layout.tenant_id != state.tenant_id
         or state.updated_at != row.get("prepared_at")
         or state.last_operation_id != operation_id
@@ -527,18 +664,105 @@ def _validate_adoption(
         raise ValueError("adoption target lifecycle is inconsistent")
 
 
+def _validate_release_publication(
+    layout: Any,
+    row: Mapping[str, Any],
+    state: PipelineState,
+    operation_id: str,
+    target: Mapping[str, Any],
+    pointer: Mapping[str, Any],
+) -> None:
+    result = _mapping(row["result"])
+    _exact_keys(
+        result,
+        {
+            "status",
+            "generation_id",
+            "release_sha256",
+            "stage_8_receipt_sha256",
+        },
+    )
+    stage_eight = next(
+        item for item in state.stages if item.stage == PipelineStage.DATASET_SPLITS.value
+    )
+    if (
+        state.schema_version != STATE_SCHEMA_VERSION
+        or state.status != "released"
+        or state.current_stage is not None
+        or state.error is not None
+        or state.updated_at != row.get("prepared_at")
+        or state.last_operation_id != operation_id
+        or any(
+            item.status != "completed" or item.receipt_sha256 is None
+            for item in state.stages
+        )
+        or set(state.counts) != _ALL_COUNT_KEYS
+        or result.get("status") != "released"
+        or result.get("generation_id") != pointer.get("generation_id")
+        or result.get("release_sha256") != target["release_sha256"]
+        or result.get("stage_8_receipt_sha256")
+        != target["stage_8_receipt_sha256"]
+        or pointer.get("stage_8_receipt_sha256")
+        != target["stage_8_receipt_sha256"]
+        or pointer.get("generation_manifest_sha256")
+        != target["generation_manifest_sha256"]
+        or pointer.get("build_provenance_sha256")
+        != target["build_provenance_sha256"]
+        or stage_eight.receipt_sha256 != target["stage_8_receipt_sha256"]
+        or _persisted_sha256(pointer) != target["release_sha256"]
+    ):
+        raise ValueError("release publication target is inconsistent")
+
+
+def _validate_committed_release_terminal(
+    layout: Any,
+    row: Mapping[str, Any],
+    target: Mapping[str, Any],
+) -> None:
+    if (
+        _file_sha256(layout.config_path) != target["config_sha256"]
+        or _file_sha256(layout.state_path) != target["state_sha256"]
+        or _current_release_descriptor(layout.release_pointer_path)
+        != {
+            "present": True,
+            "bytes": layout.release_pointer_path.stat().st_size,
+            "sha256": target["release_sha256"],
+        }
+    ):
+        raise ValueError("committed release controls are not at the target")
+    audit = _mapping(row["audit"])
+    for name, path in (
+        ("config_history", layout.config_history_path),
+        ("events", layout.events_path),
+    ):
+        target_descriptor = _audit_descriptor_mapping(
+            _mapping(audit[name])["target"]
+        )
+        present = path.is_file()
+        current = path.read_bytes() if present else b""
+        if audit_descriptor(current, present=present) != target_descriptor:
+            raise ValueError("committed release audit is not at the target")
+
+
 def _validate_operation_chronology(
     layout: Any,
     previous: Mapping[str, Any],
     previous_commit: Mapping[str, Any],
     current: Mapping[str, Any],
 ) -> None:
-    if previous["kind"] == "legacy_adoption":
-        raise ValueError("journal operation follows a terminal adoption")
+    if previous["kind"] in {"legacy_adoption", "release_publication"}:
+        raise ValueError("journal operation follows a terminal release")
     previous_state = _mapping(previous["target_state"])
     current_before_state = _mapping(current["before_state"])
     previous_target = _hash_mapping(previous["target"])
-    current_before = _hash_mapping(current["before"])
+    current_before_raw = _mapping(current["before"])
+    current_before = _hash_mapping(
+        {
+            key: value
+            for key, value in current_before_raw.items()
+            if key != "release"
+        }
+    )
     if (
         _utc_timestamp(current["prepared_at"])
         < _utc_timestamp(previous_commit["committed_at"])
@@ -594,6 +818,8 @@ def _validate_committed_adoption_terminal(
     if (
         _file_sha256(layout.config_path) != target["config_sha256"]
         or _file_sha256(layout.state_path) != target["state_sha256"]
+        or _current_release_descriptor(layout.release_pointer_path).get("sha256")
+        != target["release_sha256"]
     ):
         raise ValueError("committed adoption controls are not at the target")
     audit = _mapping(row["audit"])
@@ -641,9 +867,16 @@ def _validate_event(
     elif kind == "checkpoint_rebuild":
         expected_event = "checkpoint_rebuild_started"
         expected_details = {"stage": prepared["result"]["resume_from_stage"]}
-    else:
+    elif kind == "legacy_adoption":
         expected_event = "legacy_asset_adopted"
         expected_details = {"previous_status": "completed"}
+    else:
+        expected_event = "pipeline_released"
+        expected_details = {
+            key: value
+            for key, value in _mapping(prepared["result"]).items()
+            if key != "status"
+        }
     if (
         row.get("operation_id") != operation_id
         or row.get("tenant_id") != layout.tenant_id
@@ -935,11 +1168,54 @@ def _validate_intermediate_authority(
     *,
     history_installed: bool,
     event_installed: bool,
+    before_release: Mapping[str, Any] | None,
 ) -> None:
     config_hash = _file_sha256(layout.config_path)
     state_hash = _file_sha256(layout.state_path)
     before_pair = (before["config_sha256"], before["state_sha256"])
     target_pair = (target["config_sha256"], target["state_sha256"])
+    if row["kind"] == "release_publication":
+        if before_release is None:
+            raise ValueError("release publication lacks prior pointer evidence")
+        pointer = _mapping(_mapping(row["request"])["release_pointer"])
+        current_release = _current_release_descriptor(layout.release_pointer_path)
+        target_release = {
+            "present": True,
+            "bytes": len(_persisted_json_bytes(pointer)),
+            "sha256": target["release_sha256"],
+        }
+        current_pair = (config_hash, state_hash)
+        allowed = {
+            (
+                _release_descriptor_key(before_release),
+                (before["config_sha256"], before["state_sha256"]),
+                False,
+            ),
+            (
+                _release_descriptor_key(target_release),
+                (target["config_sha256"], before["state_sha256"]),
+                False,
+            ),
+            (
+                _release_descriptor_key(target_release),
+                (target["config_sha256"], target["state_sha256"]),
+                False,
+            ),
+            (
+                _release_descriptor_key(target_release),
+                (target["config_sha256"], target["state_sha256"]),
+                True,
+            ),
+        }
+        if (
+            _release_descriptor_key(current_release),
+            current_pair,
+            event_installed,
+        ) not in allowed:
+            raise ValueError("release publication authority order is unreachable")
+        if history_installed:
+            raise ValueError("release publication cannot append configuration history")
+        return
     if row["kind"] == "configuration_revision":
         allowed = {
             before_pair,
@@ -1105,6 +1381,96 @@ def _hash_mapping(value: Any) -> dict[str, Any]:
     return row
 
 
+def _release_descriptor(value: Any) -> dict[str, Any]:
+    descriptor = _mapping(value)
+    _exact_keys(descriptor, {"present", "bytes", "sha256"})
+    if not isinstance(descriptor["present"], bool):
+        raise ValueError("journal release presence is invalid")
+    size = descriptor["bytes"]
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+        raise ValueError("journal release size is invalid")
+    digest = descriptor["sha256"]
+    if descriptor["present"]:
+        if size < 1 or not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+            raise ValueError("journal release hash is invalid")
+    elif size != 0 or digest is not None:
+        raise ValueError("journal absent release descriptor is invalid")
+    return descriptor
+
+
+def _current_release_descriptor(path: Path) -> dict[str, Any]:
+    if path.is_symlink():
+        raise ValueError("journal release pointer is a symlink")
+    if not path.exists():
+        return {"present": False, "bytes": 0, "sha256": None}
+    if not path.is_file():
+        raise ValueError("journal release pointer is not a regular file")
+    data = path.read_bytes()
+    return {
+        "present": True,
+        "bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+
+
+def _validate_adoption_manifest_prefix(
+    layout: Any,
+    row: Mapping[str, Any],
+    *,
+    committed: bool,
+) -> bool:
+    before = _mapping(row["before_manifests"])
+    targets = _mapping(row["target_manifests"])
+    names_and_paths = (
+        ("asset_manifest", layout.manifest_path),
+        (
+            "dataset_manifest",
+            layout.artifact_path(
+                PipelineStage.DATASET_SPLITS,
+                "dataset_manifest.json",
+            ),
+        ),
+        (
+            "generation_manifest",
+            layout.artifact_path(
+                PipelineStage.DATASET_SPLITS,
+                "generation_manifest.json",
+            ),
+        ),
+    )
+    current = tuple(
+        _release_descriptor_key(_current_release_descriptor(path))
+        for _, path in names_and_paths
+    )
+    before_keys = tuple(
+        _release_descriptor_key(_release_descriptor(before[name]))
+        for name, _ in names_and_paths
+    )
+    target_keys = tuple(
+        _release_descriptor_key(
+            {
+                "present": True,
+                "bytes": len(_persisted_json_bytes(_mapping(targets[name]))),
+                "sha256": _persisted_sha256(_mapping(targets[name])),
+            }
+        )
+        for name, _ in names_and_paths
+    )
+    allowed = {
+        before_keys,
+        (target_keys[0], before_keys[1], before_keys[2]),
+        (target_keys[0], target_keys[1], before_keys[2]),
+        target_keys,
+    }
+    if current not in allowed or (committed and current != target_keys):
+        raise ValueError("adoption manifests are outside their ordered prefix")
+    return current == target_keys
+
+
+def _release_descriptor_key(value: Mapping[str, Any]) -> tuple[Any, ...]:
+    return (value["present"], value["bytes"], value["sha256"])
+
+
 def _mapping(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError("journal object is invalid")
@@ -1137,8 +1503,14 @@ def _utc_timestamp(value: Any) -> datetime:
 
 
 def _persisted_sha256(payload: Mapping[str, Any]) -> str:
-    serialized = json.dumps(dict(payload), indent=2, sort_keys=True) + "\n"
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    return hashlib.sha256(_persisted_json_bytes(payload)).hexdigest()
+
+
+def _persisted_json_bytes(payload: Mapping[str, Any]) -> bytes:
+    serialized = (
+        json.dumps(dict(payload), indent=2, sort_keys=True, allow_nan=False) + "\n"
+    )
+    return serialized.encode("utf-8")
 
 
 def _file_sha256(path: Path) -> str:

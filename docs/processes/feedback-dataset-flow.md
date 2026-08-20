@@ -148,8 +148,9 @@ history files use same-directory temporary files, flush and `fsync`,
 copy, or pre-replacement write leaves the previous single file intact and
 removes its temporary file. One deterministic collection-level file lock per
 asset protects every high-level mutation across processes. Configuration
-revision, checkpoint rebuild, and legacy adoption use an append-only recovery
-journal whose prepared payload rolls forward idempotently.
+revision, checkpoint rebuild, native release publication, and legacy adoption
+use an append-only recovery journal whose prepared payload rolls forward
+idempotently.
 Before roll-forward, recovery validates the complete version 2 journal schema,
 unique operation identity, authenticated raw pre-operation config/state,
 tenant/asset-bound target config and state, exact nested request/result/history/
@@ -158,9 +159,14 @@ strict contiguous prepare/commit ordering, and byte-exact before/target prefix
 descriptors for both append-only audit logs. Only writer-reachable on-disk
 control and audit phases are accepted. Every later operation is chained to the
 prior target mutation/config identity and audit chronology; ordinary pipeline
-stage events may extend the event prefix between mutations. A committed legacy
-adoption is the terminal operation and requires exact target config/state,
-every target receipt, exact audit prefixes, and its commit. Standalone candidate
+stage events may extend the event prefix between mutations. Native publication
+admits only the reachable pointer/state/event phases: all before; pointer
+target; pointer and state target; or pointer, state, and event target. A
+committed release requires the exact pointer, configuration, configuration
+history, released state, event prefix, commit, and no successor. A committed
+legacy adoption is likewise terminal and requires exact target config/state,
+every target receipt, pointer and generation/provenance link, exact audit
+prefixes, and its commit. Standalone candidate
 and persisted release verification call this same complete validator. With no
 outstanding operation, a final committed configuration revision or checkpoint
 rebuild requires its exact target configuration and complete target
@@ -175,10 +181,28 @@ mixed-version journals require explicit repair because they do not contain
 enough before-state evidence for safe automatic recovery. A parseable,
 rehashed, but inconsistent journal therefore fails before any authority write.
 
-These are single-file and authority-ordering guarantees. Stage 8 verifies all
-four current catalog copies before `released`, but Task 3 does not make those
-four replacements one atomic publication switch. Content-addressed generations
-and the final atomic release pointer are separate release-publication work.
+Stage 8 installs the four consumer files in one immutable content-addressed
+generation. It validates and syncs a same-filesystem hidden temporary directory
+before rename, reuses only exact existing content, and never overwrites a
+collision. `release.json` is the sole mutable catalog authority and changes by
+one atomic replacement only after the generation, manifests, build provenance,
+and Stage 8 receipt agree. The journal then installs released state, appends
+the event, and commits. Readers capture the pointer once and return a frozen,
+fully validated snapshot, so they see the complete old or complete new
+generation. Old generations and the pointer survive invalidation; this
+lifecycle has no garbage collection.
+
+Stages 3–7 always write receipt-backed `provider_calls.jsonl`, including an
+empty ledger for zero calls. Resume aggregates authenticated earlier ledgers
+instead of rerunning providers. Stage-local provenance records provider
+identity, prompt hashes/revisions, code inventory, calls, seeds, and algorithms.
+`build_provenance.json` separates deterministic identity/fingerprint from
+audit-only timestamp, Git commit/tree and dirt, request IDs, usage, and retries.
+Identity covers every declared source member, resolved defaults, runtime
+dependencies, copied input hashes, lineage, provider/model/settings, prompts,
+seeds, and algorithms. Strict allowlists and explicit unavailable or
+not-applicable markers exclude protected prompt/request/response bodies,
+headers, secrets, and exceptions.
 
 ### Updating decisions on resume
 
@@ -497,13 +521,14 @@ Each new asset contains:
 | `stages/06_label_inference/` | Inferred labels and cases plus unsupported-cluster reports |
 | `stages/07_synthetic_coverage/` | Candidate, accepted, rejected, and filter-audit synthetic artifacts |
 | `stages/08_dataset_splits/` | Authoritative component and combined train, validation, test, regression, and triage files |
-| `datasets/evaluation_assets/<asset_id>/` | Stage 8 copies of `train.jsonl`, `validation.jsonl`, `test.jsonl`, and `regression_trusted.jsonl` for evaluation consumers |
+| `datasets/evaluation_assets/<asset_id>/release.json` | Sole mutable pointer to the current verified consumer generation |
+| `datasets/evaluation_assets/<asset_id>/generations/sha256-<hash>/` | Immutable generation manifest and combined `train`, `validation`, `test`, and `regression_trusted` JSONL files |
 
 The complete `evaluation_assets/<asset_id>/` runtime tree—including copied
 inputs, checkpoints, state, events, and stage artifacts—is local-only and has
-no Studio-managed remote backend. Stage 8 also writes local consumer copies
-under the ordinary tenant `datasets/` catalog. The Studio never uploads those
-copies; they participate in a separate `customer-data --scope derived` sync
+no Studio-managed remote backend. Stage 8 also writes local immutable consumer
+generations under the ordinary tenant `datasets/` catalog. The Studio never
+uploads them; they participate in a separate `customer-data --scope derived` sync
 only when the tenant storage configuration places `datasets/` inside its
 `derived_local` tree.
 
@@ -511,7 +536,12 @@ Assets created before the stage-oriented layout remain readable through the
 compatibility mapper. Mutable legacy work rebuilds status-only checkpoints
 because no receipt exists. A pre-v2 top-level `completed` asset is not usable as
 a release until explicit adoption validates all eight stages, source hashes,
-manifests, and current catalog copies. Existing `raw_inputs/`,
+manifests, and current catalog copies, creates historical-unavailable
+provenance, and publishes one immutable generation as its single terminal WAL
+operation. Old catalog copies remain only as nonauthoritative historical bytes.
+An interim v2 released asset without `release.json` is unpublished and must be
+repaired from a verified backup or rebuilt as a new version; adoption is not a
+migration. Existing `raw_inputs/`,
 `prepared_inputs/`, `decision_assets/`, `review_queues/`, and
 `dataset_splits/` directories are not moved.
 
@@ -582,15 +612,16 @@ python -m hephaestus.cli assets adopt \
 ```
 
 Successful adoption writes historical receipts with unavailable provenance for
-facts the old build did not record, then transitions to `released`. Before any
-write it strictly validates canonical source/prepared identity, guidelines or
-legacy rubrics, clusters, coverage references, inferred/synthetic provenance,
+facts the old build did not record, materializes a generation, and installs the
+pointer, released state, event, and commit as one terminal operation. Before
+preparing the WAL it strictly validates canonical source/prepared identity,
+guidelines or legacy rubrics, clusters, coverage references,
+inferred/synthetic provenance,
 case schemas, finite numeric domains, exact deterministic synthetic
 accepted/rejected/issue outputs (including an empty candidate set), group-safe
 split partitions, trusted-only regression data, manifests, counts, and the four
-catalog copies. Invalid adoption changes no authority and directs the operator
-to repair or create a new asset. The Studio exposes the same locked core
-operation.
+catalog copies. Invalid adoption changes no authority; a valid prepared crash
+rolls forward idempotently. The Studio exposes the same locked core operation.
 
 Pass optional decision flags to revise and resume in one command:
 

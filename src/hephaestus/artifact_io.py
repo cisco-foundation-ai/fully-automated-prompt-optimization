@@ -20,7 +20,13 @@ def atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
     """Atomically replace one JSON file after durable serialization."""
 
     def produce(handle: TextIO) -> None:
-        json.dump(dict(payload), handle, indent=2, sort_keys=True)
+        json.dump(
+            dict(payload),
+            handle,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
         handle.write("\n")
 
     _atomic_write_text(path, produce)
@@ -34,7 +40,9 @@ def atomic_write_jsonl(
 
     def produce(handle: TextIO) -> None:
         for row in rows:
-            handle.write(json.dumps(dict(row), sort_keys=True) + "\n")
+            handle.write(
+                json.dumps(dict(row), sort_keys=True, allow_nan=False) + "\n"
+            )
 
     _atomic_write_text(path, produce)
 
@@ -78,7 +86,7 @@ def atomic_append_jsonl(path: Path, payload: Mapping[str, Any]) -> None:
                     needs_newline = source_handle.read(1) != b"\n"
         if needs_newline:
             handle.write(b"\n")
-        serialized = json.dumps(dict(payload), sort_keys=True) + "\n"
+        serialized = json.dumps(dict(payload), sort_keys=True, allow_nan=False) + "\n"
         handle.write(serialized.encode("utf-8"))
 
     _atomic_write_binary(path, produce)
@@ -104,7 +112,7 @@ def _atomic_write_text(
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_path, path)
-        _sync_parent_directory(path.parent)
+        sync_directory(path.parent)
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
@@ -129,13 +137,13 @@ def _atomic_write_binary(
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_path, path)
-        _sync_parent_directory(path.parent)
+        sync_directory(path.parent)
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
 
 
-def _sync_parent_directory(directory: Path) -> None:
+def sync_directory(directory: Path) -> None:
     """Persist a successful rename in directory metadata on POSIX systems."""
     if os.name == "nt":
         return

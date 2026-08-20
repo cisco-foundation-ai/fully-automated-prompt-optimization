@@ -4,13 +4,14 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import multiprocessing
 import shutil
 import sys
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 import pytest
 
@@ -58,6 +59,60 @@ class _NeverCalledRubricProvider:
     def generate_json(self, system_prompt: str, payload: dict[str, Any]) -> dict[str, Any]:
         self.calls += 1
         raise AssertionError("busy pipeline reached the rubric provider")
+
+
+def test_studio_production_scope_has_no_direct_file_writers() -> None:
+    """Studio production writes stay centralized in durable artifact primitives."""
+    source_root = Path(__file__).resolve().parents[1] / "src" / "hephaestus"
+    paths = [
+        *sorted((source_root / "evaluation_assets").glob("*.py")),
+        source_root / "webui" / "data.py",
+    ]
+    violations = []
+    for path in paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Attribute) and node.func.attr in {
+                "write_text",
+                "write_bytes",
+            }:
+                violations.append(f"{path.name}:{node.lineno}:{node.func.attr}")
+                continue
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "dump":
+                violations.append(f"{path.name}:{node.lineno}:dump")
+                continue
+            function_name = (
+                node.func.id
+                if isinstance(node.func, ast.Name)
+                else node.func.attr
+                if isinstance(node.func, ast.Attribute)
+                else ""
+            )
+            if function_name != "open":
+                continue
+            positional_modes = (
+                node.args[1:2]
+                if isinstance(node.func, ast.Name)
+                else node.args[:1]
+            )
+            keyword_modes = [
+                item.value for item in node.keywords if item.arg == "mode"
+            ]
+            mode = next(
+                (
+                    argument.value
+                    for argument in [*positional_modes, *keyword_modes]
+                    if isinstance(argument, ast.Constant)
+                    and isinstance(argument.value, str)
+                ),
+                "r",
+            )
+            if any(flag in mode for flag in "wax+"):
+                violations.append(f"{path.name}:{node.lineno}:open({mode})")
+
+    assert violations == []
 
 
 class _NeverCalledEmbeddingProvider:
@@ -763,10 +818,25 @@ def test_revised_rubric_model_constructs_only_the_new_default_after_lock(
     feedback, unlabeled = _write_input_pair(tenants_root)
     constructed: list[str] = []
 
-    def rubric_factory(*, model: str, **_: Any) -> _SuccessfulRubricProvider:
+    def rubric_factory(
+        *,
+        model: str,
+        max_output_tokens: int,
+        **_: Any,
+    ) -> _SuccessfulRubricProvider:
         constructed.append(model)
         provider = _SuccessfulRubricProvider()
         provider.model = model
+        provider.timeout_seconds = 300
+        provider.max_retries = 3
+        provider.retry_backoff_seconds = 2
+        provider.max_output_tokens = max_output_tokens
+        provider.temperature = 0.0
+        provider.response_format = "json_object"
+        provider.seed = {
+            "status": "not_applicable",
+            "reason": "provider_does_not_use_sampling",
+        }
         return provider
 
     monkeypatch.setattr(pipeline_module, "OpenAIRubricProvider", rubric_factory)
@@ -821,6 +891,15 @@ def test_embedding_revision_constructs_only_the_selected_default_provider(
         constructed.append(model)
         provider = _SuccessfulEmbeddingProvider()
         provider.model = model
+        provider.timeout_seconds = 300
+        provider.max_retries = 3
+        provider.retry_backoff_seconds = 2
+        provider.batch_size = 128
+        provider.response_format = "dense_float_vectors"
+        provider.seed = {
+            "status": "not_applicable",
+            "reason": "provider_does_not_use_sampling",
+        }
         return provider
 
     monkeypatch.setattr(
@@ -910,6 +989,40 @@ def test_injected_provider_identity_is_receipted_and_manifested_as_actual(
     assert {row["guideline_provider"] for row in evidence} == {"injected-rubric"}
     assert {row["guideline_provider"] for row in guidelines} == {"injected-rubric"}
     assert {row["rubric_provider"] for row in inferred} == {"injected-rubric"}
+
+
+def test_released_verification_reaggregates_authenticated_provider_ledgers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Release verification binds build calls to every receipt-backed ledger."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    released = pipeline.run()
+    seen: dict[str, list[dict[str, Any]]] = {}
+    original = durability_module.validate_build_provenance_call_ledgers
+
+    def capture(
+        provenance: Mapping[str, Any],
+        ledgers: Mapping[str, Sequence[Mapping[str, Any]]],
+    ) -> None:
+        seen.update({stage: [dict(row) for row in rows] for stage, rows in ledgers.items()})
+        original(provenance, ledgers)
+
+    monkeypatch.setattr(
+        durability_module,
+        "validate_build_provenance_call_ledgers",
+        capture,
+    )
+
+    verify_released_asset(pipeline.layout, released)
+
+    assert set(seen) == {
+        "rubric_extraction",
+        "intent_clustering",
+        "coverage_decisions",
+        "label_inference",
+        "synthetic_coverage",
+    }
 
 
 def test_injection_missing_required_provider_name_is_rejected_before_calls(
@@ -1264,9 +1377,7 @@ def test_raw_snapshot_floor_rejects_before_revision_or_default_construction(
     )
     pipeline.run()
     layout = pipeline.layout
-    state = layout.load_state()
-    state.status = "failed"
-    layout.save_state(state)
+    _make_released_checkpoint_mutable(layout)
     if damage == "missing":
         layout.feedback_path.unlink()
     else:
@@ -1309,9 +1420,7 @@ def test_direct_revision_rejects_invalid_raw_snapshot_without_authority_write(
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
-    state = layout.load_state()
-    state.status = "failed"
-    layout.save_state(state)
+    _make_released_checkpoint_mutable(layout)
     if damage == "missing":
         layout.feedback_path.unlink()
     else:
@@ -1331,9 +1440,7 @@ def test_direct_noop_revision_accepts_valid_raw_snapshot_without_write(
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
-    state = layout.load_state()
-    state.status = "failed"
-    layout.save_state(state)
+    _make_released_checkpoint_mutable(layout)
     before = _authority_bytes(layout)
 
     result = layout.revise_config({})
@@ -1393,8 +1500,7 @@ def test_completed_stage_one_cannot_be_relabeled_as_never_receipted(
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
-    state = layout.load_state()
-    state.status = "failed"
+    state = _make_released_checkpoint_mutable(layout)
     state.stages[0].status = "failed"
     state.stages[0].receipt_sha256 = None
     layout.save_state(state)
@@ -1425,9 +1531,7 @@ def test_claimed_raw_snapshot_floor_requires_complete_receipt_authority(
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
-    state = layout.load_state()
-    state.status = "failed"
-    layout.save_state(state)
+    _make_released_checkpoint_mutable(layout)
     receipt_path = layout.receipt_path(PipelineStage.RAW_INPUTS)
 
     if receipt_damage == "missing":
@@ -1508,9 +1612,7 @@ def test_default_provider_constructors_are_not_called_on_rejected_run(
     pipeline.run()
     layout = pipeline.layout
     if rejection == "busy":
-        state = layout.load_state()
-        state.status = "failed"
-        layout.save_state(state)
+        _make_released_checkpoint_mutable(layout)
     elif rejection == "corrupt":
         target = layout.artifact_path(
             PipelineStage.INTENT_CLUSTERING,
@@ -1595,21 +1697,21 @@ def test_stage_specification_exhaustively_declares_required_artifacts() -> None:
             "regression_trusted.jsonl",
             "triage_hold.jsonl",
             "dataset_manifest.json",
+            "generation_manifest.json",
         },
     }
 
     assert set(STAGE_SPECIFICATIONS) == set(PipelineStage)
     for stage, required_outputs in expected.items():
         assert set(STAGE_SPECIFICATIONS[stage].required_outputs) == required_outputs
+        assert STAGE_SPECIFICATIONS[stage].required_evidence_outputs == (
+            "provenance.json",
+        )
     assert STAGE_SPECIFICATIONS[PipelineStage.DATASET_SPLITS].required_asset_outputs == (
         "asset_manifest.json",
+        "build_provenance.json",
     )
-    assert STAGE_SPECIFICATIONS[PipelineStage.DATASET_SPLITS].required_catalog_outputs == (
-        "train.jsonl",
-        "validation.jsonl",
-        "test.jsonl",
-        "regression_trusted.jsonl",
-    )
+    assert STAGE_SPECIFICATIONS[PipelineStage.DATASET_SPLITS].required_catalog_outputs == ()
 
 
 def test_pipeline_writes_receipt_commit_markers_and_releases(tmp_path: Path) -> None:
@@ -1639,12 +1741,55 @@ def test_pipeline_writes_receipt_commit_markers_and_releases(tmp_path: Path) -> 
         assert receipt["provider_identity_sha256"]
         assert receipt["provider_calls_sha256"]
         assert receipt["code_sha256"]
+        if stage == PipelineStage.DATASET_SPLITS:
+            assert receipt["build_provenance_sha256"] == file_sha256(
+                pipeline.layout.build_provenance_path
+            )
+            assert receipt["generation_manifest_sha256"] == file_sha256(
+                pipeline.layout.artifact_path(
+                    PipelineStage.DATASET_SPLITS,
+                    "generation_manifest.json",
+                )
+            )
         assert {item["path"] for item in receipt["outputs"]} >= {
             pipeline.layout.artifact_path(stage, name)
             .relative_to(pipeline.layout.root)
             .as_posix()
             for name in STAGE_SPECIFICATIONS[stage].required_outputs
         }
+    ledger_rows = []
+    provider_stages = tuple(PipelineStage)[2:7]
+    for stage in provider_stages:
+        ledger_path = pipeline.layout.artifact_path(stage, "provider_calls.jsonl")
+        assert ledger_path.is_file()
+        rows = _read_jsonl(ledger_path)
+        assert [row["ordinal"] for row in rows] == list(range(1, len(rows) + 1))
+        assert all(
+            row["transport_identity"]
+            == {
+                "status": "unavailable",
+                "reason": "optional_metadata_protocol_absent",
+            }
+            for row in rows
+        )
+        stage_provenance = json.loads(
+            pipeline.layout.artifact_path(stage, "provenance.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert stage_provenance["calls"] == rows
+        ledger_rows.extend(rows)
+    assert _read_jsonl(
+        pipeline.layout.artifact_path(
+            PipelineStage.SYNTHETIC_COVERAGE,
+            "provider_calls.jsonl",
+        )
+    ) == []
+    build_provenance = json.loads(
+        pipeline.layout.build_provenance_path.read_text(encoding="utf-8")
+    )
+    assert len(build_provenance["identity"]["calls"]) == len(ledger_rows)
+    assert len(build_provenance["audit"]["calls"]) == len(ledger_rows)
 
 
 _STAGE_MUTATION_TARGETS = {
@@ -1668,9 +1813,7 @@ def test_mutable_resume_rebuilds_from_first_missing_output(
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
-    state = layout.load_state()
-    state.status = "failed"
-    layout.save_state(state)
+    _make_released_checkpoint_mutable(layout)
     boundary = list(PipelineStage).index(stage)
     prefix_receipts = {
         prior: layout.receipt_path(prior).read_bytes()
@@ -1704,9 +1847,7 @@ def test_mutable_resume_rebuilds_from_first_corrupt_output(
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
-    state = layout.load_state()
-    state.status = "failed"
-    layout.save_state(state)
+    _make_released_checkpoint_mutable(layout)
     boundary = list(PipelineStage).index(stage)
     prefix_receipts = {
         prior: layout.receipt_path(prior).read_bytes()
@@ -1811,9 +1952,7 @@ def test_downstream_revision_keeps_projected_receipt_prefix_valid(
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
-    state = layout.load_state()
-    state.status = "failed"
-    layout.save_state(state)
+    _make_released_checkpoint_mutable(layout)
     prefix = {
         stage: layout.receipt_path(stage).read_bytes()
         for stage in list(PipelineStage)[:7]
@@ -1858,6 +1997,24 @@ def test_released_verification_does_not_require_current_code_identity(
             rubric_provider=_NeverCalledRubricProvider(),
             embedding_provider=_NeverCalledEmbeddingProvider(),
         ).run()
+
+
+def test_interim_v2_release_without_pointer_fails_closed_with_repair_guidance(
+    tmp_path: Path,
+) -> None:
+    """Task 3 releases without a publication pointer are not auto-adopted."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    released = pipeline.run()
+    pipeline.layout.release_pointer_path.unlink()
+
+    with pytest.raises(
+        EvaluationAssetIntegrityError,
+        match=(
+            "this interim v2 release has no release.json publication pointer; "
+            "repair it from a verified backup or rebuild it as a new asset version"
+        ),
+    ):
+        verify_released_asset(pipeline.layout, released)
 
 
 @pytest.mark.parametrize(
@@ -1939,9 +2096,7 @@ def test_released_verification_replays_receipt_config_history(
     pipeline, rubric, embedding = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
-    state = layout.load_state()
-    state.status = "failed"
-    layout.save_state(state)
+    _make_released_checkpoint_mutable(layout)
     revised = EvaluationAssetPipeline(
         layout,
         rubric_provider=rubric,
@@ -2191,9 +2346,7 @@ def test_native_terminal_candidate_requires_revision_journal_authority(
     """Terminal verification rejects missing WAL evidence before release writes."""
     pipeline, rubric, embedding = _create_pipeline(tmp_path)
     pipeline.run()
-    state = pipeline.layout.load_state()
-    state.status = "failed"
-    pipeline.layout.save_state(state)
+    _make_released_checkpoint_mutable(pipeline.layout)
     resumed = EvaluationAssetPipeline(
         pipeline.layout,
         rubric_provider=rubric,
@@ -2211,14 +2364,15 @@ def test_native_terminal_candidate_requires_revision_journal_authority(
         return receipt
 
     before_verification: dict[str, dict[str, bytes]] = {}
-    real_verify = pipeline_module.verify_release_candidate
+    real_verify = workspace_module.verify_release_candidate
 
     def capture_candidate_authority(
         layout: EvaluationAssetLayout,
         candidate: PipelineState,
+        **kwargs: Any,
     ) -> None:
         before_verification["authority"] = _authority_bytes(layout)
-        real_verify(layout, candidate)
+        real_verify(layout, candidate, **kwargs)
 
     monkeypatch.setattr(
         pipeline_module,
@@ -2226,7 +2380,7 @@ def test_native_terminal_candidate_requires_revision_journal_authority(
         damage_journal_after_final_receipt,
     )
     monkeypatch.setattr(
-        pipeline_module,
+        workspace_module,
         "verify_release_candidate",
         capture_candidate_authority,
     )
@@ -2295,7 +2449,7 @@ def test_native_release_verifies_the_persisted_terminal_before_return(
     """The successful return follows verification of exact persisted authority."""
     pipeline, _, _ = _create_pipeline(tmp_path)
     persisted_statuses: list[str] = []
-    real_verify = pipeline_module.verify_released_asset
+    real_verify = workspace_module.verify_released_asset
 
     def record_persisted_verification(
         layout: EvaluationAssetLayout,
@@ -2307,7 +2461,7 @@ def test_native_release_verifies_the_persisted_terminal_before_return(
         real_verify(layout, state)
 
     monkeypatch.setattr(
-        pipeline_module,
+        workspace_module,
         "verify_released_asset",
         record_persisted_verification,
     )
@@ -2315,7 +2469,8 @@ def test_native_release_verifies_the_persisted_terminal_before_return(
     released = pipeline.run()
 
     assert released.status == "released"
-    assert persisted_statuses == ["released"]
+    assert persisted_statuses
+    assert set(persisted_statuses) == {"released"}
 
 
 @pytest.mark.parametrize(
@@ -2342,9 +2497,7 @@ def test_released_verification_authenticates_exact_config_history_records(
     """Every created/updated audit field and exact row schema is release evidence."""
     pipeline, rubric, embedding = _create_pipeline(tmp_path)
     pipeline.run()
-    state = pipeline.layout.load_state()
-    state.status = "failed"
-    pipeline.layout.save_state(state)
+    _make_released_checkpoint_mutable(pipeline.layout)
     EvaluationAssetPipeline(
         pipeline.layout,
         rubric_provider=rubric,
@@ -2484,9 +2637,7 @@ def test_recovery_journal_corruption_fails_closed_before_any_roll_forward(
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
-    state = layout.load_state()
-    state.status = "failed"
-    layout.save_state(state)
+    _make_released_checkpoint_mutable(layout)
 
     def stop_after_prepare(name: str) -> None:
         if name == "after_prepared_journal":
@@ -2595,9 +2746,7 @@ def test_rehashed_revision_journal_semantic_corruption_fails_before_writes(
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
-    prior_state = layout.load_state()
-    prior_state.status = "failed"
-    layout.save_state(prior_state)
+    _make_released_checkpoint_mutable(layout)
 
     def stop_after_prepare(name: str) -> None:
         if name == "after_prepared_journal":
@@ -2695,9 +2844,7 @@ def test_revision_journal_rejects_impossible_state_before_config_intermediate(
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
-    state = layout.load_state()
-    state.status = "failed"
-    layout.save_state(state)
+    _make_released_checkpoint_mutable(layout)
 
     def stop_after_prepare(name: str) -> None:
         if name == "after_prepared_journal":
@@ -2742,6 +2889,7 @@ def test_revision_resume_is_earliest_of_existing_failure_and_dependency_boundary
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
+    _make_released_checkpoint_mutable(layout)
     state = _failed_prefix_state(layout.load_state(), failed_stage)
     artifact_io.atomic_write_json(layout.state_path, state.to_dict())
 
@@ -2775,9 +2923,7 @@ def test_rehashed_revision_target_must_be_exactly_derived_from_before_state(
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
-    state = layout.load_state()
-    state.status = "failed"
-    layout.save_state(state)
+    _make_released_checkpoint_mutable(layout)
     fault_name = (
         "after_prepared_journal"
         if phase == "prepared"
@@ -2969,9 +3115,8 @@ def test_final_committed_mutation_recovery_allows_pipeline_advancement(
     prepared = [
         row
         for row in _read_jsonl(layout.recovery_journal_path)
-        if row["phase"] == "prepared"
+        if row["phase"] == "prepared" and row["kind"] == operation_kind
     ][-1]
-    assert prepared["kind"] == operation_kind
     assert (
         prepared["audit"]["events"]["target"]["row_count"]
         < len(_read_jsonl(layout.events_path))
@@ -2990,9 +3135,7 @@ def test_committed_revision_prefix_with_outstanding_prepare_recovers(
 ) -> None:
     """A final outstanding prepare governs current controls after a valid prefix."""
     layout = _release_with_config_revisions(tmp_path, revision_count=1)
-    state = layout.load_state()
-    state.status = "failed"
-    layout.save_state(state)
+    _make_released_checkpoint_mutable(layout)
 
     def stop_after_prepare(name: str) -> None:
         if name == "after_prepared_journal":
@@ -3017,9 +3160,7 @@ def test_recovery_rejects_reordered_committed_prefix_before_outstanding_prepare(
 ) -> None:
     """An outstanding operation cannot hide a reordered committed prefix."""
     layout = _release_with_config_revisions(tmp_path, revision_count=2)
-    state = layout.load_state()
-    state.status = "failed"
-    layout.save_state(state)
+    _make_released_checkpoint_mutable(layout)
 
     def stop_after_prepare(name: str) -> None:
         if name == "after_prepared_journal":
@@ -3097,9 +3238,7 @@ def test_recovery_authenticates_complete_prior_audit_prefixes(
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
-    state = layout.load_state()
-    state.status = "failed"
-    layout.save_state(state)
+    _make_released_checkpoint_mutable(layout)
 
     def stop_at_phase(name: str) -> None:
         if name == fault_name:
@@ -3135,9 +3274,7 @@ def test_recovery_journal_requires_strict_jsonl(
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
-    state = layout.load_state()
-    state.status = "failed"
-    layout.save_state(state)
+    _make_released_checkpoint_mutable(layout)
 
     def stop_after_prepare(name: str) -> None:
         if name == "after_prepared_journal":
@@ -3175,9 +3312,7 @@ def test_recovery_journal_v1_authority_requires_explicit_repair(
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
-    state = layout.load_state()
-    state.status = "failed"
-    layout.save_state(state)
+    _make_released_checkpoint_mutable(layout)
 
     def stop_after_prepare(name: str) -> None:
         if name == "after_prepared_journal":
@@ -3216,6 +3351,7 @@ def test_adoption_recovery_accepts_every_receipt_prefix(
 ) -> None:
     """Crash recovery accepts exactly Stage 1 through Stage k intermediates."""
     layout, prepared = _prepared_adoption(tmp_path, monkeypatch)
+    _install_adoption_target_manifests(layout, prepared)
     for stage in list(PipelineStage)[:installed_count]:
         artifact_io.atomic_write_json(
             layout.receipt_path(stage),
@@ -3244,6 +3380,7 @@ def test_adoption_recovery_rejects_nonprefix_receipt_intermediates(
 ) -> None:
     """Middle, suffix, and gapped adoption receipt sets are never authoritative."""
     layout, prepared = _prepared_adoption(tmp_path, monkeypatch)
+    _install_adoption_target_manifests(layout, prepared)
     for stage in installed_stages:
         artifact_io.atomic_write_json(
             layout.receipt_path(stage),
@@ -3266,9 +3403,7 @@ def test_recovery_journal_rejects_commit_that_precedes_its_prepare(
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
-    state = layout.load_state()
-    state.status = "failed"
-    layout.save_state(state)
+    _make_released_checkpoint_mutable(layout)
 
     def stop_after_prepare(name: str) -> None:
         if name == "after_prepared_journal":
@@ -3308,9 +3443,7 @@ def test_rehashed_checkpoint_journal_semantics_fail_before_writes(
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
-    state = layout.load_state()
-    state.status = "failed"
-    layout.save_state(state)
+    _make_released_checkpoint_mutable(layout)
     target = layout.artifact_path(
         PipelineStage.COVERAGE_DECISIONS,
         "intent_matches.jsonl",
@@ -3460,9 +3593,7 @@ def test_missing_raw_snapshot_is_not_rebuildable(tmp_path: Path) -> None:
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
-    state = layout.load_state()
-    state.status = "failed"
-    layout.save_state(state)
+    _make_released_checkpoint_mutable(layout)
     layout.feedback_path.unlink()
     before = _authority_bytes(layout)
 
@@ -3496,9 +3627,7 @@ def test_revision_recovery_rolls_forward_after_each_interruption(
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
-    state = layout.load_state()
-    state.status = "failed"
-    layout.save_state(state)
+    state = _make_released_checkpoint_mutable(layout)
     prefix_receipts = {
         stage: layout.receipt_path(stage).read_bytes()
         for stage in list(PipelineStage)[:4]
@@ -3573,9 +3702,7 @@ def test_revision_prepares_journal_before_changing_control_authority(
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
-    state = layout.load_state()
-    state.status = "failed"
-    layout.save_state(state)
+    _make_released_checkpoint_mutable(layout)
     before = {
         path.name: path.read_bytes()
         for path in (
@@ -3627,9 +3754,7 @@ def test_checkpoint_rebuild_recovery_marks_stale_suffix_nonauthoritative(
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
-    state = layout.load_state()
-    state.status = "failed"
-    layout.save_state(state)
+    _make_released_checkpoint_mutable(layout)
     target = layout.artifact_path(
         PipelineStage.COVERAGE_DECISIONS,
         "intent_matches.jsonl",
@@ -4403,6 +4528,196 @@ def test_legacy_adoption_recovers_installed_nonauthoritative_receipts(
     assert phases == ["prepared", "committed"]
 
 
+@pytest.mark.parametrize(
+    "fault_name",
+    [
+        "after_generation_install",
+        "after_prepared_journal",
+        "after_adoption_asset_manifest_replace",
+        "after_adoption_dataset_manifest_replace",
+        "after_adoption_generation_manifest_replace",
+        "after_receipts_install",
+        "after_adoption_pointer_replace",
+        "after_state_replace",
+        "after_event_append",
+    ],
+)
+def test_legacy_adoption_fault_phases_recover_as_one_terminal_operation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault_name: str,
+) -> None:
+    """Pre-v2 adoption retries or recovers without chaining publication WAL."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+
+    def inject(name: str) -> None:
+        if name == fault_name:
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", inject)
+    with pytest.raises(_InjectedFault, match=fault_name):
+        layout.adopt_legacy()
+
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+    if fault_name == "after_generation_install":
+        assert layout.load_state().legacy_completed
+        assert not layout.recovery_journal_path.exists()
+        adopted = layout.adopt_legacy()
+    else:
+        prepared = [
+            row
+            for row in _read_jsonl(layout.recovery_journal_path)
+            if row.get("kind") == "legacy_adoption"
+            and row.get("phase") == "prepared"
+        ]
+        assert len(prepared) == 1
+        assert layout.recover() == [prepared[0]["operation_id"]]
+        adopted = layout.load_state()
+
+    assert adopted.status == "released"
+    verify_released_asset(layout, adopted)
+    journal = _read_jsonl(layout.recovery_journal_path)
+    assert [row["kind"] for row in journal] == [
+        "legacy_adoption",
+        "legacy_adoption",
+    ]
+    assert [row["phase"] for row in journal] == ["prepared", "committed"]
+    assert adopted.last_operation_id == journal[0]["operation_id"]
+
+
+def test_adoption_recovery_rejects_impossible_manifest_prefix_without_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dataset-manifest target cannot precede the asset-manifest target."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+
+    def stop_after_prepare(name: str) -> None:
+        if name == "after_prepared_journal":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", stop_after_prepare)
+    with pytest.raises(_InjectedFault):
+        layout.adopt_legacy()
+    prepared = _read_jsonl(layout.recovery_journal_path)[0]
+    artifact_io.atomic_write_json(
+        layout.artifact_path(
+            PipelineStage.DATASET_SPLITS,
+            "dataset_manifest.json",
+        ),
+        prepared["target_manifests"]["dataset_manifest"],
+    )
+    before = _authority_bytes(layout)
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        layout.recover()
+
+    assert _authority_bytes(layout) == before
+
+
+@pytest.mark.parametrize(
+    "unreachable_phase",
+    ["receipt", "pointer", "state"],
+)
+def test_adoption_recovery_rejects_authority_before_manifests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unreachable_phase: str,
+) -> None:
+    """Receipts, pointer, and state cannot precede all adoption manifests."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+
+    def stop_after_prepare(name: str) -> None:
+        if name == "after_prepared_journal":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", stop_after_prepare)
+    with pytest.raises(_InjectedFault):
+        layout.adopt_legacy()
+    prepared = _read_jsonl(layout.recovery_journal_path)[0]
+    stages = list(PipelineStage)
+    install_count = 1 if unreachable_phase == "receipt" else len(stages)
+    for stage in stages[:install_count]:
+        artifact_io.atomic_write_json(
+            layout.receipt_path(stage),
+            prepared["target_receipts"][stage.value],
+        )
+    if unreachable_phase in {"pointer", "state"}:
+        artifact_io.atomic_write_json(
+            layout.release_pointer_path,
+            prepared["request"]["release_pointer"],
+        )
+    if unreachable_phase == "state":
+        artifact_io.atomic_write_json(layout.state_path, prepared["target_state"])
+    before = _authority_bytes(layout)
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        layout.recover()
+
+    assert _authority_bytes(layout) == before
+
+
+def test_adopted_legacy_catalog_copies_are_nonauthoritative(tmp_path: Path) -> None:
+    """Historical top-level copies no longer influence an adopted release."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+    adopted = layout.adopt_legacy()
+
+    for split in ("train", "validation", "test", "regression_trusted"):
+        top_level = layout.published_datasets / f"{split}.jsonl"
+        top_level.write_text("nonauthoritative legacy bytes\n", encoding="utf-8")
+
+    verify_released_asset(layout, adopted)
+
+
+def test_relative_tenants_root_runs_and_adopts_with_repo_relative_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI-style default relative tenants root has one canonical base."""
+    monkeypatch.chdir(tmp_path)
+    tenants_root = Path("tenants")
+    feedback, unlabeled = _write_input_pair(tenants_root)
+    pipeline = EvaluationAssetPipeline.create(
+        tenants_root,
+        EvaluationAssetConfig(
+            tenant_id="tenant_a",
+            asset_id="v1",
+            rubric_provider="fake",
+            rubric_model="fake-rubric",
+            embedding_provider="fake",
+            embedding_model="fake-embedding",
+            cluster_count=1,
+        ),
+        feedback,
+        unlabeled,
+        rubric_provider=_SuccessfulRubricProvider(),
+        embedding_provider=_SuccessfulEmbeddingProvider(),
+    )
+    released = pipeline.run()
+    assert released.status == "released"
+    _downgrade_to_legacy_completed(pipeline.layout)
+
+    adopted = pipeline.layout.adopt_legacy()
+
+    assert adopted.status == "released"
+    assert pipeline.layout.tenants_root == (tmp_path / "tenants").resolve()
+    verify_released_asset(pipeline.layout, adopted)
+
+
 def test_service_adopt_is_a_thin_locked_core_api(tmp_path: Path) -> None:
     """Service callers use the same adoption transaction as library callers."""
     pipeline, _, _ = _create_pipeline(tmp_path)
@@ -4438,7 +4753,12 @@ def test_extension_rejects_corrupt_parent_before_child_creation(
     elif damage == "manifest":
         target = parent.manifest_path
     else:
-        target = parent.published_datasets / "train.jsonl"
+        pointer = json.loads(parent.release_pointer_path.read_text(encoding="utf-8"))
+        target = (
+            parent.generations_root
+            / pointer["generation_id"]
+            / "train.jsonl"
+        )
     target.write_bytes(target.read_bytes() + b" \n")
     child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
     additional = _write_additional_feedback(parent.tenants_root)
@@ -4821,6 +5141,194 @@ class _InjectedFault(RuntimeError):
     pass
 
 
+@pytest.mark.parametrize(
+    "fault_name",
+    [
+        "after_generation_temp_created",
+        "after_generation_split_train",
+        "after_generation_split_validation",
+        "after_generation_split_test",
+        "after_generation_split_regression_trusted",
+        "after_generation_manifest_write",
+        "after_generation_temp_sync",
+        "after_generation_install",
+        "after_stage_8_outputs_validated",
+        "after_release_publication_prepared",
+        "before_release_pointer_replace",
+        "after_release_pointer_replace",
+        "after_release_pointer_verify",
+        "after_released_state_replace",
+        "after_release_event_append",
+        "after_release_publication_commit",
+    ],
+)
+def test_native_publication_faults_recover_without_provider_or_stage_rerun(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault_name: str,
+) -> None:
+    """Every generation/WAL phase resumes to one authenticated release."""
+    pipeline, rubric, embedding = _create_pipeline(tmp_path)
+
+    def inject(name: str) -> None:
+        if name == fault_name:
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", inject)
+    with pytest.raises(_InjectedFault, match=fault_name):
+        pipeline.run()
+
+    calls_before_resume = (rubric.calls, embedding.calls)
+    state_after_fault = pipeline.layout.load_state()
+    if fault_name in {
+        "after_released_state_replace",
+        "after_release_event_append",
+        "after_release_publication_commit",
+    }:
+        assert state_after_fault.status == "released"
+    else:
+        assert state_after_fault.status != "released"
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("publication recovery reran a provider")
+
+    rubric.generate_json = forbidden  # type: ignore[method-assign]
+    embedding.embed_texts = forbidden  # type: ignore[method-assign]
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+    resumed = EvaluationAssetPipeline(
+        pipeline.layout,
+        rubric_provider=rubric,
+        embedding_provider=embedding,
+    )
+    if fault_name == "after_release_publication_commit":
+        assert pipeline.layout.recover() == []
+        recovered = pipeline.layout.load_state()
+    else:
+        recovered = resumed.run()
+
+    assert recovered.status == "released"
+    assert (rubric.calls, embedding.calls) == calls_before_resume
+    verify_released_asset(pipeline.layout, recovered)
+    release_rows = [
+        row
+        for row in _read_jsonl(pipeline.layout.recovery_journal_path)
+        if row.get("kind") == "release_publication"
+    ]
+    assert [row["phase"] for row in release_rows] == ["prepared", "committed"]
+    assert recovered.last_operation_id == release_rows[0]["operation_id"]
+
+
+def test_generation_temp_created_fault_removes_owned_temporary_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The earliest generation fault cannot strand a hidden temporary tree."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+
+    def inject(name: str) -> None:
+        if name == "after_generation_temp_created":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", inject)
+    with pytest.raises(_InjectedFault, match="after_generation_temp_created"):
+        pipeline.run()
+
+    generations_root = pipeline.layout.generations_root
+    assert not list(generations_root.glob(".*.tmp"))
+
+
+def test_recovery_rejects_corrupt_prepared_release_before_pointer_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prepared evidence is semantically verified before pointer authority moves."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+
+    def inject(name: str) -> None:
+        if name == "after_release_publication_prepared":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", inject)
+    with pytest.raises(_InjectedFault, match="after_release_publication_prepared"):
+        pipeline.run()
+    layout = pipeline.layout
+    assert not layout.release_pointer_path.exists()
+    provenance = json.loads(layout.build_provenance_path.read_text(encoding="utf-8"))
+    provenance["created_at"] = "2026-08-20T00:00:00+00:00"
+    artifact_io.atomic_write_json(layout.build_provenance_path, provenance)
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        layout.recover()
+
+    assert not layout.release_pointer_path.exists()
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "pointer_generation",
+        "pointer_provenance",
+        "pointer_receipt",
+        "generation_manifest",
+        "build_provenance",
+        "stage_8_receipt",
+    ],
+)
+def test_release_cross_link_corruption_fails_closed_without_repair_writes(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    """Pointer, generation, provenance, and receipt links are one authority DAG."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    released = pipeline.run()
+    layout = pipeline.layout
+    pointer = json.loads(layout.release_pointer_path.read_text(encoding="utf-8"))
+    generation_manifest = (
+        layout.generations_root
+        / pointer["generation_id"]
+        / "generation_manifest.json"
+    )
+    if corruption == "pointer_generation":
+        pointer["generation_id"] = f"sha256-{'0' * 64}"
+        artifact_io.atomic_write_json(layout.release_pointer_path, pointer)
+    elif corruption == "pointer_provenance":
+        pointer["build_provenance_sha256"] = "0" * 64
+        artifact_io.atomic_write_json(layout.release_pointer_path, pointer)
+    elif corruption == "pointer_receipt":
+        pointer["stage_8_receipt_sha256"] = "0" * 64
+        artifact_io.atomic_write_json(layout.release_pointer_path, pointer)
+    elif corruption == "generation_manifest":
+        artifact_io.atomic_write_text(
+            generation_manifest,
+            generation_manifest.read_text(encoding="utf-8") + " ",
+        )
+    elif corruption == "build_provenance":
+        provenance = json.loads(layout.build_provenance_path.read_text(encoding="utf-8"))
+        provenance["created_at"] = "2026-08-20T00:00:00+00:00"
+        artifact_io.atomic_write_json(layout.build_provenance_path, provenance)
+    elif corruption == "stage_8_receipt":
+        receipt = json.loads(
+            layout.receipt_path(PipelineStage.DATASET_SPLITS).read_text(
+                encoding="utf-8"
+            )
+        )
+        receipt["build_provenance_sha256"] = "0" * 64
+        artifact_io.atomic_write_json(
+            layout.receipt_path(PipelineStage.DATASET_SPLITS),
+            receipt,
+        )
+    else:  # pragma: no cover - parameter list is exhaustive
+        raise AssertionError(corruption)
+    before = _authority_bytes(layout)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        layout.recover()
+
+    assert _authority_bytes(layout) == before
+    assert released.status == "released"
+
+
 def _create_pipeline(
     tmp_path: Path,
     *,
@@ -5109,9 +5617,7 @@ def _release_with_config_revisions(
         {"split_seed": 73},
     )
     for revision_updates in updates[:revision_count]:
-        state = pipeline.layout.load_state()
-        state.status = "failed"
-        pipeline.layout.save_state(state)
+        _make_released_checkpoint_mutable(pipeline.layout)
         EvaluationAssetPipeline(
             pipeline.layout,
             rubric_provider=rubric,
@@ -5129,9 +5635,7 @@ def _layout_after_final_committed_mutation(
     """Build a writer-reachable post-commit state for revision/rebuild recovery."""
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
-    state = pipeline.layout.load_state()
-    state.status = "failed"
-    pipeline.layout.save_state(state)
+    _make_released_checkpoint_mutable(pipeline.layout)
     config_updates: dict[str, Any] | None
     if operation_kind == "configuration_revision":
         config_updates = {"match_threshold": 0.2}
@@ -5169,9 +5673,9 @@ def _layout_after_final_committed_mutation(
     prepared = [
         row
         for row in _read_jsonl(pipeline.layout.recovery_journal_path)
-        if row["phase"] == "prepared"
+        if row["phase"] == "prepared" and row["kind"] == operation_kind
     ]
-    assert prepared[-1]["kind"] == operation_kind
+    assert prepared
     return pipeline.layout
 
 
@@ -5274,6 +5778,28 @@ def _prepared_adoption(
     with pytest.raises(_InjectedFault):
         layout.adopt_legacy()
     return layout, _read_jsonl(layout.recovery_journal_path)[0]
+
+
+def _install_adoption_target_manifests(
+    layout: EvaluationAssetLayout,
+    prepared: dict[str, Any],
+) -> None:
+    targets = prepared["target_manifests"]
+    artifact_io.atomic_write_json(layout.manifest_path, targets["asset_manifest"])
+    artifact_io.atomic_write_json(
+        layout.artifact_path(
+            PipelineStage.DATASET_SPLITS,
+            "dataset_manifest.json",
+        ),
+        targets["dataset_manifest"],
+    )
+    artifact_io.atomic_write_json(
+        layout.artifact_path(
+            PipelineStage.DATASET_SPLITS,
+            "generation_manifest.json",
+        ),
+        targets["generation_manifest"],
+    )
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -5484,6 +6010,20 @@ def _apply_semantic_corruption(
     def write(stage: PipelineStage, name: str, payload: list[dict[str, Any]]) -> None:
         artifact_io.atomic_write_jsonl(path(stage, name), payload)
 
+    def write_historical_nonfinite(
+        stage: PipelineStage,
+        name: str,
+        payload: list[dict[str, Any]],
+    ) -> None:
+        """Bypass strict current writers to model already-persisted legacy bytes."""
+        path(stage, name).write_text(
+            "".join(
+                json.dumps(row, sort_keys=True, allow_nan=True) + "\n"
+                for row in payload
+            ),
+            encoding="utf-8",
+        )
+
     def sync_case_to_splits(case: dict[str, Any]) -> None:
         for name in (
             "train.jsonl",
@@ -5528,7 +6068,14 @@ def _apply_semantic_corruption(
         payload[0]["confidence"] = value_by_suffix[
             corruption.removeprefix("native_evidence_confidence_")
         ]
-        write(PipelineStage.RUBRIC_EXTRACTION, "feedback_evidence.jsonl", payload)
+        if corruption.endswith(("nan", "infinity")):
+            write_historical_nonfinite(
+                PipelineStage.RUBRIC_EXTRACTION,
+                "feedback_evidence.jsonl",
+                payload,
+            )
+        else:
+            write(PipelineStage.RUBRIC_EXTRACTION, "feedback_evidence.jsonl", payload)
     elif corruption == "native_evidence_observations_object":
         payload = rows(PipelineStage.RUBRIC_EXTRACTION, "feedback_evidence.jsonl")
         payload[0]["observations"] = {"claim": "not an array"}
@@ -5607,11 +6154,22 @@ def _apply_semantic_corruption(
         payload[0]["confidence"] = value_by_suffix[
             corruption.removeprefix("legacy_rubric_confidence_")
         ]
-        write(PipelineStage.RUBRIC_EXTRACTION, "feedback_rubrics.jsonl", payload)
+        if corruption.endswith(("nan", "infinity")):
+            write_historical_nonfinite(
+                PipelineStage.RUBRIC_EXTRACTION,
+                "feedback_rubrics.jsonl",
+                payload,
+            )
+        else:
+            write(PipelineStage.RUBRIC_EXTRACTION, "feedback_rubrics.jsonl", payload)
     elif corruption == "legacy_rubric_nested_nonfinite":
         payload = rows(PipelineStage.RUBRIC_EXTRACTION, "feedback_rubrics.jsonl")
         payload[0]["deterministic_checks"] = [{"threshold": float("nan")}]
-        write(PipelineStage.RUBRIC_EXTRACTION, "feedback_rubrics.jsonl", payload)
+        write_historical_nonfinite(
+            PipelineStage.RUBRIC_EXTRACTION,
+            "feedback_rubrics.jsonl",
+            payload,
+        )
     elif corruption == "legacy_duplicate_rubric":
         payload = rows(PipelineStage.RUBRIC_EXTRACTION, "feedback_rubrics.jsonl")
         payload.append(json.loads(json.dumps(payload[0])))
@@ -5870,3 +6428,77 @@ def _downgrade_to_legacy_completed(layout: EvaluationAssetLayout) -> None:
     workspace_module.atomic_write_json(layout.state_path, state)
     for stage in PipelineStage:
         layout.receipt_path(stage).unlink()
+    layout.recovery_journal_path.unlink(missing_ok=True)
+    layout.release_pointer_path.unlink(missing_ok=True)
+    layout.build_provenance_path.unlink(missing_ok=True)
+    layout.artifact_path(
+        PipelineStage.DATASET_SPLITS,
+        "generation_manifest.json",
+    ).unlink(missing_ok=True)
+    if layout.generations_root.exists():
+        shutil.rmtree(layout.generations_root)
+    published_files = {}
+    for split in ("train", "validation", "test", "regression_trusted"):
+        destination = layout.published_datasets / f"{split}.jsonl"
+        artifact_io.atomic_copy_file(
+            layout.artifact_path(PipelineStage.DATASET_SPLITS, f"{split}.jsonl"),
+            destination,
+        )
+        published_files[split] = destination.relative_to(
+            layout.tenant_root
+        ).as_posix()
+    manifest = json.loads(layout.manifest_path.read_text(encoding="utf-8"))
+    manifest["published_datasets"] = {
+        "directory": layout.published_datasets.relative_to(
+            layout.tenant_root
+        ).as_posix(),
+        "files": published_files,
+    }
+    artifact_io.atomic_write_json(layout.manifest_path, manifest)
+    artifact_io.atomic_write_json(
+        layout.artifact_path(PipelineStage.DATASET_SPLITS, "dataset_manifest.json"),
+        manifest,
+    )
+
+
+def _make_released_checkpoint_mutable(
+    layout: EvaluationAssetLayout,
+) -> PipelineState:
+    """Remove only the terminal publication authority for mutable-resume fixtures."""
+    entries = _read_jsonl(layout.recovery_journal_path)
+    publication = next(
+        (
+            row
+            for row in reversed(entries)
+            if row.get("kind") == "release_publication"
+            and row.get("phase") == "prepared"
+        ),
+        None,
+    )
+    if publication is None:
+        state = layout.load_state()
+    else:
+        operation_id = publication["operation_id"]
+        retained = [
+            row for row in entries if row.get("operation_id") != operation_id
+        ]
+        if retained:
+            artifact_io.atomic_write_jsonl(layout.recovery_journal_path, retained)
+        else:
+            layout.recovery_journal_path.unlink(missing_ok=True)
+        event_before = publication["audit"]["events"]["before"]
+        prefix = layout.events_path.read_bytes()[: event_before["byte_length"]]
+        if event_before["present"]:
+            artifact_io.atomic_write_text(
+                layout.events_path,
+                prefix.decode("utf-8"),
+            )
+        else:
+            layout.events_path.unlink(missing_ok=True)
+        layout.release_pointer_path.unlink(missing_ok=True)
+        state = PipelineState.from_dict(publication["before_state"])
+    state.status = "failed"
+    state.current_stage = None
+    state.error = "interrupted test checkpoint"
+    layout.save_state(state)
+    return state

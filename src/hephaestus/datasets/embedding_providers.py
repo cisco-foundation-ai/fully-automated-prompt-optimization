@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 import os
 import time
+from copy import deepcopy
 from numbers import Real
 from typing import Any, Callable, List, Optional, Sequence
 
@@ -21,6 +22,8 @@ DEFAULT_BATCH_SIZE = 128
 
 class OpenAIEmbeddingProvider:
     """OpenAI embeddings backend for intent clustering and matching."""
+
+    provider_name = "openai"
 
     def __init__(
         self,
@@ -39,11 +42,18 @@ class OpenAIEmbeddingProvider:
         self.max_retries = max_retries
         self.retry_backoff_seconds = retry_backoff_seconds
         self.batch_size = batch_size
+        self.response_format = "dense_float_vectors"
+        self.seed = {
+            "status": "not_applicable",
+            "reason": "provider_does_not_use_sampling",
+        }
         self._client = client
         self._sleep_fn = sleep_fn
+        self._call_metadata: List[dict[str, Any]] = []
 
     def embed_texts(self, texts: Sequence[str]) -> List[List[float]]:
         """Embed text strings, preserving input order."""
+        self._call_metadata.clear()
         if not texts:
             return []
 
@@ -57,6 +67,12 @@ class OpenAIEmbeddingProvider:
             expected_count=len(texts),
             source="OpenAI embedding response",
         )
+
+    def drain_call_metadata(self) -> List[dict[str, Any]]:
+        """Return successful SDK-batch metadata once and clear the buffer."""
+        rows = deepcopy(self._call_metadata)
+        self._call_metadata.clear()
+        return rows
 
     def _create_client(self) -> Any:
         from openai import OpenAI
@@ -84,7 +100,22 @@ class OpenAIEmbeddingProvider:
         for attempt in range(self.max_retries + 1):
             try:
                 response = client.embeddings.create(model=self.model, input=list(batch))
-                return _extract_embedding_vectors(response, expected_count=len(batch))
+                from src.hephaestus.evaluation_assets.provenance import (
+                    provider_response_metadata,
+                )
+
+                metadata = provider_response_metadata(
+                    response,
+                    transport_ordinal=len(self._call_metadata) + 1,
+                    retry_count=attempt,
+                    output_tokens_not_applicable=True,
+                )
+                vectors = _extract_embedding_vectors(
+                    response,
+                    expected_count=len(batch),
+                )
+                self._call_metadata.append(metadata)
+                return vectors
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 if attempt >= self.max_retries:

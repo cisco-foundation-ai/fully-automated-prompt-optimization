@@ -270,28 +270,50 @@ acceptance only after separate lock and preflight decisions from the live
 worker, without abandoning a lock-owning worker on a fixed timeout.
 
 After Stage 8 succeeds, the authoritative split artifacts remain inside the
-asset workspace and four consumer-facing copies are published to:
+asset workspace and a content-addressed consumer generation is installed at:
 
 ```text
 tenants/<tenant_id>/datasets/evaluation_assets/<asset_id>/
-├── train.jsonl
-├── validation.jsonl
-├── test.jsonl
-└── regression_trusted.jsonl
+├── release.json
+└── generations/
+    └── sha256-<generation-descriptor-hash>/
+        ├── generation_manifest.json
+        ├── train.jsonl
+        ├── validation.jsonl
+        ├── test.jsonl
+        └── regression_trusted.jsonl
 ```
 
-The versioned directory prevents one asset from overwriting another and can be
-used directly as the `dataset.path` source in evaluation configurations. These
-files are local copies in the ordinary tenant dataset catalog. The Studio does
-not upload them. A separate `customer-data --scope derived` operation can sync
-them only when that tenant's storage configuration includes `datasets/` in its
-configured `derived_local` tree.
+The generation descriptor hashes all four files and the deterministic build
+fingerprint. A same-filesystem hidden temporary directory is validated and
+synced before one rename installs the immutable generation; exact content is
+reused, while an address collision fails without overwrite. `release.json` is
+the sole mutable catalog authority and is replaced atomically only after the
+generation, Stage 8 receipt, build provenance, manifests, and hashes agree.
+Released state and its event follow the pointer under the recovery journal, so
+recovery accepts only the reachable pointer/state/event phases and rolls an
+interrupted publication forward without rerunning providers. Old generations
+are retained; invalidation does not delete them or the release pointer.
 
-Each catalog file is replaced atomically, and Stage 8 is receipted before the
-asset becomes `released`. The four-file publication is not yet one atomic
-switch: an interrupted mutable build can leave stale catalog files that are not
-authoritative because the asset is not released. Content-addressed generations
-and a single atomic release pointer are separate lifecycle work.
+`asset_manifest.json` and the Stage 8 manifest expose the current generation
+ID, release pointer, hashes, and literal immutable paths. Evaluation configs do
+not interpret `release.json`; set `dataset.path` to the exact generation file
+path recorded in a manifest. These local derived files are not uploaded by the
+Studio. A separate `customer-data --scope derived` operation can sync them only
+when the tenant storage configuration includes `datasets/` in its configured
+`derived_local` tree.
+
+Stages 3–7 persist receipt-backed `provider_calls.jsonl` ledgers, including an
+empty ledger when a stage makes no call. `build_provenance.json` aggregates
+their body-free request/response hashes and separates deterministic identity
+from audit-only timestamps, Git commit/tree and dirt, request IDs, token usage,
+and retries. The identity covers the complete declared source inventory,
+resolved configuration/defaults, runtime dependencies, copied input hashes,
+lineage, provider/model/settings, prompt revisions and hashes, seeds, and
+algorithms. Optional transport metadata is strictly allowlisted; custom
+providers without the metadata protocol record an explicit unavailable marker.
+Full prompts, requests, responses, headers, exceptions, and credentials are
+never serialized for provenance.
 
 ### Use the Evaluation Asset Studio
 
@@ -399,10 +421,14 @@ python -m hephaestus.cli assets adopt \
 Adoption accepts only pre-v2 `completed`, validates all eight stages, raw source
 hashes, strict finite artifact schemas, deterministic Stage 7 filter outputs,
 both manifests, and the current four catalog copies, records unavailable
-historical prompt/provider/code facts honestly, builds receipts, and changes
-the status to `released` only after the complete terminal candidate and then
-the persisted receipt chain verify. Failure leaves the legacy authority
-unchanged and requires repair or a new asset.
+historical prompt/provider/code facts honestly, materializes an immutable
+generation, and publishes it with receipts, pointer, released state, event, and
+commit as one terminal `legacy_adoption` operation. The old top-level catalog
+copies become nonauthoritative. Failure leaves legacy authority unchanged or
+rolls the prepared adoption forward and requires repair or a new asset only
+when authenticated evidence is inconsistent. A v2 released checkpoint without
+`release.json` is an unpublished interim build: repair it from a verified
+backup or rebuild it as a new asset version; adoption is not a migration path.
 
 Add `--enable-synthetic-coverage --synthetic-cases-per-cluster <count>` to
 enable Stage 7. Use `--embedding-model tfidf` for deterministic local
