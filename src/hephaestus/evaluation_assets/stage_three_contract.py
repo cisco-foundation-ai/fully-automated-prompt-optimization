@@ -345,7 +345,12 @@ def compile_evaluation_guidelines(
     missing = sorted(set(evidence_by_id) - represented)
     if missing:
         raise ValueError("candidate guidelines omit trusted evidence")
-    return sorted(provisional, key=lambda item: str(item["guideline_id"]))
+    guidelines = sorted(provisional, key=lambda item: str(item["guideline_id"]))
+    validate_stage_three_identities(
+        candidates=candidates,
+        guidelines=guidelines,
+    )
+    return guidelines
 
 
 def replay_native_stage_three(
@@ -440,6 +445,12 @@ def replay_native_stage_three(
         )
         for row in normalized
     ]
+    validate_stage_three_identities(
+        candidates=canonical_candidates,
+        guidelines=guidelines,
+        trusted_intents=trusted_intents,
+        trusted_cases=trusted_cases,
+    )
     return {
         "candidates": canonical_candidates,
         "guidelines": guidelines,
@@ -512,6 +523,10 @@ def replay_legacy_stage_three(
         trusted_case(row, rubric_by_id[str(row["record_id"])], asset_id)
         for row in normalized
     ]
+    validate_stage_three_identities(
+        trusted_intents=trusted_intents,
+        trusted_cases=trusted_cases,
+    )
     return {"trusted_intents": trusted_intents, "trusted_cases": trusted_cases}
 
 
@@ -688,6 +703,44 @@ def validate_native_guideline_rows(rows: Sequence[Mapping[str, Any]]) -> None:
                 _GUIDELINE_CRITERION_FIELDS
             ):
                 raise ValueError("evaluation guideline criterion schema is invalid")
+
+
+def validate_stage_three_identities(
+    *,
+    candidates: Sequence[Mapping[str, Any]] = (),
+    guidelines: Sequence[Mapping[str, Any]] = (),
+    trusted_intents: Sequence[Mapping[str, Any]] = (),
+    trusted_cases: Sequence[Mapping[str, Any]] = (),
+) -> None:
+    """Reject every duplicate or colliding canonical Stage 3 identity."""
+    candidate_payloads: set[str] = set()
+    for candidate in candidates:
+        payload = json.dumps(
+            dict(candidate),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        if payload in candidate_payloads:
+            raise ValueError("Stage 3 candidates are not unique")
+        candidate_payloads.add(payload)
+
+    _unique_by(guidelines, "guideline_id")
+    criterion_ids: set[str] = set()
+    for guideline in guidelines:
+        criteria = guideline.get("criteria")
+        if not isinstance(criteria, list):
+            raise ValueError("evaluation guideline criteria are invalid")
+        for criterion in criteria:
+            if not isinstance(criterion, Mapping):
+                raise ValueError("evaluation guideline criterion is invalid")
+            criterion_id = _nonempty_string(criterion.get("criterion_id"))
+            if criterion_id in criterion_ids:
+                raise ValueError("Stage 3 criterion identities are not unique")
+            criterion_ids.add(criterion_id)
+    _unique_by(trusted_intents, "intent_id")
+    _unique_by(trusted_cases, "case_id")
 
 
 def _context(row: Mapping[str, Any]) -> dict[str, str]:

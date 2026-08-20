@@ -9,12 +9,18 @@ from pathlib import Path
 
 import pytest
 
+from src.hephaestus import artifact_io
 from src.hephaestus.datasets.intent_assets import IntentCluster, IntentMatch
 from src.hephaestus.evaluation_assets import pipeline as pipeline_module
+from src.hephaestus.evaluation_assets.durability import (
+    build_stage_receipt,
+    file_sha256,
+)
 from src.hephaestus.evaluation_assets.models import (
     STAGE_COUNT_KEYS,
     EvaluationAssetConfig,
     PipelineStage,
+    PipelineState,
 )
 from src.hephaestus.evaluation_assets.pipeline import (
     GUIDELINE_SYNTHESIS_PROMPT,
@@ -27,7 +33,10 @@ from src.hephaestus.evaluation_assets.pipeline import (
     _rubric_from_guidelines,
 )
 from src.hephaestus.evaluation_assets.service import EvaluationAssetRunManager
-from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
+from src.hephaestus.evaluation_assets.workspace import (
+    EvaluationAssetLayout,
+    utc_now,
+)
 
 
 class FakeEmbeddingProvider:
@@ -1632,6 +1641,35 @@ def test_layout_resolves_previous_stage_three_directory(tmp_path: Path) -> None:
     ) == previous / "feedback_rubrics.jsonl"
 
 
+def _add_genuine_stage_one_receipt(
+    layout: EvaluationAssetLayout,
+    state: PipelineState,
+) -> None:
+    pipeline = EvaluationAssetPipeline(
+        layout,
+        rubric_provider=FakeRubricProvider(),
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+    counts = pipeline._validate_raw_inputs()
+    completed_at = utc_now()
+    receipt = build_stage_receipt(
+        layout,
+        PipelineStage.RAW_INPUTS,
+        layout.load_config(),
+        counts,
+        completed_at=completed_at,
+        prompt_values={},
+    )
+    receipt_path = layout.receipt_path(PipelineStage.RAW_INPUTS)
+    artifact_io.atomic_write_json(receipt_path, receipt)
+    stage_one = state.stages[0]
+    stage_one.status = "completed"
+    stage_one.started_at = stage_one.started_at or completed_at
+    stage_one.completed_at = completed_at
+    stage_one.receipt_sha256 = file_sha256(receipt_path)
+    state.counts.update(counts)
+
+
 def test_revise_config_invalidates_only_dependent_stages(tmp_path: Path) -> None:
     tenants_root = tmp_path / "tenants"
     feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
@@ -1639,7 +1677,7 @@ def test_revise_config_invalidates_only_dependent_stages(tmp_path: Path) -> None
     state = layout.initialize(
         EvaluationAssetConfig(
             tenant_id="tenant_a",
-            cluster_count=5,
+            cluster_count=1,
             match_threshold=0.6,
         ),
         feedback,
@@ -1655,6 +1693,7 @@ def test_revise_config_invalidates_only_dependent_stages(tmp_path: Path) -> None
     state.counts = {
         key: 1 for keys in STAGE_COUNT_KEYS.values() for key in keys
     }
+    _add_genuine_stage_one_receipt(layout, state)
     layout.save_state(state)
     stage_four_artifact = layout.artifact_path(
         PipelineStage.INTENT_CLUSTERING,
@@ -1713,12 +1752,13 @@ def test_revise_config_derives_embedding_provider_and_restarts_stage_four(
     feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
     layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
     state = layout.initialize(
-        EvaluationAssetConfig(tenant_id="tenant_a"),
+        EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
         feedback,
         unlabeled,
     )
     for stage_state in state.stages[:3]:
         stage_state.status = "completed"
+    _add_genuine_stage_one_receipt(layout, state)
     layout.save_state(state)
 
     revision = layout.revise_config({"embedding_model": "tfidf"})
@@ -1737,11 +1777,11 @@ def test_revise_config_with_unchanged_values_preserves_checkpoints(
     feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
     layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
     state = layout.initialize(
-        EvaluationAssetConfig(tenant_id="tenant_a"),
+        EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
         feedback,
         unlabeled,
     )
-    state.stages[0].status = "completed"
+    _add_genuine_stage_one_receipt(layout, state)
     layout.save_state(state)
 
     revision = layout.revise_config({"match_threshold": 0.6})
@@ -1762,7 +1802,7 @@ def test_revise_config_resumes_an_earlier_incomplete_stage(
     feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
     layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
     state = layout.initialize(
-        EvaluationAssetConfig(tenant_id="tenant_a"),
+        EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
         feedback,
         unlabeled,
     )
@@ -1771,6 +1811,7 @@ def test_revise_config_resumes_an_earlier_incomplete_stage(
     state.stages[4].status = "failed"
     state.status = "failed"
     state.current_stage = "coverage_decisions"
+    _add_genuine_stage_one_receipt(layout, state)
     layout.save_state(state)
 
     revision = layout.revise_config({"synthetic_coverage_enabled": True})

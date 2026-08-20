@@ -18,6 +18,7 @@ from src.hephaestus import artifact_io
 from src.hephaestus.evaluation_assets import durability as durability_module
 from src.hephaestus.evaluation_assets import pipeline as pipeline_module
 from src.hephaestus.evaluation_assets import service as service_module
+from src.hephaestus.evaluation_assets import stage_three_contract
 from src.hephaestus.evaluation_assets import workspace as workspace_module
 from src.hephaestus.evaluation_assets.durability import (
     LEGACY_UNAVAILABLE_PROVENANCE,
@@ -29,6 +30,7 @@ from src.hephaestus.evaluation_assets.durability import (
     canonical_sha256,
     file_sha256,
     released_parent_evidence,
+    verify_release_candidate,
     verify_released_asset,
 )
 from src.hephaestus.evaluation_assets.models import (
@@ -1344,6 +1346,141 @@ def test_direct_noop_revision_accepts_valid_raw_snapshot_without_write(
     assert _authority_bytes(layout) == before
 
 
+def test_pending_never_receipted_stage_one_keeps_presence_only_revision_path(
+    tmp_path: Path,
+) -> None:
+    """A fresh pending workspace may revise before Stage 1 creates authority."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+
+    result = pipeline.layout.revise_config({"match_threshold": 0.2})
+
+    stage_one = pipeline.layout.load_state().stages[0]
+    assert result["invalidated_from_stage"] == PipelineStage.COVERAGE_DECISIONS.value
+    assert stage_one.status == "pending"
+    assert stage_one.receipt_sha256 is None
+    assert not pipeline.layout.receipt_path(PipelineStage.RAW_INPUTS).exists()
+
+
+def test_running_never_receipted_stage_one_keeps_presence_only_revision_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A process death before the Stage 1 receipt leaves a resumable floor."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+
+    def interrupt_before_stage_one(stage: PipelineStage) -> dict[str, int]:
+        assert stage == PipelineStage.RAW_INPUTS
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(pipeline, "_run_stage", interrupt_before_stage_one)
+    with pytest.raises(KeyboardInterrupt):
+        pipeline.run()
+
+    stage_one = pipeline.layout.load_state().stages[0]
+    assert stage_one.status == "running"
+    assert stage_one.receipt_sha256 is None
+    assert not pipeline.layout.receipt_path(PipelineStage.RAW_INPUTS).exists()
+
+    result = pipeline.layout.revise_config({"match_threshold": 0.2})
+
+    assert result["invalidated_from_stage"] == PipelineStage.COVERAGE_DECISIONS.value
+
+
+def test_completed_stage_one_cannot_be_relabeled_as_never_receipted(
+    tmp_path: Path,
+) -> None:
+    """A retained completion event prevents a failed-state receipt bypass."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    state = layout.load_state()
+    state.status = "failed"
+    state.stages[0].status = "failed"
+    state.stages[0].receipt_sha256 = None
+    layout.save_state(state)
+    layout.receipt_path(PipelineStage.RAW_INPUTS).unlink()
+    before = _authority_bytes(layout)
+
+    with pytest.raises(
+        EvaluationAssetIntegrityError,
+        match="raw input snapshot receipt authority",
+    ):
+        layout.revise_config({"match_threshold": 0.2})
+
+    assert _authority_bytes(layout) == before
+
+
+@pytest.mark.parametrize(
+    "receipt_damage",
+    ["missing", "malformed", "incomplete_inputs", "rewritten_with_stale_state"],
+)
+@pytest.mark.parametrize("revision_path", ["direct_changed", "direct_noop", "pipeline"])
+def test_claimed_raw_snapshot_floor_requires_complete_receipt_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    receipt_damage: str,
+    revision_path: str,
+) -> None:
+    """A completed Stage 1 never falls back to presence-only raw validation."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    state = layout.load_state()
+    state.status = "failed"
+    layout.save_state(state)
+    receipt_path = layout.receipt_path(PipelineStage.RAW_INPUTS)
+
+    if receipt_damage == "missing":
+        receipt_path.unlink()
+    elif receipt_damage == "malformed":
+        artifact_io.atomic_write_text(receipt_path, "{not-json\n")
+        state = layout.load_state()
+        state.stages[0].receipt_sha256 = file_sha256(receipt_path)
+        artifact_io.atomic_write_json(layout.state_path, state.to_dict())
+    else:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        if receipt_damage == "incomplete_inputs":
+            receipt["inputs"] = receipt["inputs"][:1]
+            artifact_io.atomic_write_json(receipt_path, receipt)
+            state = layout.load_state()
+            state.stages[0].receipt_sha256 = file_sha256(receipt_path)
+            artifact_io.atomic_write_json(layout.state_path, state.to_dict())
+        else:
+            layout.feedback_path.write_bytes(
+                layout.feedback_path.read_bytes() + b" \n"
+            )
+            relative = layout.feedback_path.relative_to(layout.root).as_posix()
+            feedback_record = next(
+                item for item in receipt["inputs"] if item["path"] == relative
+            )
+            feedback_record["bytes"] = layout.feedback_path.stat().st_size
+            feedback_record["sha256"] = file_sha256(layout.feedback_path)
+            artifact_io.atomic_write_json(receipt_path, receipt)
+
+    configured: list[bool] = []
+
+    def forbidden_configuration(*_: Any, **__: Any) -> None:
+        configured.append(True)
+        raise AssertionError("provider configuration preceded raw-floor rejection")
+
+    monkeypatch.setattr(
+        pipeline_module.EvaluationAssetPipeline,
+        "_configure_providers",
+        forbidden_configuration,
+    )
+    before = _authority_bytes(layout)
+    updates = {} if revision_path == "direct_noop" else {"match_threshold": 0.2}
+
+    with pytest.raises(EvaluationAssetIntegrityError, match="raw input snapshot"):
+        if revision_path == "pipeline":
+            EvaluationAssetPipeline(layout).run(config_updates=updates)
+        else:
+            layout.revise_config(updates)
+
+    assert configured == []
+    assert _authority_bytes(layout) == before
+
+
 @pytest.mark.parametrize("rejection", ["busy", "released", "corrupt"])
 def test_default_provider_constructors_are_not_called_on_rejected_run(
     tmp_path: Path,
@@ -1900,6 +2037,144 @@ def test_standalone_release_verification_requires_strict_control_jsonl(
 
     with pytest.raises(EvaluationAssetIntegrityError):
         verify_released_asset(layout, layout.load_state())
+
+    assert _authority_bytes(layout) == before
+
+
+@pytest.mark.parametrize("verification_boundary", ["candidate", "persisted"])
+@pytest.mark.parametrize(
+    "ledger_damage",
+    [
+        "v1_row",
+        "nonrevision_v2_row",
+        "mixed_v1_v2",
+        "audit_descriptor",
+        "reanchored_history",
+        "relabeled_origins_without_wal",
+    ],
+)
+def test_standalone_release_verification_uses_complete_journal_authority(
+    tmp_path: Path,
+    verification_boundary: str,
+    ledger_damage: str,
+) -> None:
+    """Candidate and persisted verification share recovery's complete ledger grammar."""
+    layout = (
+        _release_with_config_revisions(tmp_path, revision_count=1)
+        if ledger_damage
+        in {"mixed_v1_v2", "audit_descriptor", "reanchored_history"}
+        else _create_pipeline(tmp_path)[0].layout
+    )
+    if not layout.state_path.exists():
+        raise AssertionError("test setup did not initialize the asset")
+    if layout.load_state().status != "released":
+        EvaluationAssetPipeline(
+            layout,
+            rubric_provider=_SuccessfulRubricProvider(),
+            embedding_provider=_SuccessfulEmbeddingProvider(),
+        ).run()
+
+    if ledger_damage == "relabeled_origins_without_wal":
+        state = layout.load_state()
+        for stage in PipelineStage:
+            path = layout.receipt_path(stage)
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+            receipt["origin"] = "legacy_adoption"
+            receipt["upstream_receipts"] = [
+                {
+                    "stage": dependency.value,
+                    "sha256": file_sha256(layout.receipt_path(dependency)),
+                }
+                for dependency in STAGE_SPECIFICATIONS[stage].upstream_stages
+            ]
+            artifact_io.atomic_write_json(path, receipt)
+            next(
+                item for item in state.stages if item.stage == stage.value
+            ).receipt_sha256 = file_sha256(path)
+        artifact_io.atomic_write_json(layout.state_path, state.to_dict())
+        if layout.recovery_journal_path.exists():
+            layout.recovery_journal_path.unlink()
+    elif ledger_damage in {"v1_row", "nonrevision_v2_row", "mixed_v1_v2"}:
+        rows = (
+            _read_jsonl(layout.recovery_journal_path)
+            if layout.recovery_journal_path.exists()
+            else []
+        )
+        rows.append(
+            {
+                "schema_version": (
+                    "fapo-recovery-journal-v1"
+                    if ledger_damage != "nonrevision_v2_row"
+                    else "fapo-recovery-journal-v2"
+                ),
+                "kind": "checkpoint_rebuild",
+                "phase": "prepared",
+                "operation_id": "f" * 32,
+            }
+        )
+        artifact_io.atomic_write_jsonl(layout.recovery_journal_path, rows)
+    elif ledger_damage == "audit_descriptor":
+        rows = _read_jsonl(layout.recovery_journal_path)
+        rows[0]["audit"]["events"]["target"]["sha256"] = "f" * 64
+        artifact_io.atomic_write_jsonl(layout.recovery_journal_path, rows)
+    else:
+        history_rows = _read_jsonl(layout.config_history_path)
+        artifact_io.atomic_write_text(
+            layout.config_history_path,
+            "".join(
+                json.dumps(row, sort_keys=False, separators=(",", ":")) + "\n"
+                for row in history_rows
+            ),
+        )
+        receipt_path = layout.receipt_path(PipelineStage.DATASET_SPLITS)
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["config_history_sha256"] = file_sha256(layout.config_history_path)
+        artifact_io.atomic_write_json(receipt_path, receipt)
+        state = layout.load_state()
+        next(
+            item
+            for item in state.stages
+            if item.stage == PipelineStage.DATASET_SPLITS.value
+        ).receipt_sha256 = file_sha256(receipt_path)
+        artifact_io.atomic_write_json(layout.state_path, state.to_dict())
+
+    state = layout.load_state()
+    before = _authority_bytes(layout)
+    with pytest.raises(EvaluationAssetIntegrityError):
+        if verification_boundary == "candidate":
+            verify_release_candidate(layout, state)
+        else:
+            verify_released_asset(layout, state)
+    assert _authority_bytes(layout) == before
+
+
+@pytest.mark.parametrize("verification_boundary", ["candidate", "persisted"])
+def test_standalone_adopted_verification_replays_legacy_semantics(
+    tmp_path: Path,
+    verification_boundary: str,
+) -> None:
+    """A matching WAL and rehashed receipts cannot bless invalid legacy bytes."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+    layout.adopt_legacy()
+    candidate_path = layout.artifact_path(
+        PipelineStage.RUBRIC_EXTRACTION,
+        "candidate_guidelines.jsonl",
+    )
+    candidates = _read_jsonl(candidate_path)
+    candidates.append(json.loads(json.dumps(candidates[0])))
+    artifact_io.atomic_write_jsonl(candidate_path, candidates)
+    _rehash_committed_adoption_authority(layout)
+    state = layout.load_state()
+    before = _authority_bytes(layout)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        if verification_boundary == "candidate":
+            verify_release_candidate(layout, state)
+        else:
+            verify_released_asset(layout, state)
 
     assert _authority_bytes(layout) == before
 
@@ -2563,6 +2838,134 @@ def test_recovery_journal_rejects_interleaved_committed_operations(
     assert _authority_bytes(layout) == before
 
 
+def test_recovery_journal_rejects_cross_kind_interleaving(
+    tmp_path: Path,
+) -> None:
+    """The one-active-operation grammar applies across every journal kind."""
+    layout = _release_with_config_revisions(tmp_path, revision_count=2)
+    rows = _read_jsonl(layout.recovery_journal_path)
+    rows[2]["kind"] = "checkpoint_rebuild"
+    rows[3]["kind"] = "checkpoint_rebuild"
+    artifact_io.atomic_write_jsonl(
+        layout.recovery_journal_path,
+        [rows[0], rows[2], rows[1], rows[3]],
+    )
+    before = _authority_bytes(layout)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        layout.recover()
+
+    assert _authority_bytes(layout) == before
+
+
+def test_recovery_journal_rejects_swapped_complete_revision_pairs(
+    tmp_path: Path,
+) -> None:
+    """Locally complete revision pairs remain chained in writer chronology."""
+    layout = _release_with_config_revisions(tmp_path, revision_count=2)
+    rows = _read_jsonl(layout.recovery_journal_path)
+    first_pair = rows[:2]
+    second_pair = rows[2:4]
+    artifact_io.atomic_write_jsonl(
+        layout.recovery_journal_path,
+        [*second_pair, *first_pair],
+    )
+    before = _authority_bytes(layout)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        layout.recover()
+
+    assert _authority_bytes(layout) == before
+
+
+def test_ordered_complete_revision_pairs_remain_exact_recovery_noop(
+    tmp_path: Path,
+) -> None:
+    """Writer-ordered committed revisions remain a stable terminal ledger."""
+    layout = _release_with_config_revisions(tmp_path, revision_count=2)
+    prepared = [
+        row
+        for row in _read_jsonl(layout.recovery_journal_path)
+        if row["phase"] == "prepared"
+    ]
+    assert (
+        prepared[0]["audit"]["events"]["target"]["row_count"]
+        < prepared[1]["audit"]["events"]["before"]["row_count"]
+    )
+    before = _authority_bytes(layout)
+
+    assert layout.recover() == []
+    verify_released_asset(layout, layout.load_state())
+    assert _authority_bytes(layout) == before
+
+
+def test_recovery_rejects_reordered_committed_prefix_before_outstanding_prepare(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An outstanding operation cannot hide a reordered committed prefix."""
+    layout = _release_with_config_revisions(tmp_path, revision_count=2)
+    state = layout.load_state()
+    state.status = "failed"
+    layout.save_state(state)
+
+    def stop_after_prepare(name: str) -> None:
+        if name == "after_prepared_journal":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", stop_after_prepare)
+    with pytest.raises(_InjectedFault):
+        layout.revise_config({"synthetic_coverage_enabled": True})
+    rows = _read_jsonl(layout.recovery_journal_path)
+    artifact_io.atomic_write_jsonl(
+        layout.recovery_journal_path,
+        [*rows[2:4], *rows[:2], rows[4]],
+    )
+    before = _authority_bytes(layout)
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        layout.recover()
+
+    assert _authority_bytes(layout) == before
+
+
+def test_recovery_rejects_committed_adoption_reverted_to_before_state(
+    tmp_path: Path,
+) -> None:
+    """A committed terminal adoption requires its exact released controls."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+    layout.adopt_legacy()
+    prepared = _read_jsonl(layout.recovery_journal_path)[0]
+    artifact_io.atomic_write_json(layout.state_path, prepared["before_state"])
+    before = _authority_bytes(layout)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        layout.recover()
+
+    assert _authority_bytes(layout) == before
+
+
+def test_committed_adoption_terminal_recovery_is_exact_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    """The exact committed adoption terminal remains a stable no-op on recovery."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+    adopted = layout.adopt_legacy()
+    before = _authority_bytes(layout)
+
+    assert adopted.status == "released"
+    assert layout.recover() == []
+    assert layout.recover() == []
+    assert _authority_bytes(layout) == before
+
+
 @pytest.mark.parametrize(
     ("fault_name", "audit_name"),
     [
@@ -2903,6 +3306,41 @@ def test_rehashed_adoption_journal_semantics_fail_before_receipt_install(
         layout.recover()
 
     assert _authority_bytes(layout) == before
+
+
+def test_outstanding_adoption_semantic_failure_is_integrity_and_zero_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovery translates deep adoption replay failure before roll-forward."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+
+    def stop_after_prepare(name: str) -> None:
+        if name == "after_prepared_journal":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", stop_after_prepare)
+    with pytest.raises(_InjectedFault):
+        layout.adopt_legacy()
+    candidate_path = layout.artifact_path(
+        PipelineStage.RUBRIC_EXTRACTION,
+        "candidate_guidelines.jsonl",
+    )
+    candidates = _read_jsonl(candidate_path)
+    candidates.append(json.loads(json.dumps(candidates[0])))
+    artifact_io.atomic_write_jsonl(candidate_path, candidates)
+    _rehash_prepared_adoption_authority(layout)
+    before = _authority_bytes(layout)
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        layout.recover()
+
+    assert _authority_bytes(layout) == before
+    assert not any(layout.receipts_root.glob("*.json"))
 
 
 def test_missing_raw_snapshot_is_not_rebuildable(tmp_path: Path) -> None:
@@ -3373,6 +3811,110 @@ def test_native_writer_rejects_unsupported_candidate_domains_before_persistence(
         PipelineStage.RUBRIC_EXTRACTION,
         "candidate_guidelines.jsonl",
     ).exists()
+
+
+@pytest.mark.parametrize(
+    "duplicate_shape",
+    ["exact_candidate", "criterion_identity", "derived_id_collision"],
+)
+def test_native_writer_rejects_duplicate_stage_three_identities_before_persistence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    duplicate_shape: str,
+) -> None:
+    """Ambiguous Stage 3 canonical identities fail before derivative authority."""
+
+    class DuplicateIdentityProvider(_SuccessfulRubricProvider):
+        def generate_json(
+            self,
+            system_prompt: str,
+            payload: dict[str, Any],
+        ) -> dict[str, Any]:
+            response = super().generate_json(system_prompt, payload)
+            if "evidence" not in payload:
+                return response
+            first = response["guidelines"][0]
+            if duplicate_shape == "exact_candidate":
+                response["guidelines"].append(json.loads(json.dumps(first)))
+            elif duplicate_shape == "criterion_identity":
+                duplicate = json.loads(json.dumps(first["criteria"][0]))
+                duplicate["dimension"] = "colliding_secondary_dimension"
+                first["criteria"].append(duplicate)
+            else:
+                second = json.loads(json.dumps(first))
+                second["intent_label"] = "distinct candidate"
+                second["description"] = "A distinct canonical candidate."
+                second["criteria"][0]["statement"] = "A distinct criterion."
+                response["guidelines"].append(second)
+            return response
+
+    if duplicate_shape == "derived_id_collision":
+        class CollidingHashlib:
+            @staticmethod
+            def sha256(_: bytes) -> Any:
+                return type("Digest", (), {"hexdigest": lambda self: "0" * 64})()
+
+        monkeypatch.setattr(stage_three_contract, "hashlib", CollidingHashlib)
+
+    tenants_root = tmp_path / "tenants"
+    feedback, unlabeled = _write_input_pair(tenants_root)
+    provider = DuplicateIdentityProvider()
+    pipeline = EvaluationAssetPipeline.create(
+        tenants_root,
+        EvaluationAssetConfig(
+            tenant_id="tenant_a",
+            rubric_provider=provider.provider_name,
+            rubric_model=provider.model,
+            embedding_provider="fake",
+            embedding_model="fake-embedding",
+            cluster_count=1,
+        ),
+        feedback,
+        unlabeled,
+        rubric_provider=provider,
+        embedding_provider=_SuccessfulEmbeddingProvider(),
+    )
+
+    with pytest.raises(ProviderCallError, match="invalid response"):
+        pipeline.run()
+
+    stage = PipelineStage.RUBRIC_EXTRACTION
+    assert not any(
+        pipeline.layout.artifact_path(stage, name).exists()
+        for name in STAGE_SPECIFICATIONS[stage].required_outputs
+    )
+    assert not any(
+        pipeline.layout.receipt_path(later).exists()
+        for later in list(PipelineStage)[2:]
+    )
+    assert not pipeline.layout.manifest_path.exists()
+    assert not pipeline.layout.published_datasets.exists()
+    assert pipeline.layout.load_state().status != "released"
+
+
+def test_legacy_adoption_rejects_duplicate_native_candidates_without_writes(
+    tmp_path: Path,
+) -> None:
+    """Adoption applies the same exact-candidate uniqueness contract as live Stage 3."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+    path = layout.artifact_path(
+        PipelineStage.RUBRIC_EXTRACTION,
+        "candidate_guidelines.jsonl",
+    )
+    candidates = _read_jsonl(path)
+    candidates.append(json.loads(json.dumps(candidates[0])))
+    artifact_io.atomic_write_jsonl(path, candidates)
+    before = _authority_bytes(layout)
+
+    with pytest.raises(EvaluationAssetLegacyError):
+        layout.adopt_legacy()
+
+    assert _authority_bytes(layout) == before
+    assert not layout.recovery_journal_path.exists()
+    assert not any(layout.receipts_root.glob("*.json"))
 
 
 def test_native_stage_three_accepts_all_declared_domains_and_open_structures(
@@ -4346,6 +4888,101 @@ def _authority_bytes(layout: EvaluationAssetLayout) -> dict[str, bytes]:
             }
         )
     return authority
+
+
+def _rehash_committed_adoption_authority(layout: EvaluationAssetLayout) -> None:
+    """Re-anchor a committed adoption after a Stage 3 artifact rewrite."""
+    candidate_path = layout.artifact_path(
+        PipelineStage.RUBRIC_EXTRACTION,
+        "candidate_guidelines.jsonl",
+    )
+    candidate_relative = candidate_path.relative_to(layout.root).as_posix()
+    receipts: dict[PipelineStage, dict[str, Any]] = {}
+    for stage in PipelineStage:
+        receipt_path = layout.receipt_path(stage)
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        if stage == PipelineStage.RUBRIC_EXTRACTION:
+            output = next(
+                item
+                for item in receipt["outputs"]
+                if item["path"] == candidate_relative
+            )
+            output["sha256"] = file_sha256(candidate_path)
+            output["bytes"] = candidate_path.stat().st_size
+        receipt["upstream_receipts"] = [
+            {
+                "stage": dependency.value,
+                "sha256": durability_module.persisted_json_sha256(
+                    receipts[dependency]
+                ),
+            }
+            for dependency in STAGE_SPECIFICATIONS[stage].upstream_stages
+        ]
+        artifact_io.atomic_write_json(receipt_path, receipt)
+        receipts[stage] = receipt
+
+    rows = _read_jsonl(layout.recovery_journal_path)
+    prepared = rows[0]
+    state = layout.load_state()
+    receipt_hashes = {
+        stage.value: file_sha256(layout.receipt_path(stage))
+        for stage in PipelineStage
+    }
+    for stage_state in state.stages:
+        stage_state.receipt_sha256 = receipt_hashes[stage_state.stage]
+    prepared["target_receipts"] = {
+        stage.value: receipts[stage] for stage in PipelineStage
+    }
+    prepared["target"]["receipt_sha256"] = receipt_hashes
+    prepared["target_state"] = state.to_dict()
+    prepared["target"]["state_sha256"] = durability_module.persisted_json_sha256(
+        prepared["target_state"]
+    )
+    artifact_io.atomic_write_json(layout.state_path, prepared["target_state"])
+    artifact_io.atomic_write_jsonl(layout.recovery_journal_path, rows)
+
+
+def _rehash_prepared_adoption_authority(layout: EvaluationAssetLayout) -> None:
+    """Re-anchor one outstanding adoption after a Stage 3 artifact rewrite."""
+    rows = _read_jsonl(layout.recovery_journal_path)
+    prepared = rows[0]
+    candidate_path = layout.artifact_path(
+        PipelineStage.RUBRIC_EXTRACTION,
+        "candidate_guidelines.jsonl",
+    )
+    candidate_relative = candidate_path.relative_to(layout.root).as_posix()
+    receipts: dict[PipelineStage, dict[str, Any]] = {}
+    for stage in PipelineStage:
+        receipt = prepared["target_receipts"][stage.value]
+        if stage == PipelineStage.RUBRIC_EXTRACTION:
+            output = next(
+                item
+                for item in receipt["outputs"]
+                if item["path"] == candidate_relative
+            )
+            output["sha256"] = file_sha256(candidate_path)
+            output["bytes"] = candidate_path.stat().st_size
+        receipt["upstream_receipts"] = [
+            {
+                "stage": dependency.value,
+                "sha256": durability_module.persisted_json_sha256(
+                    receipts[dependency]
+                ),
+            }
+            for dependency in STAGE_SPECIFICATIONS[stage].upstream_stages
+        ]
+        receipts[stage] = receipt
+    receipt_hashes = {
+        stage.value: durability_module.persisted_json_sha256(receipts[stage])
+        for stage in PipelineStage
+    }
+    for stage_state in prepared["target_state"]["stages"]:
+        stage_state["receipt_sha256"] = receipt_hashes[stage_state["stage"]]
+    prepared["target"]["receipt_sha256"] = receipt_hashes
+    prepared["target"]["state_sha256"] = durability_module.persisted_json_sha256(
+        prepared["target_state"]
+    )
+    artifact_io.atomic_write_jsonl(layout.recovery_journal_path, rows)
 
 
 def _release_with_config_revisions(

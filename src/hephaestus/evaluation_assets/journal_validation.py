@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -18,7 +19,6 @@ from src.hephaestus.evaluation_assets.control_jsonl import (
     parse_strict_jsonl_objects,
     read_strict_jsonl_objects,
 )
-from src.hephaestus.evaluation_assets.durability import verify_release_candidate
 from src.hephaestus.evaluation_assets.journal_transitions import (
     JOURNAL_SCHEMA_VERSION,
     append_jsonl_bytes,
@@ -137,10 +137,19 @@ _PREPARED_FIELDS = {
 }
 
 
+@dataclass(frozen=True)
+class ValidatedRecoveryJournal:
+    """Authenticated operation ledger returned to release and recovery callers."""
+
+    prepared: tuple[dict[str, Any], ...]
+    committed_operation_ids: frozenset[str]
+    outstanding: dict[str, Any] | None
+
+
 def validate_recovery_journal(
     layout: Any,
     entries: Sequence[Mapping[str, Any]],
-) -> None:
+) -> ValidatedRecoveryJournal:
     """Validate the complete log and every uncommitted intermediate state."""
     prepared: dict[str, dict[str, Any]] = {}
     committed: dict[str, dict[str, Any]] = {}
@@ -180,8 +189,34 @@ def validate_recovery_journal(
     outstanding = set(prepared) - set(committed)
     if len(outstanding) > 1 or (bool(outstanding) != (active is not None)):
         raise ValueError("journal has competing uncommitted operations")
-    for operation_id, row in prepared.items():
-        _validate_prepared(layout, row, uncommitted=operation_id in outstanding)
+    prepared_rows = tuple(prepared.values())
+    for index, row in enumerate(prepared_rows):
+        operation_id = str(row["operation_id"])
+        _validate_prepared(
+            layout,
+            row,
+            uncommitted=operation_id in outstanding,
+            final_operation=index == len(prepared_rows) - 1,
+        )
+        if index:
+            previous = prepared_rows[index - 1]
+            previous_operation = str(previous["operation_id"])
+            if previous_operation not in committed:
+                raise ValueError("journal chronology follows an uncommitted operation")
+            _validate_operation_chronology(
+                layout,
+                previous,
+                committed[previous_operation],
+                row,
+            )
+    outstanding_row = (
+        prepared[next(iter(outstanding))] if outstanding else None
+    )
+    return ValidatedRecoveryJournal(
+        prepared=prepared_rows,
+        committed_operation_ids=frozenset(committed),
+        outstanding=outstanding_row,
+    )
 
 
 def _validate_prepared(
@@ -189,6 +224,7 @@ def _validate_prepared(
     row: Mapping[str, Any],
     *,
     uncommitted: bool,
+    final_operation: bool,
 ) -> None:
     operation_id = str(row["operation_id"])
     kind = str(row["kind"])
@@ -325,6 +361,10 @@ def _validate_prepared(
     if not uncommitted:
         if kind == "legacy_adoption" and not all(installed_receipts):
             raise ValueError("committed adoption receipt authority is incomplete")
+        if kind == "legacy_adoption":
+            if not final_operation:
+                raise ValueError("committed adoption is not terminal")
+            _validate_committed_adoption_terminal(layout, row, target)
         return
     _validate_intermediate_authority(
         layout,
@@ -483,13 +523,89 @@ def _validate_adoption(
         or set(state.counts) != _ALL_COUNT_KEYS
     ):
         raise ValueError("adoption target lifecycle is inconsistent")
-    verify_release_candidate(
-        layout,
-        state,
-        receipts={
-            stage: _mapping(receipts[stage.value]) for stage in PipelineStage
-        },
+
+
+def _validate_operation_chronology(
+    layout: Any,
+    previous: Mapping[str, Any],
+    previous_commit: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> None:
+    if previous["kind"] == "legacy_adoption":
+        raise ValueError("journal operation follows a terminal adoption")
+    previous_state = _mapping(previous["target_state"])
+    current_before_state = _mapping(current["before_state"])
+    previous_target = _hash_mapping(previous["target"])
+    current_before = _hash_mapping(current["before"])
+    if (
+        _utc_timestamp(current["prepared_at"])
+        < _utc_timestamp(previous_commit["committed_at"])
+        or current_before["config_sha256"] != previous_target["config_sha256"]
+        or current_before_state.get("created_at") != previous_state.get("created_at")
+        or current_before_state.get("mutation_sequence")
+        != previous_state.get("mutation_sequence")
+        or current_before_state.get("last_operation_id")
+        != previous.get("operation_id")
+    ):
+        raise ValueError("journal operations are not chained in writer chronology")
+    previous_audit = _mapping(previous["audit"])
+    current_audit = _mapping(current["audit"])
+    previous_history = _audit_descriptor_mapping(
+        _mapping(previous_audit["config_history"])["target"]
     )
+    current_history = _audit_descriptor_mapping(
+        _mapping(current_audit["config_history"])["before"]
+    )
+    if previous_history != current_history:
+        raise ValueError("journal configuration-history chronology is inconsistent")
+    previous_events = _audit_descriptor_mapping(
+        _mapping(previous_audit["events"])["target"]
+    )
+    current_events = _audit_descriptor_mapping(
+        _mapping(current_audit["events"])["before"]
+    )
+    if (
+        previous_events["present"] and not current_events["present"]
+        or previous_events["byte_length"] > current_events["byte_length"]
+        or previous_events["row_count"] > current_events["row_count"]
+    ):
+        raise ValueError("journal event chronology is inconsistent")
+    current_bytes = (
+        layout.events_path.read_bytes() if layout.events_path.is_file() else b""
+    )
+    previous_prefix = current_bytes[: previous_events["byte_length"]]
+    later_prefix = current_bytes[: current_events["byte_length"]]
+    if (
+        audit_descriptor(previous_prefix, present=previous_events["present"])
+        != previous_events
+        or audit_descriptor(later_prefix, present=current_events["present"])
+        != current_events
+    ):
+        raise ValueError("journal event prefixes are not monotonic")
+
+
+def _validate_committed_adoption_terminal(
+    layout: Any,
+    row: Mapping[str, Any],
+    target: Mapping[str, Any],
+) -> None:
+    if (
+        _file_sha256(layout.config_path) != target["config_sha256"]
+        or _file_sha256(layout.state_path) != target["state_sha256"]
+    ):
+        raise ValueError("committed adoption controls are not at the target")
+    audit = _mapping(row["audit"])
+    for name, path in (
+        ("config_history", layout.config_history_path),
+        ("events", layout.events_path),
+    ):
+        target_descriptor = _audit_descriptor_mapping(
+            _mapping(audit[name])["target"]
+        )
+        present = path.is_file()
+        current = path.read_bytes() if present else b""
+        if audit_descriptor(current, present=present) != target_descriptor:
+            raise ValueError("committed adoption audit is not at the target")
 
 
 def _validate_event(

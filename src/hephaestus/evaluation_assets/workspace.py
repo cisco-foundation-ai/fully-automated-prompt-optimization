@@ -36,6 +36,7 @@ from src.hephaestus.evaluation_assets.durability import (
     EvaluationAssetImmutableError,
     EvaluationAssetIntegrityError,
     EvaluationAssetLegacyError,
+    _verify_prospective_legacy_adoption_candidate,
     build_stage_receipt,
     file_sha256,
     persisted_json_sha256,
@@ -939,10 +940,11 @@ class EvaluationAssetLayout:
             )
             target_state = PipelineState.from_dict(plan["target_state"])
             try:
-                verify_release_candidate(
+                _verify_prospective_legacy_adoption_candidate(
                     self,
                     target_state,
-                    receipts=receipts,
+                    receipts,
+                    legacy_state=state,
                 )
             except (
                 EvaluationAssetIntegrityError,
@@ -1128,8 +1130,31 @@ class EvaluationAssetLayout:
         """Recover prepared operations while the caller holds the asset lock."""
         entries = self._read_control_log(self.recovery_journal_path)
         try:
-            validate_recovery_journal(self, entries)
-        except (KeyError, OSError, TypeError, UnicodeError, ValueError) as exc:
+            journal = validate_recovery_journal(self, entries)
+            outstanding = journal.outstanding
+            if outstanding is not None and outstanding.get("kind") == "legacy_adoption":
+                target_state = PipelineState.from_dict(outstanding["target_state"])
+                before_state = PipelineState.from_dict(outstanding["before_state"])
+                target_receipts = outstanding.get("target_receipts")
+                if not isinstance(target_receipts, Mapping):
+                    raise ValueError("adoption receipt target is invalid")
+                _verify_prospective_legacy_adoption_candidate(
+                    self,
+                    target_state,
+                    {
+                        stage: target_receipts[stage.value]
+                        for stage in PipelineStage
+                    },
+                    legacy_state=before_state,
+                )
+        except (
+            EvaluationAssetLegacyError,
+            KeyError,
+            OSError,
+            TypeError,
+            UnicodeError,
+            ValueError,
+        ) as exc:
             raise EvaluationAssetIntegrityError(
                 self.tenant_id,
                 self.asset_id,

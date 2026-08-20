@@ -117,6 +117,14 @@ to have exactly one earlier byte-equivalent version 2 prepare and one later
 matching commit in revision order, and
 binds Stage 8 to the exact persisted configuration-history bytes and current
 configuration without requiring the current checkout to equal historical code.
+Before Stage 1 has ever claimed receipt or completion authority, coherent
+pending, failed, and process-interrupted running states use the copied raw files
+as the resumable floor. Once a completed-stage status, state receipt hash,
+receipt file, or completion event claims authority, revision and resume require
+completed state, an exact state-to-receipt hash match, and a strict receipt
+inventory authenticating both copied raw files. Missing, malformed, incomplete,
+or stale evidence—and rewritten raw/receipt bytes that no longer match the
+recorded state hash—fails before revision writes or provider construction.
 
 Provider transport plus semantic response validation and normalization share
 one sanitized boundary. Failures retain their original exception as an
@@ -148,10 +156,20 @@ tenant/asset-bound target config and state, exact nested request/result/history/
 event schemas, changed-field and stage-suffix semantics, before/target hashes,
 strict contiguous prepare/commit ordering, and byte-exact before/target prefix
 descriptors for both append-only audit logs. Only writer-reachable on-disk
-control and audit phases are accepted. Version 1 or mixed-version journals
-require explicit repair because they do not contain enough before-state
-evidence for safe automatic recovery. A parseable, rehashed, but inconsistent
-journal therefore fails before any authority write.
+control and audit phases are accepted. Every later operation is chained to the
+prior target mutation/config identity and audit chronology; ordinary pipeline
+stage events may extend the event prefix between mutations. A committed legacy
+adoption is the terminal operation and requires exact target config/state,
+every target receipt, exact audit prefixes, and its commit. Standalone candidate
+and persisted release verification call this same complete validator. Legacy
+history compatibility is authorized only by the final validated adoption
+prepare—committed or the one legitimate outstanding crash state—whose target
+receipt hashes match the verified receipts. The authenticated adoption
+before-state is then replayed through the full native or historical semantic
+validator; receipt origin labels alone convey no compatibility. Version 1 or
+mixed-version journals require explicit repair because they do not contain
+enough before-state evidence for safe automatic recovery. A parseable,
+rehashed, but inconsistent journal therefore fails before any authority write.
 
 These are single-file and authority-ordering guarantees. Stage 8 verifies all
 four current catalog copies before `released`, but Task 3 does not make those
@@ -681,8 +699,12 @@ and tool expectations are a finite JSON mapping. Adoption deterministically
 replays candidate compilation and every derived guideline, trusted-intent, and
 trusted-case field. Genuine pre-guideline rubric layouts are replayed against
 their historical trusted intent/case writer rather than being coerced into the
-native schema. Any mismatch fails before receipts, journal, state, history,
-events, or catalog authority changes.
+native schema. The shared identity contract rejects exact duplicate canonical
+candidates and duplicate or colliding guideline, criterion, trusted-intent, or
+trusted-case IDs; it never silently deduplicates. The live writer performs this
+check before any Stage 3 artifact or receipt write, and native/historical replay
+uses the same check. Any mismatch fails before receipts, journal, state,
+history, events, or catalog authority changes.
 
 Evaluator plans use this preference order:
 

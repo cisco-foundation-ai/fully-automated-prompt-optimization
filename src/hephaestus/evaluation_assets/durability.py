@@ -20,6 +20,10 @@ from src.hephaestus.evaluation_assets.control_jsonl import (
 from src.hephaestus.evaluation_assets.journal_transitions import (
     JOURNAL_SCHEMA_VERSION,
 )
+from src.hephaestus.evaluation_assets.journal_validation import (
+    ValidatedRecoveryJournal,
+    validate_recovery_journal,
+)
 from src.hephaestus.evaluation_assets.legacy_validation import (
     validate_legacy_stage_semantics,
 )
@@ -512,19 +516,37 @@ def _verify_release_evidence(
             state,
             require_persisted_state=require_persisted_state,
         )
+        journal_entries = (
+            read_strict_jsonl_objects(layout.recovery_journal_path)
+            if layout.recovery_journal_path.is_file()
+            else []
+        )
+        journal = validate_recovery_journal(layout, journal_entries)
         verified_receipts = (
             _verify_candidate_receipts(layout, state, candidate_receipts)
             if candidate_receipts is not None
             else verify_receipt_chain(layout, state)
         )
+        legacy_adoption = _legacy_receipt_authority(
+            journal,
+            verified_receipts,
+        )
+        if legacy_adoption is not None:
+            legacy_state = PipelineState.from_dict(
+                dict(legacy_adoption["before_state"])
+            )
+            semantic_counts = validate_legacy_release_candidate(
+                layout,
+                legacy_state,
+                config,
+            )
+            if semantic_counts != state.counts:
+                raise ValueError("adopted release counts are inconsistent")
         config_hashes = _replay_config_history(
             layout,
             config,
             state,
-            allow_pre_wal_history=all(
-                receipt.get("origin") == "legacy_adoption"
-                for receipt in verified_receipts.values()
-            ),
+            allow_pre_wal_history=legacy_adoption is not None,
         )
         _verify_receipt_config_history(
             layout,
@@ -534,12 +556,87 @@ def _verify_release_evidence(
         )
     except EvaluationAssetIntegrityError:
         raise
-    except (KeyError, OSError, TypeError, UnicodeError, ValueError) as exc:
+    except (
+        EvaluationAssetLegacyError,
+        KeyError,
+        OSError,
+        TypeError,
+        UnicodeError,
+        ValueError,
+    ) as exc:
         raise EvaluationAssetIntegrityError(
             layout.tenant_id,
             layout.asset_id,
             "released control evidence is invalid",
         ) from exc
+
+
+def _verify_prospective_legacy_adoption_candidate(
+    layout: Any,
+    state: PipelineState,
+    receipts: Mapping[PipelineStage, Mapping[str, Any]],
+    *,
+    legacy_state: PipelineState | None = None,
+) -> None:
+    """Verify one internal pre-WAL adoption target without public compatibility."""
+    source_state = legacy_state or layout.load_state()
+    config = layout.load_config()
+    counts = validate_legacy_release_candidate(layout, source_state, config)
+    if state.counts != counts:
+        raise ValueError("prospective adoption counts are inconsistent")
+    _validate_released_control_state(
+        layout,
+        state,
+        require_persisted_state=False,
+    )
+    verified_receipts = _verify_candidate_receipts(layout, state, receipts)
+    if any(
+        receipt.get("origin") != "legacy_adoption"
+        for receipt in verified_receipts.values()
+    ):
+        raise ValueError("prospective adoption receipt origin is invalid")
+    config_hashes = _replay_config_history(
+        layout,
+        config,
+        state,
+        allow_pre_wal_history=True,
+    )
+    _verify_receipt_config_history(layout, verified_receipts, config_hashes, config)
+
+
+def _legacy_receipt_authority(
+    journal: ValidatedRecoveryJournal,
+    receipts: Mapping[PipelineStage, Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    origins = {receipt.get("origin") for receipt in receipts.values()}
+    if origins == {"native"}:
+        return None
+    if origins != {"legacy_adoption"}:
+        raise ValueError("release receipt origins are inconsistent")
+    receipt_hashes = {
+        stage.value: persisted_json_sha256(receipts[stage]) for stage in PipelineStage
+    }
+    if not journal.prepared:
+        raise ValueError("legacy receipt authority lacks a matching adoption")
+    adoption = journal.prepared[-1]
+    operation_id = str(adoption.get("operation_id") or "")
+    outstanding_operation = (
+        str(journal.outstanding.get("operation_id") or "")
+        if journal.outstanding is not None
+        else None
+    )
+    operation_is_authorized = (
+        operation_id in journal.committed_operation_ids
+        or operation_id == outstanding_operation
+    )
+    if (
+        adoption.get("kind") != "legacy_adoption"
+        or not operation_is_authorized
+        or not isinstance(adoption.get("target"), Mapping)
+        or adoption["target"].get("receipt_sha256") != receipt_hashes
+    ):
+        raise ValueError("legacy receipt authority lacks a matching adoption")
+    return adoption
 
 
 def released_parent_evidence(
@@ -1221,27 +1318,90 @@ def verify_raw_snapshot_floor(layout: Any, state: PipelineState) -> None:
         )
     stage_state = _stage_state(state, PipelineStage.RAW_INPUTS)
     receipt_path = layout.receipt_path(PipelineStage.RAW_INPUTS)
-    if not stage_state.receipt_sha256 or not receipt_path.is_file():
+    try:
+        events = read_strict_jsonl_objects(layout.events_path)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "immutable raw input snapshot audit authority is malformed",
+        ) from exc
+    prior_stage_completion = any(
+        event.get("event") == "stage_completed" for event in events
+    )
+    unclaimed_status_is_coherent = (
+        stage_state.status == "pending"
+        and state.status in {"draft", "queued", "running", "failed"}
+    ) or (
+        stage_state.status in {"running", "failed"}
+        and state.status == stage_state.status
+        and state.current_stage == PipelineStage.RAW_INPUTS.value
+    )
+    never_receipted = (
+        stage_state.status != "completed"
+        and stage_state.receipt_sha256 is None
+        and not receipt_path.exists()
+        and not prior_stage_completion
+        and unclaimed_status_is_coherent
+    )
+    if never_receipted:
         return
+    if (
+        stage_state.status != "completed"
+        or not isinstance(stage_state.receipt_sha256, str)
+        or not _SHA256.fullmatch(stage_state.receipt_sha256)
+        or not receipt_path.is_file()
+        or file_sha256(receipt_path) != stage_state.receipt_sha256
+    ):
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "immutable raw input snapshot receipt authority is inconsistent",
+        )
     try:
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return
-    inputs = receipt.get("inputs") if isinstance(receipt, Mapping) else None
-    if not isinstance(inputs, list):
-        return
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "immutable raw input snapshot receipt is malformed",
+        ) from exc
+    if (
+        not isinstance(receipt, Mapping)
+        or set(receipt) != _STAGE_RECEIPT_FIELDS
+        or receipt.get("schema_version") != STAGE_RECEIPT_SCHEMA_VERSION
+        or receipt.get("stage") != PipelineStage.RAW_INPUTS.value
+        or receipt.get("stage_index") != 1
+    ):
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "immutable raw input snapshot receipt is invalid",
+        )
+    inputs = receipt.get("inputs")
     raw_relative_paths = {
         path.relative_to(layout.root).as_posix() for path in raw_paths
     }
+    if not isinstance(inputs, list) or len(inputs) != len(raw_relative_paths):
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "immutable raw input snapshot receipt inventory is incomplete",
+        )
     records = {
         str(item.get("path")): item
         for item in inputs
         if isinstance(item, Mapping)
+        and set(item) == {"path", "scope", "sha256", "bytes"}
         and item.get("scope") == "asset"
         and item.get("path") in raw_relative_paths
     }
     if set(records) != raw_relative_paths:
-        return
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "immutable raw input snapshot receipt inventory is incomplete",
+        )
     for item in records.values():
         try:
             _verify_file_record(layout, PipelineStage.RAW_INPUTS, item)

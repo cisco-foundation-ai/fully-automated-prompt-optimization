@@ -211,13 +211,23 @@ Stage 3 uses one shared producer/verification contract: supported candidate
 domains are validated before persistence, compiled guidelines and their trusted
 intent/case derivatives are deterministic, and legacy adoption replays the
 exact native or historical transformation before accepting existing bytes.
+Exact duplicate candidates and duplicate or colliding guideline, criterion,
+trusted-intent, and trusted-case identifiers fail before any Stage 3 derivative
+or receipt is persisted; live compilation and both adoption profiles apply the
+same identity check.
 
 The top-level lifecycle is exactly `draft`, `queued`, `running`,
 `awaiting_review`, `released`, or `failed`. Each completed stage has an atomic
 receipt commit marker under `receipts/`; `pipeline_state.json` references its
 hash, and `events.jsonl` retains the append-only history. Resume verifies the
 completed receipt prefix and rebuilds from its first invalid boundary. Missing
-or corrupt immutable raw snapshots require repair or a new asset. A released
+or corrupt immutable raw snapshots require repair or a new asset. Presence-only
+raw validation is limited to a coherent Stage 1 lifecycle that has never
+claimed receipt or completion authority, including safe retry after a failure
+or process death before the first receipt. Once a completed-stage status, state
+receipt hash, receipt file, or completion event claims Stage 1 authority,
+revision and resume require a completed stage, the exact state-bound receipt
+hash, and receipt records that authenticate both copied raw files. A released
 asset is read-only: verification binds the exact v2 control state, persisted
 configuration history, receipt chain, and required artifact hashes while
 treating historical code identity as audit evidence. The final stage receipt
@@ -234,9 +244,17 @@ the complete pre-operation config/state snapshot, exact nested target semantics,
 byte-exact before/target prefixes for configuration history and events,
 prepare-before-commit order, before/target hashes, and only operation-reachable
 intermediate control pairs before writing. Version 2 operations form strict
-contiguous prepare/commit pairs with at most one trailing prepare. Version 1 or
-mixed-version journals require explicit repair because they lack the complete
-before-state evidence needed for safe roll-forward.
+contiguous prepare/commit pairs with at most one trailing prepare. Consecutive
+operations also authenticate writer chronology through mutation identity,
+configuration history, and monotonic event prefixes while allowing ordinary
+stage events between mutations. A committed legacy adoption is terminal and
+must retain its exact target config, state, receipts, and audit prefixes.
+Standalone candidate and released verification use this same complete journal
+validator. Pre-WAL history compatibility comes only from the final validated
+adoption transaction whose target hashes match the semantically replayed
+receipts, not from receipt origin labels. Version 1 or mixed-version journals
+require explicit repair because they lack the complete before-state evidence
+needed for safe roll-forward.
 One cross-process per-asset lock protects create, run/resume, revision,
 adoption, and extension mutations across library, CLI, and Studio callers.
 Default providers are constructed only after that lock, recovery, lifecycle

@@ -98,6 +98,9 @@ from src.hephaestus.evaluation_assets.stage_three_contract import (
 from src.hephaestus.evaluation_assets.stage_three_contract import (
     trusted_intent_from_guideline as _trusted_intent_from_guideline,
 )
+from src.hephaestus.evaluation_assets.stage_three_contract import (
+    validate_stage_three_identities as _validate_stage_three_identities,
+)
 from src.hephaestus.evaluation_assets.workspace import (
     EvaluationAssetLayout,
     atomic_write_json,
@@ -818,6 +821,12 @@ class EvaluationAssetPipeline:
             )
             for row in normalized
         ]
+        _validate_stage_three_identities(
+            candidates=candidates,
+            guidelines=guidelines,
+            trusted_intents=trusted_intents,
+            trusted_cases=trusted_cases,
+        )
         write_jsonl(evidence_path, evidence)
         write_jsonl(candidate_path, candidates)
         write_jsonl(guideline_path, guidelines)
