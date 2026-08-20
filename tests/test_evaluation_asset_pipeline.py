@@ -31,6 +31,7 @@ from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
 
 
 class FakeEmbeddingProvider:
+    provider_name = "fake"
     model = "fake-embedding"
 
     def __init__(self):
@@ -61,6 +62,7 @@ class SecretFailingEmbeddingProvider(FakeEmbeddingProvider):
 
 
 class FakeRubricProvider:
+    provider_name = "fake"
     model = "fake-rubric"
 
     def __init__(self):
@@ -1073,7 +1075,7 @@ def test_provider_failure_persists_only_sanitized_causal_summary(
         + pipeline.layout.events_path.read_text(encoding="utf-8")
     )
     assert expected_stage.value in persisted
-    assert "provider=openai" in persisted
+    assert "provider=fake" in persisted
     assert "model=fake-" in persisted
     assert "cause=RuntimeError" in persisted
     assert "summary=provider operation failed" in persisted
@@ -1183,6 +1185,7 @@ def test_rubric_normalization_accepts_list_form_tool_expectations() -> None:
         "record_id",
         "feedback-1",
         "human_feedback",
+        "fake",
         "gpt-5.5",
     )
 
@@ -1233,9 +1236,15 @@ def test_guideline_compilation_preserves_provenance_and_evaluator_plan() -> None
     guidelines = _compile_evaluation_guidelines(
         candidates,
         evidence,
+        "fake",
         "gpt-5.5",
     )
-    rubric = _rubric_from_guidelines("feedback-1", guidelines, "gpt-5.5")
+    rubric = _rubric_from_guidelines(
+        "feedback-1",
+        guidelines,
+        "fake",
+        "gpt-5.5",
+    )
 
     assert guidelines[0]["criteria"][0]["source_record_ids"] == ["feedback-1"]
     assert guidelines[0]["criteria"][0]["evaluator"]["type"] == "state_check"
@@ -1790,6 +1799,10 @@ def test_extend_asset_keeps_clustering_and_extracts_only_new_rubrics(
             tenant_id="tenant_a",
             cluster_count=1,
             synthetic_coverage_enabled=False,
+            rubric_provider="fake",
+            rubric_model="fake-rubric",
+            embedding_provider="fake",
+            embedding_model="fake-embedding",
         ),
         feedback,
         unlabeled,
@@ -1864,7 +1877,14 @@ def test_extend_asset_refreshes_clustering_for_new_unlabeled_records(
     _write_extension_unlabeled(added_unlabeled, ["u3"])
     parent = EvaluationAssetPipeline.create(
         tenants_root,
-        EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
+        EvaluationAssetConfig(
+            tenant_id="tenant_a",
+            cluster_count=1,
+            rubric_provider="fake",
+            rubric_model="fake-rubric",
+            embedding_provider="fake",
+            embedding_model="fake-embedding",
+        ),
         feedback,
         unlabeled,
         rubric_provider=FakeRubricProvider(),
@@ -1918,7 +1938,14 @@ def test_extend_asset_rejects_unlabeled_additions_when_clustering_is_kept(
     _write_extension_unlabeled(added_unlabeled, ["u2"])
     parent = EvaluationAssetPipeline.create(
         tenants_root,
-        EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
+        EvaluationAssetConfig(
+            tenant_id="tenant_a",
+            cluster_count=1,
+            rubric_provider="fake",
+            rubric_model="fake-rubric",
+            embedding_provider="fake",
+            embedding_model="fake-embedding",
+        ),
         feedback,
         unlabeled,
         rubric_provider=FakeRubricProvider(),
@@ -2064,7 +2091,9 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
         tenant_id="new_tenant",
         asset_id="v1",
         cluster_count=1,
+        rubric_provider="fake",
         rubric_model="fake-rubric",
+        embedding_provider="fake",
         embedding_model="fake-embedding",
         synthetic_coverage_enabled=synthetic_coverage_enabled,
         synthetic_cases_per_cluster=synthetic_cases_per_cluster,

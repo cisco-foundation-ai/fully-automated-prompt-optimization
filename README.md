@@ -215,20 +215,25 @@ completed receipt prefix and rebuilds from its first invalid boundary. Missing
 or corrupt immutable raw snapshots require repair or a new asset. A released
 asset is read-only: verification binds the exact v2 control state, persisted
 configuration history, receipt chain, and required artifact hashes while
-treating historical code identity as audit evidence. Any mismatch fails closed,
-and changes require a child version.
+treating historical code identity as audit evidence. The final stage receipt
+also binds the exact configuration-history bytes, whose versioned row schemas,
+UTC timestamps, revision operations, and changed-field boundaries are verified.
+Any mismatch fails closed, and changes require a child version.
 
 Configuration revisions and checkpoint rebuilds first append a durable
 prepared record to `recovery_journal.jsonl`, then make stale stage state
 nonauthoritative, and only afterward remove stale files. A later run rolls any
 prepared operation forward idempotently before it evaluates the receipt chain.
 Recovery authenticates the journal schema, operation and tenant/asset identity,
-before/target hashes, and allowable intermediate control state before writing.
+exact nested target/audit semantics, prepare-before-commit order, before/target
+hashes, and only operation-reachable intermediate control pairs before writing.
 One cross-process per-asset lock protects create, run/resume, revision,
 adoption, and extension mutations across library, CLI, and Studio callers.
 Default providers are constructed only after that lock, recovery, lifecycle
-checks, revision, and configuration reload; receipts identify the provider
-instance and model actually used. Service jobs persist `queued`, then return
+and immutable raw-snapshot checks, revision, and configuration reload. Injected
+providers must declare nonblank `provider_name` and `model` attributes; receipts
+identify the provider instance and model actually used instead of substituting
+configured defaults. Service jobs persist `queued`, then return
 acceptance only after separate lock and preflight decisions from the live
 worker, without abandoning a lock-owning worker on a fixed timeout.
 
@@ -300,7 +305,10 @@ complete dataset splits in the new version. Parent and child locks are acquired
 in deterministic order; the parent receipt and source-lineage evidence must
 verify before the child root is created. Stages 3–8 receipt the exact lineage,
 reuse, and parent-snapshot inputs they consume, and Stage 8 anchors the lineage
-and reuse manifests as required outputs. The parent asset is never changed.
+and reuse manifests as required outputs. Producing provider identities come
+from verified parent receipts; a historically unavailable identity requires an
+explicit complete child provider/model selection. The parent asset is never
+changed.
 
 ### Use the CLI
 
@@ -353,10 +361,12 @@ python -m hephaestus.cli assets adopt \
 ```
 
 Adoption accepts only pre-v2 `completed`, validates all eight stages, raw source
-hashes, both manifests, and the current four catalog copies, records unavailable
-historical prompt/provider/code facts honestly, builds receipts, and changes the
-status to `released` only after the complete receipt chain verifies. Failure
-leaves the legacy authority unchanged and requires repair or a new asset.
+hashes, strict finite artifact schemas, deterministic Stage 7 filter outputs,
+both manifests, and the current four catalog copies, records unavailable
+historical prompt/provider/code facts honestly, builds receipts, and changes
+the status to `released` only after the complete terminal candidate and then
+the persisted receipt chain verify. Failure leaves the legacy authority
+unchanged and requires repair or a new asset.
 
 Add `--enable-synthetic-coverage --synthetic-cases-per-cluster <count>` to
 enable Stage 7. Use `--embedding-model tfidf` for deterministic local

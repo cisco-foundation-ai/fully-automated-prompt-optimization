@@ -44,6 +44,7 @@ from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
 
 
 class _NeverCalledRubricProvider:
+    provider_name = "fake"
     model = "never-called-rubric"
 
     def __init__(self) -> None:
@@ -55,6 +56,7 @@ class _NeverCalledRubricProvider:
 
 
 class _NeverCalledEmbeddingProvider:
+    provider_name = "fake"
     model = "never-called-embedding"
 
     def __init__(self) -> None:
@@ -66,6 +68,7 @@ class _NeverCalledEmbeddingProvider:
 
 
 class _SuccessfulEmbeddingProvider:
+    provider_name = "fake"
     model = "fake-embedding"
 
     def __init__(self) -> None:
@@ -77,6 +80,7 @@ class _SuccessfulEmbeddingProvider:
 
 
 class _SuccessfulRubricProvider:
+    provider_name = "fake"
     model = "fake-rubric"
 
     def __init__(self) -> None:
@@ -158,6 +162,33 @@ class _SuccessfulRubricProvider:
                 for row in payload["clusters"]
             ]
         }
+
+
+class _SuccessfulSyntheticRubricProvider(_SuccessfulRubricProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.synthetic_calls = 0
+
+    def generate_json(
+        self,
+        system_prompt: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if "synthetic evaluation input" in system_prompt:
+            self.calls += 1
+            self.synthetic_calls += 1
+            return {
+                "cases": [
+                    {
+                        "cluster_id": row["cluster_id"],
+                        "task_type": "generic",
+                        "user_input": "Diagnose a novel lunar telemetry checksum divergence.",
+                        "conversation_context": [],
+                    }
+                    for row in payload["clusters"]
+                ]
+            }
+        return super().generate_json(system_prompt, payload)
 
 
 def _hold_asset_lock(
@@ -651,6 +682,8 @@ def test_service_extension_persists_queued_before_worker_preflight(
     """Service-created children enter queued, never draft, before execution."""
     tenants_root = tmp_path / "tenants"
     feedback, unlabeled = _write_input_pair(tenants_root)
+    rubric = _SuccessfulRubricProvider()
+    rubric.provider_name = "openai"
     parent_pipeline = EvaluationAssetPipeline.create(
         tenants_root,
         EvaluationAssetConfig(
@@ -663,7 +696,7 @@ def test_service_extension_persists_queued_before_worker_preflight(
         ),
         feedback,
         unlabeled,
-        rubric_provider=_SuccessfulRubricProvider(),
+        rubric_provider=rubric,
     )
     parent_pipeline.run()
     entered = threading.Event()
@@ -851,6 +884,227 @@ def test_injected_provider_identity_is_receipted_and_manifested_as_actual(
         "rubric_model": "actual-rubric",
         "rubric_provider": "injected-rubric",
     }
+    evidence = _read_jsonl(
+        pipeline.layout.artifact_path(
+            PipelineStage.RUBRIC_EXTRACTION,
+            "feedback_evidence.jsonl",
+        )
+    )
+    guidelines = _read_jsonl(
+        pipeline.layout.artifact_path(
+            PipelineStage.RUBRIC_EXTRACTION,
+            "evaluation_guidelines.jsonl",
+        )
+    )
+    inferred = _read_jsonl(
+        pipeline.layout.artifact_path(
+            PipelineStage.LABEL_INFERENCE,
+            "inferred_unlabeled_cluster_rubrics.jsonl",
+        )
+    )
+    assert {row["guideline_provider"] for row in evidence} == {"injected-rubric"}
+    assert {row["guideline_provider"] for row in guidelines} == {"injected-rubric"}
+    assert {row["rubric_provider"] for row in inferred} == {"injected-rubric"}
+
+
+def test_injection_missing_required_provider_name_is_rejected_before_calls(
+    tmp_path: Path,
+) -> None:
+    """The injection contract never substitutes config for required identity."""
+
+    class ProtocolMinimalRubricProvider:
+        model = "fake-rubric"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate_json(
+            self,
+            system_prompt: str,
+            payload: dict[str, Any],
+        ) -> dict[str, Any]:
+            self.calls += 1
+            return _SuccessfulRubricProvider().generate_json(system_prompt, payload)
+
+    tenants_root = tmp_path / "tenants"
+    feedback, unlabeled = _write_input_pair(tenants_root)
+    rubric = ProtocolMinimalRubricProvider()
+    pipeline = EvaluationAssetPipeline.create(
+        tenants_root,
+        EvaluationAssetConfig(
+            tenant_id="tenant_a",
+            rubric_provider="fake",
+            rubric_model=rubric.model,
+            embedding_provider="fake",
+            embedding_model="fake-embedding",
+            cluster_count=1,
+        ),
+        feedback,
+        unlabeled,
+        rubric_provider=rubric,
+        embedding_provider=_SuccessfulEmbeddingProvider(),
+    )
+    before = _authority_bytes(pipeline.layout)
+
+    with pytest.raises(ValueError, match="injected rubric provider identity is unavailable"):
+        pipeline.run()
+
+    assert rubric.calls == 0
+    assert _authority_bytes(pipeline.layout) == before
+
+
+def test_injected_provider_mismatch_requires_explicit_extension_identity(
+    tmp_path: Path,
+) -> None:
+    """A child cannot silently default to stale configured producer identities."""
+    pipeline, rubric, embedding = _create_pipeline(tmp_path)
+    rubric.provider_name = "actual-rubric-provider"
+    rubric.model = "actual-rubric-model"
+    embedding.provider_name = "actual-embedding-provider"
+    embedding.model = "actual-embedding-model"
+    pipeline.run()
+    child = EvaluationAssetLayout(
+        pipeline.layout.tenants_root,
+        pipeline.layout.tenant_id,
+        "v2",
+    )
+    additional = _write_additional_feedback(pipeline.layout.tenants_root)
+
+    with pytest.raises(ValueError, match="explicit provider identity"):
+        child.initialize_extension(
+            pipeline.layout,
+            additional_feedback=additional,
+            additional_unlabeled=None,
+            clustering_mode="keep",
+        )
+
+    assert not child.root.exists()
+    child.initialize_extension(
+        pipeline.layout,
+        additional_feedback=additional,
+        additional_unlabeled=None,
+        clustering_mode="keep",
+        config_updates={
+            "rubric_provider": "actual-rubric-provider",
+            "rubric_model": "actual-rubric-model",
+            "embedding_provider": "actual-embedding-provider",
+            "embedding_model": "actual-embedding-model",
+        },
+    )
+    child_config = child.load_config()
+    assert (
+        child_config.rubric_provider,
+        child_config.rubric_model,
+        child_config.embedding_provider,
+        child_config.embedding_model,
+    ) == (
+        "actual-rubric-provider",
+        "actual-rubric-model",
+        "actual-embedding-provider",
+        "actual-embedding-model",
+    )
+
+
+def test_unavailable_parent_provider_identity_accepts_explicit_child_choice(
+    tmp_path: Path,
+) -> None:
+    """An adopted parent can extend only with a complete explicit identity."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    _downgrade_to_legacy_completed(pipeline.layout)
+    pipeline.layout.adopt_legacy()
+    child = EvaluationAssetLayout(
+        pipeline.layout.tenants_root,
+        pipeline.layout.tenant_id,
+        "v2",
+    )
+    additional = _write_additional_feedback(pipeline.layout.tenants_root)
+
+    child.initialize_extension(
+        pipeline.layout,
+        additional_feedback=additional,
+        additional_unlabeled=None,
+        clustering_mode="keep",
+        config_updates={
+            "rubric_provider": "chosen-rubric-provider",
+            "rubric_model": "chosen-rubric-model",
+            "embedding_provider": "chosen-embedding-provider",
+            "embedding_model": "chosen-embedding-model",
+        },
+    )
+
+    child_config = child.load_config()
+    assert (
+        child_config.rubric_provider,
+        child_config.rubric_model,
+        child_config.embedding_provider,
+        child_config.embedding_model,
+    ) == (
+        "chosen-rubric-provider",
+        "chosen-rubric-model",
+        "chosen-embedding-provider",
+        "chosen-embedding-model",
+    )
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+def test_raw_snapshot_floor_rejects_before_revision_or_default_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    damage: str,
+) -> None:
+    """Raw-floor integrity precedes revision WAL and credential-bearing defaults."""
+    tenants_root = tmp_path / "tenants"
+    feedback, unlabeled = _write_input_pair(tenants_root)
+    pipeline = EvaluationAssetPipeline.create(
+        tenants_root,
+        EvaluationAssetConfig(
+            tenant_id="tenant_a",
+            rubric_provider="openai",
+            rubric_model="initial-rubric",
+            embedding_provider="openai",
+            embedding_model="initial-embedding",
+            cluster_count=1,
+        ),
+        feedback,
+        unlabeled,
+        rubric_provider=_SuccessfulRubricProvider(),
+        embedding_provider=_SuccessfulEmbeddingProvider(),
+    )
+    pipeline.run()
+    layout = pipeline.layout
+    state = layout.load_state()
+    state.status = "failed"
+    layout.save_state(state)
+    if damage == "missing":
+        layout.feedback_path.unlink()
+    else:
+        layout.feedback_path.write_bytes(layout.feedback_path.read_bytes() + b" \n")
+    before = _authority_bytes(layout)
+    constructed: list[tuple[str, str]] = []
+
+    def rubric_factory(*, model: str, **_: Any) -> _SuccessfulRubricProvider:
+        constructed.append(("rubric", model))
+        provider = _SuccessfulRubricProvider()
+        provider.model = model
+        return provider
+
+    def embedding_factory(*, model: str, **_: Any) -> _SuccessfulEmbeddingProvider:
+        constructed.append(("embedding", model))
+        provider = _SuccessfulEmbeddingProvider()
+        provider.model = model
+        return provider
+
+    monkeypatch.setattr(pipeline_module, "OpenAIRubricProvider", rubric_factory)
+    monkeypatch.setattr(pipeline_module, "OpenAIEmbeddingProvider", embedding_factory)
+
+    with pytest.raises(EvaluationAssetIntegrityError, match="raw input snapshot"):
+        EvaluationAssetPipeline(layout).run(
+            config_updates={"rubric_model": "revised-rubric"}
+        )
+
+    assert constructed == []
+    assert _authority_bytes(layout) == before
 
 
 @pytest.mark.parametrize("rejection", ["busy", "released", "corrupt"])
@@ -1347,6 +1601,204 @@ def test_released_verification_requires_config_history_authority(
     assert _authority_bytes(pipeline.layout) == before
 
 
+@pytest.mark.parametrize("damage", ["missing", "malformed"])
+def test_native_release_authenticates_history_before_persisting_released(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    damage: str,
+) -> None:
+    """A run never reports release for a terminal candidate lacking audit evidence."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    real_builder = pipeline_module.build_stage_receipt
+
+    def damage_history_after_final_receipt(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        receipt = real_builder(*args, **kwargs)
+        stage = args[1]
+        if stage == PipelineStage.DATASET_SPLITS:
+            if damage == "missing":
+                pipeline.layout.config_history_path.unlink()
+            else:
+                pipeline.layout.config_history_path.write_text(
+                    "{not-json\n",
+                    encoding="utf-8",
+                )
+        return receipt
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "build_stage_receipt",
+        damage_history_after_final_receipt,
+    )
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        pipeline.run()
+
+    assert pipeline.layout.load_state().status != "released"
+
+
+def test_native_release_verifies_the_persisted_terminal_before_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The successful return follows verification of exact persisted authority."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    persisted_statuses: list[str] = []
+    real_verify = pipeline_module.verify_released_asset
+
+    def record_persisted_verification(
+        layout: EvaluationAssetLayout,
+        state: PipelineState,
+    ) -> None:
+        persisted_statuses.append(
+            json.loads(layout.state_path.read_text(encoding="utf-8"))["status"]
+        )
+        real_verify(layout, state)
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "verify_released_asset",
+        record_persisted_verification,
+    )
+
+    released = pipeline.run()
+
+    assert released.status == "released"
+    assert persisted_statuses == ["released"]
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "created_timestamp",
+        "created_timestamp_missing",
+        "created_extra",
+        "created_revision_bool",
+        "created_configuration_extra",
+        "updated_timestamp",
+        "updated_timestamp_missing",
+        "updated_extra",
+        "updated_operation",
+        "updated_operation_missing",
+        "updated_invalidated_boundary",
+        "updated_resume_boundary",
+    ],
+)
+def test_released_verification_authenticates_exact_config_history_records(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    """Every created/updated audit field and exact row schema is release evidence."""
+    pipeline, rubric, embedding = _create_pipeline(tmp_path)
+    pipeline.run()
+    state = pipeline.layout.load_state()
+    state.status = "failed"
+    pipeline.layout.save_state(state)
+    EvaluationAssetPipeline(
+        pipeline.layout,
+        rubric_provider=rubric,
+        embedding_provider=embedding,
+    ).run(config_updates={"match_threshold": 0.2})
+    rows = _read_jsonl(pipeline.layout.config_history_path)
+    if corruption == "created_timestamp":
+        rows[0]["timestamp"] = "2026-08-19T00:00:00+00:00"
+    elif corruption == "created_timestamp_missing":
+        rows[0].pop("timestamp")
+    elif corruption == "created_extra":
+        rows[0]["untrusted_extra"] = "value"
+    elif corruption == "created_revision_bool":
+        rows[0]["revision"] = True
+    elif corruption == "created_configuration_extra":
+        rows[0]["configuration"]["untrusted_extra"] = "value"
+    elif corruption == "updated_timestamp":
+        rows[1]["timestamp"] = "2026-08-19T00:00:00+00:00"
+    elif corruption == "updated_timestamp_missing":
+        rows[1].pop("timestamp")
+    elif corruption == "updated_extra":
+        rows[1]["untrusted_extra"] = "value"
+    elif corruption == "updated_operation":
+        rows[1]["operation_id"] = "f" * 32
+    elif corruption == "updated_operation_missing":
+        rows[1].pop("operation_id")
+    elif corruption == "updated_invalidated_boundary":
+        rows[1]["invalidated_from_stage"] = PipelineStage.LABEL_INFERENCE.value
+    elif corruption == "updated_resume_boundary":
+        rows[1]["resume_from_stage"] = PipelineStage.LABEL_INFERENCE.value
+    else:
+        raise AssertionError(corruption)
+    artifact_io.atomic_write_jsonl(pipeline.layout.config_history_path, rows)
+    before = _authority_bytes(pipeline.layout)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        verify_released_asset(pipeline.layout, pipeline.layout.load_state())
+
+    assert _authority_bytes(pipeline.layout) == before
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["parent_asset", "missing_parent_asset", "extra_field"],
+)
+def test_released_verification_authenticates_exact_inherited_history_record(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    """An extension release binds every inherited-origin history field."""
+    parent, _, _ = _create_pipeline(tmp_path)
+    parent.run()
+    child = EvaluationAssetLayout(
+        parent.layout.tenants_root,
+        parent.layout.tenant_id,
+        "v2",
+    )
+    child.initialize_extension(
+        parent.layout,
+        additional_feedback=_write_additional_feedback(parent.layout.tenants_root),
+        additional_unlabeled=None,
+        clustering_mode="keep",
+    )
+    released = EvaluationAssetPipeline(
+        child,
+        rubric_provider=_SuccessfulRubricProvider(),
+        embedding_provider=_SuccessfulEmbeddingProvider(),
+    ).run()
+    rows = _read_jsonl(child.config_history_path)
+    if corruption == "parent_asset":
+        rows[0]["parent_asset_id"] = "different-parent"
+    elif corruption == "missing_parent_asset":
+        rows[0].pop("parent_asset_id")
+    else:
+        rows[0]["untrusted_extra"] = "value"
+    artifact_io.atomic_write_jsonl(child.config_history_path, rows)
+    before = _authority_bytes(child)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        verify_released_asset(child, released)
+
+    assert _authority_bytes(child) == before
+
+
+def test_legacy_adoption_authenticates_terminal_history_before_wal(
+    tmp_path: Path,
+) -> None:
+    """Invalid terminal audit evidence cannot prepare adoption authority."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+    rows = _read_jsonl(layout.config_history_path)
+    rows[0]["untrusted_extra"] = "value"
+    artifact_io.atomic_write_jsonl(layout.config_history_path, rows)
+    before = _authority_bytes(layout)
+
+    with pytest.raises(EvaluationAssetLegacyError):
+        layout.adopt_legacy()
+
+    assert _authority_bytes(layout) == before
+    assert layout.load_state().legacy_completed
+    assert not layout.recovery_journal_path.exists()
+    assert not any(layout.receipts_root.glob("*.json"))
+
+
 @pytest.mark.parametrize(
     "corruption",
     [
@@ -1455,6 +1907,317 @@ def test_recovery_journal_corruption_fails_closed_before_any_roll_forward(
     if corruption not in {"duplicate_prepared", "orphan_committed"}:
         rows[0] = prepared
     artifact_io.atomic_write_jsonl(layout.recovery_journal_path, rows)
+    before = _authority_bytes(layout)
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        layout.recover()
+
+    assert _authority_bytes(layout) == before
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "unknown_current_stage",
+        "duplicate_stage",
+        "unknown_stage",
+        "impossible_prefix",
+        "invalid_prefix_status",
+        "invalidated_message",
+        "invalidated_started_at",
+        "history_extra",
+        "result_extra",
+        "changed_field_previous",
+        "changed_field_unchanged",
+        "dependency_boundary",
+        "event_extra",
+    ],
+)
+def test_rehashed_revision_journal_semantic_corruption_fails_before_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    corruption: str,
+) -> None:
+    """Rehashing cannot turn an operation-impossible revision into authority."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    prior_state = layout.load_state()
+    prior_state.status = "failed"
+    layout.save_state(prior_state)
+
+    def stop_after_prepare(name: str) -> None:
+        if name == "after_prepared_journal":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", stop_after_prepare)
+    with pytest.raises(_InjectedFault):
+        layout.revise_config({"match_threshold": 0.2})
+    rows = _read_jsonl(layout.recovery_journal_path)
+    prepared = rows[0]
+    target_state = prepared["target_state"]
+    history = prepared["history_entry"]
+    result = prepared["result"]
+    event_details = prepared["event_entry"]["details"]
+    if corruption == "unknown_current_stage":
+        for payload in (history, result, event_details):
+            payload["resume_from_stage"] = "not_a_stage"
+        target_state["current_stage"] = "not_a_stage"
+    elif corruption == "duplicate_stage":
+        target_state["stages"].append(dict(target_state["stages"][0]))
+    elif corruption == "unknown_stage":
+        target_state["stages"].append(
+            {
+                "stage": "not_a_stage",
+                "label": "Unknown stage",
+                "status": "pending",
+                "message": "",
+                "started_at": None,
+                "completed_at": None,
+                "receipt_sha256": None,
+            }
+        )
+    elif corruption == "impossible_prefix":
+        target_state["stages"][0].update(
+            {
+                "status": "pending",
+                "message": "",
+                "started_at": None,
+                "completed_at": None,
+                "receipt_sha256": None,
+            }
+        )
+    elif corruption == "invalid_prefix_status":
+        target_state["stages"][0]["status"] = "not_a_status"
+    elif corruption == "invalidated_message":
+        target_state["stages"][4]["message"] = "stale authority"
+    elif corruption == "invalidated_started_at":
+        target_state["stages"][4]["started_at"] = target_state["updated_at"]
+    elif corruption == "history_extra":
+        history["untrusted_extra"] = "value"
+    elif corruption == "result_extra":
+        result["untrusted_extra"] = "value"
+    elif corruption == "changed_field_previous":
+        for payload in (history, result, event_details):
+            payload["changed_fields"]["match_threshold"]["previous"] = 0.123
+    elif corruption == "changed_field_unchanged":
+        unchanged = {"previous": 3, "new": 3}
+        for payload in (history, result, event_details):
+            payload["changed_fields"]["batch_size"] = unchanged
+    elif corruption == "dependency_boundary":
+        prior = json.loads(layout.state_path.read_text(encoding="utf-8"))
+        target_state["stages"][4] = prior["stages"][4]
+        target_state["current_stage"] = PipelineStage.LABEL_INFERENCE.value
+        prepared["invalidated_stages"] = [
+            stage.value
+            for stage in list(PipelineStage)[
+                list(PipelineStage).index(PipelineStage.LABEL_INFERENCE) :
+            ]
+        ]
+        for payload in (history, result, event_details):
+            payload["invalidated_from_stage"] = PipelineStage.LABEL_INFERENCE.value
+            payload["resume_from_stage"] = PipelineStage.LABEL_INFERENCE.value
+    elif corruption == "event_extra":
+        prepared["event_entry"]["untrusted_extra"] = "value"
+    else:
+        raise AssertionError(corruption)
+    prepared["target"]["state_sha256"] = durability_module.persisted_json_sha256(
+        target_state
+    )
+    artifact_io.atomic_write_jsonl(layout.recovery_journal_path, [prepared])
+    before = _authority_bytes(layout)
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        layout.recover()
+
+    assert _authority_bytes(layout) == before
+
+
+def test_revision_journal_rejects_impossible_state_before_config_intermediate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only before/before, target/before, and target/target control pairs exist."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    state = layout.load_state()
+    state.status = "failed"
+    layout.save_state(state)
+
+    def stop_after_prepare(name: str) -> None:
+        if name == "after_prepared_journal":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", stop_after_prepare)
+    with pytest.raises(_InjectedFault):
+        layout.revise_config({"match_threshold": 0.2})
+    prepared = _read_jsonl(layout.recovery_journal_path)[0]
+    artifact_io.atomic_write_json(layout.state_path, prepared["target_state"])
+    before = _authority_bytes(layout)
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        layout.recover()
+
+    assert _authority_bytes(layout) == before
+
+
+def test_recovery_journal_rejects_commit_that_precedes_its_prepare(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A matching commit is authoritative only after its prepare record."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    state = layout.load_state()
+    state.status = "failed"
+    layout.save_state(state)
+
+    def stop_after_prepare(name: str) -> None:
+        if name == "after_prepared_journal":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", stop_after_prepare)
+    with pytest.raises(_InjectedFault):
+        layout.revise_config({"match_threshold": 0.2})
+    prepared = _read_jsonl(layout.recovery_journal_path)[0]
+    committed = {
+        "schema_version": prepared["schema_version"],
+        "operation_id": prepared["operation_id"],
+        "kind": prepared["kind"],
+        "phase": "committed",
+        "committed_at": prepared["prepared_at"],
+    }
+    artifact_io.atomic_write_jsonl(
+        layout.recovery_journal_path,
+        [committed, prepared],
+    )
+    before = _authority_bytes(layout)
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        layout.recover()
+
+    assert _authority_bytes(layout) == before
+
+
+@pytest.mark.parametrize("corruption", ["unknown_current_stage", "stale_suffix"])
+def test_rehashed_checkpoint_journal_semantics_fail_before_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    corruption: str,
+) -> None:
+    """Checkpoint recovery authenticates its exact resumable target state."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    state = layout.load_state()
+    state.status = "failed"
+    layout.save_state(state)
+    target = layout.artifact_path(
+        PipelineStage.COVERAGE_DECISIONS,
+        "intent_matches.jsonl",
+    )
+    target.write_bytes(target.read_bytes() + b" \n")
+
+    def stop_after_prepare(name: str) -> None:
+        if name == "after_prepared_journal":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", stop_after_prepare)
+    with pytest.raises(_InjectedFault):
+        EvaluationAssetPipeline(
+            layout,
+            rubric_provider=_SuccessfulRubricProvider(),
+            embedding_provider=_SuccessfulEmbeddingProvider(),
+        ).run()
+    prepared = _read_jsonl(layout.recovery_journal_path)[0]
+    if corruption == "unknown_current_stage":
+        prepared["target_state"]["current_stage"] = "not_a_stage"
+        prepared["result"]["resume_from_stage"] = "not_a_stage"
+    else:
+        prepared["target_state"]["stages"][4]["completed_at"] = prepared[
+            "prepared_at"
+        ]
+    prepared["target"]["state_sha256"] = durability_module.persisted_json_sha256(
+        prepared["target_state"]
+    )
+    artifact_io.atomic_write_jsonl(layout.recovery_journal_path, [prepared])
+    before = _authority_bytes(layout)
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        layout.recover()
+
+    assert _authority_bytes(layout) == before
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "stage_status",
+        "stage_order",
+        "negative_count",
+        "receipt_schema",
+        "receipt_output_hash",
+        "receipt_upstream",
+    ],
+)
+def test_rehashed_adoption_journal_semantics_fail_before_receipt_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    corruption: str,
+) -> None:
+    """Adoption WAL validates terminal authority before installing receipts."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+
+    def stop_after_prepare(name: str) -> None:
+        if name == "after_prepared_journal":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", stop_after_prepare)
+    with pytest.raises(_InjectedFault):
+        layout.adopt_legacy()
+    prepared = _read_jsonl(layout.recovery_journal_path)[0]
+    if corruption == "stage_status":
+        prepared["target_state"]["stages"][0]["status"] = "pending"
+    elif corruption == "stage_order":
+        prepared["target_state"]["stages"][0:2] = reversed(
+            prepared["target_state"]["stages"][0:2]
+        )
+    elif corruption == "negative_count":
+        prepared["target_state"]["counts"]["dataset_cases"] = -1
+    else:
+        stage = (
+            PipelineStage.RAW_INPUTS
+            if corruption != "receipt_upstream"
+            else PipelineStage.PREPARED_INPUTS
+        )
+        receipt = prepared["target_receipts"][stage.value]
+        if corruption == "receipt_schema":
+            receipt["schema_version"] = "not-a-receipt-schema"
+        elif corruption == "receipt_output_hash":
+            receipt["outputs"][0]["sha256"] = "0" * 64
+        else:
+            receipt["upstream_receipts"] = []
+        receipt_sha256 = durability_module.persisted_json_sha256(receipt)
+        prepared["target"]["receipt_sha256"][stage.value] = receipt_sha256
+        next(
+            item
+            for item in prepared["target_state"]["stages"]
+            if item["stage"] == stage.value
+        )["receipt_sha256"] = receipt_sha256
+    prepared["target"]["state_sha256"] = durability_module.persisted_json_sha256(
+        prepared["target_state"]
+    )
+    artifact_io.atomic_write_jsonl(layout.recovery_journal_path, [prepared])
     before = _authority_bytes(layout)
     monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
 
@@ -1831,6 +2594,172 @@ def test_legacy_adoption_rejects_parseable_semantic_corruption_without_writes(
     assert layout.load_state().legacy_completed
     assert not layout.recovery_journal_path.exists()
     assert not any(layout.receipts_root.glob("*.json"))
+
+
+@pytest.mark.parametrize(
+    ("profile", "corruption"),
+    [
+        ("native", "native_evidence_confidence_nan"),
+        ("native", "native_evidence_confidence_positive_infinity"),
+        ("native", "native_evidence_confidence_negative_infinity"),
+        ("native", "native_evidence_confidence_bool"),
+        ("native", "native_evidence_confidence_out_of_domain"),
+        ("native", "native_evidence_observations_object"),
+        ("native", "native_candidate_confidence_bool"),
+        ("native", "native_guideline_support_bool"),
+        ("native", "native_criterion_evidence_required_integer"),
+        ("native", "native_duplicate_evidence"),
+        ("legacy", "legacy_rubric_confidence_nan"),
+        ("legacy", "legacy_rubric_confidence_positive_infinity"),
+        ("legacy", "legacy_rubric_confidence_negative_infinity"),
+        ("legacy", "legacy_rubric_confidence_bool"),
+        ("legacy", "legacy_rubric_nested_nonfinite"),
+        ("legacy", "legacy_duplicate_rubric"),
+    ],
+)
+def test_legacy_adoption_rejects_strict_stage_three_schema_corruption(
+    tmp_path: Path,
+    profile: str,
+    corruption: str,
+) -> None:
+    """Native and compatibility rows reject non-JSON and coerced field values."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    if profile == "legacy":
+        _convert_to_legacy_rubric_profile(layout)
+    _downgrade_to_legacy_completed(layout)
+    _apply_semantic_corruption(layout, corruption)
+    before = _authority_bytes(layout)
+
+    with pytest.raises(EvaluationAssetLegacyError):
+        layout.adopt_legacy()
+
+    assert _authority_bytes(layout) == before
+    assert layout.load_state().legacy_completed
+    assert not layout.recovery_journal_path.exists()
+    assert not any(layout.receipts_root.glob("*.json"))
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "zero_candidates_with_accepted",
+        "accepted_payload_differs_from_candidate",
+        "accepted_order_differs_from_filter",
+    ],
+)
+def test_legacy_adoption_rejects_nonreproducible_stage_seven_authority(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    """Accepted synthetic authority must exactly reproduce ordered filtering."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    first = _synthetic_case_fixture(
+        layout,
+        case_id="synthetic-first",
+        user_input="Diagnose a novel lunar telemetry checksum divergence.",
+    )
+    second = _synthetic_case_fixture(
+        layout,
+        case_id="synthetic-second",
+        user_input="Classify an unusual botanical spectral absorption anomaly.",
+    )
+    if corruption == "zero_candidates_with_accepted":
+        candidates: list[dict[str, Any]] = []
+        accepted = [first]
+    elif corruption == "accepted_payload_differs_from_candidate":
+        candidates = [first]
+        accepted = json.loads(json.dumps(candidates))
+        accepted[0]["context"]["messages_json"] = json.dumps(
+            [{"role": "user", "content": "A substituted accepted payload."}]
+        )
+    else:
+        candidates = [first, second]
+        accepted = [second, first]
+    _install_synthetic_fixture(
+        layout,
+        candidates=candidates,
+        rejected=[],
+        issues=[],
+        accepted=accepted,
+    )
+    _downgrade_to_legacy_completed(layout)
+    before = _authority_bytes(layout)
+
+    with pytest.raises(EvaluationAssetLegacyError):
+        layout.adopt_legacy()
+
+    assert _authority_bytes(layout) == before
+    assert layout.load_state().legacy_completed
+    assert not layout.recovery_journal_path.exists()
+    assert not any(layout.receipts_root.glob("*.json"))
+
+
+def test_legacy_adoption_accepts_exact_native_synthetic_filter_outputs(
+    tmp_path: Path,
+) -> None:
+    """A genuine enabled Stage 7 output remains adoptable."""
+    pipeline, provider = _create_synthetic_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    assert provider.synthetic_calls == 1
+    assert len(
+        _read_jsonl(
+            layout.artifact_path(
+                PipelineStage.SYNTHETIC_COVERAGE,
+                "synthetic_candidates.jsonl",
+            )
+        )
+    ) == 1
+    _downgrade_to_legacy_completed(layout)
+
+    adopted = layout.adopt_legacy()
+
+    assert adopted.status == "released"
+    verify_released_asset(layout, adopted)
+
+
+def test_legacy_adoption_reconstructs_exact_keep_mode_inherited_synthetic_output(
+    tmp_path: Path,
+) -> None:
+    """Keep-mode adoption retains only the self-contained unchanged parent case."""
+    pipeline, _ = _create_synthetic_pipeline(tmp_path)
+    pipeline.run()
+    parent = pipeline.layout
+    child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
+    child.initialize_extension(
+        parent,
+        additional_feedback=_write_additional_feedback(parent.tenants_root),
+        additional_unlabeled=None,
+        clustering_mode="keep",
+    )
+    provider = _SuccessfulSyntheticRubricProvider()
+    EvaluationAssetPipeline(
+        child,
+        rubric_provider=provider,
+        embedding_provider=_SuccessfulEmbeddingProvider(),
+    ).run()
+    inherited = _read_jsonl(
+        child.artifact_path(PipelineStage.SYNTHETIC_COVERAGE, "synthetic_cases.jsonl")
+    )
+    assert provider.synthetic_calls == 0
+    assert len(inherited) == 1
+    assert inherited[0]["metadata"]["dataset_version"] == "v2"
+    assert not _read_jsonl(
+        child.artifact_path(
+            PipelineStage.SYNTHETIC_COVERAGE,
+            "synthetic_candidates.jsonl",
+        )
+    )
+    _downgrade_to_legacy_completed(child)
+
+    adopted = child.adopt_legacy()
+
+    assert adopted.status == "released"
+    verify_released_asset(child, adopted)
 
 
 @pytest.mark.parametrize("layout_kind", ["old_staged", "pre_stage_layout"])
@@ -2461,6 +3390,32 @@ def _create_pipeline(
     return pipeline, rubric, embedding
 
 
+def _create_synthetic_pipeline(
+    tmp_path: Path,
+) -> tuple[EvaluationAssetPipeline, _SuccessfulSyntheticRubricProvider]:
+    tenants_root = tmp_path / "tenants"
+    feedback, unlabeled = _write_input_pair(tenants_root)
+    rubric = _SuccessfulSyntheticRubricProvider()
+    embedding = _SuccessfulEmbeddingProvider()
+    pipeline = EvaluationAssetPipeline.create(
+        tenants_root,
+        EvaluationAssetConfig(
+            tenant_id="tenant_a",
+            rubric_provider="fake",
+            rubric_model=rubric.model,
+            embedding_provider="fake",
+            embedding_model=embedding.model,
+            cluster_count=1,
+            synthetic_coverage_enabled=True,
+        ),
+        feedback,
+        unlabeled,
+        rubric_provider=rubric,
+        embedding_provider=embedding,
+    )
+    return pipeline, rubric
+
+
 def _write_input_pair(tenants_root: Path) -> tuple[Path, Path]:
     sources = tenants_root / "tenant_a" / "source_artifacts"
     sources.mkdir(parents=True)
@@ -2668,6 +3623,59 @@ def _apply_semantic_corruption(
         payload = rows(PipelineStage.RUBRIC_EXTRACTION, "feedback_evidence.jsonl")
         payload[0]["record_id"] = "unknown-feedback"
         write(PipelineStage.RUBRIC_EXTRACTION, "feedback_evidence.jsonl", payload)
+    elif corruption.startswith("native_evidence_confidence_"):
+        payload = rows(PipelineStage.RUBRIC_EXTRACTION, "feedback_evidence.jsonl")
+        value_by_suffix = {
+            "nan": float("nan"),
+            "positive_infinity": float("inf"),
+            "negative_infinity": float("-inf"),
+            "bool": True,
+            "out_of_domain": 1.5,
+        }
+        payload[0]["confidence"] = value_by_suffix[
+            corruption.removeprefix("native_evidence_confidence_")
+        ]
+        write(PipelineStage.RUBRIC_EXTRACTION, "feedback_evidence.jsonl", payload)
+    elif corruption == "native_evidence_observations_object":
+        payload = rows(PipelineStage.RUBRIC_EXTRACTION, "feedback_evidence.jsonl")
+        payload[0]["observations"] = {"claim": "not an array"}
+        write(PipelineStage.RUBRIC_EXTRACTION, "feedback_evidence.jsonl", payload)
+    elif corruption == "native_candidate_confidence_bool":
+        payload = rows(PipelineStage.RUBRIC_EXTRACTION, "candidate_guidelines.jsonl")
+        payload[0]["confidence"] = True
+        write(PipelineStage.RUBRIC_EXTRACTION, "candidate_guidelines.jsonl", payload)
+    elif corruption == "native_guideline_support_bool":
+        payload = rows(PipelineStage.RUBRIC_EXTRACTION, "evaluation_guidelines.jsonl")
+        payload[0]["support"]["trusted_example_count"] = True
+        write(PipelineStage.RUBRIC_EXTRACTION, "evaluation_guidelines.jsonl", payload)
+    elif corruption == "native_criterion_evidence_required_integer":
+        payload = rows(PipelineStage.RUBRIC_EXTRACTION, "evaluation_guidelines.jsonl")
+        payload[0]["criteria"][0]["evidence_required"] = 1
+        write(PipelineStage.RUBRIC_EXTRACTION, "evaluation_guidelines.jsonl", payload)
+    elif corruption == "native_duplicate_evidence":
+        payload = rows(PipelineStage.RUBRIC_EXTRACTION, "feedback_evidence.jsonl")
+        payload.append(json.loads(json.dumps(payload[0])))
+        write(PipelineStage.RUBRIC_EXTRACTION, "feedback_evidence.jsonl", payload)
+    elif corruption.startswith("legacy_rubric_confidence_"):
+        payload = rows(PipelineStage.RUBRIC_EXTRACTION, "feedback_rubrics.jsonl")
+        value_by_suffix = {
+            "nan": float("nan"),
+            "positive_infinity": float("inf"),
+            "negative_infinity": float("-inf"),
+            "bool": True,
+        }
+        payload[0]["confidence"] = value_by_suffix[
+            corruption.removeprefix("legacy_rubric_confidence_")
+        ]
+        write(PipelineStage.RUBRIC_EXTRACTION, "feedback_rubrics.jsonl", payload)
+    elif corruption == "legacy_rubric_nested_nonfinite":
+        payload = rows(PipelineStage.RUBRIC_EXTRACTION, "feedback_rubrics.jsonl")
+        payload[0]["deterministic_checks"] = [{"threshold": float("nan")}]
+        write(PipelineStage.RUBRIC_EXTRACTION, "feedback_rubrics.jsonl", payload)
+    elif corruption == "legacy_duplicate_rubric":
+        payload = rows(PipelineStage.RUBRIC_EXTRACTION, "feedback_rubrics.jsonl")
+        payload.append(json.loads(json.dumps(payload[0])))
+        write(PipelineStage.RUBRIC_EXTRACTION, "feedback_rubrics.jsonl", payload)
     elif corruption == "guideline_source":
         payload = rows(PipelineStage.RUBRIC_EXTRACTION, "evaluation_guidelines.jsonl")
         payload[0]["source_record_ids"] = ["unknown-feedback"]
@@ -2791,6 +3799,84 @@ def _apply_semantic_corruption(
         _set_manifest_split_count(layout, "regression_trusted", 1)
     else:
         raise AssertionError(f"unknown semantic corruption: {corruption}")
+
+
+def _synthetic_case_fixture(
+    layout: EvaluationAssetLayout,
+    *,
+    case_id: str,
+    user_input: str,
+) -> dict[str, Any]:
+    expected = _read_jsonl(
+        layout.artifact_path(PipelineStage.LABEL_INFERENCE, "inferred_cases.jsonl")
+    )[0]["expected"]
+    expected = json.loads(json.dumps(expected))
+    expected["label_source"] = "synthetic_from_trusted_rubric"
+    return {
+        "case_id": case_id,
+        "task_type": "generic",
+        "context": {
+            "messages_json": json.dumps([{"role": "user", "content": user_input}]),
+            "runtime_json": "{}",
+            "tool_context_json": "[]",
+        },
+        "expected": expected,
+        "metadata": {
+            "source": "synthetic_generation",
+            "source_cluster": "generic-001",
+            "dataset_version": layout.asset_id,
+            "group_id": case_id,
+            "request_id": case_id,
+            "trust_tier": "synthetic",
+            "review_status": "review_required",
+        },
+    }
+
+
+def _install_synthetic_fixture(
+    layout: EvaluationAssetLayout,
+    *,
+    candidates: list[dict[str, Any]],
+    rejected: list[dict[str, Any]],
+    issues: list[dict[str, Any]],
+    accepted: list[dict[str, Any]],
+) -> None:
+    artifact_io.atomic_write_jsonl(
+        layout.artifact_path(
+            PipelineStage.SYNTHETIC_COVERAGE,
+            "synthetic_candidates.jsonl",
+        ),
+        candidates,
+    )
+    artifact_io.atomic_write_jsonl(
+        layout.artifact_path(
+            PipelineStage.SYNTHETIC_COVERAGE,
+            "rejected_synthetic.jsonl",
+        ),
+        rejected,
+    )
+    artifact_io.atomic_write_jsonl(
+        layout.artifact_path(
+            PipelineStage.SYNTHETIC_COVERAGE,
+            "synthetic_filter_issues.jsonl",
+        ),
+        issues,
+    )
+    artifact_io.atomic_write_jsonl(
+        layout.artifact_path(PipelineStage.SYNTHETIC_COVERAGE, "synthetic_cases.jsonl"),
+        accepted,
+    )
+    train_synthetic = layout.artifact_path(
+        PipelineStage.DATASET_SPLITS,
+        "train_synthetic.jsonl",
+    )
+    train = layout.artifact_path(PipelineStage.DATASET_SPLITS, "train.jsonl")
+    existing_train = _read_jsonl(train)
+    artifact_io.atomic_write_jsonl(train_synthetic, accepted)
+    artifact_io.atomic_write_jsonl(train, [*existing_train, *accepted])
+    artifact_io.atomic_copy_file(train, layout.published_datasets / "train.jsonl")
+    _set_manifest_split_count(layout, "train_synthetic", len(accepted))
+    _set_manifest_split_count(layout, "train", len(existing_train) + len(accepted))
 
 
 def _set_manifest_split_count(

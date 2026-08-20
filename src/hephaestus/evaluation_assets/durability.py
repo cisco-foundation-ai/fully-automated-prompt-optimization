@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -36,6 +38,47 @@ UNAVAILABLE_PROVENANCE = {
 LEGACY_UNAVAILABLE_PROVENANCE = {
     "status": "unavailable",
     "reason": "legacy_checkpoint_predates_provenance",
+}
+_OPERATION_ID = re.compile(r"^[0-9a-f]{32}$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_STAGE_RECEIPT_FIELDS = {
+    "schema_version",
+    "stage",
+    "stage_index",
+    "origin",
+    "artifact_profile",
+    "completed_at",
+    "inputs",
+    "upstream_receipts",
+    "outputs",
+    "resolved_config_sha256",
+    "dependency_config_sha256",
+    "prompt_set_sha256",
+    "provider_identity",
+    "provider_identity_sha256",
+    "provider_calls_sha256",
+    "code",
+    "code_sha256",
+    "counts",
+}
+_CREATED_HISTORY_FIELDS = {
+    "timestamp",
+    "revision",
+    "event",
+    "configuration",
+}
+_INHERITED_HISTORY_FIELDS = {
+    *_CREATED_HISTORY_FIELDS,
+    "parent_asset_id",
+}
+_UPDATED_HISTORY_FIELDS = {
+    "timestamp",
+    "revision",
+    "event",
+    "operation_id",
+    "changed_fields",
+    "invalidated_from_stage",
+    "resume_from_stage",
 }
 
 
@@ -366,7 +409,7 @@ def build_stage_receipt(
         else _provider_identity(config, specification.provider_roles)
     )
     code = unavailable if historical_unavailable else _code_identity()
-    return {
+    receipt = {
         "schema_version": STAGE_RECEIPT_SCHEMA_VERSION,
         "stage": stage.value,
         "stage_index": list(PipelineStage).index(stage) + 1,
@@ -386,6 +429,11 @@ def build_stage_receipt(
         "code_sha256": canonical_sha256(code),
         "counts": {str(key): int(value) for key, value in counts.items()},
     }
+    if stage == PipelineStage.DATASET_SPLITS:
+        receipt["config_history_sha256"] = file_sha256(
+            layout.config_history_path
+        )
+    return receipt
 
 
 def current_dependency_hashes(
@@ -422,11 +470,54 @@ def current_dependency_hashes(
 
 def verify_released_asset(layout: Any, state: PipelineState) -> None:
     """Verify a released receipt/artifact chain without current-code equality."""
+    _verify_release_evidence(
+        layout,
+        state,
+        require_persisted_state=True,
+        candidate_receipts=None,
+    )
+
+
+def verify_release_candidate(
+    layout: Any,
+    state: PipelineState,
+    *,
+    receipts: Mapping[PipelineStage, Mapping[str, Any]] | None = None,
+) -> None:
+    """Verify complete terminal evidence before installing released authority."""
+    _verify_release_evidence(
+        layout,
+        state,
+        require_persisted_state=False,
+        candidate_receipts=receipts,
+    )
+
+
+def _verify_release_evidence(
+    layout: Any,
+    state: PipelineState,
+    *,
+    require_persisted_state: bool,
+    candidate_receipts: Mapping[PipelineStage, Mapping[str, Any]] | None,
+) -> None:
     try:
-        config = _validate_released_control_state(layout, state)
-        config_hashes = _replay_config_history(layout, config)
-        receipts = verify_receipt_chain(layout, state)
-        _verify_receipt_config_history(layout, receipts, config_hashes, config)
+        config = _validate_released_control_state(
+            layout,
+            state,
+            require_persisted_state=require_persisted_state,
+        )
+        config_hashes = _replay_config_history(layout, config, state)
+        verified_receipts = (
+            _verify_candidate_receipts(layout, state, candidate_receipts)
+            if candidate_receipts is not None
+            else verify_receipt_chain(layout, state)
+        )
+        _verify_receipt_config_history(
+            layout,
+            verified_receipts,
+            config_hashes,
+            config,
+        )
     except EvaluationAssetIntegrityError:
         raise
     except (KeyError, OSError, TypeError, UnicodeError, ValueError) as exc:
@@ -502,7 +593,7 @@ def mutable_rebuild_boundary(
     ] | None = None,
 ) -> PipelineStage | None:
     """Return the first incomplete or invalid mutable checkpoint boundary."""
-    _verify_raw_snapshot_floor(layout, state)
+    verify_raw_snapshot_floor(layout, state)
     for stage in PipelineStage:
         stage_state = _stage_state(state, stage)
         if stage_state.status != "completed" or not stage_state.receipt_sha256:
@@ -547,6 +638,21 @@ def verify_stage_receipt(
         raise _integrity(layout, stage, "receipt is not a JSON object")
     if receipt.get("schema_version") != STAGE_RECEIPT_SCHEMA_VERSION:
         raise _integrity(layout, stage, "receipt schema is unsupported")
+    if stage == PipelineStage.DATASET_SPLITS:
+        try:
+            history_sha256 = file_sha256(layout.config_history_path)
+        except OSError as exc:
+            raise _integrity(
+                layout,
+                stage,
+                "configuration history evidence is missing",
+            ) from exc
+        if receipt.get("config_history_sha256") != history_sha256:
+            raise _integrity(
+                layout,
+                stage,
+                "configuration history evidence changed",
+            )
     if receipt.get("stage") != stage.value or receipt.get("stage_index") != (
         list(PipelineStage).index(stage) + 1
     ):
@@ -662,6 +768,8 @@ def verify_stage_receipt(
 def _validate_released_control_state(
     layout: Any,
     state: PipelineState,
+    *,
+    require_persisted_state: bool,
 ) -> EvaluationAssetConfig:
     if state.schema_version != "fapo-evaluation-asset-state-v2" or (
         state.status != "released"
@@ -671,13 +779,15 @@ def _validate_released_control_state(
             layout.asset_id,
             "the persisted lifecycle is not a v2 release",
         )
-    raw_state = _read_json_object(layout.state_path)
-    if raw_state != state.to_dict():
-        raise EvaluationAssetIntegrityError(
-            layout.tenant_id,
-            layout.asset_id,
-            "the supplied state does not match persisted authority",
-        )
+    raw_state = state.to_dict()
+    if require_persisted_state:
+        raw_state = _read_json_object(layout.state_path)
+        if raw_state != state.to_dict():
+            raise EvaluationAssetIntegrityError(
+                layout.tenant_id,
+                layout.asset_id,
+                "the supplied state does not match persisted authority",
+            )
     if state.tenant_id != layout.tenant_id or state.asset_id != layout.asset_id:
         raise EvaluationAssetIntegrityError(
             layout.tenant_id,
@@ -690,7 +800,9 @@ def _validate_released_control_state(
             layout.asset_id,
             "released terminal state is inconsistent",
         )
-    if not state.created_at or not state.updated_at:
+    if not _canonical_utc_timestamp(state.created_at) or not (
+        _canonical_utc_timestamp(state.updated_at)
+    ):
         raise EvaluationAssetIntegrityError(
             layout.tenant_id,
             layout.asset_id,
@@ -748,6 +860,7 @@ def _validate_released_control_state(
 def _replay_config_history(
     layout: Any,
     current_config: EvaluationAssetConfig,
+    state: PipelineState,
 ) -> list[str]:
     rows = _read_jsonl_objects(layout.config_history_path)
     if not rows:
@@ -757,21 +870,75 @@ def _replay_config_history(
             "configuration history is missing",
         )
     first = rows[0]
-    if first.get("revision") != 1 or first.get("event") not in {
-        "configuration_created",
-        "configuration_inherited",
-    }:
+    origin_event = first.get("event")
+    expected_origin_fields = (
+        _INHERITED_HISTORY_FIELDS
+        if origin_event == "configuration_inherited"
+        else _CREATED_HISTORY_FIELDS
+    )
+    if (
+        origin_event not in {"configuration_created", "configuration_inherited"}
+        or set(first) != expected_origin_fields
+        or not isinstance(first.get("revision"), int)
+        or isinstance(first.get("revision"), bool)
+        or first["revision"] != 1
+        or not _canonical_utc_timestamp(first.get("timestamp"))
+        or first["timestamp"] != state.created_at
+    ):
         raise ValueError("configuration history origin is invalid")
     initial = first.get("configuration")
     if not isinstance(initial, Mapping):
         raise ValueError("configuration history origin is incomplete")
-    replayed = EvaluationAssetConfig.from_dict(initial).to_dict()
+    initial_config = EvaluationAssetConfig.from_dict(initial)
+    replayed = initial_config.to_dict()
+    if dict(initial) != replayed or (
+        initial_config.tenant_id != layout.tenant_id
+        or initial_config.asset_id != layout.asset_id
+    ):
+        raise ValueError("configuration history origin configuration is invalid")
+    if origin_event == "configuration_inherited":
+        parent_asset_id = first.get("parent_asset_id")
+        if not isinstance(parent_asset_id, str) or not parent_asset_id.strip():
+            raise ValueError("configuration history parent identity is invalid")
+        lineage = _read_json_object(layout.lineage_path)
+        if lineage.get("parent_asset_id") != parent_asset_id:
+            raise ValueError("configuration history parent identity is inconsistent")
+    elif layout.lineage_path.is_file():
+        raise ValueError("extension configuration history origin is invalid")
+
+    journal_rows = (
+        _read_jsonl_objects(layout.recovery_journal_path)
+        if layout.recovery_journal_path.is_file()
+        else []
+    )
+    revision_prepares = [
+        row
+        for row in journal_rows
+        if row.get("kind") == "configuration_revision"
+        and row.get("phase") == "prepared"
+    ]
     snapshots = [canonical_sha256(replayed)]
+    previous_timestamp = datetime.fromisoformat(str(first["timestamp"]))
     for revision, row in enumerate(rows[1:], start=2):
-        if row.get("revision") != revision or row.get("event") != (
-            "configuration_updated"
+        timestamp = row.get("timestamp")
+        if (
+            set(row) != _UPDATED_HISTORY_FIELDS
+            or row.get("event") != "configuration_updated"
+            or not isinstance(row.get("revision"), int)
+            or isinstance(row.get("revision"), bool)
+            or row["revision"] != revision
+            or not _canonical_utc_timestamp(timestamp)
         ):
             raise ValueError("configuration history sequence is invalid")
+        parsed_timestamp = datetime.fromisoformat(str(timestamp))
+        if parsed_timestamp < previous_timestamp:
+            raise ValueError("configuration history timestamps are out of order")
+        previous_timestamp = parsed_timestamp
+        operation_id = row.get("operation_id")
+        if not isinstance(operation_id, str) or not _OPERATION_ID.fullmatch(
+            operation_id
+        ):
+            raise ValueError("configuration history operation is invalid")
         changes = row.get("changed_fields")
         if not isinstance(changes, Mapping) or not changes:
             raise ValueError("configuration history changes are invalid")
@@ -783,8 +950,36 @@ def _replay_config_history(
                 raise ValueError("configuration history change is invalid")
             if change["previous"] != updated[field]:
                 raise ValueError("configuration history predecessor is invalid")
+            if change["new"] == change["previous"]:
+                raise ValueError("configuration history change is empty")
             updated[field] = change["new"]
         replayed = EvaluationAssetConfig.from_dict(updated).to_dict()
+        earliest = min(
+            (CONFIG_STAGE_DEPENDENCIES[field] for field in changes),
+            key=list(PipelineStage).index,
+        )
+        if row.get("invalidated_from_stage") != earliest.value:
+            raise ValueError("configuration history boundary is invalid")
+        try:
+            PipelineStage(str(row.get("resume_from_stage")))
+        except ValueError as exc:
+            raise ValueError("configuration history resume stage is invalid") from exc
+        if revision_prepares:
+            matching = [
+                prepared
+                for prepared in revision_prepares
+                if prepared.get("operation_id") == operation_id
+                and prepared.get("history_entry") == row
+            ]
+            matching_commits = [
+                committed
+                for committed in journal_rows
+                if committed.get("operation_id") == operation_id
+                and committed.get("kind") == "configuration_revision"
+                and committed.get("phase") == "committed"
+            ]
+            if len(matching) != 1 or len(matching_commits) != 1:
+                raise ValueError("configuration history journal authority is invalid")
         snapshots.append(canonical_sha256(replayed))
     if replayed != current_config.to_dict():
         raise EvaluationAssetIntegrityError(
@@ -830,7 +1025,175 @@ def _verify_receipt_config_history(
         )
 
 
-def _verify_raw_snapshot_floor(layout: Any, state: PipelineState) -> None:
+def _verify_candidate_receipts(
+    layout: Any,
+    state: PipelineState,
+    receipts: Mapping[PipelineStage, Mapping[str, Any]],
+) -> dict[PipelineStage, dict[str, Any]]:
+    """Authenticate an in-memory adoption chain before installing authority."""
+    if set(receipts) != set(PipelineStage):
+        raise ValueError("candidate receipt inventory is incomplete")
+    config = layout.load_config()
+    resolved_config = config.to_dict()
+    verified: dict[PipelineStage, dict[str, Any]] = {}
+    for stage in PipelineStage:
+        receipt = dict(receipts[stage])
+        specification = STAGE_SPECIFICATIONS[stage]
+        expected_fields = set(_STAGE_RECEIPT_FIELDS)
+        if stage == PipelineStage.DATASET_SPLITS:
+            expected_fields.add("config_history_sha256")
+        if (
+            set(receipt) != expected_fields
+            or receipt.get("schema_version") != STAGE_RECEIPT_SCHEMA_VERSION
+            or receipt.get("stage") != stage.value
+            or receipt.get("stage_index") != list(PipelineStage).index(stage) + 1
+            or receipt.get("origin") != "legacy_adoption"
+        ):
+            raise ValueError("candidate receipt identity is invalid")
+        receipt_sha256 = persisted_json_sha256(receipt)
+        if _stage_state(state, stage).receipt_sha256 != receipt_sha256:
+            raise ValueError("candidate state receipt identity is invalid")
+        required_outputs, direct_inputs, artifact_profile = _stage_artifact_profile(
+            layout,
+            stage,
+            allow_legacy=True,
+        )
+        if receipt.get("artifact_profile") != artifact_profile:
+            raise ValueError("candidate receipt artifact profile is invalid")
+        outputs = receipt.get("outputs")
+        expected_outputs = _expected_output_locations(
+            layout,
+            stage,
+            specification,
+            required_outputs,
+        )
+        if not isinstance(outputs, list) or len(outputs) != len(expected_outputs):
+            raise ValueError("candidate receipt output inventory is invalid")
+        recorded_outputs: set[tuple[str, str]] = set()
+        for item in outputs:
+            if not isinstance(item, Mapping) or set(item) != {
+                "path",
+                "scope",
+                "sha256",
+                "bytes",
+                "required",
+            } or item.get("required") is not True:
+                raise ValueError("candidate receipt output row is invalid")
+            recorded_outputs.add((str(item.get("scope")), str(item.get("path"))))
+            _verify_file_record(layout, stage, item)
+        if recorded_outputs != expected_outputs:
+            raise ValueError("candidate receipt output inventory is incomplete")
+
+        inputs = receipt.get("inputs")
+        expected_inputs = {
+            (
+                "asset",
+                layout.artifact_path(input_stage, name)
+                .relative_to(layout.root)
+                .as_posix(),
+            )
+            for input_stage, name in direct_inputs
+        }
+        expected_inputs.update(
+            (
+                "asset",
+                path.relative_to(layout.root).as_posix(),
+            )
+            for path in extension_receipt_input_paths(layout, stage)
+        )
+        if not isinstance(inputs, list) or len(inputs) != len(expected_inputs):
+            raise ValueError("candidate receipt input inventory is invalid")
+        recorded_inputs: set[tuple[str, str]] = set()
+        for item in inputs:
+            if not isinstance(item, Mapping) or set(item) != {
+                "path",
+                "scope",
+                "sha256",
+                "bytes",
+            }:
+                raise ValueError("candidate receipt input row is invalid")
+            recorded_inputs.add((str(item.get("scope")), str(item.get("path"))))
+            _verify_file_record(layout, stage, item)
+        if recorded_inputs != expected_inputs:
+            raise ValueError("candidate receipt input inventory is incomplete")
+
+        expected_upstream = [
+            {
+                "stage": dependency.value,
+                "sha256": persisted_json_sha256(receipts[dependency]),
+            }
+            for dependency in STAGE_SPECIFICATIONS[stage].upstream_stages
+        ]
+        if receipt.get("upstream_receipts") != expected_upstream:
+            raise ValueError("candidate receipt chain is invalid")
+        counts = receipt.get("counts")
+        if (
+            not isinstance(counts, Mapping)
+            or set(counts) != STAGE_COUNT_KEYS[stage]
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+                or state.counts.get(key) != value
+                for key, value in counts.items()
+            )
+        ):
+            raise ValueError("candidate receipt counts are invalid")
+        unavailable_sha256 = canonical_sha256(LEGACY_UNAVAILABLE_PROVENANCE)
+        dependency_config = {
+            field: resolved_config[field] for field in specification.config_fields
+        }
+        if (
+            receipt.get("resolved_config_sha256")
+            != canonical_sha256(resolved_config)
+            or receipt.get("dependency_config_sha256")
+            != canonical_sha256(dependency_config)
+            or receipt.get("prompt_set_sha256") != unavailable_sha256
+            or receipt.get("provider_identity") != LEGACY_UNAVAILABLE_PROVENANCE
+            or receipt.get("provider_identity_sha256") != unavailable_sha256
+            or receipt.get("provider_calls_sha256") != unavailable_sha256
+            or receipt.get("code") != LEGACY_UNAVAILABLE_PROVENANCE
+            or receipt.get("code_sha256") != unavailable_sha256
+            or not isinstance(receipt.get("completed_at"), str)
+            or not receipt["completed_at"]
+        ):
+            raise ValueError("candidate receipt evidence is invalid")
+        for field in (
+            "resolved_config_sha256",
+            "dependency_config_sha256",
+            "prompt_set_sha256",
+            "provider_identity_sha256",
+            "provider_calls_sha256",
+            "code_sha256",
+        ):
+            if not isinstance(receipt.get(field), str) or not _SHA256.fullmatch(
+                receipt[field]
+            ):
+                raise ValueError("candidate receipt hash is invalid")
+        if stage == PipelineStage.DATASET_SPLITS and receipt.get(
+            "config_history_sha256"
+        ) != file_sha256(layout.config_history_path):
+            raise ValueError("candidate configuration history evidence changed")
+        verified[stage] = receipt
+    return verified
+
+
+def _canonical_utc_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return (
+        parsed.tzinfo is not None
+        and parsed.utcoffset() == timedelta(0)
+        and parsed.isoformat() == value
+    )
+
+
+def verify_raw_snapshot_floor(layout: Any, state: PipelineState) -> None:
+    """Fail closed when the immutable Stage 1 rebuild floor is unavailable."""
     raw_paths = (layout.feedback_path, layout.unlabeled_path)
     if not all(path.is_file() for path in raw_paths):
         raise EvaluationAssetIntegrityError(

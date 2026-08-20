@@ -61,7 +61,8 @@ from src.hephaestus.evaluation_assets.durability import (
     build_stage_receipt,
     file_sha256,
     mutable_rebuild_boundary,
-    verify_receipt_chain,
+    verify_raw_snapshot_floor,
+    verify_release_candidate,
     verify_released_asset,
 )
 from src.hephaestus.evaluation_assets.input_contract import (
@@ -160,6 +161,7 @@ RubricResponseT = TypeVar("RubricResponseT")
 class RubricProvider(Protocol):
     """JSON generation interface used by the pipeline."""
 
+    provider_name: str
     model: str
 
     def generate_json(
@@ -173,6 +175,7 @@ class RubricProvider(Protocol):
 class EmbeddingProvider(Protocol):
     """Embedding interface used by clustering and coverage."""
 
+    provider_name: str
     model: str
 
     def embed_texts(self, texts: Sequence[str]) -> Sequence[Sequence[float]]:
@@ -219,7 +222,7 @@ class EvaluationAssetPipeline:
         self._injected_embedding_provider = embedding_provider
         self.rubric_provider = rubric_provider
         self.embedding_provider = embedding_provider
-        self._provider_identities: dict[str, dict[str, str]] = {}
+        self._provider_identities: dict[str, dict[str, Any]] = {}
         self.last_revision: Optional[Dict[str, Any]] = None
 
     def _configure_providers(self) -> None:
@@ -277,14 +280,76 @@ class EvaluationAssetPipeline:
         configured_provider: str,
         configured_model: str,
         source: str,
-    ) -> dict[str, str]:
-        provider_name = str(
-            getattr(provider, "provider_name", configured_provider)
-        ).strip()
-        model = str(getattr(provider, "model", configured_model)).strip()
-        if not provider_name or not model:
-            raise ValueError("Provider identity requires non-empty provider and model")
-        return {"provider": provider_name, "model": model, "source": source}
+    ) -> dict[str, Any]:
+        if source == "default":
+            provider_name = configured_provider.strip()
+            model = configured_model.strip()
+            if not provider_name or not model:
+                raise ValueError(
+                    "Default provider identity requires non-empty provider and model"
+                )
+            return {"provider": provider_name, "model": model, "source": source}
+
+        declared = {
+            "provider_name": getattr(provider, "provider_name", None),
+            "model": getattr(provider, "model", None),
+        }
+        unavailable_fields = [
+            field
+            for field, value in declared.items()
+            if not isinstance(value, str) or not value.strip()
+        ]
+        if unavailable_fields:
+            return {
+                "provider": (
+                    str(declared["provider_name"]).strip()
+                    if "provider_name" not in unavailable_fields
+                    else "unavailable"
+                ),
+                "model": (
+                    str(declared["model"]).strip()
+                    if "model" not in unavailable_fields
+                    else "unavailable"
+                ),
+                "source": source,
+                "status": "unavailable",
+                "unavailable_fields": unavailable_fields,
+            }
+        return {
+            "provider": str(declared["provider_name"]).strip(),
+            "model": str(declared["model"]).strip(),
+            "source": source,
+        }
+
+    def _validate_injected_provider_identities(self) -> None:
+        """Reject incomplete injected identities before any authority mutation."""
+        injected = {
+            "rubric": (
+                self._injected_rubric_provider,
+                self.config.rubric_provider,
+                self.config.rubric_model,
+            ),
+            "embedding": (
+                self._injected_embedding_provider,
+                self.config.embedding_provider,
+                self.config.embedding_model,
+            ),
+        }
+        for role, (provider, configured_provider, configured_model) in injected.items():
+            if provider is None:
+                continue
+            identity = self._actual_provider_identity(
+                provider,
+                configured_provider=configured_provider,
+                configured_model=configured_model,
+                source="injected",
+            )
+            if identity.get("status") == "unavailable":
+                missing = ", ".join(identity["unavailable_fields"])
+                raise ValueError(
+                    f"injected {role} provider identity is unavailable; "
+                    f"declare non-empty {missing}"
+                )
 
     def _provider_identity_for_stage(
         self,
@@ -387,6 +452,8 @@ class EvaluationAssetPipeline:
                     self.layout.asset_id,
                     "explicit verification and adoption are required",
                 )
+            verify_raw_snapshot_floor(self.layout, state)
+            self._validate_injected_provider_identities()
             self.last_revision = (
                 self.layout._revise_config_locked(config_updates)
                 if config_updates is not None
@@ -481,13 +548,19 @@ class EvaluationAssetPipeline:
                 {"stage": stage.value, "counts": counts},
             )
 
-        verify_receipt_chain(self.layout, state)
-        state.status = "released"
-        state.current_stage = None
-        state.error = None
-        self.layout.save_state(state)
-        self.layout.append_event("pipeline_released", {"counts": state.counts})
-        return state
+        candidate = PipelineState.from_dict(state.to_dict())
+        candidate.status = "released"
+        candidate.current_stage = None
+        candidate.error = None
+        candidate.updated_at = utc_now()
+        verify_release_candidate(self.layout, candidate)
+        atomic_write_json(self.layout.state_path, candidate.to_dict())
+        verify_released_asset(self.layout, candidate)
+        self.layout.append_event(
+            "pipeline_released",
+            {"counts": candidate.counts},
+        )
+        return candidate
 
     def _run_stage(self, stage: PipelineStage) -> Dict[str, int]:
         handlers = {
@@ -647,6 +720,9 @@ class EvaluationAssetPipeline:
                     partial(
                         _normalize_feedback_evidence_response,
                         batch=batch,
+                        rubric_provider=self._provider_identities["rubric"][
+                            "provider"
+                        ],
                         rubric_model=self._provider_identities["rubric"]["model"],
                     ),
                 )
@@ -691,6 +767,9 @@ class EvaluationAssetPipeline:
                     _normalize_guideline_response,
                     route=route,
                     evidence=route_evidence,
+                    rubric_provider=self._provider_identities["rubric"][
+                        "provider"
+                    ],
                     rubric_model=self._provider_identities["rubric"]["model"],
                 ),
             )
@@ -708,6 +787,7 @@ class EvaluationAssetPipeline:
                 _rubric_from_guidelines(
                     str(row["record_id"]),
                     guideline_by_record[str(row["record_id"])],
+                    self._provider_identities["rubric"]["provider"],
                     self._provider_identities["rubric"]["model"],
                 ),
                 self.config.asset_id,
@@ -1065,6 +1145,9 @@ class EvaluationAssetPipeline:
                     partial(
                         _normalize_inferred_rubric_response,
                         batch=batch,
+                        rubric_provider=self._provider_identities["rubric"][
+                            "provider"
+                        ],
                         rubric_model=self._provider_identities["rubric"]["model"],
                     ),
                 )
@@ -1673,6 +1756,7 @@ def _validate_stage_one_feasibility(
 def _normalize_feedback_evidence(
     raw: Mapping[str, Any],
     source: Mapping[str, Any],
+    rubric_provider: str,
     rubric_model: str,
 ) -> Dict[str, Any]:
     observations = []
@@ -1701,7 +1785,7 @@ def _normalize_feedback_evidence(
         "requested_corrections": _string_list(raw.get("requested_corrections")),
         "uncertainties": _string_list(raw.get("uncertainties")),
         "evidence_source": "trusted_feedback",
-        "guideline_provider": "openai",
+        "guideline_provider": rubric_provider,
         "guideline_model": rubric_model,
     }
 
@@ -1710,6 +1794,7 @@ def _normalize_feedback_evidence_response(
     response: Mapping[str, Any],
     *,
     batch: Sequence[Mapping[str, Any]],
+    rubric_provider: str,
     rubric_model: str,
 ) -> List[Dict[str, Any]]:
     returned = _indexed_items(response, "evidence", "record_id")
@@ -1722,6 +1807,7 @@ def _normalize_feedback_evidence_response(
             _normalize_feedback_evidence(
                 returned[record_id],
                 row,
+                rubric_provider,
                 rubric_model,
             )
         )
@@ -1733,6 +1819,7 @@ def _normalize_guideline_response(
     *,
     route: str,
     evidence: Sequence[Mapping[str, Any]],
+    rubric_provider: str,
     rubric_model: str,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     items = response.get("guidelines")
@@ -1746,6 +1833,7 @@ def _normalize_guideline_response(
     guidelines = _compile_evaluation_guidelines(
         candidates,
         evidence,
+        rubric_provider,
         rubric_model,
     )
     return candidates, guidelines
@@ -1754,6 +1842,7 @@ def _normalize_guideline_response(
 def _compile_evaluation_guidelines(
     candidates: Sequence[Mapping[str, Any]],
     evidence: Sequence[Mapping[str, Any]],
+    rubric_provider: str,
     rubric_model: str,
 ) -> List[Dict[str, Any]]:
     evidence_by_id = {str(item["record_id"]): item for item in evidence}
@@ -1838,7 +1927,7 @@ def _compile_evaluation_guidelines(
                 "unknown_policy": "needs_review",
                 "activation_status": "active_from_trusted_evidence",
                 "calibration_status": "uncalibrated",
-                "guideline_provider": "openai",
+                "guideline_provider": rubric_provider,
                 "guideline_model": rubric_model,
                 "oracle_version": "fapo-evaluation-guideline-v1",
             }
@@ -1937,6 +2026,7 @@ def _guidelines_by_source_record(
 def _rubric_from_guidelines(
     record_id: str,
     guidelines: Sequence[Mapping[str, Any]],
+    rubric_provider: str,
     rubric_model: str,
 ) -> Dict[str, Any]:
     criteria = [
@@ -2003,7 +2093,7 @@ def _rubric_from_guidelines(
         ],
         "evaluation_guidelines": [dict(guideline) for guideline in guidelines],
         "label_source": "evaluation_guideline_from_trusted_feedback",
-        "rubric_provider": "openai",
+        "rubric_provider": rubric_provider,
         "rubric_model": rubric_model,
         "oracle_version": "fapo-evaluation-guideline-v1",
     }
@@ -2099,6 +2189,7 @@ def _normalize_rubric(
     identity_key: str,
     identity: str,
     label_source: str,
+    rubric_provider: str,
     rubric_model: str,
     review_status: Optional[str] = "review_required",
 ) -> Dict[str, Any]:
@@ -2119,7 +2210,7 @@ def _normalize_rubric(
             else None
         ),
         "label_source": label_source,
-        "rubric_provider": "openai",
+        "rubric_provider": rubric_provider,
         "rubric_model": rubric_model,
         "oracle_version": "fapo-evaluation-asset-v1",
     }
@@ -2132,6 +2223,7 @@ def _normalize_inferred_rubric_response(
     response: Mapping[str, Any],
     *,
     batch: Sequence[IntentCluster],
+    rubric_provider: str,
     rubric_model: str,
 ) -> List[Dict[str, Any]]:
     returned = _indexed_items(response, "rubrics", "cluster_id")
@@ -2147,6 +2239,7 @@ def _normalize_inferred_rubric_response(
                 "cluster_id",
                 cluster.cluster_id,
                 "inferred_from_trusted_feedback",
+                rubric_provider,
                 rubric_model,
             )
         )

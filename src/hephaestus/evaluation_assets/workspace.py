@@ -38,7 +38,7 @@ from src.hephaestus.evaluation_assets.durability import (
     persisted_json_sha256,
     released_parent_evidence,
     validate_legacy_release_candidate,
-    verify_receipt_chain,
+    verify_release_candidate,
     verify_released_asset,
 )
 from src.hephaestus.evaluation_assets.input_contract import validate_input_records
@@ -88,6 +88,87 @@ def utc_now() -> str:
 
 def _fault_point(name: str) -> None:
     """Provide a deterministic test seam between durable transaction phases."""
+
+
+def _released_provider_decision(
+    layout: "EvaluationAssetLayout",
+    stage: PipelineStage,
+    role: str,
+) -> dict[str, str]:
+    """Return verified producing identity or an explicit unavailable marker."""
+    receipt = json.loads(layout.receipt_path(stage).read_text(encoding="utf-8"))
+    provider_identity = receipt.get("provider_identity")
+    if not isinstance(provider_identity, Mapping):
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "released provider identity is inconsistent",
+        )
+    if provider_identity.get("status") in {
+        "unavailable",
+        "historically_unavailable",
+    }:
+        return {"status": "unavailable"}
+    identity = provider_identity.get(role)
+    if not isinstance(identity, Mapping):
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "released provider identity is inconsistent",
+        )
+    provider = identity.get("provider")
+    model = identity.get("model")
+    if (
+        identity.get("status") == "unavailable"
+        or not isinstance(provider, str)
+        or not provider.strip()
+        or not isinstance(model, str)
+        or not model.strip()
+    ):
+        return {"status": "unavailable"}
+    return {
+        "status": "available",
+        "provider": provider.strip(),
+        "model": model.strip(),
+    }
+
+
+def _required_extension_provider_identity(
+    *,
+    role: str,
+    configured_provider: str,
+    configured_model: str,
+    decision: Mapping[str, str],
+    updates: Mapping[str, Any],
+) -> tuple[str, str]:
+    """Require an explicit child choice when parent evidence cannot be inherited."""
+    provider_field = f"{role}_provider"
+    model_field = f"{role}_model"
+    configured = (configured_provider, configured_model)
+    if decision.get("status") == "unavailable":
+        explicit_provider = updates.get(provider_field)
+        explicit_model = updates.get(model_field)
+        if (
+            not isinstance(explicit_provider, str)
+            or not explicit_provider.strip()
+            or not isinstance(explicit_model, str)
+            or not explicit_model.strip()
+        ):
+            raise ValueError(
+                "extension requires an explicit provider identity because "
+                f"the released parent {role} identity is unavailable"
+            )
+        return explicit_provider.strip(), explicit_model.strip()
+    producing = (str(decision["provider"]), str(decision["model"]))
+    if producing != configured and (
+        updates.get(provider_field),
+        updates.get(model_field),
+    ) != producing:
+        raise ValueError(
+            "extension requires an explicit provider identity matching "
+            f"released parent {role} evidence"
+        )
+    return producing
 
 
 @contextmanager
@@ -499,26 +580,49 @@ class EvaluationAssetLayout:
         parent_release = released_parent_evidence(parent, parent_state)
 
         parent_config = parent.load_config()
+        updates = dict(config_updates or {})
+        expected_rubric_identity = _required_extension_provider_identity(
+            role="rubric",
+            configured_provider=parent_config.rubric_provider,
+            configured_model=parent_config.rubric_model,
+            decision=_released_provider_decision(
+                parent,
+                PipelineStage.RUBRIC_EXTRACTION,
+                "rubric",
+            ),
+            updates=updates,
+        )
+        expected_embedding_identity = _required_extension_provider_identity(
+            role="embedding",
+            configured_provider=parent_config.embedding_provider,
+            configured_model=parent_config.embedding_model,
+            decision=_released_provider_decision(
+                parent,
+                PipelineStage.INTENT_CLUSTERING,
+                "embedding",
+            ),
+            updates=updates,
+        )
         merged_config = parent_config.to_dict()
-        merged_config.update(dict(config_updates or {}))
+        merged_config.update(updates)
         merged_config["tenant_id"] = self.tenant_id
         merged_config["asset_id"] = self.asset_id
-        if "embedding_model" in (config_updates or {}):
+        if "embedding_model" in updates and "embedding_provider" not in updates:
             merged_config["embedding_provider"] = (
                 "tfidf"
-                if config_updates["embedding_model"] == "tfidf"
+                if updates["embedding_model"] == "tfidf"
                 else "openai"
             )
         config = EvaluationAssetConfig.from_dict(merged_config)
-        if config.rubric_provider != parent_config.rubric_provider or (
-            config.rubric_model != parent_config.rubric_model
+        if (config.rubric_provider, config.rubric_model) != (
+            expected_rubric_identity
         ):
             raise ValueError(
                 "incremental extension must keep the parent's guideline model"
             )
         if clustering_mode == "keep" and (
-            config.embedding_provider != parent_config.embedding_provider
-            or config.embedding_model != parent_config.embedding_model
+            (config.embedding_provider, config.embedding_model)
+            != expected_embedding_identity
             or config.cluster_count != parent_config.cluster_count
         ):
             raise ValueError(
@@ -808,6 +912,25 @@ class EvaluationAssetLayout:
                 stage_state.receipt_sha256 = persisted_json_sha256(
                     receipts[stage]
                 )
+            try:
+                verify_release_candidate(
+                    self,
+                    target_state,
+                    receipts=receipts,
+                )
+            except (
+                EvaluationAssetIntegrityError,
+                KeyError,
+                OSError,
+                TypeError,
+                UnicodeError,
+                ValueError,
+            ) as exc:
+                raise EvaluationAssetLegacyError(
+                    self.tenant_id,
+                    self.asset_id,
+                    "required release evidence failed verification",
+                ) from exc
             event_entry = {
                 "timestamp": timestamp,
                 "event": "legacy_asset_adopted",
@@ -845,9 +968,10 @@ class EvaluationAssetLayout:
             _fault_point("after_prepared_journal")
             self._install_adoption_receipts(prepared)
             _fault_point("after_receipts_install")
-            verify_receipt_chain(self, target_state)
+            verify_release_candidate(self, target_state)
             atomic_write_json(self.state_path, target_state.to_dict())
             _fault_point("after_state_replace")
+            verify_released_asset(self, target_state)
             self._append_jsonl_once(self.events_path, event_entry)
             _fault_point("after_event_append")
             self._commit_journal_operation(prepared)
@@ -1048,8 +1172,9 @@ class EvaluationAssetLayout:
                     "the recovery journal is missing target state",
                 )
             recovered_state = PipelineState.from_dict(target_state)
-            verify_receipt_chain(self, recovered_state)
+            verify_release_candidate(self, recovered_state)
             atomic_write_json(self.state_path, target_state)
+            verify_released_asset(self, recovered_state)
             event_entry = entry.get("event_entry")
             if isinstance(event_entry, Mapping):
                 self._append_jsonl_once(self.events_path, event_entry)

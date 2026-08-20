@@ -31,8 +31,10 @@ _MATCH_STATUSES = {
 _TRUST_TIERS = {
     "trusted": "trusted_feedback",
     "inferred": "inferred_from_trusted_feedback",
-    "synthetic": "synthetic",
 }
+_SYNTHETIC_TRUST_TIERS = frozenset(
+    {"synthetic", "synthetic_from_trusted_rubric"}
+)
 _SOURCE_NAMES = {
     "trusted": "feedback_trace",
     "inferred": "unlabeled_trace",
@@ -182,6 +184,11 @@ def _validate_stage_three(
         source_ids = _string_list(metadata, "source_record_ids", require_nonempty=True)
         if not set(source_ids) <= set(feedback_by_id):
             raise ValueError("trusted intent references unknown feedback")
+        for field in ("trusted_example_count", "trusted_group_count"):
+            if field in metadata:
+                _integer(metadata, field, minimum=0)
+        if "feedback_polarities" in metadata:
+            _string_list(metadata, "feedback_polarities")
 
     trusted_cases = _case_rows(layout.artifact_path(stage, "trusted_cases.jsonl"))
     trusted_cases_by_id = _unique_by(trusted_cases, "case_id")
@@ -211,9 +218,14 @@ def _validate_stage_three(
             for field in ("must", "must_not", "should"):
                 if field in row:
                     scoreable = bool(_string_list(row, field)) or scoreable
-            checks = row.get("deterministic_checks", [])
-            if not isinstance(checks, list):
-                raise ValueError("legacy rubric deterministic checks are invalid")
+            checks = _mapping_list(row, "deterministic_checks", default_empty=True)
+            if "confidence" in row:
+                _number(row, "confidence", minimum=0.0, maximum=1.0)
+            if "intent_label" in row:
+                _nonempty_string(row, "intent_label")
+            if "tool_expectations" in row:
+                _object(row, "tool_expectations")
+            _nullable_string(row, "reference_output")
             if not scoreable and not checks and not row.get("reference_output"):
                 raise ValueError("legacy rubric has no scoreable expected value")
         covered = {
@@ -254,20 +266,48 @@ def _validate_stage_three(
             or row.get("evidence_source") != "trusted_feedback"
         ):
             raise ValueError("feedback evidence provenance is inconsistent")
+        _nonempty_string(row, "intent_label")
+        _number(row, "confidence", minimum=0.0, maximum=1.0)
+        observations = _mapping_list(row, "observations")
+        for observation in observations:
+            for field in (
+                "claim",
+                "evidence_type",
+                "evidence_pointer",
+                "polarity",
+            ):
+                _nonempty_string(observation, field)
+        _string_list(row, "requested_corrections")
+        _string_list(row, "uncertainties")
+        _nonempty_string(row, "guideline_provider")
+        _nonempty_string(row, "guideline_model")
 
     candidate_rows = _rows(layout.artifact_path(stage, "candidate_guidelines.jsonl"))
     for row in candidate_rows:
+        _nonempty_string(row, "intent_label")
+        _nonempty_string(row, "description")
+        _nonempty_string(row, "route")
+        _number(row, "confidence", minimum=0.0, maximum=1.0)
         source_ids = _string_list(row, "source_record_ids", require_nonempty=True)
         if not set(source_ids) <= set(evidence) or any(
             evidence[source_id]["route"] != row.get("route")
             for source_id in source_ids
         ):
             raise ValueError("candidate guideline references unknown evidence")
+        _validate_candidate_criteria(row)
+        _object(row, "tool_expectations")
+        _nullable_string(row, "reference_output")
+        for field in ("conflicts", "uncertainties"):
+            if field in row:
+                _string_list(row, field)
 
     guideline_rows = _rows(layout.artifact_path(stage, "evaluation_guidelines.jsonl"))
     guidelines = _unique_by(guideline_rows, "guideline_id")
     represented: set[str] = set()
     for row in guideline_rows:
+        _nonempty_string(row, "intent_label")
+        _nonempty_string(row, "description")
+        _number(row, "confidence", minimum=0.0, maximum=1.0)
         source_ids = _string_list(row, "source_record_ids", require_nonempty=True)
         if not set(source_ids) <= set(evidence) or any(
             evidence[source_id]["route"] != row.get("route")
@@ -276,19 +316,40 @@ def _validate_stage_three(
             raise ValueError("evaluation guideline references unknown evidence")
         represented.update(source_ids)
         _nonempty_string(row, "route")
+        support = _object(row, "support")
+        trusted_examples = _integer(support, "trusted_example_count", minimum=1)
+        trusted_groups = _integer(support, "trusted_group_count", minimum=1)
+        if trusted_examples != len(source_ids) or trusted_groups != len(
+            {feedback_by_id[source_id]["group_id"] for source_id in source_ids}
+        ):
+            raise ValueError("evaluation guideline support is inconsistent")
         criteria = row.get("criteria")
         if not isinstance(criteria, list) or not criteria:
             raise ValueError("evaluation guideline criteria are missing")
-        for criterion in criteria:
+        for order, criterion in enumerate(criteria, start=1):
             if not isinstance(criterion, Mapping):
                 raise ValueError("evaluation guideline criterion is invalid")
             _nonempty_string(criterion, "criterion_id")
             _nonempty_string(criterion, "statement")
+            _validate_guideline_criterion(criterion, expected_order=order)
             criterion_sources = _string_list(
                 criterion, "source_record_ids", require_nonempty=True
             )
             if not set(criterion_sources) <= set(source_ids):
                 raise ValueError("criterion source evidence is inconsistent")
+        _string_list(row, "conflicts")
+        _string_list(row, "uncertainties")
+        _object(row, "tool_expectations")
+        _nullable_string(row, "reference_output")
+        for field in (
+            "unknown_policy",
+            "activation_status",
+            "calibration_status",
+            "guideline_provider",
+            "guideline_model",
+            "oracle_version",
+        ):
+            _nonempty_string(row, field)
     if represented != set(feedback_by_id):
         raise ValueError("evaluation guidelines do not exactly cover evidence")
     if set(trusted_intents) != set(guidelines):
@@ -301,6 +362,11 @@ def _validate_stage_three(
             or set(_string_list(metadata, "source_record_ids"))
             != set(_string_list(guideline, "source_record_ids"))
             or intent.get("route") != guideline.get("route")
+            or intent.get("label") != guideline.get("intent_label")
+            or metadata.get("trusted_example_count")
+            != guideline["support"]["trusted_example_count"]
+            or metadata.get("trusted_group_count")
+            != guideline["support"]["trusted_group_count"]
         ):
             raise ValueError("trusted intent guideline lineage is inconsistent")
     guideline_ids_by_source = {
@@ -312,10 +378,23 @@ def _validate_stage_three(
         for record_id in feedback_by_id
     }
     for case in trusted_cases:
-        ids = _string_list(case["expected"], "evaluation_guideline_ids", require_nonempty=True)
+        expected = case["expected"]
+        ids = _string_list(expected, "evaluation_guideline_ids", require_nonempty=True)
         source_id = str(case["case_id"])[len("feedback-") :]
         if set(ids) != guideline_ids_by_source[source_id]:
             raise ValueError("trusted case references unknown guidelines")
+        embedded = expected.get("evaluation_guidelines")
+        if not isinstance(embedded, list) or embedded != [
+            guidelines[guideline_id] for guideline_id in ids
+        ]:
+            raise ValueError("trusted case guideline payload is inconsistent")
+        if (
+            expected.get("feedback_polarity")
+            != feedback_by_id[source_id]["feedback"]["polarity"]
+            or expected.get("label_source")
+            != "evaluation_guideline_from_trusted_feedback"
+        ):
+            raise ValueError("trusted case evidence lineage is inconsistent")
     return trusted_intents, trusted_cases
 
 
@@ -416,6 +495,17 @@ def _validate_queue(
             raise ValueError("labeling queue record membership is inconsistent")
         if record_id not in intents:
             raise ValueError("labeling queue references an unknown intent record")
+        for field in (
+            "cluster_size",
+            "sample_rank",
+            "samples_from_cluster",
+        ):
+            if field in row:
+                _integer(row, field, minimum=1)
+        if "match_score" in row:
+            _number(row, "match_score", minimum=0.0, maximum=1.0)
+        if "sample_ratio" in row:
+            _number(row, "sample_ratio", minimum=0.0, maximum=1.0)
         seen.add(key)
 
 
@@ -443,7 +533,18 @@ def _validate_inference(
             raise ValueError("inferred rubric label source is invalid")
         for field in ("must", "must_not", "should"):
             _string_list(row, field)
-        _number(row, "confidence", minimum=0.0)
+        _number(row, "confidence", minimum=0.0, maximum=1.0)
+        _mapping_list(row, "deterministic_checks", default_empty=True)
+        _object(row, "tool_expectations")
+        _nullable_string(row, "reference_output")
+        for field in (
+            "intent_label",
+            "rubric_provider",
+            "rubric_model",
+            "oracle_version",
+            "review_status",
+        ):
+            _nonempty_string(row, field)
 
     label_rows = _rows(layout.artifact_path(stage, "inferred_unlabeled_labels.jsonl"))
     labels = _unique_by(label_rows, "record_id")
@@ -462,6 +563,13 @@ def _validate_inference(
             raise ValueError("inferred label intent lineage is inconsistent")
         if row.get("review_status") != "review_required":
             raise ValueError("inferred label review state is invalid")
+        if _number(row, "match_score", minimum=0.0, maximum=1.0) != _number(
+            matches[cluster_id],
+            "score",
+            minimum=0.0,
+            maximum=1.0,
+        ):
+            raise ValueError("inferred label score is inconsistent")
         _validate_expected(_object(row, "expected"))
 
     cases = _case_rows(layout.artifact_path(stage, "inferred_cases.jsonl"))
@@ -498,6 +606,11 @@ def _validate_inference(
     for cluster_id, row in missing.items():
         if row.get("status") != matches[cluster_id].get("status"):
             raise ValueError("missing-feedback status is inconsistent")
+        for field in ("cluster_size", "trusted_example_count", "trusted_group_count"):
+            if field in row:
+                _integer(row, field, minimum=0)
+        if "match_score" in row:
+            _number(row, "match_score", minimum=0.0, maximum=1.0)
     return cases
 
 
@@ -511,13 +624,11 @@ def _validate_synthetic(
     candidates = _case_rows(layout.artifact_path(stage, "synthetic_candidates.jsonl"))
     rejected = _case_rows(layout.artifact_path(stage, "rejected_synthetic.jsonl"))
     accepted = _case_rows(layout.artifact_path(stage, "synthetic_cases.jsonl"))
-    candidates_by_id = _unique_by(candidates, "case_id")
+    _unique_by(candidates, "case_id")
     rejected_by_id = _unique_by(rejected, "case_id")
     accepted_by_id = _unique_by(accepted, "case_id")
     if set(accepted_by_id) & set(rejected_by_id):
         raise ValueError("synthetic accepted and rejected sets overlap")
-    if candidates_by_id and set(candidates_by_id) != set(accepted_by_id) | set(rejected_by_id):
-        raise ValueError("synthetic filtering is not an exact partition")
     matched = {
         cluster_id
         for cluster_id, row in matches.items()
@@ -528,7 +639,7 @@ def _validate_synthetic(
         cluster_id = metadata.get("source_cluster")
         if (
             metadata.get("source") != _SOURCE_NAMES["synthetic"]
-            or metadata.get("trust_tier") != _TRUST_TIERS["synthetic"]
+            or metadata.get("trust_tier") not in _SYNTHETIC_TRUST_TIERS
             or not isinstance(cluster_id, str)
             or cluster_id not in clusters
             or cluster_id not in matched
@@ -543,11 +654,7 @@ def _validate_synthetic(
             raise ValueError("synthetic filter issue references a non-rejected case")
         _nonempty_string(row, "code")
         _nonempty_string(row, "message")
-    inherited = (
-        _case_rows(layout.parent_snapshot / "parent_synthetic_cases.jsonl")
-        if (layout.parent_snapshot / "parent_synthetic_cases.jsonl").is_file()
-        else []
-    )
+    inherited = _inherited_synthetic_cases(layout, matches)
     filtered = filter_synthetic_cases(
         candidates,
         existing_cases=[*existing_cases, *inherited],
@@ -560,17 +667,64 @@ def _validate_synthetic(
         }
         for issue in filtered.issues
     ]
-    if Counter(_canonical(row) for row in rejected) != Counter(
-        _canonical(row) for row in filtered.rejected
-    ) or Counter(_canonical(row) for row in issues) != Counter(
-        _canonical(row) for row in expected_issues
+    expected_accepted = [*inherited, *filtered.accepted]
+    if (
+        [_canonical(row) for row in rejected]
+        != [_canonical(row) for row in filtered.rejected]
+        or [_canonical(row) for row in issues]
+        != [_canonical(row) for row in expected_issues]
+        or [_canonical(row) for row in accepted]
+        != [_canonical(row) for row in expected_accepted]
     ):
         raise ValueError("synthetic filter artifacts do not reproduce")
-    if not {
-        str(row["case_id"]) for row in filtered.accepted
-    } <= set(accepted_by_id):
-        raise ValueError("accepted synthetic candidates are incomplete")
+    candidate_partition = [*filtered.accepted, *filtered.rejected]
+    if Counter(_canonical(row) for row in candidates) != Counter(
+        _canonical(row) for row in candidate_partition
+    ):
+        raise ValueError("synthetic filtering is not an exact partition")
     return accepted
+
+
+def _inherited_synthetic_cases(
+    layout: Any,
+    matches: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Reconstruct the exact keep-mode parent cases Stage 7 would retain."""
+    if not layout.lineage_path.is_file():
+        return []
+    lineage = _json_object(layout.lineage_path)
+    if lineage.get("clustering_mode") != "keep":
+        return []
+    matches_path = layout.parent_snapshot / "parent_intent_matches.jsonl"
+    synthetic_path = layout.parent_snapshot / "parent_synthetic_cases.jsonl"
+    if not matches_path.is_file() or not synthetic_path.is_file():
+        raise ValueError("keep-mode synthetic snapshot is incomplete")
+    previous_rows = _rows(matches_path)
+    previous = _unique_by(previous_rows, "cluster_id")
+    changed = {
+        cluster_id
+        for cluster_id, match in matches.items()
+        if cluster_id not in previous
+        or previous[cluster_id].get("status") != match.get("status")
+        or previous[cluster_id].get("matched_intent_id")
+        != match.get("matched_intent_id")
+    }
+    retained: list[dict[str, Any]] = []
+    for case in _case_rows(synthetic_path):
+        metadata = _case_metadata(case)
+        cluster_id = metadata.get("source_cluster")
+        if (
+            isinstance(cluster_id, str)
+            and cluster_id not in changed
+            and cluster_id in matches
+            and matches[cluster_id].get("status") == "matched_trusted_intent"
+        ):
+            copied = dict(case)
+            copied_metadata = dict(metadata)
+            copied_metadata["dataset_version"] = layout.asset_id
+            copied["metadata"] = copied_metadata
+            retained.append(copied)
+    return retained
 
 
 def _validate_splits(
@@ -593,8 +747,14 @@ def _validate_splits(
             _unique_by(rows, "case_id")
             for case in rows:
                 case_id = case["case_id"]
+                trust_tier = _case_metadata(case).get("trust_tier")
+                tier_matches = (
+                    trust_tier in _SYNTHETIC_TRUST_TIERS
+                    if tier == "synthetic"
+                    else trust_tier == _TRUST_TIERS[tier]
+                )
                 if (
-                    _case_metadata(case).get("trust_tier") != _TRUST_TIERS[tier]
+                    not tier_matches
                     or case_id not in source_by_tier[tier]
                     or case != source_by_tier[tier][case_id]
                 ):
@@ -650,11 +810,13 @@ def _validate_splits(
         trust_tier = metadata.get("trust_tier")
         if trust_tier not in {
             _TRUST_TIERS["inferred"],
-            _TRUST_TIERS["synthetic"],
+            *_SYNTHETIC_TRUST_TIERS,
         }:
             raise ValueError("triage case trust tier is invalid")
         source = source_by_tier[
-            "inferred" if trust_tier == _TRUST_TIERS["inferred"] else "synthetic"
+            "inferred"
+            if trust_tier == _TRUST_TIERS["inferred"]
+            else "synthetic"
         ]
         if case_id not in source:
             raise ValueError("triage case is not part of the source dataset")
@@ -673,11 +835,38 @@ def _rows(path: Path) -> list[dict[str, Any]]:
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
-        value = json.loads(line)
+        value = json.loads(line, parse_constant=_reject_json_constant)
+        _validate_json_numbers(value)
         if not isinstance(value, dict):
             raise ValueError("artifact row is not an object")
         rows.append(value)
     return rows
+
+
+def _json_object(path: Path) -> dict[str, Any]:
+    value = json.loads(
+        path.read_text(encoding="utf-8"),
+        parse_constant=_reject_json_constant,
+    )
+    _validate_json_numbers(value)
+    if not isinstance(value, dict):
+        raise ValueError("artifact document is not an object")
+    return value
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError("non-standard JSON numeric constant is invalid")
+
+
+def _validate_json_numbers(value: Any) -> None:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("non-finite JSON number is invalid")
+    if isinstance(value, Mapping):
+        for nested in value.values():
+            _validate_json_numbers(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            _validate_json_numbers(nested)
 
 
 def _case_rows(path: Path) -> list[dict[str, Any]]:
@@ -732,6 +921,79 @@ def _object(row: Mapping[str, Any], field: str) -> Mapping[str, Any]:
     return value
 
 
+def _mapping_list(
+    row: Mapping[str, Any],
+    field: str,
+    *,
+    default_empty: bool = False,
+) -> list[Mapping[str, Any]]:
+    value = row.get(field, [] if default_empty else None)
+    if not isinstance(value, list) or not all(
+        isinstance(item, Mapping) for item in value
+    ):
+        raise ValueError("required artifact object array is invalid")
+    return value
+
+
+def _nullable_string(row: Mapping[str, Any], field: str) -> None:
+    value = row.get(field)
+    if value is not None and not isinstance(value, str):
+        raise ValueError("optional artifact string is invalid")
+
+
+def _boolean(row: Mapping[str, Any], field: str) -> bool:
+    value = row.get(field)
+    if not isinstance(value, bool):
+        raise ValueError("required artifact boolean is invalid")
+    return value
+
+
+def _validate_candidate_criteria(row: Mapping[str, Any]) -> None:
+    criteria = _mapping_list(row, "criteria")
+    if not criteria:
+        raise ValueError("candidate guideline criteria are missing")
+    for criterion in criteria:
+        for field in (
+            "kind",
+            "statement",
+            "dimension",
+            "severity",
+            "scoring",
+        ):
+            _nonempty_string(criterion, field)
+        applicability = criterion.get("applicability")
+        if not isinstance(applicability, (str, Mapping)):
+            raise ValueError("guideline criterion applicability is invalid")
+        if isinstance(applicability, str) and not applicability.strip():
+            raise ValueError("guideline criterion applicability is invalid")
+        _boolean(criterion, "evidence_required")
+        evaluator = _object(criterion, "evaluator")
+        _nonempty_string(evaluator, "type")
+        _nonempty_string(evaluator, "fallback")
+        if "source_record_ids" in criterion:
+            _string_list(criterion, "source_record_ids", require_nonempty=True)
+
+
+def _validate_guideline_criterion(
+    criterion: Mapping[str, Any],
+    *,
+    expected_order: int,
+) -> None:
+    for field in ("kind", "dimension", "severity", "scoring"):
+        _nonempty_string(criterion, field)
+    applicability = criterion.get("applicability")
+    if not isinstance(applicability, (str, Mapping)):
+        raise ValueError("guideline criterion applicability is invalid")
+    if isinstance(applicability, str) and not applicability.strip():
+        raise ValueError("guideline criterion applicability is invalid")
+    _boolean(criterion, "evidence_required")
+    if _integer(criterion, "order", minimum=1) != expected_order:
+        raise ValueError("guideline criterion order is inconsistent")
+    evaluator = _object(criterion, "evaluator")
+    _nonempty_string(evaluator, "type")
+    _nonempty_string(evaluator, "fallback")
+
+
 def _integer(row: Mapping[str, Any], field: str, *, minimum: int) -> int:
     value = row.get(field)
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
@@ -744,12 +1006,17 @@ def _number(
     field: str,
     *,
     minimum: float | None = None,
+    maximum: float | None = None,
 ) -> float:
     value = row.get(field)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError("required artifact number is invalid")
     number = float(value)
-    if not math.isfinite(number) or (minimum is not None and number < minimum):
+    if (
+        not math.isfinite(number)
+        or (minimum is not None and number < minimum)
+        or (maximum is not None and number > maximum)
+    ):
         raise ValueError("required artifact number is invalid")
     return number
 
@@ -774,9 +1041,7 @@ def _validate_expected(expected: Mapping[str, Any]) -> None:
             raise ValueError("case rubric is invalid")
         for field in ("must", "must_not", "should"):
             scoreable = bool(_string_list(rubric, field)) or scoreable
-    checks = expected.get("deterministic_checks", [])
-    if not isinstance(checks, list):
-        raise ValueError("case deterministic checks are invalid")
+    checks = _mapping_list(expected, "deterministic_checks", default_empty=True)
     scoreable = scoreable or bool(checks)
     for field in ("answer", "expected_output", "label", "reference_output"):
         value = expected.get(field)
@@ -792,7 +1057,7 @@ def _validate_expected(expected: Mapping[str, Any]) -> None:
     if not scoreable:
         raise ValueError("case expected value is not scoreable")
     if "confidence" in expected:
-        _number(expected, "confidence", minimum=0.0)
+        _number(expected, "confidence", minimum=0.0, maximum=1.0)
 
 
 def _canonical(value: Mapping[str, Any]) -> str:

@@ -112,7 +112,9 @@ completed receipt prefix and rebuilds from the first incomplete or invalid
 stage; a released asset is immutable and fails closed on any receipt or
 artifact mismatch. Released verification also authenticates the exact v2
 control state and identities, replays configuration history to justify every
-receipt's full resolved-config hash, and binds Stage 8 to the current persisted
+receipt's full resolved-config hash, requires the exact versioned history row
+schemas and exact journal correspondence when revision evidence is present, and
+binds Stage 8 to the exact persisted configuration-history bytes and current
 configuration without requiring the current checkout to equal historical code.
 
 Provider transport plus semantic response validation and normalization share
@@ -123,9 +125,12 @@ allowlisted causal summary. Raw provider messages, request/response bodies,
 credentials, and arbitrary payload text are never persisted.
 
 Injected providers remain injected. Default providers are constructed lazily
-under the asset lock only after recovery, immutable/integrity checks, optional
-revision, and configuration reload. Their actual identity is shared by errors,
-receipts, and the asset manifest, so a revision cannot call an old provider
+under the asset lock only after recovery, lifecycle and immutable raw-snapshot
+integrity checks, optional revision, and configuration reload. An injected
+rubric or embedding provider must declare nonblank `provider_name` and `model`
+attributes; the configured identity is never substituted for missing observed
+identity. The actual identity is shared by errors, receipts, Stage 3/6/7
+metadata, and the asset manifest, so a revision cannot call an old provider
 while claiming a new one.
 
 Individual Studio JSON, JSONL, Markdown/text, copied, event, and configuration
@@ -137,9 +142,11 @@ asset protects every high-level mutation across processes. Configuration
 revision, checkpoint rebuild, and legacy adoption use an append-only recovery
 journal whose prepared payload rolls forward idempotently.
 Before roll-forward, recovery validates the complete journal schema, unique
-operation identity, tenant/asset-bound target config and state, before/target
-hashes, cleanup suffix, audit rows, and the on-disk intermediate state. A
-parseable but inconsistent journal therefore fails before any authority write.
+operation identity, tenant/asset-bound target config and state, exact nested
+result/history/event schemas, changed-field and stage-suffix semantics,
+before/target hashes, prepare-before-commit ordering, audit rows, and only the
+operation-reachable on-disk control pairs. A parseable, rehashed, but
+inconsistent journal therefore fails before any authority write.
 
 These are single-file and authority-ordering guarantees. Stage 8 verifies all
 four current catalog copies before `released`, but Task 3 does not make those
@@ -205,7 +212,11 @@ The Studio and `assets extend` CLI expose two modes:
 Keep mode requires the parent's embedding provider, embedding model, cluster
 count, and guideline model. Refresh mode may select a new embedding model and
 cluster count but retains the guideline model so the trusted pool does not mix
-guideline-generation versions.
+guideline-generation versions. These comparisons use verified receipt evidence
+from the producing providers, not potentially stale configured defaults. When
+legacy adoption records a producing identity as historically unavailable, the
+child must explicitly select a complete provider/model identity before its root
+is created.
 
 Feedback collected for a Stage 5 queue item may use the same `record_id` as its
 original unlabeled trace. The trace remains in the intent inventory so traffic
@@ -546,10 +557,12 @@ Successful adoption writes historical receipts with unavailable provenance for
 facts the old build did not record, then transitions to `released`. Before any
 write it strictly validates canonical source/prepared identity, guidelines or
 legacy rubrics, clusters, coverage references, inferred/synthetic provenance,
-case schemas, group-safe split partitions, trusted-only regression data,
-manifests, counts, and the four catalog copies. Invalid adoption changes no
-authority and directs the operator to repair or create a new asset. The Studio
-exposes the same locked core operation.
+case schemas, finite numeric domains, exact deterministic synthetic
+accepted/rejected/issue outputs (including an empty candidate set), group-safe
+split partitions, trusted-only regression data, manifests, counts, and the four
+catalog copies. Invalid adoption changes no authority and directs the operator
+to repair or create a new asset. The Studio exposes the same locked core
+operation.
 
 Pass optional decision flags to revise and resume in one command:
 
