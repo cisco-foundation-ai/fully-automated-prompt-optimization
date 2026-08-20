@@ -61,10 +61,12 @@ from src.hephaestus.evaluation_assets.control_jsonl import (
 from src.hephaestus.evaluation_assets.durability import (
     STAGE_SPECIFICATIONS,
     EvaluationAssetImmutableError,
+    EvaluationAssetIntegrityError,
     EvaluationAssetLegacyError,
     build_stage_receipt,
     file_sha256,
     mutable_rebuild_boundary,
+    verify_completed_release_candidate,
     verify_raw_snapshot_floor,
     verify_released_asset,
 )
@@ -595,6 +597,21 @@ class EvaluationAssetPipeline:
         """Run while the caller holds the asset mutation lock."""
         state = self.layout.load_state()
         state.schema_version = "fapo-evaluation-asset-state-v2"
+        completed_release_candidate = (
+            state.status == "running"
+            and state.current_stage
+            in {None, PipelineStage.DATASET_SPLITS.value}
+            and state.error is None
+            and all(
+                item.status == "completed" and item.receipt_sha256
+                for item in state.stages
+            )
+        )
+        if completed_release_candidate:
+            self._pending_generation = verify_completed_release_candidate(
+                self.layout,
+                state,
+            )
         boundary = mutable_rebuild_boundary(
             self.layout,
             state,
@@ -606,6 +623,13 @@ class EvaluationAssetPipeline:
             },
         )
         if boundary is not None:
+            if completed_release_candidate:
+                raise EvaluationAssetIntegrityError(
+                    self.layout.tenant_id,
+                    self.layout.asset_id,
+                    "completed release candidate evidence is invalid; "
+                    "restore it from a verified backup or rebuild a new asset version",
+                )
             boundary_index = list(PipelineStage).index(boundary)
             suffix_states = state.stages[boundary_index:]
             if any(
@@ -665,6 +689,12 @@ class EvaluationAssetPipeline:
             stage_state.completed_at = completed_at
             stage_state.message = _stage_message(stage, counts)
             self.layout.save_state(state)
+            if stage == PipelineStage.DATASET_SPLITS:
+                self._pending_generation = verify_completed_release_candidate(
+                    self.layout,
+                    state,
+                )
+                _publication_fault_point("after_stage_8_receipt_state_complete")
             self.layout.append_event(
                 "stage_completed",
                 {"stage": stage.value, "counts": counts},
@@ -732,7 +762,7 @@ class EvaluationAssetPipeline:
             ),
         )
         atomic_write_json(
-            self.layout.artifact_path(stage, "provenance.json"),
+            self.layout.stage_provenance_path(stage),
             stage_provenance,
         )
         if stage == PipelineStage.DATASET_SPLITS:

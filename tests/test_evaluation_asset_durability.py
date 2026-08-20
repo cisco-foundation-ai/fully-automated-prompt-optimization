@@ -33,6 +33,7 @@ from src.hephaestus.evaluation_assets.durability import (
     released_parent_evidence,
     verify_release_candidate,
     verify_released_asset,
+    verify_stage_receipt,
 )
 from src.hephaestus.evaluation_assets.models import (
     STATE_SCHEMA_VERSION,
@@ -61,58 +62,459 @@ class _NeverCalledRubricProvider:
         raise AssertionError("busy pipeline reached the rubric provider")
 
 
+def _studio_persistence_paths(source_root: Path) -> tuple[Path, ...]:
+    """Return the complete declared Studio production persistence boundary."""
+    paths = {
+        source_root / "artifact_io.py",
+        source_root / "datasets" / "evaluation_assets.py",
+        source_root / "datasets" / "intent_assets.py",
+        source_root / "cli.py",
+        source_root / "webui" / "data.py",
+        source_root / "webui" / "server.py",
+        source_root / "webui" / "frontend.py",
+        *(source_root / "evaluation_assets").rglob("*.py"),
+    }
+    return tuple(sorted(paths, key=lambda path: path.as_posix()))
+
+
+def _assigned_ast_node(
+    node: ast.AST,
+    assignments: Mapping[str, ast.AST],
+    *,
+    seen: frozenset[str] = frozenset(),
+) -> ast.AST:
+    if isinstance(node, ast.NamedExpr):
+        return _assigned_ast_node(node.value, assignments, seen=seen)
+    if isinstance(node, ast.Name) and node.id in assignments and node.id not in seen:
+        return _assigned_ast_node(
+            assignments[node.id],
+            assignments,
+            seen=seen | {node.id},
+        )
+    return node
+
+
+def _qualified_ast_name(
+    node: ast.AST,
+    aliases: Mapping[str, str],
+    assignments: Mapping[str, ast.AST] | None = None,
+) -> str:
+    node = _assigned_ast_node(node, assignments or {})
+    if isinstance(node, ast.Name):
+        return aliases.get(node.id, node.id)
+    if isinstance(node, ast.Attribute):
+        prefix = _qualified_ast_name(node.value, aliases, assignments)
+        return f"{prefix}.{node.attr}" if prefix else node.attr
+    return ""
+
+
+def _literal_mode(
+    node: ast.Call,
+    *,
+    positional_index: int,
+    assignments: Mapping[str, ast.AST],
+) -> str | None:
+    arguments = list(node.args[positional_index : positional_index + 1])
+    arguments.extend(
+        keyword.value for keyword in node.keywords if keyword.arg == "mode"
+    )
+    if not arguments:
+        return "r"
+    argument = _assigned_ast_node(arguments[0], assignments)
+    if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+        return argument.value
+    return None
+
+
+def _os_write_flag_status(
+    node: ast.AST,
+    aliases: Mapping[str, str],
+    assignments: Mapping[str, ast.AST],
+) -> bool | None:
+    node = _assigned_ast_node(node, assignments)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        left = _os_write_flag_status(node.left, aliases, assignments)
+        right = _os_write_flag_status(node.right, aliases, assignments)
+        if left is True or right is True:
+            return True
+        return False if left is False and right is False else None
+    qualified = _qualified_ast_name(node, aliases, assignments)
+    if qualified in {
+        "os.O_WRONLY",
+        "os.O_RDWR",
+        "os.O_APPEND",
+        "os.O_CREAT",
+        "os.O_TRUNC",
+        "os.O_EXCL",
+    }:
+        return True
+    if qualified in {
+        "os.O_RDONLY",
+        "os.O_CLOEXEC",
+        "os.O_DIRECTORY",
+        "os.O_NOFOLLOW",
+    }:
+        return False
+    if isinstance(node, ast.Constant) and node.value == 0:
+        return False
+    if (
+        isinstance(node, ast.Call)
+        and _qualified_ast_name(node.func, aliases, assignments) == "getattr"
+        and len(node.args) == 3
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value in {"O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW"}
+        and isinstance(node.args[2], ast.Constant)
+        and node.args[2].value == 0
+    ):
+        return False
+    return None
+
+
+def _path_like_receiver(
+    node: ast.AST,
+    aliases: Mapping[str, str],
+    assignments: Mapping[str, ast.AST],
+) -> bool:
+    node = _assigned_ast_node(node, assignments)
+    if isinstance(node, ast.Name):
+        name = node.id.lower()
+        return name == "path" or name.endswith("_path") or name.endswith("path")
+    if isinstance(node, ast.Attribute):
+        return node.attr == "parent" or node.attr.lower().endswith(
+            "path"
+        ) or _path_like_receiver(node.value, aliases, assignments)
+    if not isinstance(node, ast.Call):
+        return False
+    if _qualified_ast_name(node.func, aliases, assignments) in {
+        "Path",
+        "pathlib.Path",
+    }:
+        return True
+    return (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"absolute", "resolve"}
+        and _path_like_receiver(
+            node.func.value,
+            aliases,
+            assignments,
+        )
+    )
+
+
+def _obvious_string_receiver(
+    node: ast.AST,
+    assignments: Mapping[str, ast.AST],
+) -> bool:
+    node = _assigned_ast_node(node, assignments)
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, str)
+    if isinstance(node, ast.Subscript):
+        return _obvious_string_receiver(node.value, assignments)
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr
+        in {
+            "casefold",
+            "lower",
+            "lstrip",
+            "removeprefix",
+            "removesuffix",
+            "rsplit",
+            "rstrip",
+            "split",
+            "strip",
+            "upper",
+        }
+    )
+
+
+def _studio_writer_violations(path: Path, source: str) -> list[str]:
+    """Find direct persistence calls, resolving qualified and imported aliases."""
+    tree = ast.parse(source, filename=str(path))
+    aliases: dict[str, str] = {}
+    assignments: dict[str, ast.AST] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for item in node.names:
+                aliases[item.asname or item.name.split(".", 1)[0]] = item.name
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for item in node.names:
+                aliases[item.asname or item.name] = f"{node.module}.{item.name}"
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    assignments[target.id] = node.value
+                elif (
+                    isinstance(target, (ast.Tuple, ast.List))
+                    and isinstance(node.value, (ast.Tuple, ast.List))
+                    and len(target.elts) == len(node.value.elts)
+                ):
+                    assignments.update(
+                        {
+                            item.id: value
+                            for item, value in zip(target.elts, node.value.elts)
+                            if isinstance(item, ast.Name)
+                        }
+                    )
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.value is not None:
+                assignments[node.target.id] = node.value
+        elif isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
+            assignments[node.target.id] = node.value
+
+    path_text = path.as_posix()
+    artifact_seam = path_text.endswith("src/hephaestus/artifact_io.py")
+    publication_seam = path_text.endswith(
+        "src/hephaestus/evaluation_assets/publication.py"
+    )
+    violations: list[str] = []
+    copy_calls = {
+        "shutil.copy",
+        "shutil.copy2",
+        "shutil.copyfile",
+        "shutil.copyfileobj",
+        "shutil.copytree",
+        "shutil.move",
+    }
+    low_level_calls = {
+        "os.write",
+        "os.pwrite",
+        "os.truncate",
+        "os.ftruncate",
+        "os.replace",
+        "os.rename",
+    }
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        resolved_func = _assigned_ast_node(node.func, assignments)
+        qualified = _qualified_ast_name(resolved_func, aliases, assignments)
+        attribute = (
+            resolved_func.attr if isinstance(resolved_func, ast.Attribute) else ""
+        )
+
+        if (
+            qualified in {"getattr", "builtins.getattr"}
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value
+            in {"dump", "open", "rename", "replace", "write", "write_bytes", "write_text"}
+        ):
+            violations.append(
+                f"{path.name}:{node.lineno}:getattr({node.args[1].value})"
+            )
+            continue
+        if attribute in {"write_text", "write_bytes", "touch"}:
+            violations.append(f"{path.name}:{node.lineno}:{attribute}")
+            continue
+        if qualified in {"json.dump", "pickle.dump", "yaml.dump"} or (
+            attribute == "dump" and not qualified
+        ):
+            if not artifact_seam:
+                violations.append(f"{path.name}:{node.lineno}:{qualified or 'dump'}")
+            continue
+        if qualified in copy_calls:
+            if not (artifact_seam and qualified == "shutil.copyfileobj"):
+                violations.append(f"{path.name}:{node.lineno}:{qualified}")
+            continue
+        if qualified in low_level_calls:
+            allowed = (artifact_seam and qualified == "os.replace") or (
+                publication_seam and qualified == "os.rename"
+            )
+            if not allowed:
+                violations.append(f"{path.name}:{node.lineno}:{qualified}")
+            continue
+        if qualified == "tempfile.NamedTemporaryFile":
+            if not artifact_seam:
+                violations.append(
+                    f"{path.name}:{node.lineno}:tempfile.NamedTemporaryFile"
+                )
+            continue
+        if qualified == "os.open":
+            flags = node.args[1] if len(node.args) > 1 else next(
+                (keyword.value for keyword in node.keywords if keyword.arg == "flags"),
+                None,
+            )
+            status = (
+                _os_write_flag_status(flags, aliases, assignments)
+                if flags is not None
+                else None
+            )
+            if status is not False:
+                operation = "write" if status else "dynamic"
+                violations.append(f"{path.name}:{node.lineno}:os.open({operation})")
+            continue
+        if qualified in {"builtins.open", "io.open", "os.fdopen"} or (
+            qualified == "open" and isinstance(resolved_func, ast.Name)
+        ):
+            index = 1
+        elif attribute == "open":
+            index = 0
+        else:
+            index = -1
+        if index >= 0:
+            mode = _literal_mode(
+                node,
+                positional_index=index,
+                assignments=assignments,
+            )
+            if mode is None or any(flag in mode for flag in "wax+"):
+                violations.append(
+                    f"{path.name}:{node.lineno}:open({mode or 'dynamic'})"
+                )
+            continue
+        if attribute == "write":
+            allowed = artifact_seam or (
+                path_text.endswith("src/hephaestus/webui/server.py")
+                and isinstance(resolved_func, ast.Attribute)
+                and _qualified_ast_name(
+                    resolved_func.value,
+                    aliases,
+                    assignments,
+                )
+                == "self.wfile"
+            )
+            if not allowed:
+                violations.append(f"{path.name}:{node.lineno}:write")
+            continue
+        if attribute in {"replace", "rename"}:
+            receiver = resolved_func.value
+            if not _obvious_string_receiver(receiver, assignments):
+                violations.append(
+                    f"{path.name}:{node.lineno}:path.{attribute}"
+                )
+    return violations
+
+
 def test_studio_production_scope_has_no_direct_file_writers() -> None:
     """Studio production writes stay centralized in durable artifact primitives."""
     source_root = Path(__file__).resolve().parents[1] / "src" / "hephaestus"
-    paths = [
-        *sorted((source_root / "evaluation_assets").glob("*.py")),
-        source_root / "webui" / "data.py",
-    ]
-    violations = []
-    for path in paths:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            if isinstance(node.func, ast.Attribute) and node.func.attr in {
-                "write_text",
-                "write_bytes",
-            }:
-                violations.append(f"{path.name}:{node.lineno}:{node.func.attr}")
-                continue
-            if isinstance(node.func, ast.Attribute) and node.func.attr == "dump":
-                violations.append(f"{path.name}:{node.lineno}:dump")
-                continue
-            function_name = (
-                node.func.id
-                if isinstance(node.func, ast.Name)
-                else node.func.attr
-                if isinstance(node.func, ast.Attribute)
-                else ""
-            )
-            if function_name != "open":
-                continue
-            positional_modes = (
-                node.args[1:2]
-                if isinstance(node.func, ast.Name)
-                else node.args[:1]
-            )
-            keyword_modes = [
-                item.value for item in node.keywords if item.arg == "mode"
-            ]
-            mode = next(
-                (
-                    argument.value
-                    for argument in [*positional_modes, *keyword_modes]
-                    if isinstance(argument, ast.Constant)
-                    and isinstance(argument.value, str)
-                ),
-                "r",
-            )
-            if any(flag in mode for flag in "wax+"):
-                violations.append(f"{path.name}:{node.lineno}:open({mode})")
+    paths = _studio_persistence_paths(source_root)
+    relative = {path.relative_to(source_root).as_posix() for path in paths}
+    assert {
+        "artifact_io.py",
+        "datasets/evaluation_assets.py",
+        "datasets/intent_assets.py",
+        "cli.py",
+        "webui/data.py",
+        "webui/server.py",
+        "webui/frontend.py",
+    } <= relative
+    assert {
+        path.relative_to(source_root).as_posix()
+        for path in (source_root / "evaluation_assets").rglob("*.py")
+    } <= relative
+    assert [
+        violation
+        for path in paths
+        for violation in _studio_writer_violations(
+            path,
+            path.read_text(encoding="utf-8"),
+        )
+    ] == []
 
-    assert violations == []
+
+@pytest.mark.parametrize(
+    ("source", "operation"),
+    [
+        ("Path('x').write_text('body')", "write_text"),
+        ("Path('x').write_bytes(b'body')", "write_bytes"),
+        ("from json import dump as emit\nemit({}, handle)", "json.dump"),
+        ("open('x', 'a', encoding='utf-8')", "open(a)"),
+        ("Path('x').open(mode='w')", "open(w)"),
+        (
+            "from builtins import open as file_open\nfile_open('x', 'x')",
+            "open(x)",
+        ),
+        (
+            "from pathlib import Path as P\nP('x').open('w')",
+            "open(w)",
+        ),
+        (
+            "from os import open as low_open, O_WRONLY as write_flag\n"
+            "low_open('x', write_flag)",
+            "os.open(write)",
+        ),
+        ("import shutil as sh\nsh.copy(source, target)", "shutil.copy"),
+        (
+            "from shutil import copyfileobj as stream\nstream(source, target)",
+            "shutil.copyfileobj",
+        ),
+        ("import os as operating\noperating.write(fd, b'body')", "os.write"),
+        ("from os import pwrite as emit\nemit(fd, b'body', 0)", "os.pwrite"),
+        ("import os as operating\noperating.replace(a, b)", "os.replace"),
+        ("from os import rename as swap\nswap(a, b)", "os.rename"),
+        ("path.replace(target)", "path.replace"),
+        ("Path('x').rename(target)", "path.rename"),
+        ("mode = 'w'\nopen('x', mode)", "open(w)"),
+        ("self.output_path.replace(target)", "path.replace"),
+        ("emit = json.dump\nemit({}, handle)", "json.dump"),
+        ("handle.write(b'body')", "write"),
+        ("emit = Path('x').write_text\nemit('body')", "write_text"),
+        ("emit = handle.write\nemit(b'body')", "write"),
+        ("emit = Path('x').rename\nemit(target)", "path.rename"),
+        ("Path('x').resolve().rename(target)", "path.rename"),
+        ("Path('x').parent.replace(target)", "path.replace"),
+        ("(Path('root') / 'x').replace(target)", "path.replace"),
+        ("Path('x').with_suffix('.tmp').replace(target)", "path.replace"),
+        ("Path('x').joinpath('y').rename(target)", "path.rename"),
+        ("target.replace(destination)", "path.replace"),
+        (
+            "emit = (Path('root') / 'x').replace\nemit(target)",
+            "path.replace",
+        ),
+        ("getattr(handle, 'write')(b'body')", "getattr(write)"),
+        ("emit, other = handle.write, noop\nemit(b'body')", "write"),
+        ("(emit := handle.write)(b'body')", "write"),
+        ("(emit := open)('x', 'w')", "open(w)"),
+    ],
+)
+def test_studio_writer_guard_rejects_qualified_and_aliased_forms(
+    source: str,
+    operation: str,
+) -> None:
+    """Imports and aliases cannot bypass the production persistence guard."""
+    path = Path("src/hephaestus/evaluation_assets/example.py")
+    assert any(
+        operation in violation
+        for violation in _studio_writer_violations(path, source)
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "source"),
+    [
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import json, os, shutil, tempfile\n"
+            "json.dump({}, handle)\n"
+            "handle.write('body')\n"
+            "shutil.copyfileobj(source, handle)\n"
+            "tempfile.NamedTemporaryFile('wb')\n"
+            "os.replace(source, target)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/publication.py"),
+            "import os\nos.rename(temporary, target)",
+        ),
+        (
+            Path("src/hephaestus/webui/server.py"),
+            "self.wfile.write(body)",
+        ),
+        (
+            Path("src/hephaestus/webui/data.py"),
+            "import os\nopen(path, 'rb')\nPath(path).open('r')\n"
+            "os.open(path, os.O_RDONLY)",
+        ),
+    ],
+)
+def test_studio_writer_guard_allows_only_audited_nonpersistent_seams(
+    path: Path,
+    source: str,
+) -> None:
+    """The allowlist is path-specific and does not suppress ordinary writers."""
+    assert _studio_writer_violations(path, source) == []
 
 
 class _NeverCalledEmbeddingProvider:
@@ -2364,15 +2766,14 @@ def test_native_terminal_candidate_requires_revision_journal_authority(
         return receipt
 
     before_verification: dict[str, dict[str, bytes]] = {}
-    real_verify = workspace_module.verify_release_candidate
+    real_verify = pipeline_module.verify_completed_release_candidate
 
     def capture_candidate_authority(
         layout: EvaluationAssetLayout,
         candidate: PipelineState,
-        **kwargs: Any,
-    ) -> None:
+    ) -> Any:
         before_verification["authority"] = _authority_bytes(layout)
-        real_verify(layout, candidate, **kwargs)
+        return real_verify(layout, candidate)
 
     monkeypatch.setattr(
         pipeline_module,
@@ -2380,8 +2781,8 @@ def test_native_terminal_candidate_requires_revision_journal_authority(
         damage_journal_after_final_receipt,
     )
     monkeypatch.setattr(
-        workspace_module,
-        "verify_release_candidate",
+        pipeline_module,
+        "verify_completed_release_candidate",
         capture_candidate_authority,
     )
 
@@ -4374,6 +4775,84 @@ def test_legacy_adoption_accepts_real_legacy_layout_alternatives(
     verify_released_asset(layout, adopted)
 
 
+def test_pre_stage_legacy_adoption_rejects_external_provenance_symlink_without_writes(
+    tmp_path: Path,
+) -> None:
+    """Historical provenance materialization cannot escape the asset root."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _convert_to_legacy_rubric_profile(layout)
+    _downgrade_to_legacy_completed(layout)
+    _move_to_pre_stage_layout(layout)
+    outside = tmp_path / "outside-provenance"
+    outside.mkdir()
+    provenance_directory = layout.root / "stage_provenance"
+    provenance_directory.symlink_to(outside, target_is_directory=True)
+    before_asset = _tree_bytes(layout.root)
+    before_outside = _tree_bytes(outside)
+
+    with pytest.raises(EvaluationAssetLegacyError, match="verification"):
+        layout.adopt_legacy()
+
+    assert provenance_directory.is_symlink()
+    assert _tree_bytes(layout.root) == before_asset
+    assert _tree_bytes(outside) == before_outside == {}
+    assert not layout.recovery_journal_path.exists()
+
+
+@pytest.mark.parametrize("invalid_target", ["build_provenance", "stage_provenance"])
+def test_pre_stage_legacy_adoption_preflights_every_provenance_target(
+    tmp_path: Path,
+    invalid_target: str,
+) -> None:
+    """A later invalid provenance target cannot leave earlier provenance writes."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _convert_to_legacy_rubric_profile(layout)
+    _downgrade_to_legacy_completed(layout)
+    _move_to_pre_stage_layout(layout)
+    if invalid_target == "build_provenance":
+        layout.build_provenance_path.mkdir()
+    else:
+        final_target = layout.stage_provenance_path(PipelineStage.DATASET_SPLITS)
+        final_target.parent.mkdir()
+        final_target.mkdir()
+    before = _tree_bytes(layout.root)
+
+    with pytest.raises(EvaluationAssetLegacyError, match="verification"):
+        layout.adopt_legacy()
+
+    assert _tree_bytes(layout.root) == before
+    assert not layout.recovery_journal_path.exists()
+
+
+def test_pre_stage_legacy_adoption_rejects_external_receipt_symlink_without_writes(
+    tmp_path: Path,
+) -> None:
+    """Adoption cannot install authoritative receipts through an external symlink."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _convert_to_legacy_rubric_profile(layout)
+    _downgrade_to_legacy_completed(layout)
+    _move_to_pre_stage_layout(layout)
+    shutil.rmtree(layout.receipts_root)
+    outside = tmp_path / "outside-receipts"
+    outside.mkdir()
+    layout.receipts_root.symlink_to(outside, target_is_directory=True)
+    before_asset = _tree_bytes(layout.root)
+
+    with pytest.raises(EvaluationAssetLegacyError, match="verification"):
+        layout.adopt_legacy()
+
+    assert layout.receipts_root.is_symlink()
+    assert _tree_bytes(layout.root) == before_asset
+    assert _tree_bytes(outside) == {}
+    assert not layout.recovery_journal_path.exists()
+
+
 def test_legacy_adoption_rejects_ambiguous_complete_stage_three_profiles(
     tmp_path: Path,
 ) -> None:
@@ -5141,33 +5620,326 @@ class _InjectedFault(RuntimeError):
     pass
 
 
+@pytest.mark.parametrize("stage", list(PipelineStage), ids=lambda stage: stage.value)
+def test_each_stage_provenance_rejects_self_consistent_secret_rehash_without_writes(
+    tmp_path: Path,
+    stage: PipelineStage,
+) -> None:
+    """A receipt hash authenticates only strict body-free provenance semantics."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    state = layout.load_state()
+    provenance_path = layout.stage_provenance_path(stage)
+    payload = json.loads(provenance_path.read_text(encoding="utf-8"))
+    payload["request_body"] = {
+        "authorization": "Bearer stage-provenance-canary",
+        "protected_response": "sk-stage-provenance-canary",
+    }
+    _replace_stage_provenance_and_rehash_receipt(layout, state, stage, payload)
+    before = _authority_bytes(layout)
+
+    with pytest.raises(EvaluationAssetIntegrityError, match="provenance"):
+        verify_stage_receipt(
+            layout,
+            state,
+            stage,
+            layout.load_config(),
+            prompt_values={},
+            compare_current_dependencies=False,
+        )
+
+    assert _authority_bytes(layout) == before
+
+
+def test_stage_provenance_receipt_rejects_self_consistent_duplicate_key_json(
+    tmp_path: Path,
+) -> None:
+    """Duplicate keys cannot collapse into an apparently valid stage record."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    state = layout.load_state()
+    stage = PipelineStage.RAW_INPUTS
+    provenance_path = layout.artifact_path(stage, "provenance.json")
+    original = provenance_path.read_text(encoding="utf-8").rstrip()
+    raw = (original[:-1] + ',"stage":"raw_inputs"}\n').encode("utf-8")
+    _replace_stage_provenance_and_rehash_receipt(layout, state, stage, raw)
+    before = _authority_bytes(layout)
+
+    with pytest.raises(EvaluationAssetIntegrityError, match="provenance"):
+        verify_stage_receipt(
+            layout,
+            state,
+            stage,
+            layout.load_config(),
+            prompt_values={},
+            compare_current_dependencies=False,
+        )
+
+    assert _authority_bytes(layout) == before
+
+
+def test_mutable_receipt_rejects_rehashed_undeclared_origin_without_writes(
+    tmp_path: Path,
+) -> None:
+    """Mutable verification admits only exact native or adoption profiles."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    state = layout.load_state()
+    stage = PipelineStage.RAW_INPUTS
+    receipt_path = layout.receipt_path(stage)
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["origin"] = "fabricated"
+    artifact_io.atomic_write_json(receipt_path, receipt)
+    next(item for item in state.stages if item.stage == stage.value).receipt_sha256 = (
+        file_sha256(receipt_path)
+    )
+    artifact_io.atomic_write_json(layout.state_path, state.to_dict())
+    before = _authority_bytes(layout)
+
+    with pytest.raises(EvaluationAssetIntegrityError, match="profile|origin"):
+        verify_stage_receipt(
+            layout,
+            state,
+            stage,
+            layout.load_config(),
+            prompt_values={},
+            compare_current_dependencies=True,
+        )
+
+    assert _authority_bytes(layout) == before
+
+
+def test_mutable_receipt_rejects_native_legacy_hybrid_without_writes(
+    tmp_path: Path,
+) -> None:
+    """Legacy provenance cannot be paired with retained native receipt evidence."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    state = layout.load_state()
+    stage = PipelineStage.RAW_INPUTS
+    _replace_stage_provenance_and_rehash_receipt(
+        layout,
+        state,
+        stage,
+        workspace_module.build_legacy_stage_provenance(stage.value),
+    )
+    receipt_path = layout.receipt_path(stage)
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["origin"] = "legacy_adoption"
+    receipt["provider_calls_sha256"] = canonical_sha256(
+        LEGACY_UNAVAILABLE_PROVENANCE
+    )
+    artifact_io.atomic_write_json(receipt_path, receipt)
+    next(item for item in state.stages if item.stage == stage.value).receipt_sha256 = (
+        file_sha256(receipt_path)
+    )
+    artifact_io.atomic_write_json(layout.state_path, state.to_dict())
+    before = _authority_bytes(layout)
+
+    with pytest.raises(EvaluationAssetIntegrityError, match="profile|origin"):
+        verify_stage_receipt(
+            layout,
+            state,
+            stage,
+            layout.load_config(),
+            prompt_values={},
+            compare_current_dependencies=True,
+        )
+
+    assert _authority_bytes(layout) == before
+
+
 @pytest.mark.parametrize(
-    "fault_name",
+    "corruption",
     [
-        "after_generation_temp_created",
-        "after_generation_split_train",
-        "after_generation_split_validation",
-        "after_generation_split_test",
-        "after_generation_split_regression_trusted",
-        "after_generation_manifest_write",
-        "after_generation_temp_sync",
-        "after_generation_install",
-        "after_stage_8_outputs_validated",
-        "after_release_publication_prepared",
-        "before_release_pointer_replace",
-        "after_release_pointer_replace",
-        "after_release_pointer_verify",
-        "after_released_state_replace",
-        "after_release_event_append",
-        "after_release_publication_commit",
+        "counts_extra",
+        "output_extra",
+        "input_extra",
+        "upstream_extra",
+        "stage_index_bool",
+        "completed_at_secret",
+        "output_bytes_float",
     ],
 )
-def test_native_publication_faults_recover_without_provider_or_stage_rerun(
+def test_stage_receipt_rejects_rehashed_nested_secret_extras_without_writes(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    """Receipt subtrees are closed, body-free authentication records."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    state = layout.load_state()
+    stage = PipelineStage.PREPARED_INPUTS
+    receipt_path = layout.receipt_path(stage)
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if corruption == "counts_extra":
+        receipt["counts"]["secret_extra"] = "sk-receipt-canary"
+    elif corruption == "output_extra":
+        receipt["outputs"][0]["secret_extra"] = "sk-receipt-canary"
+    elif corruption == "input_extra":
+        receipt["inputs"][0]["secret_extra"] = "sk-receipt-canary"
+    elif corruption == "upstream_extra":
+        receipt["upstream_receipts"][0]["secret_extra"] = "sk-receipt-canary"
+    elif corruption == "stage_index_bool":
+        receipt["stage_index"] = True
+    elif corruption == "completed_at_secret":
+        receipt["completed_at"] = "sk-receipt-timestamp"
+    else:
+        receipt["outputs"][0]["bytes"] = float(receipt["outputs"][0]["bytes"])
+    artifact_io.atomic_write_json(receipt_path, receipt)
+    next(item for item in state.stages if item.stage == stage.value).receipt_sha256 = (
+        file_sha256(receipt_path)
+    )
+    artifact_io.atomic_write_json(layout.state_path, state.to_dict())
+    before = _authority_bytes(layout)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        verify_stage_receipt(
+            layout,
+            state,
+            stage,
+            layout.load_config(),
+            prompt_values={},
+            compare_current_dependencies=False,
+        )
+
+    assert _authority_bytes(layout) == before
+
+
+def test_stage_receipt_rejects_rehashed_duplicate_key_secret_without_writes(
+    tmp_path: Path,
+) -> None:
+    """Strict receipt parsing rejects hidden duplicate-key body content."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    state = layout.load_state()
+    stage = PipelineStage.PREPARED_INPUTS
+    receipt_path = layout.receipt_path(stage)
+    original = receipt_path.read_text(encoding="utf-8")
+    artifact_io.atomic_write_text(
+        receipt_path,
+        original.replace(
+            "{\n",
+            '{\n  "counts": {"secret": "sk-duplicate-receipt"},\n',
+            1,
+        ),
+    )
+    next(item for item in state.stages if item.stage == stage.value).receipt_sha256 = (
+        file_sha256(receipt_path)
+    )
+    artifact_io.atomic_write_json(layout.state_path, state.to_dict())
+    before = _authority_bytes(layout)
+
+    with pytest.raises(EvaluationAssetIntegrityError, match="JSON|receipt"):
+        verify_stage_receipt(
+            layout,
+            state,
+            stage,
+            layout.load_config(),
+            prompt_values={},
+            compare_current_dependencies=False,
+        )
+
+    assert _authority_bytes(layout) == before
+
+
+def test_final_release_verification_validates_every_stage_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Final release verification rechecks all captured stage evidence."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    released = pipeline.run()
+    calls: list[tuple[str, str]] = []
+    original = durability_module.validate_stage_provenance
+
+    def record(payload: Mapping[str, Any], **expected: Any) -> dict[str, Any]:
+        calls.append((expected["expected_stage"], expected["profile"]))
+        return original(payload, **expected)
+
+    monkeypatch.setattr(durability_module, "validate_stage_provenance", record)
+    verify_released_asset(pipeline.layout, released)
+
+    assert {stage for stage, profile in calls if profile == "native"} == {
+        stage.value for stage in PipelineStage
+    }
+
+
+def test_legacy_adoption_candidate_validates_every_stage_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prospective adoption rejects provenance before installing release authority."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+    calls: list[tuple[str, str]] = []
+    original = durability_module.validate_stage_provenance
+
+    def record(payload: Mapping[str, Any], **expected: Any) -> dict[str, Any]:
+        calls.append((expected["expected_stage"], expected["profile"]))
+        return original(payload, **expected)
+
+    monkeypatch.setattr(durability_module, "validate_stage_provenance", record)
+    adopted = layout.adopt_legacy()
+
+    assert adopted.status == "released"
+    assert {stage for stage, profile in calls if profile == "legacy"} == {
+        stage.value for stage in PipelineStage
+    }
+
+
+_PRE_RECEIPT_PUBLICATION_FAULTS = (
+    "after_generation_temp_created",
+    "after_generation_split_train",
+    "after_generation_split_validation",
+    "after_generation_split_test",
+    "after_generation_split_regression_trusted",
+    "after_generation_manifest_write",
+    "after_generation_temp_sync",
+    "after_generation_install",
+    "after_stage_8_outputs_validated",
+)
+_RECEIPT_AUTHORITY_PUBLICATION_FAULTS = (
+    "after_stage_8_receipt_state_complete",
+    "after_release_publication_prepared",
+    "before_release_pointer_replace",
+    "after_release_pointer_replace",
+    "after_release_pointer_verify",
+    "after_released_state_replace",
+    "after_release_event_append",
+    "after_release_publication_commit",
+)
+
+
+def _exercise_native_publication_fault(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     fault_name: str,
+    *,
+    expected_stage_eight_runs: int,
 ) -> None:
-    """Every generation/WAL phase resumes to one authenticated release."""
+    """Exercise one generation/publication fault and its exact recovery contract."""
+    stage_eight_runs = 0
+    original_run_stage = EvaluationAssetPipeline._run_stage
+
+    def count_stage_eight(
+        instance: EvaluationAssetPipeline,
+        stage: PipelineStage,
+    ) -> dict[str, int]:
+        nonlocal stage_eight_runs
+        if stage == PipelineStage.DATASET_SPLITS:
+            stage_eight_runs += 1
+        return original_run_stage(instance, stage)
+
+    monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", count_stage_eight)
     pipeline, rubric, embedding = _create_pipeline(tmp_path)
 
     def inject(name: str) -> None:
@@ -5180,6 +5952,23 @@ def test_native_publication_faults_recover_without_provider_or_stage_rerun(
 
     calls_before_resume = (rubric.calls, embedding.calls)
     state_after_fault = pipeline.layout.load_state()
+    receipt_before = None
+    generation_before = None
+    generation_id = None
+    if expected_stage_eight_runs == 1:
+        receipt_before = pipeline.layout.receipt_path(
+            PipelineStage.DATASET_SPLITS
+        ).read_bytes()
+        manifest = json.loads(
+            pipeline.layout.artifact_path(
+                PipelineStage.DATASET_SPLITS,
+                "generation_manifest.json",
+            ).read_text(encoding="utf-8")
+        )
+        generation_id = manifest["generation_id"]
+        generation_before = _tree_bytes(
+            pipeline.layout.generations_root / generation_id
+        )
     if fault_name in {
         "after_released_state_replace",
         "after_release_event_append",
@@ -5208,6 +5997,14 @@ def test_native_publication_faults_recover_without_provider_or_stage_rerun(
 
     assert recovered.status == "released"
     assert (rubric.calls, embedding.calls) == calls_before_resume
+    assert stage_eight_runs == expected_stage_eight_runs
+    if receipt_before is not None and generation_before is not None:
+        assert pipeline.layout.receipt_path(
+            PipelineStage.DATASET_SPLITS
+        ).read_bytes() == receipt_before
+        assert _tree_bytes(
+            pipeline.layout.generations_root / str(generation_id)
+        ) == generation_before
     verify_released_asset(pipeline.layout, recovered)
     release_rows = [
         row
@@ -5216,6 +6013,147 @@ def test_native_publication_faults_recover_without_provider_or_stage_rerun(
     ]
     assert [row["phase"] for row in release_rows] == ["prepared", "committed"]
     assert recovered.last_operation_id == release_rows[0]["operation_id"]
+    release_events = [
+        row
+        for row in _read_jsonl(pipeline.layout.events_path)
+        if row.get("event") == "pipeline_released"
+    ]
+    assert len(release_events) == 1
+    assert release_events[0]["operation_id"] == release_rows[0]["operation_id"]
+    assert release_rows[1]["operation_id"] == release_rows[0]["operation_id"]
+
+
+@pytest.mark.parametrize("fault_name", _PRE_RECEIPT_PUBLICATION_FAULTS)
+def test_native_pre_receipt_faults_recompute_stage_eight_without_provider_rerun(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault_name: str,
+) -> None:
+    """Pre-receipt generation failures recompute only deterministic Stage 8."""
+    _exercise_native_publication_fault(
+        tmp_path,
+        monkeypatch,
+        fault_name,
+        expected_stage_eight_runs=2,
+    )
+
+
+@pytest.mark.parametrize("fault_name", _RECEIPT_AUTHORITY_PUBLICATION_FAULTS)
+def test_native_receipt_and_wal_faults_reuse_stage_eight_and_provider_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault_name: str,
+) -> None:
+    """Receipt/WAL authority recovers without rerunning a stage or provider."""
+    _exercise_native_publication_fault(
+        tmp_path,
+        monkeypatch,
+        fault_name,
+        expected_stage_eight_runs=1,
+    )
+
+
+def test_corrupt_completed_stage_eight_handoff_fails_closed_without_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A corrupt completed release candidate is never silently recomputed."""
+    pipeline, rubric, embedding = _create_pipeline(tmp_path)
+
+    def inject(name: str) -> None:
+        if name == "after_stage_8_receipt_state_complete":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", inject)
+    with pytest.raises(_InjectedFault, match="after_stage_8_receipt_state_complete"):
+        pipeline.run()
+    assert (
+        pipeline.layout.load_state().current_stage
+        == PipelineStage.DATASET_SPLITS.value
+    )
+    receipt_path = pipeline.layout.receipt_path(PipelineStage.DATASET_SPLITS)
+    receipt_path.write_bytes(receipt_path.read_bytes() + b"\n")
+    before = _authority_bytes(pipeline.layout)
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("corrupt release candidate reran work")
+
+    rubric.generate_json = forbidden  # type: ignore[method-assign]
+    embedding.embed_texts = forbidden  # type: ignore[method-assign]
+    monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", forbidden)
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+
+    with pytest.raises(
+        EvaluationAssetIntegrityError,
+        match="completed release candidate",
+    ):
+        EvaluationAssetPipeline(
+            pipeline.layout,
+            rubric_provider=rubric,
+            embedding_provider=embedding,
+        ).run()
+
+    assert _authority_bytes(pipeline.layout) == before
+
+
+def test_reanchored_build_handoff_corruption_fails_before_any_resume_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A self-consistent receipt rehash cannot bypass the completed handoff preflight."""
+    pipeline, rubric, embedding = _create_pipeline(tmp_path)
+
+    def inject(name: str) -> None:
+        if name == "after_stage_8_receipt_state_complete":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", inject)
+    with pytest.raises(_InjectedFault, match="after_stage_8_receipt_state_complete"):
+        pipeline.run()
+    layout = pipeline.layout
+    state = layout.load_state()
+    provenance = json.loads(layout.build_provenance_path.read_text(encoding="utf-8"))
+    provenance["identity"]["algorithms"]["raw_inputs"] = "substituted-v1"
+    provenance["identity_sha256"] = canonical_sha256(provenance["identity"])
+    artifact_io.atomic_write_json(layout.build_provenance_path, provenance)
+    receipt_path = layout.receipt_path(PipelineStage.DATASET_SPLITS)
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    relative = layout.build_provenance_path.relative_to(layout.root).as_posix()
+    build_row = next(item for item in receipt["outputs"] if item["path"] == relative)
+    build_row["sha256"] = file_sha256(layout.build_provenance_path)
+    build_row["bytes"] = layout.build_provenance_path.stat().st_size
+    receipt["build_provenance_sha256"] = file_sha256(
+        layout.build_provenance_path
+    )
+    artifact_io.atomic_write_json(receipt_path, receipt)
+    stage_state = next(
+        item
+        for item in state.stages
+        if item.stage == PipelineStage.DATASET_SPLITS.value
+    )
+    stage_state.receipt_sha256 = file_sha256(receipt_path)
+    artifact_io.atomic_write_json(layout.state_path, state.to_dict())
+    before = _authority_bytes(layout)
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("corrupt completed handoff reran work")
+
+    rubric.generate_json = forbidden  # type: ignore[method-assign]
+    embedding.embed_texts = forbidden  # type: ignore[method-assign]
+    monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", forbidden)
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+
+    with pytest.raises(
+        EvaluationAssetIntegrityError,
+        match="completed release candidate",
+    ):
+        EvaluationAssetPipeline(
+            layout,
+            rubric_provider=rubric,
+            embedding_provider=embedding,
+        ).run()
+
+    assert _authority_bytes(layout) == before
 
 
 def test_generation_temp_created_fault_removes_owned_temporary_directory(
@@ -5508,6 +6446,29 @@ def _authority_bytes(layout: EvaluationAssetLayout) -> dict[str, bytes]:
             }
         )
     return authority
+
+
+def _replace_stage_provenance_and_rehash_receipt(
+    layout: EvaluationAssetLayout,
+    state: PipelineState,
+    stage: PipelineStage,
+    payload: Mapping[str, Any] | bytes,
+) -> None:
+    """Install test-only provenance bytes and re-anchor its immediate receipt/state."""
+    provenance_path = layout.stage_provenance_path(stage)
+    if isinstance(payload, bytes):
+        artifact_io.atomic_write_text(provenance_path, payload.decode("utf-8"))
+    else:
+        artifact_io.atomic_write_json(provenance_path, payload)
+    receipt_path = layout.receipt_path(stage)
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    relative = provenance_path.relative_to(layout.root).as_posix()
+    row = next(item for item in receipt["outputs"] if item["path"] == relative)
+    row["sha256"] = file_sha256(provenance_path)
+    row["bytes"] = provenance_path.stat().st_size
+    artifact_io.atomic_write_json(receipt_path, receipt)
+    stage_state = next(item for item in state.stages if item.stage == stage.value)
+    stage_state.receipt_sha256 = file_sha256(receipt_path)
 
 
 def _rehash_committed_adoption_authority(layout: EvaluationAssetLayout) -> None:

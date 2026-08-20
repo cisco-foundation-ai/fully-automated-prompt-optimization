@@ -88,6 +88,16 @@ PROVIDER_STAGE_ROLES = {
     "synthetic_coverage": ("rubric",),
     "dataset_splits": (),
 }
+STAGE_PROMPT_NAMES = {
+    "raw_inputs": (),
+    "prepared_inputs": (),
+    "rubric_extraction": ("evidence_extraction", "guideline_synthesis"),
+    "intent_clustering": (),
+    "coverage_decisions": (),
+    "label_inference": ("label_inference",),
+    "synthetic_coverage": ("synthetic_coverage",),
+    "dataset_splits": (),
+}
 PROMPT_REVISIONS = {
     "evidence_extraction": "v1",
     "guideline_synthesis": "v1",
@@ -120,6 +130,14 @@ def canonical_sha256(payload: Any) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _same_json(first: Any, second: Any) -> bool:
+    """Compare exact JSON scalar types instead of Python's bool/int equality."""
+    try:
+        return canonical_sha256(first) == canonical_sha256(second)
+    except (TypeError, ValueError):
+        return False
 
 
 def declared_source_dependencies(repository_root: Path) -> tuple[Path, ...]:
@@ -230,12 +248,18 @@ def sanitize_call_metadata(value: Any) -> list[dict[str, Any]]:
     """Validate provider transport metadata and discard every unknown field."""
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         raise ValueError("provider call metadata must be a sequence")
+    if not value:
+        raise ValueError("provider call metadata must not be empty")
     rows: list[dict[str, Any]] = []
     for expected_ordinal, raw in enumerate(value, start=1):
         if not isinstance(raw, Mapping):
             raise ValueError("provider call metadata row must be an object")
         ordinal = raw.get("transport_ordinal")
-        if ordinal != expected_ordinal:
+        if (
+            not isinstance(ordinal, int)
+            or isinstance(ordinal, bool)
+            or ordinal != expected_ordinal
+        ):
             raise ValueError("provider transport ordinals must be contiguous")
         usage = raw.get("usage")
         usage_row = usage if isinstance(usage, Mapping) else {}
@@ -272,6 +296,15 @@ def provider_response_metadata(
     output_tokens_not_applicable: bool,
 ) -> dict[str, Any]:
     """Project one SDK response into the optional metadata protocol."""
+    if (
+        not isinstance(transport_ordinal, int)
+        or isinstance(transport_ordinal, bool)
+        or transport_ordinal < 1
+        or not isinstance(retry_count, int)
+        or isinstance(retry_count, bool)
+        or retry_count < 0
+    ):
+        raise ValueError("provider transport metadata ordinal or retry is invalid")
     usage = _value(response, "usage", None)
     prompt_tokens = _value(usage, "prompt_tokens", _value(usage, "input_tokens", None))
     completion_tokens = _value(
@@ -406,7 +439,7 @@ def build_provider_call(
     metadata: Any,
 ) -> dict[str, Any]:
     """Build one body-free logical provider-call ledger row."""
-    if ordinal < 1:
+    if not isinstance(ordinal, int) or isinstance(ordinal, bool) or ordinal < 1:
         raise ValueError("provider call ordinal must be positive")
     request_sha256 = canonical_sha256(dict(request))
     response_sha256 = canonical_sha256(response)
@@ -481,6 +514,8 @@ def validate_provider_calls(
         if (
             raw.get("schema_version") != PROVIDER_CALL_SCHEMA_VERSION
             or raw.get("stage") != expected_stage
+            or not isinstance(raw.get("ordinal"), int)
+            or isinstance(raw.get("ordinal"), bool)
             or raw.get("ordinal") != ordinal
             or raw.get("provider_role") not in allowed_roles
             or not isinstance(raw.get("provider"), str)
@@ -488,15 +523,19 @@ def validate_provider_calls(
             or not isinstance(raw.get("model"), str)
             or not raw["model"]
         ):
-            raise ValueError("provider call ledger provider role or identity is invalid")
+            raise ValueError(
+                "provider call ledger provider role, identity, or ordinal is invalid"
+            )
         for field in ("request_sha256", "response_sha256"):
             if not isinstance(raw.get(field), str) or not _SHA256.fullmatch(raw[field]):
                 raise ValueError("provider call ledger hash is invalid")
         transport_identity = raw.get("transport_identity")
         transport_audit = raw.get("transport_audit")
         if isinstance(transport_identity, list):
-            if not isinstance(transport_audit, list) or len(transport_identity) != len(
-                transport_audit
+            if (
+                not transport_identity
+                or not isinstance(transport_audit, list)
+                or len(transport_identity) != len(transport_audit)
             ):
                 raise ValueError("provider transport evidence is inconsistent")
             for index, (identity, audit) in enumerate(
@@ -506,6 +545,8 @@ def validate_provider_calls(
                     not isinstance(identity, Mapping)
                     or set(identity)
                     != {"transport_ordinal", "model", "system_fingerprint"}
+                    or not isinstance(identity.get("transport_ordinal"), int)
+                    or isinstance(identity.get("transport_ordinal"), bool)
                     or identity.get("transport_ordinal") != index
                     or not isinstance(audit, Mapping)
                     or set(audit)
@@ -516,6 +557,8 @@ def validate_provider_calls(
                         "usage",
                         "retry_count",
                     }
+                    or not isinstance(audit.get("transport_ordinal"), int)
+                    or isinstance(audit.get("transport_ordinal"), bool)
                     or audit.get("transport_ordinal") != index
                 ):
                     raise ValueError("provider transport evidence is invalid")
@@ -605,6 +648,159 @@ def build_stage_provenance(
         "algorithms": dict(algorithms),
         "source": dict(code),
     }
+
+
+def validate_stage_provenance(
+    payload: Mapping[str, Any],
+    *,
+    expected_stage: str,
+    profile: str,
+    expected_provider_identity: Mapping[str, Any] | None = None,
+    expected_prompt_set_sha256: str | None = None,
+    expected_prompts: Sequence[Mapping[str, Any]] | None = None,
+    expected_calls: Sequence[Mapping[str, Any]] | None = None,
+    expected_source: Mapping[str, Any] | None = None,
+    expected_seeds: Mapping[str, Any] | None = None,
+    expected_algorithms: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate one exact, body-free stage record against authenticated facts."""
+    fields = {
+        "schema_version",
+        "stage",
+        "provider_identity",
+        "prompts",
+        "calls",
+        "seeds",
+        "algorithms",
+        "source",
+    }
+    if (
+        expected_stage not in PROVIDER_STAGE_ROLES
+        or profile not in {"native", "legacy"}
+        or not isinstance(payload, Mapping)
+        or set(payload) != fields
+        or payload.get("schema_version") != STAGE_PROVENANCE_SCHEMA_VERSION
+        or payload.get("stage") != expected_stage
+    ):
+        raise ValueError("stage provenance schema or identity is invalid")
+    _validate_json_value(payload, "stage provenance")
+
+    legacy_marker = unavailable("legacy_checkpoint_predates_provenance")
+    if profile == "legacy":
+        if any(
+            payload.get(field) != legacy_marker
+            for field in fields - {"schema_version", "stage"}
+        ):
+            raise ValueError("legacy stage provenance marker is invalid")
+        return dict(payload)
+
+    required_expectations = (
+        expected_provider_identity,
+        expected_prompt_set_sha256,
+        expected_source,
+        expected_seeds,
+        expected_algorithms,
+    )
+    if any(value is None for value in required_expectations):
+        raise ValueError("native stage provenance expectations are incomplete")
+
+    roles = PROVIDER_STAGE_ROLES[expected_stage]
+    provider_identity = payload.get("provider_identity")
+    if roles:
+        if not isinstance(provider_identity, Mapping) or set(provider_identity) != set(
+            roles
+        ):
+            raise ValueError("native stage provenance provider inventory is invalid")
+        for role in roles:
+            identity = provider_identity.get(role)
+            if not isinstance(identity, Mapping) or set(identity) != {
+                "provider",
+                "model",
+                "source",
+            } or any(
+                not isinstance(identity.get(field), str)
+                or not identity[field]
+                or _SECRET.search(identity[field])
+                for field in ("provider", "model", "source")
+            ) or identity.get("source") not in {"default", "injected"}:
+                raise ValueError("native stage provenance provider identity is invalid")
+    elif provider_identity != {"status": "not_applicable"}:
+        raise ValueError("native stage provenance provider marker is invalid")
+    if not _same_json(provider_identity, expected_provider_identity):
+        raise ValueError("native stage provenance provider cross-link differs")
+
+    prompts = payload.get("prompts")
+    _validate_prompt_inventory(prompts)
+    expected_prompt_names = STAGE_PROMPT_NAMES[expected_stage]
+    if not isinstance(prompts, list) or tuple(
+        row.get("name") for row in prompts if isinstance(row, Mapping)
+    ) != expected_prompt_names:
+        raise ValueError("native stage provenance prompt inventory is invalid")
+    prompt_hashes = {str(row["name"]): row["sha256"] for row in prompts}
+    receipt_prompt_fact: Any = (
+        prompt_hashes if prompt_hashes else {"status": "not_applicable"}
+    )
+    if canonical_sha256(receipt_prompt_fact) != expected_prompt_set_sha256 or (
+        expected_prompts is not None and not _same_json(prompts, expected_prompts)
+    ):
+        raise ValueError("native stage provenance prompt cross-link differs")
+
+    calls = payload.get("calls")
+    if roles:
+        if not isinstance(calls, list):
+            raise ValueError("native stage provenance call inventory is invalid")
+        validated_calls = validate_provider_calls(calls, expected_stage=expected_stage)
+        if expected_calls is None or not _same_json(validated_calls, expected_calls):
+            raise ValueError("native stage provenance call ledger differs")
+        for row in validated_calls:
+            identity = provider_identity[row["provider_role"]]
+            if any(row[field] != identity[field] for field in ("provider", "model")):
+                raise ValueError("native stage provenance call provider differs")
+    elif calls != not_applicable("stage_has_no_provider_role") or (
+        expected_calls is not None
+    ):
+        raise ValueError("native stage provenance call marker is invalid")
+
+    source = payload.get("source")
+    _validate_source_identity(source)
+    source_members = source.get("members") if isinstance(source, Mapping) else None
+    if not isinstance(source_members, list) or [
+        row.get("path") for row in source_members if isinstance(row, Mapping)
+    ] != sorted(SOURCE_FIXED_MEMBERS) or not _same_json(source, expected_source):
+        raise ValueError("native stage provenance source cross-link differs")
+
+    seeds = payload.get("seeds")
+    if expected_stage == "dataset_splits":
+        valid_seed_profile = (
+            isinstance(seeds, Mapping)
+            and set(seeds) == {"split"}
+            and isinstance(seeds.get("split"), int)
+            and not isinstance(seeds.get("split"), bool)
+        )
+    else:
+        reason = (
+            "stage_has_no_provider_role"
+            if not roles
+            else "provider_does_not_use_sampling"
+            if calls
+            else "stage_made_no_provider_calls"
+        )
+        valid_seed_profile = seeds == {
+            "sampling": not_applicable(reason)
+        }
+    if not valid_seed_profile or not _same_json(seeds, expected_seeds):
+        raise ValueError("native stage provenance seed profile differs")
+
+    algorithms = payload.get("algorithms")
+    if not isinstance(algorithms, Mapping) or set(algorithms) != {
+        "stage",
+        "revision",
+    } or algorithms.get("stage") != expected_stage or not _same_json(
+        algorithms,
+        expected_algorithms,
+    ):
+        raise ValueError("native stage provenance algorithm profile differs")
+    return dict(payload)
 
 
 def build_provenance(

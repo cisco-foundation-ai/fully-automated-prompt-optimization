@@ -77,7 +77,9 @@ from src.hephaestus.evaluation_assets.provenance import (
 )
 from src.hephaestus.evaluation_assets.publication import (
     InstalledGeneration,
+    build_generation_descriptor,
     build_release_pointer,
+    generation_id_for_descriptor,
     install_generation,
     resolve_evaluation_asset_release,
     validate_historical_generation,
@@ -333,6 +335,15 @@ class EvaluationAssetLayout:
         if self.uses_stage_layout:
             return self.stage_directory(stage_name) / relative_name
         return self.root / _legacy_artifact_path(stage_name, relative_name)
+
+    def stage_provenance_path(self, stage: PipelineStage | str) -> Path:
+        """Return a unique stage record path for canonical or historical layouts."""
+        stage_name = stage.value if isinstance(stage, PipelineStage) else str(stage)
+        stage_value = PipelineStage(stage_name)
+        if self.uses_stage_layout:
+            return self.artifact_path(stage_value, "provenance.json")
+        index = list(PipelineStage).index(stage_value) + 1
+        return self.root / "stage_provenance" / f"{index:02d}_{stage_name}.json"
 
     @property
     def raw_inputs(self) -> Path:
@@ -1099,11 +1110,6 @@ class EvaluationAssetLayout:
         timestamp: str,
     ) -> tuple[InstalledGeneration, dict[str, Any]]:
         """Convert verified pre-v2 outputs into historical provenance and a generation."""
-        for stage in PipelineStage:
-            atomic_write_json(
-                self.artifact_path(stage, "provenance.json"),
-                build_legacy_stage_provenance(stage.value),
-            )
         input_manifest = read_json(
             self.artifact_path(PipelineStage.RAW_INPUTS, "input_manifest.json")
         )
@@ -1127,18 +1133,73 @@ class EvaluationAssetLayout:
             split_seed=config.split_seed,
             created_at=timestamp,
         )
+        split_paths = {
+            split: self.artifact_path(
+                PipelineStage.DATASET_SPLITS,
+                f"{split}.jsonl",
+            )
+            for split in ("train", "validation", "test", "regression_trusted")
+        }
+        descriptor = build_generation_descriptor(
+            split_paths,
+            provenance["identity_sha256"],
+        )
+        generation_id = generation_id_for_descriptor(descriptor)
+        provenance_paths = [self.stage_provenance_path(stage) for stage in PipelineStage]
+        _validate_asset_write_targets(
+            self.root,
+            [
+                *provenance_paths,
+                self.build_provenance_path,
+                *(self.receipt_path(stage) for stage in PipelineStage),
+                self.manifest_path,
+                self.artifact_path(
+                    PipelineStage.DATASET_SPLITS,
+                    "dataset_manifest.json",
+                ),
+                self.artifact_path(
+                    PipelineStage.DATASET_SPLITS,
+                    "generation_manifest.json",
+                ),
+                self.state_path,
+                self.events_path,
+                self.recovery_journal_path,
+            ],
+        )
+        _validate_asset_write_targets(
+            self.tenant_root,
+            [self.release_pointer_path],
+        )
+        _validate_asset_write_targets(
+            self.tenant_root,
+            [
+                self.published_datasets,
+                self.generations_root,
+                self.generations_root / generation_id,
+            ],
+            target_kind="directory",
+        )
+        existing_generation = self.generations_root / generation_id
+        if existing_generation.exists():
+            installed = validate_historical_generation(
+                existing_generation,
+                expected_tenant_id=self.tenant_id,
+                expected_asset_id=self.asset_id,
+                trusted_root=self.tenant_root,
+            )
+            if dict(installed.descriptor) != descriptor:
+                raise ValueError("legacy generation collision is inconsistent")
+        for stage in PipelineStage:
+            atomic_write_json(
+                self.stage_provenance_path(stage),
+                build_legacy_stage_provenance(stage.value),
+            )
         atomic_write_json(self.build_provenance_path, provenance)
         generation = install_generation(
             self.published_datasets,
             tenant_id=self.tenant_id,
             asset_id=self.asset_id,
-            split_paths={
-                split: self.artifact_path(
-                    PipelineStage.DATASET_SPLITS,
-                    f"{split}.jsonl",
-                )
-                for split in ("train", "validation", "test", "regression_trusted")
-            },
+            split_paths=split_paths,
             build_fingerprint=provenance["identity_sha256"],
             fault_hook=_fault_point,
             trusted_root=self.tenant_root,
@@ -2062,6 +2123,41 @@ def _validate_source_rows(path: Path, *, labeled: bool) -> list[Dict[str, Any]]:
 
 def _is_beneath(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
+
+
+def _validate_asset_write_targets(
+    root: Path,
+    targets: Sequence[Path],
+    *,
+    target_kind: str = "file",
+) -> None:
+    """Reject any prospective asset write whose path traverses a symlink."""
+    if target_kind not in {"file", "directory"}:
+        raise ValueError("evaluation asset write target kind is invalid")
+    lexical_root = root.absolute()
+    if lexical_root.is_symlink():
+        raise ValueError("evaluation asset root cannot be a symlink")
+    resolved_root = lexical_root.resolve(strict=True)
+    for supplied in targets:
+        target = supplied.absolute()
+        if not _is_beneath(target, lexical_root):
+            raise ValueError("evaluation asset write target escapes its root")
+        relative = target.relative_to(lexical_root)
+        current = lexical_root
+        for component in relative.parts:
+            current = current / component
+            if current.is_symlink():
+                raise ValueError("evaluation asset write target traverses a symlink")
+            if current.exists() and current != target and not current.is_dir():
+                raise ValueError("evaluation asset write target parent is not a directory")
+        if target.exists() and (
+            (target_kind == "file" and not target.is_file())
+            or (target_kind == "directory" and not target.is_dir())
+        ):
+            raise ValueError("evaluation asset write target has the wrong file type")
+        resolved_target = target.resolve(strict=False)
+        if not _is_beneath(resolved_target, resolved_root):
+            raise ValueError("evaluation asset write target escapes its root")
 
 
 def _merge_jsonl_rows(

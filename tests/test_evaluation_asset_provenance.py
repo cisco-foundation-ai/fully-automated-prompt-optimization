@@ -16,6 +16,7 @@ import pytest
 
 from src.hephaestus.datasets.embedding_providers import OpenAIEmbeddingProvider
 from src.hephaestus.datasets.rubric_providers import OpenAIRubricProvider
+from src.hephaestus.evaluation_assets import control_jsonl as control_jsonl_module
 from src.hephaestus.evaluation_assets import provenance as provenance_module
 from src.hephaestus.evaluation_assets.models import EvaluationAssetConfig, PipelineStage
 from src.hephaestus.evaluation_assets.pipeline import _stage_algorithms, _stage_seeds
@@ -799,6 +800,72 @@ def test_provider_call_validator_rejects_role_on_disallowed_stage() -> None:
         validate_provider_calls([row], expected_stage="raw_inputs")
 
 
+@pytest.mark.parametrize(
+    "corruption",
+    ["logical_bool", "identity_bool", "audit_bool", "empty_transport"],
+)
+def test_provider_call_validator_rejects_non_integer_or_empty_ordinals(
+    corruption: str,
+) -> None:
+    """Boolean ordinals and claimed-but-empty transport evidence are invalid."""
+    row = build_provider_call(
+        stage="intent_clustering",
+        ordinal=1,
+        provider_role="embedding",
+        provider="provider",
+        model="model",
+        request={"request": "hashed only"},
+        response=[[1.0, 0.0]],
+        metadata=[
+            {
+                "transport_ordinal": 1,
+                "usage": {"input_tokens": 1, "total_tokens": 1},
+                "retry_count": 0,
+            }
+        ],
+    )
+    candidate = json.loads(json.dumps(row))
+    if corruption == "logical_bool":
+        candidate["ordinal"] = True
+    elif corruption == "identity_bool":
+        candidate["transport_identity"][0]["transport_ordinal"] = True
+    elif corruption == "audit_bool":
+        candidate["transport_audit"][0]["transport_ordinal"] = True
+    else:
+        candidate["transport_identity"] = []
+        candidate["transport_audit"] = []
+
+    with pytest.raises(ValueError, match="ordinal|transport"):
+        validate_provider_calls([candidate], expected_stage="intent_clustering")
+
+
+@pytest.mark.parametrize("ordinal", [True, 1.0, 0, -1])
+def test_provider_call_builder_rejects_non_positive_integer_ordinals(
+    ordinal: object,
+) -> None:
+    """Logical-call identity starts at an exact non-boolean integer ordinal."""
+    with pytest.raises(ValueError, match="ordinal"):
+        build_provider_call(
+            stage="intent_clustering",
+            ordinal=ordinal,  # type: ignore[arg-type]
+            provider_role="embedding",
+            provider="provider",
+            model="model",
+            request={},
+            response=[],
+            metadata=None,
+        )
+
+
+@pytest.mark.parametrize("metadata", [[], [{"transport_ordinal": True}]])
+def test_metadata_sanitizer_rejects_empty_or_boolean_transport_ordinals(
+    metadata: list[dict[str, object]],
+) -> None:
+    """An implemented metadata protocol provides a nonempty exact sequence."""
+    with pytest.raises(ValueError, match="metadata|ordinal"):
+        sanitize_call_metadata(metadata)
+
+
 def test_build_provenance_calls_must_equal_authenticated_stage_ledgers(
     tmp_path: Path,
 ) -> None:
@@ -937,3 +1004,152 @@ def test_stage_provenance_distinguishes_calls_and_extension_algorithm() -> None:
         config,
         extension=True,
     )["revision"]["algorithm"] == "group-safe-stable-fraction-extension-v1"
+
+
+def _native_stage_provenance_case(tmp_path: Path) -> tuple[dict[str, object], dict[str, object]]:
+    repository = tmp_path / "repository"
+    _source_tree(repository)
+    stage = PipelineStage.RUBRIC_EXTRACTION
+    prompts = {
+        "evidence_extraction": "exact evidence prompt",
+        "guideline_synthesis": "exact guideline prompt",
+    }
+    provider_identity = {
+        "rubric": {
+            "provider": "fake",
+            "model": "rubric-model",
+            "source": "injected",
+        }
+    }
+    calls = [
+        build_provider_call(
+            stage=stage.value,
+            ordinal=1,
+            provider_role="rubric",
+            provider="fake",
+            model="rubric-model",
+            request={"prompt_sha256": "1" * 64},
+            response={"result_sha256": "2" * 64},
+            metadata=None,
+        )
+    ]
+    source = working_source_identity(repository)
+    seeds = {"sampling": not_applicable("provider_does_not_use_sampling")}
+    algorithms = {"stage": stage.value, "revision": "stage-revision-v1"}
+    payload = provenance_module.build_stage_provenance(
+        stage=stage.value,
+        provider_identity=provider_identity,
+        prompt_values=prompts,
+        calls=calls,
+        code=source,
+        seeds=seeds,
+        algorithms=algorithms,
+    )
+    expected = {
+        "expected_stage": stage.value,
+        "profile": "native",
+        "expected_provider_identity": provider_identity,
+        "expected_prompt_set_sha256": canonical_sha256(
+            {row["name"]: row["sha256"] for row in payload["prompts"]}
+        ),
+        "expected_prompts": payload["prompts"],
+        "expected_calls": calls,
+        "expected_source": source,
+        "expected_seeds": seeds,
+        "expected_algorithms": algorithms,
+    }
+    return payload, expected
+
+
+def test_stage_provenance_validator_accepts_exact_native_and_legacy_profiles(
+    tmp_path: Path,
+) -> None:
+    """Only the declared native profile and exact historical marker are accepted."""
+    payload, expected = _native_stage_provenance_case(tmp_path)
+
+    assert provenance_module.validate_stage_provenance(payload, **expected) == payload
+
+    legacy = provenance_module.build_legacy_stage_provenance("raw_inputs")
+    assert provenance_module.validate_stage_provenance(
+        legacy,
+        expected_stage="raw_inputs",
+        profile="legacy",
+    ) == legacy
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "outer_extra_secret",
+        "wrong_stage",
+        "provider_nested_extra",
+        "prompt_hash",
+        "call_identity",
+        "source_member_extra",
+        "seed_bool",
+        "algorithm_extra",
+    ],
+)
+def test_native_stage_provenance_rejects_exact_profile_and_cross_link_corruption(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    """Self-consistent JSON cannot substitute any stage provenance fact."""
+    payload, expected = _native_stage_provenance_case(tmp_path)
+    candidate = json.loads(json.dumps(payload))
+    if corruption == "outer_extra_secret":
+        candidate["request_body"] = "sk-stage-provenance-canary"
+    elif corruption == "wrong_stage":
+        candidate["stage"] = "raw_inputs"
+    elif corruption == "provider_nested_extra":
+        candidate["provider_identity"]["rubric"]["headers"] = {
+            "authorization": "Bearer stage-provenance-canary"
+        }
+    elif corruption == "prompt_hash":
+        candidate["prompts"][0]["sha256"] = "3" * 64
+    elif corruption == "call_identity":
+        candidate["calls"][0]["provider"] = "substitute"
+    elif corruption == "source_member_extra":
+        candidate["source"]["members"][0]["body"] = "protected request"
+    elif corruption == "seed_bool":
+        candidate["seeds"] = {"sampling": False}
+    elif corruption == "algorithm_extra":
+        candidate["algorithms"]["request"] = {"body": "protected response"}
+    else:  # pragma: no cover - parameter list is exhaustive
+        raise AssertionError(corruption)
+
+    with pytest.raises(ValueError, match="provenance"):
+        provenance_module.validate_stage_provenance(candidate, **expected)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["provider_identity", "prompts", "calls", "seeds", "algorithms", "source"],
+)
+def test_legacy_stage_provenance_requires_exact_unavailable_marker(field: str) -> None:
+    """Legacy adoption cannot substitute a generic or native-looking marker."""
+    candidate = provenance_module.build_legacy_stage_provenance("raw_inputs")
+    candidate[field] = unavailable("provider_does_not_expose_field")
+
+    with pytest.raises(ValueError, match="stage provenance"):
+        provenance_module.validate_stage_provenance(
+            candidate,
+            expected_stage="raw_inputs",
+            profile="legacy",
+        )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b'{"stage":"raw_inputs","stage":"raw_inputs"}',
+        b'{"stage":"raw_inputs","value":NaN}',
+        b'{"stage":"raw_inputs","value":Infinity}',
+    ],
+)
+def test_strict_json_object_rejects_duplicate_keys_and_nonstandard_numbers(
+    raw: bytes,
+) -> None:
+    """Stage provenance parsing uses the same strict control JSON boundary."""
+    with pytest.raises(ValueError, match="control JSON"):
+        control_jsonl_module.parse_strict_json_object(raw)
