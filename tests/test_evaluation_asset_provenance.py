@@ -341,7 +341,10 @@ def test_build_provenance_has_exact_schema_and_body_free_identity(
         provider_role="rubric",
         provider="custom",
         model="rubric-model",
-        request={"protected_prompt": secret},
+        request={
+            "protected_prompt": secret,
+            "settings": _native_providers()["rubric"]["settings"],
+        },
         response={"protected_response": secret},
         metadata=None,
     )
@@ -755,7 +758,7 @@ def test_provider_call_validator_rejects_nested_metadata_corruption(
         provider_role="embedding",
         provider="provider",
         model="model",
-        request={"request": "hashed only"},
+        request={"request": "hashed only", "settings": {}},
         response=[[1.0, 0.0]],
         metadata=[
             {
@@ -791,7 +794,7 @@ def test_provider_call_validator_rejects_role_on_disallowed_stage() -> None:
         provider_role="rubric",
         provider="provider",
         model="model",
-        request={"request": "hashed only"},
+        request={"request": "hashed only", "settings": {}},
         response={"response": "hashed only"},
         metadata=None,
     )
@@ -814,7 +817,7 @@ def test_provider_call_validator_rejects_non_integer_or_empty_ordinals(
         provider_role="embedding",
         provider="provider",
         model="model",
-        request={"request": "hashed only"},
+        request={"request": "hashed only", "settings": {}},
         response=[[1.0, 0.0]],
         metadata=[
             {
@@ -851,7 +854,7 @@ def test_provider_call_builder_rejects_non_positive_integer_ordinals(
             provider_role="embedding",
             provider="provider",
             model="model",
-            request={},
+            request={"settings": {}},
             response=[],
             metadata=None,
         )
@@ -877,7 +880,10 @@ def test_build_provenance_calls_must_equal_authenticated_stage_ledgers(
         provider_role="rubric",
         provider="custom",
         model="rubric-model",
-        request={"request": "hashed only"},
+        request={
+            "request": "hashed only",
+            "settings": _native_providers()["rubric"]["settings"],
+        },
         response={"response": "hashed only"},
         metadata=None,
     )
@@ -908,6 +914,61 @@ def test_build_provenance_calls_must_equal_authenticated_stage_ledgers(
     provenance_module.validate_build_provenance_call_ledgers(payload, ledgers)
     with pytest.raises(ValueError, match="call ledger"):
         provenance_module.validate_build_provenance_call_ledgers(candidate, ledgers)
+
+
+def test_historical_build_provenance_binds_v1_provider_settings_profile(
+    tmp_path: Path,
+) -> None:
+    """Rehashing provider settings cannot contradict authenticated v1 calls."""
+    _source_tree(tmp_path)
+    call = build_provider_call(
+        stage="rubric_extraction",
+        ordinal=1,
+        provider_role="rubric",
+        provider="custom",
+        model="rubric-model",
+        request={"settings": _native_providers()["rubric"]["settings"]},
+        response={},
+        metadata=None,
+    )
+    payload = build_provenance(
+        repository_root=tmp_path,
+        resolved_configuration=_native_config(),
+        copied_inputs=_native_inputs(),
+        lineage=None,
+        providers=_native_providers(),
+        prompt_values=_native_prompts(),
+        calls=[call],
+        seeds=_native_seeds(),
+        algorithms=_native_algorithms(),
+        lineage_files=None,
+        created_at="2026-08-20T00:00:00+00:00",
+    )
+    ledgers = {
+        "rubric_extraction": [call],
+        "intent_clustering": [],
+        "coverage_decisions": [],
+        "label_inference": [],
+        "synthetic_coverage": [],
+    }
+    profile = provenance_module.historical_build_provenance_profile(payload)
+    provenance_module.validate_build_provenance_call_ledgers(
+        payload,
+        ledgers,
+        profile=profile,
+    )
+    candidate = json.loads(json.dumps(payload))
+    candidate["identity"]["providers"]["rubric"]["settings"][
+        "timeout_seconds"
+    ] = 123.0
+    candidate["identity_sha256"] = canonical_sha256(candidate["identity"])
+
+    with pytest.raises(ValueError, match="provider settings"):
+        provenance_module.validate_build_provenance_call_ledgers(
+            candidate,
+            ledgers,
+            profile=profile,
+        )
 
 
 def test_provider_settings_project_actual_builtin_and_unavailable_custom_fields() -> None:
@@ -943,6 +1004,158 @@ def test_provider_settings_project_actual_builtin_and_unavailable_custom_fields(
     assert custom["temperature"] == marker
     assert custom["response_format"] == marker
     assert custom["seed"] == marker
+
+
+def test_call_backed_injected_settings_survive_current_and_historical_validation(
+    tmp_path: Path,
+) -> None:
+    """Actual injected settings are captured and bound to their call ledger."""
+    _source_tree(tmp_path)
+
+    class CustomRubricProvider:
+        timeout_seconds = 300
+        max_retries = 3
+        retry_backoff_seconds = 2
+        max_output_tokens = 16384
+        temperature = 0.0
+        response_format = "json_object"
+        seed = 7
+
+    identity = {
+        "provider": "custom",
+        "model": "rubric-model",
+        "source": "injected",
+    }
+    rubric = provider_settings(
+        CustomRubricProvider(),
+        role="rubric",
+        identity=identity,
+        pipeline_batch_size=3,
+    )
+    providers = _native_providers()
+    providers["rubric"] = rubric
+    call = build_provider_call(
+        stage="rubric_extraction",
+        ordinal=1,
+        provider_role="rubric",
+        provider="custom",
+        model="rubric-model",
+        request={"settings": rubric["settings"]},
+        response={},
+        metadata=None,
+    )
+    payload = build_provenance(
+        repository_root=tmp_path,
+        resolved_configuration=_native_config(),
+        copied_inputs=_native_inputs(),
+        lineage=None,
+        providers=providers,
+        prompt_values=_native_prompts(),
+        calls=[call],
+        seeds=_native_seeds(),
+        algorithms=_native_algorithms(),
+        lineage_files=None,
+        created_at="2026-08-20T00:00:00+00:00",
+    )
+    ledgers = {
+        "rubric_extraction": [call],
+        "intent_clustering": [],
+        "coverage_decisions": [],
+        "label_inference": [],
+        "synthetic_coverage": [],
+    }
+
+    provenance_module.validate_build_provenance_call_ledgers(payload, ledgers)
+    provenance_module.validate_build_provenance_call_ledgers(
+        payload,
+        ledgers,
+        profile=provenance_module.historical_build_provenance_profile(payload),
+    )
+
+    v1_payload = json.loads(json.dumps(payload))
+    v1_call = json.loads(json.dumps(call))
+    v1_call["schema_version"] = "fapo-provider-call-v1"
+    del v1_call["settings_sha256"]
+    v1_payload["schema_version"] = "fapo-evaluation-build-provenance-v1"
+    v1_payload["identity"]["schema_version"] = (
+        "fapo-evaluation-build-identity-v1"
+    )
+    del v1_payload["identity"]["calls"][0]["settings_sha256"]
+    v1_payload["identity_sha256"] = canonical_sha256(v1_payload["identity"])
+    v1_ledgers = dict(ledgers)
+    v1_ledgers["rubric_extraction"] = [v1_call]
+
+    assert provenance_module.historical_build_provenance_profile(v1_payload) == (
+        provenance_module.HISTORICAL_PROVENANCE_PROFILE_V1
+    )
+    provenance_module.validate_build_provenance_call_ledgers(
+        v1_payload,
+        v1_ledgers,
+        profile=provenance_module.HISTORICAL_PROVENANCE_PROFILE_V1,
+    )
+
+
+def test_legacy_split_seed_is_bound_to_resolved_configuration() -> None:
+    """Historical-unavailable provenance cannot invent a different split seed."""
+    payload = provenance_module.build_legacy_provenance(
+        resolved_configuration=_native_config(),
+        copied_inputs=_native_inputs(),
+        lineage=None,
+        split_seed=int(_native_config()["split_seed"]),
+        created_at="2026-08-20T00:00:00+00:00",
+    )
+    payload["identity"]["seeds"]["split"] += 1
+    payload["identity_sha256"] = canonical_sha256(payload["identity"])
+
+    with pytest.raises(ValueError, match="seed"):
+        validate_build_provenance(
+            payload,
+            profile=provenance_module.historical_build_provenance_profile(payload),
+        )
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["native-marker", "count-type", "count-equation", "generation-id"],
+)
+def test_legacy_lineage_profile_is_exact_and_type_sensitive(
+    corruption: str,
+) -> None:
+    """Legacy native and extension lineage retain one closed v2 profile."""
+    lineage = None
+    if corruption != "native-marker":
+        lineage = {
+            "parent_asset_id": "v1",
+            "clustering_mode": "keep",
+            "added_labeled_record_ids": ["feedback-2"],
+            "added_unlabeled_record_ids": [],
+            "parent_input_counts": {"labeled": 1, "unlabeled": 1},
+            "extended_input_counts": {"labeled": 2, "unlabeled": 1},
+            "parent_release": _parent_release(),
+        }
+    payload = provenance_module.build_legacy_provenance(
+        resolved_configuration=_native_config(),
+        copied_inputs=_native_inputs(),
+        lineage=lineage,
+        split_seed=int(_native_config()["split_seed"]),
+        created_at="2026-08-20T00:00:00+00:00",
+    )
+    identity_lineage = payload["identity"]["lineage"]
+    if corruption == "native-marker":
+        identity_lineage["reason"] = "provider_does_not_expose_field"
+    elif corruption == "count-type":
+        identity_lineage["parent_input_counts"]["labeled"] = True
+    elif corruption == "count-equation":
+        identity_lineage["extended_input_counts"]["labeled"] = 99
+    else:
+        identity_lineage["parent_generation_id"] = "not-a-generation"
+    payload["identity_sha256"] = canonical_sha256(payload["identity"])
+
+    with pytest.raises(ValueError, match="legacy.*lineage"):
+        validate_build_provenance(
+            payload,
+            profile=provenance_module.historical_build_provenance_profile(payload),
+        )
 
 
 def test_extension_file_dependencies_change_deterministic_build_identity(
@@ -1015,20 +1228,19 @@ def _native_stage_provenance_case(tmp_path: Path) -> tuple[dict[str, object], di
         "guideline_synthesis": "exact guideline prompt",
     }
     provider_identity = {
-        "rubric": {
-            "provider": "fake",
-            "model": "rubric-model",
-            "source": "injected",
-        }
+        "rubric": _native_providers()["rubric"]
     }
     calls = [
         build_provider_call(
             stage=stage.value,
             ordinal=1,
             provider_role="rubric",
-            provider="fake",
+            provider="custom",
             model="rubric-model",
-            request={"prompt_sha256": "1" * 64},
+            request={
+                "prompt_sha256": "1" * 64,
+                "settings": provider_identity["rubric"]["settings"],
+            },
             response={"result_sha256": "2" * 64},
             metadata=None,
         )
@@ -1068,6 +1280,30 @@ def test_stage_provenance_validator_accepts_exact_native_and_legacy_profiles(
     payload, expected = _native_stage_provenance_case(tmp_path)
 
     assert provenance_module.validate_stage_provenance(payload, **expected) == payload
+
+    v1_payload = json.loads(json.dumps(payload))
+    v1_payload["schema_version"] = "fapo-stage-provenance-v1"
+    v1_provider = {
+        role: {
+            field: identity[field]
+            for field in ("provider", "model", "source")
+        }
+        for role, identity in v1_payload["provider_identity"].items()
+    }
+    v1_payload["provider_identity"] = v1_provider
+    for call in v1_payload["calls"]:
+        call["schema_version"] = "fapo-provider-call-v1"
+        del call["settings_sha256"]
+    v1_expected = dict(expected)
+    v1_expected.update(
+        profile=provenance_module.HISTORICAL_PROVENANCE_PROFILE_V1,
+        expected_provider_identity=v1_provider,
+        expected_calls=v1_payload["calls"],
+    )
+    assert provenance_module.validate_stage_provenance(
+        v1_payload,
+        **v1_expected,
+    ) == v1_payload
 
     legacy = provenance_module.build_legacy_stage_provenance("raw_inputs")
     assert provenance_module.validate_stage_provenance(

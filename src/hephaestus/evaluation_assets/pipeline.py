@@ -61,6 +61,7 @@ from src.hephaestus.evaluation_assets.control_jsonl import (
 from src.hephaestus.evaluation_assets.durability import (
     STAGE_SPECIFICATIONS,
     EvaluationAssetImmutableError,
+    EvaluationAssetIntegrityError,
     EvaluationAssetLegacyError,
     build_stage_receipt,
     file_sha256,
@@ -421,7 +422,7 @@ class EvaluationAssetPipeline:
     ) -> dict[str, Any]:
         roles = STAGE_SPECIFICATIONS[stage].provider_roles
         return (
-            {role: dict(self._provider_identities[role]) for role in roles}
+            {role: dict(self._provider_settings[role]) for role in roles}
             if roles
             else {"status": "not_applicable"}
         )
@@ -579,7 +580,8 @@ class EvaluationAssetPipeline:
                     self.layout.asset_id,
                     "explicit verification and adoption are required",
                 )
-            verify_raw_snapshot_floor(self.layout, state)
+            if handoff_control is None:
+                verify_raw_snapshot_floor(self.layout, state)
             if handoff_control is not None and not config_updates:
                 self.config = handoff_control[1]
                 self.lineage = (
@@ -621,15 +623,22 @@ class EvaluationAssetPipeline:
         completed_release_candidate: bool,
     ) -> PipelineState:
         """Run while the caller holds the asset mutation lock."""
-        state = self.layout.load_state()
-        state.schema_version = "fapo-evaluation-asset-state-v2"
         if completed_release_candidate:
+            handoff_control = load_completed_release_handoff_control(self.layout)
+            if handoff_control is None:
+                raise EvaluationAssetIntegrityError(
+                    self.layout.tenant_id,
+                    self.layout.asset_id,
+                    "completed release candidate control disappeared under lock",
+                )
+            state = handoff_control[0]
             self._pending_generation = verify_completed_release_candidate(
                 self.layout,
                 state,
             )
             boundary = None
         else:
+            state = self.layout.load_state()
             boundary = mutable_rebuild_boundary(
                 self.layout,
                 state,
@@ -640,6 +649,7 @@ class EvaluationAssetPipeline:
                     for stage in PipelineStage
                 },
             )
+            state.schema_version = "fapo-evaluation-asset-state-v2"
         if boundary is not None:
             boundary_index = list(PipelineStage).index(boundary)
             suffix_states = state.stages[boundary_index:]

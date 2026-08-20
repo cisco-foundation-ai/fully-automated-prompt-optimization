@@ -73,11 +73,12 @@ NOT_APPLICABLE_REASONS = {
 _GIT_OBJECT = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _SECRET = re.compile(r"(?i)(?:\bsk-[a-z0-9_-]+|bearer\s+|api[_-]?key)")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_GENERATION_ID = re.compile(r"^sha256-[0-9a-f]{64}$")
 
-PROVIDER_CALL_SCHEMA_VERSION = "fapo-provider-call-v1"
-STAGE_PROVENANCE_SCHEMA_VERSION = "fapo-stage-provenance-v1"
-BUILD_PROVENANCE_SCHEMA_VERSION = "fapo-evaluation-build-provenance-v1"
-BUILD_IDENTITY_SCHEMA_VERSION = "fapo-evaluation-build-identity-v1"
+PROVIDER_CALL_SCHEMA_VERSION = "fapo-provider-call-v2"
+STAGE_PROVENANCE_SCHEMA_VERSION = "fapo-stage-provenance-v2"
+BUILD_PROVENANCE_SCHEMA_VERSION = "fapo-evaluation-build-provenance-v2"
+BUILD_IDENTITY_SCHEMA_VERSION = "fapo-evaluation-build-identity-v2"
 PROVIDER_STAGE_ROLES = {
     "raw_inputs": (),
     "prepared_inputs": (),
@@ -104,6 +105,157 @@ PROMPT_REVISIONS = {
     "label_inference": "v1",
     "synthetic_coverage": "v1",
 }
+
+# Historical verification is keyed only by the schema written into the
+# evidence.  Keep these v1 literals independent from the mutable authoring
+# registries above so a later deployment can still authenticate an already
+# completed generation.
+HISTORICAL_PROVENANCE_PROFILE_V1 = "fapo-historical-provenance-profile-v1"
+HISTORICAL_LEGACY_PROVENANCE_PROFILE_V1 = (
+    "fapo-historical-legacy-provenance-profile-v1"
+)
+HISTORICAL_PROVENANCE_PROFILE_V2 = "fapo-historical-provenance-profile-v2"
+HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2 = (
+    "fapo-historical-legacy-provenance-profile-v2"
+)
+_HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V1 = "fapo-provider-call-v1"
+_HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V1 = "fapo-stage-provenance-v1"
+_HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V1 = (
+    "fapo-evaluation-build-provenance-v1"
+)
+_HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V1 = "fapo-evaluation-build-identity-v1"
+_HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V2 = "fapo-provider-call-v2"
+_HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V2 = "fapo-stage-provenance-v2"
+_HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V2 = (
+    "fapo-evaluation-build-provenance-v2"
+)
+_HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V2 = "fapo-evaluation-build-identity-v2"
+_HISTORICAL_SOURCE_FIXED_MEMBERS_V1 = (
+    "pyproject.toml",
+    "src/__init__.py",
+    "src/hephaestus/__init__.py",
+    "src/hephaestus/artifact_io.py",
+    "src/hephaestus/datasets/__init__.py",
+    "src/hephaestus/datasets/embedding_providers.py",
+    "src/hephaestus/datasets/evaluation_assets.py",
+    "src/hephaestus/datasets/intent_assets.py",
+    "src/hephaestus/datasets/rubric_providers.py",
+    "src/hephaestus/evaluation_assets/__init__.py",
+    "src/hephaestus/evaluation_assets/control_jsonl.py",
+    "src/hephaestus/evaluation_assets/durability.py",
+    "src/hephaestus/evaluation_assets/input_contract.py",
+    "src/hephaestus/evaluation_assets/journal_transitions.py",
+    "src/hephaestus/evaluation_assets/journal_validation.py",
+    "src/hephaestus/evaluation_assets/legacy_validation.py",
+    "src/hephaestus/evaluation_assets/lineage_validation.py",
+    "src/hephaestus/evaluation_assets/models.py",
+    "src/hephaestus/evaluation_assets/pipeline.py",
+    "src/hephaestus/evaluation_assets/provenance.py",
+    "src/hephaestus/evaluation_assets/publication.py",
+    "src/hephaestus/evaluation_assets/service.py",
+    "src/hephaestus/evaluation_assets/stage_three_contract.py",
+    "src/hephaestus/evaluation_assets/workspace.py",
+)
+_HISTORICAL_PROVIDER_STAGE_ROLES_V1 = (
+    ("raw_inputs", ()),
+    ("prepared_inputs", ()),
+    ("rubric_extraction", ("rubric",)),
+    ("intent_clustering", ("embedding",)),
+    ("coverage_decisions", ("embedding",)),
+    ("label_inference", ("rubric",)),
+    ("synthetic_coverage", ("rubric",)),
+    ("dataset_splits", ()),
+)
+_HISTORICAL_STAGE_PROMPT_NAMES_V1 = (
+    ("raw_inputs", ()),
+    ("prepared_inputs", ()),
+    ("rubric_extraction", ("evidence_extraction", "guideline_synthesis")),
+    ("intent_clustering", ()),
+    ("coverage_decisions", ()),
+    ("label_inference", ("label_inference",)),
+    ("synthetic_coverage", ("synthetic_coverage",)),
+    ("dataset_splits", ()),
+)
+_HISTORICAL_PROMPT_REVISIONS_V1 = (
+    ("evidence_extraction", "v1"),
+    ("guideline_synthesis", "v1"),
+    ("label_inference", "v1"),
+    ("synthetic_coverage", "v1"),
+)
+_HISTORICAL_CONFIG_STRING_FIELDS_V1 = (
+    "tenant_id",
+    "asset_id",
+    "rubric_provider",
+    "rubric_model",
+    "embedding_provider",
+    "embedding_model",
+)
+_HISTORICAL_CONFIG_INTEGER_FIELDS_V1 = (
+    "cluster_count",
+    "batch_size",
+    "min_trusted_examples",
+    "min_trusted_groups",
+    "synthetic_cases_per_cluster",
+    "split_seed",
+)
+
+
+def historical_stage_provenance_profile(payload: Mapping[str, Any]) -> str:
+    """Select the immutable historical profile from a persisted stage schema."""
+    if payload.get("schema_version") == _HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V1:
+        return HISTORICAL_PROVENANCE_PROFILE_V1
+    if (
+        payload.get("schema_version")
+        == _HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V2
+    ):
+        return HISTORICAL_PROVENANCE_PROFILE_V2
+    raise ValueError("historical stage provenance schema is unsupported")
+
+
+def historical_legacy_stage_provenance_profile(
+    payload: Mapping[str, Any],
+) -> str:
+    """Select the immutable legacy profile from a persisted stage schema."""
+    profile = historical_stage_provenance_profile(payload)
+    return (
+        HISTORICAL_LEGACY_PROVENANCE_PROFILE_V1
+        if profile == HISTORICAL_PROVENANCE_PROFILE_V1
+        else HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2
+    )
+
+
+def historical_build_provenance_profile(payload: Mapping[str, Any]) -> str:
+    """Select the immutable historical profile from persisted build schemas."""
+    identity = payload.get("identity")
+    if (
+        payload.get("schema_version")
+        == _HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V1
+        and isinstance(identity, Mapping)
+        and identity.get("schema_version")
+        == _HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V1
+    ):
+        return HISTORICAL_PROVENANCE_PROFILE_V1
+    if (
+        payload.get("schema_version")
+        == _HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V2
+        and isinstance(identity, Mapping)
+        and identity.get("schema_version")
+        == _HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V2
+    ):
+        return HISTORICAL_PROVENANCE_PROFILE_V2
+    raise ValueError("historical build provenance schema is unsupported")
+
+
+def historical_provider_call_stages(profile: str) -> tuple[str, ...]:
+    """Return provider-backed stages declared by an immutable profile."""
+    if profile not in {
+        HISTORICAL_PROVENANCE_PROFILE_V1,
+        HISTORICAL_PROVENANCE_PROFILE_V2,
+    }:
+        raise ValueError("historical provider-call profile is unsupported")
+    return tuple(
+        stage for stage, roles in _HISTORICAL_PROVIDER_STAGE_ROLES_V1 if roles
+    )
 
 
 def unavailable(reason: str) -> dict[str, str]:
@@ -427,6 +579,46 @@ def build_algorithm_inventory(
     }
 
 
+def historical_algorithm_inventory_v1(
+    config: Mapping[str, Any],
+    *,
+    extension: bool,
+) -> dict[str, Any]:
+    """Return the immutable algorithm profile recorded by provenance v1."""
+    return {
+        "raw_inputs": "fapo-evaluation-input-v1",
+        "prepared_inputs": "fapo-evaluation-canonical-preparation-v1",
+        "rubric_extraction": "fapo-evaluation-guideline-v1",
+        "intent_clustering": {
+            "algorithm": "deterministic-cosine-fixed-count-v1",
+            "embedding": (
+                "smoothed-unigram-tfidf-v1"
+                if config.get("embedding_provider") == "tfidf"
+                else "provider-dense-v1"
+            ),
+            "max_iterations": 50,
+            "max_representatives": 3,
+        },
+        "coverage_decisions": {
+            "algorithm": "route-constrained-cosine-v1",
+            "labeling_queue": "deterministic-centroid-nearest-v1",
+            "sample_ratio": 0.1,
+            "minimum_per_cluster": 1,
+            "maximum_per_cluster": 3,
+        },
+        "label_inference": "trusted-guideline-inference-v1",
+        "synthetic_coverage": "fapo-synthetic-filter-v1",
+        "dataset_splits": {
+            "algorithm": (
+                "group-safe-stable-fraction-extension-v1"
+                if extension
+                else "group-safe-random-v1"
+            ),
+            "regression_fraction": 0.2,
+        },
+    }
+
+
 def build_provider_call(
     *,
     stage: str,
@@ -441,6 +633,9 @@ def build_provider_call(
     """Build one body-free logical provider-call ledger row."""
     if not isinstance(ordinal, int) or isinstance(ordinal, bool) or ordinal < 1:
         raise ValueError("provider call ordinal must be positive")
+    settings = request.get("settings")
+    if not isinstance(settings, Mapping):
+        raise ValueError("provider call request settings must be an object")
     request_sha256 = canonical_sha256(dict(request))
     response_sha256 = canonical_sha256(response)
     if metadata is None:
@@ -479,6 +674,7 @@ def build_provider_call(
         "provider_role": provider_role,
         "provider": provider,
         "model": model,
+        "settings_sha256": canonical_sha256(settings),
         "request_sha256": request_sha256,
         "response_sha256": response_sha256,
         "transport_identity": identity,
@@ -490,11 +686,34 @@ def validate_provider_calls(
     rows: Sequence[Mapping[str, Any]],
     *,
     expected_stage: str,
+    profile: str = "current",
 ) -> list[dict[str, Any]]:
     """Strictly validate one complete ordered stage provider-call ledger."""
-    if expected_stage not in PROVIDER_STAGE_ROLES:
+    historical = profile in {
+        HISTORICAL_PROVENANCE_PROFILE_V1,
+        HISTORICAL_PROVENANCE_PROFILE_V2,
+    }
+    if profile not in {
+        "current",
+        HISTORICAL_PROVENANCE_PROFILE_V1,
+        HISTORICAL_PROVENANCE_PROFILE_V2,
+    }:
+        raise ValueError("provider call validation profile is unsupported")
+    provider_stage_roles = (
+        dict(_HISTORICAL_PROVIDER_STAGE_ROLES_V1)
+        if historical
+        else PROVIDER_STAGE_ROLES
+    )
+    schema_version = (
+        _HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V1
+        if profile == HISTORICAL_PROVENANCE_PROFILE_V1
+        else _HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V2
+        if profile == HISTORICAL_PROVENANCE_PROFILE_V2
+        else PROVIDER_CALL_SCHEMA_VERSION
+    )
+    if expected_stage not in provider_stage_roles:
         raise ValueError("provider call ledger stage is unsupported")
-    allowed_roles = PROVIDER_STAGE_ROLES[expected_stage]
+    allowed_roles = provider_stage_roles[expected_stage]
     expected_fields = {
         "schema_version",
         "stage",
@@ -502,17 +721,20 @@ def validate_provider_calls(
         "provider_role",
         "provider",
         "model",
+        "settings_sha256",
         "request_sha256",
         "response_sha256",
         "transport_identity",
         "transport_audit",
     }
+    if profile == HISTORICAL_PROVENANCE_PROFILE_V1:
+        expected_fields.remove("settings_sha256")
     result: list[dict[str, Any]] = []
     for ordinal, raw in enumerate(rows, start=1):
         if not isinstance(raw, Mapping) or set(raw) != expected_fields:
             raise ValueError("provider call ledger row schema is invalid")
         if (
-            raw.get("schema_version") != PROVIDER_CALL_SCHEMA_VERSION
+            raw.get("schema_version") != schema_version
             or raw.get("stage") != expected_stage
             or not isinstance(raw.get("ordinal"), int)
             or isinstance(raw.get("ordinal"), bool)
@@ -526,7 +748,10 @@ def validate_provider_calls(
             raise ValueError(
                 "provider call ledger provider role, identity, or ordinal is invalid"
             )
-        for field in ("request_sha256", "response_sha256"):
+        hash_fields = ["request_sha256", "response_sha256"]
+        if profile != HISTORICAL_PROVENANCE_PROFILE_V1:
+            hash_fields.insert(0, "settings_sha256")
+        for field in hash_fields:
             if not isinstance(raw.get(field), str) or not _SHA256.fullmatch(raw[field]):
                 raise ValueError("provider call ledger hash is invalid")
         transport_identity = raw.get("transport_identity")
@@ -664,6 +889,48 @@ def validate_stage_provenance(
     expected_algorithms: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate one exact, body-free stage record against authenticated facts."""
+    historical = profile in {
+        HISTORICAL_PROVENANCE_PROFILE_V1,
+        HISTORICAL_PROVENANCE_PROFILE_V2,
+        HISTORICAL_LEGACY_PROVENANCE_PROFILE_V1,
+        HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2,
+    }
+    legacy = profile in {
+        "legacy",
+        HISTORICAL_LEGACY_PROVENANCE_PROFILE_V1,
+        HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2,
+    }
+    provider_stage_roles = (
+        dict(_HISTORICAL_PROVIDER_STAGE_ROLES_V1)
+        if historical
+        else PROVIDER_STAGE_ROLES
+    )
+    stage_prompt_names = (
+        dict(_HISTORICAL_STAGE_PROMPT_NAMES_V1)
+        if historical
+        else STAGE_PROMPT_NAMES
+    )
+    prompt_revisions = (
+        dict(_HISTORICAL_PROMPT_REVISIONS_V1)
+        if historical
+        else PROMPT_REVISIONS
+    )
+    source_fixed_members = (
+        _HISTORICAL_SOURCE_FIXED_MEMBERS_V1 if historical else SOURCE_FIXED_MEMBERS
+    )
+    schema_version = (
+        _HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V1
+        if profile in {
+            HISTORICAL_PROVENANCE_PROFILE_V1,
+            HISTORICAL_LEGACY_PROVENANCE_PROFILE_V1,
+        }
+        else _HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V2
+        if profile in {
+            HISTORICAL_PROVENANCE_PROFILE_V2,
+            HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2,
+        }
+        else STAGE_PROVENANCE_SCHEMA_VERSION
+    )
     fields = {
         "schema_version",
         "stage",
@@ -675,18 +942,26 @@ def validate_stage_provenance(
         "source",
     }
     if (
-        expected_stage not in PROVIDER_STAGE_ROLES
-        or profile not in {"native", "legacy"}
+        expected_stage not in provider_stage_roles
+        or profile
+        not in {
+            "native",
+            "legacy",
+            HISTORICAL_PROVENANCE_PROFILE_V1,
+            HISTORICAL_PROVENANCE_PROFILE_V2,
+            HISTORICAL_LEGACY_PROVENANCE_PROFILE_V1,
+            HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2,
+        }
         or not isinstance(payload, Mapping)
         or set(payload) != fields
-        or payload.get("schema_version") != STAGE_PROVENANCE_SCHEMA_VERSION
+        or payload.get("schema_version") != schema_version
         or payload.get("stage") != expected_stage
     ):
         raise ValueError("stage provenance schema or identity is invalid")
     _validate_json_value(payload, "stage provenance")
 
     legacy_marker = unavailable("legacy_checkpoint_predates_provenance")
-    if profile == "legacy":
+    if legacy:
         if any(
             payload.get(field) != legacy_marker
             for field in fields - {"schema_version", "stage"}
@@ -704,7 +979,7 @@ def validate_stage_provenance(
     if any(value is None for value in required_expectations):
         raise ValueError("native stage provenance expectations are incomplete")
 
-    roles = PROVIDER_STAGE_ROLES[expected_stage]
+    roles = provider_stage_roles[expected_stage]
     provider_identity = payload.get("provider_identity")
     if roles:
         if not isinstance(provider_identity, Mapping) or set(provider_identity) != set(
@@ -713,16 +988,57 @@ def validate_stage_provenance(
             raise ValueError("native stage provenance provider inventory is invalid")
         for role in roles:
             identity = provider_identity.get(role)
-            if not isinstance(identity, Mapping) or set(identity) != {
-                "provider",
-                "model",
-                "source",
-            } or any(
+            v1_identity = profile == HISTORICAL_PROVENANCE_PROFILE_V1
+            expected_identity_fields = (
+                {"provider", "model", "source"}
+                if v1_identity
+                else {"provider", "model", "source", "interface", "settings"}
+            )
+            if not isinstance(identity, Mapping) or set(identity) != (
+                expected_identity_fields
+            ) or any(
                 not isinstance(identity.get(field), str)
                 or not identity[field]
                 or _SECRET.search(identity[field])
                 for field in ("provider", "model", "source")
-            ) or identity.get("source") not in {"default", "injected"}:
+            ) or identity.get("source") not in {"default", "injected"} or (
+                not v1_identity
+                and (
+                    identity.get("interface")
+                    != (
+                        "generate_json-v1"
+                        if role == "rubric"
+                        else "embed_texts-v1"
+                    )
+                    or not isinstance(identity.get("settings"), Mapping)
+                    or set(identity["settings"])
+                    != (
+                        {
+                            "timeout_seconds",
+                            "max_retries",
+                            "retry_backoff_seconds",
+                            "pipeline_batch_size",
+                            "max_output_tokens",
+                            "temperature",
+                            "response_format",
+                            "seed",
+                        }
+                        if role == "rubric"
+                        else {
+                            "timeout_seconds",
+                            "max_retries",
+                            "retry_backoff_seconds",
+                            "provider_batch_size",
+                            "response_format",
+                            "seed",
+                        }
+                    )
+                    or any(
+                        not _valid_native_provider_setting(name, item)
+                        for name, item in identity["settings"].items()
+                    )
+                )
+            ):
                 raise ValueError("native stage provenance provider identity is invalid")
     elif provider_identity != {"status": "not_applicable"}:
         raise ValueError("native stage provenance provider marker is invalid")
@@ -730,8 +1046,8 @@ def validate_stage_provenance(
         raise ValueError("native stage provenance provider cross-link differs")
 
     prompts = payload.get("prompts")
-    _validate_prompt_inventory(prompts)
-    expected_prompt_names = STAGE_PROMPT_NAMES[expected_stage]
+    _validate_prompt_inventory(prompts, prompt_revisions=prompt_revisions)
+    expected_prompt_names = stage_prompt_names[expected_stage]
     if not isinstance(prompts, list) or tuple(
         row.get("name") for row in prompts if isinstance(row, Mapping)
     ) != expected_prompt_names:
@@ -749,12 +1065,22 @@ def validate_stage_provenance(
     if roles:
         if not isinstance(calls, list):
             raise ValueError("native stage provenance call inventory is invalid")
-        validated_calls = validate_provider_calls(calls, expected_stage=expected_stage)
+        validated_calls = validate_provider_calls(
+            calls,
+            expected_stage=expected_stage,
+            profile=(profile if historical and not legacy else "current"),
+        )
         if expected_calls is None or not _same_json(validated_calls, expected_calls):
             raise ValueError("native stage provenance call ledger differs")
         for row in validated_calls:
             identity = provider_identity[row["provider_role"]]
-            if any(row[field] != identity[field] for field in ("provider", "model")):
+            if any(
+                row[field] != identity[field] for field in ("provider", "model")
+            ) or (
+                "settings_sha256" in row
+                and row["settings_sha256"]
+                != canonical_sha256(identity.get("settings"))
+            ):
                 raise ValueError("native stage provenance call provider differs")
     elif calls != not_applicable("stage_has_no_provider_role") or (
         expected_calls is not None
@@ -766,7 +1092,7 @@ def validate_stage_provenance(
     source_members = source.get("members") if isinstance(source, Mapping) else None
     if not isinstance(source_members, list) or [
         row.get("path") for row in source_members if isinstance(row, Mapping)
-    ] != sorted(SOURCE_FIXED_MEMBERS) or not _same_json(source, expected_source):
+    ] != sorted(source_fixed_members) or not _same_json(source, expected_source):
         raise ValueError("native stage provenance source cross-link differs")
 
     seeds = payload.get("seeds")
@@ -872,15 +1198,48 @@ def build_provenance(
     }
 
 
-def validate_build_provenance(payload: Mapping[str, Any]) -> dict[str, Any]:
+def validate_build_provenance(
+    payload: Mapping[str, Any],
+    *,
+    profile: str = "current",
+) -> dict[str, Any]:
     """Validate exact nested build provenance without accepting opaque bodies."""
+    if profile not in {
+        "current",
+        HISTORICAL_PROVENANCE_PROFILE_V1,
+        HISTORICAL_PROVENANCE_PROFILE_V2,
+    }:
+        raise ValueError("build provenance validation profile is unsupported")
+    historical = profile in {
+        HISTORICAL_PROVENANCE_PROFILE_V1,
+        HISTORICAL_PROVENANCE_PROFILE_V2,
+    }
+    build_schema_version = (
+        _HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V1
+        if profile == HISTORICAL_PROVENANCE_PROFILE_V1
+        else _HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V2
+        if profile == HISTORICAL_PROVENANCE_PROFILE_V2
+        else BUILD_PROVENANCE_SCHEMA_VERSION
+    )
+    identity_schema_version = (
+        _HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V1
+        if profile == HISTORICAL_PROVENANCE_PROFILE_V1
+        else _HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V2
+        if profile == HISTORICAL_PROVENANCE_PROFILE_V2
+        else BUILD_IDENTITY_SCHEMA_VERSION
+    )
+    prompt_revisions = (
+        dict(_HISTORICAL_PROMPT_REVISIONS_V1)
+        if historical
+        else PROMPT_REVISIONS
+    )
     if set(payload) != {
         "schema_version",
         "identity",
         "identity_sha256",
         "audit",
         "created_at",
-    } or payload.get("schema_version") != BUILD_PROVENANCE_SCHEMA_VERSION:
+    } or payload.get("schema_version") != build_schema_version:
         raise ValueError("build provenance schema is invalid")
     identity = payload.get("identity")
     if not isinstance(identity, Mapping) or payload.get(
@@ -904,7 +1263,7 @@ def validate_build_provenance(payload: Mapping[str, Any]) -> dict[str, Any]:
     if set(identity) != expected_identity:
         raise ValueError("build provenance identity schema is invalid")
     if (
-        identity.get("schema_version") != BUILD_IDENTITY_SCHEMA_VERSION
+        identity.get("schema_version") != identity_schema_version
         or identity.get("hash_algorithm") != "sha256"
     ):
         raise ValueError("build provenance identity schema is invalid")
@@ -914,7 +1273,10 @@ def validate_build_provenance(payload: Mapping[str, Any]) -> dict[str, Any]:
     _validate_input_inventory(identity.get("inputs"))
     _validate_lineage_identity(identity.get("lineage"))
     _validate_provider_inventory(identity.get("providers"))
-    _validate_prompt_inventory(identity.get("prompts"))
+    _validate_prompt_inventory(
+        identity.get("prompts"),
+        prompt_revisions=prompt_revisions,
+    )
     _validate_json_value(identity.get("seeds"), "provenance seeds")
     _validate_json_value(identity.get("algorithms"), "provenance algorithms")
     if not isinstance(payload.get("audit"), Mapping) or set(payload["audit"]) != {
@@ -927,13 +1289,18 @@ def validate_build_provenance(payload: Mapping[str, Any]) -> dict[str, Any]:
     _validate_call_evidence(
         identity.get("calls"),
         payload["audit"].get("calls"),
+        profile=profile,
     )
     _validate_lineage_files(payload["audit"].get("lineage_files"))
     legacy_marker = unavailable("legacy_checkpoint_predates_provenance")
     if identity.get("source") == legacy_marker:
         _validate_legacy_build_profile(identity, payload["audit"], legacy_marker)
     else:
-        _validate_native_build_profile(identity, payload["audit"])
+        _validate_native_build_profile(
+            identity,
+            payload["audit"],
+            historical=historical,
+        )
     created_at = payload.get("created_at")
     try:
         parsed_created_at = datetime.fromisoformat(str(created_at))
@@ -952,15 +1319,24 @@ def validate_build_provenance(payload: Mapping[str, Any]) -> dict[str, Any]:
 def validate_build_provenance_call_ledgers(
     payload: Mapping[str, Any],
     stage_ledgers: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    profile: str = "current",
 ) -> None:
     """Bind native build call projections to every authenticated stage ledger."""
-    validate_build_provenance(payload)
-    required_stages = {
-        stage for stage, roles in PROVIDER_STAGE_ROLES.items() if roles
-    }
+    validate_build_provenance(payload, profile=profile)
+    roles_by_stage = (
+        dict(_HISTORICAL_PROVIDER_STAGE_ROLES_V1)
+        if profile
+        in {HISTORICAL_PROVENANCE_PROFILE_V1, HISTORICAL_PROVENANCE_PROFILE_V2}
+        else PROVIDER_STAGE_ROLES
+    )
+    required_stages = {stage for stage, roles in roles_by_stage.items() if roles}
     if set(stage_ledgers) != required_stages:
         raise ValueError("build provenance call ledger inventory is incomplete")
-    identity_calls, audit_calls = _provider_call_projections(stage_ledgers)
+    identity_calls, audit_calls = _provider_call_projections(
+        stage_ledgers,
+        profile=profile,
+    )
     identity = payload["identity"]
     audit = payload["audit"]
     if (
@@ -973,25 +1349,35 @@ def validate_build_provenance_call_ledgers(
 
 def _provider_call_projections(
     stage_ledgers: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    profile: str = "current",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     validated_calls: list[dict[str, Any]] = []
     for stage in sorted(stage_ledgers):
         validated_calls.extend(
-            validate_provider_calls(stage_ledgers[stage], expected_stage=stage)
+            validate_provider_calls(
+                stage_ledgers[stage],
+                expected_stage=stage,
+                profile=profile,
+            )
         )
+    identity_fields = [
+        "stage",
+        "ordinal",
+        "provider_role",
+        "provider",
+        "model",
+        "settings_sha256",
+        "request_sha256",
+        "response_sha256",
+        "transport_identity",
+    ]
+    if profile == HISTORICAL_PROVENANCE_PROFILE_V1:
+        identity_fields.remove("settings_sha256")
     identity_calls = [
         {
             key: row[key]
-            for key in (
-                "stage",
-                "ordinal",
-                "provider_role",
-                "provider",
-                "model",
-                "request_sha256",
-                "response_sha256",
-                "transport_identity",
-            )
+            for key in identity_fields
         }
         for row in validated_calls
     ]
@@ -1153,7 +1539,12 @@ def _validate_provider_inventory(value: Any) -> None:
         _validate_json_value(row["settings"], "provenance provider settings")
 
 
-def _validate_prompt_inventory(value: Any) -> None:
+def _validate_prompt_inventory(
+    value: Any,
+    *,
+    prompt_revisions: Mapping[str, str] | None = None,
+) -> None:
+    revisions = PROMPT_REVISIONS if prompt_revisions is None else prompt_revisions
     if _is_marker(value, status="unavailable"):
         return
     if not isinstance(value, list):
@@ -1169,8 +1560,8 @@ def _validate_prompt_inventory(value: Any) -> None:
             raise ValueError("build provenance prompt row is invalid")
         name = row.get("name")
         if (
-            name not in PROMPT_REVISIONS
-            or row.get("revision") != PROMPT_REVISIONS[name]
+            name not in revisions
+            or row.get("revision") != revisions[name]
             or not isinstance(row.get("bytes"), int)
             or isinstance(row.get("bytes"), bool)
             or row["bytes"] < 0
@@ -1182,7 +1573,12 @@ def _validate_prompt_inventory(value: Any) -> None:
         raise ValueError("build provenance prompt inventory is invalid")
 
 
-def _validate_call_evidence(identity_calls: Any, audit_calls: Any) -> None:
+def _validate_call_evidence(
+    identity_calls: Any,
+    audit_calls: Any,
+    *,
+    profile: str,
+) -> None:
     if _is_marker(identity_calls, status="unavailable"):
         if audit_calls != identity_calls:
             raise ValueError("build provenance call markers are inconsistent")
@@ -1193,16 +1589,22 @@ def _validate_call_evidence(identity_calls: Any, audit_calls: Any) -> None:
         raise ValueError("build provenance call inventories differ")
     reconstructed: list[dict[str, Any]] = []
     for identity_row, audit_row in zip(identity_calls, audit_calls):
-        if not isinstance(identity_row, Mapping) or set(identity_row) != {
+        identity_fields = {
             "stage",
             "ordinal",
             "provider_role",
             "provider",
             "model",
+            "settings_sha256",
             "request_sha256",
             "response_sha256",
             "transport_identity",
-        } or not isinstance(audit_row, Mapping) or set(audit_row) != {
+        }
+        if profile == HISTORICAL_PROVENANCE_PROFILE_V1:
+            identity_fields.remove("settings_sha256")
+        if not isinstance(identity_row, Mapping) or set(identity_row) != (
+            identity_fields
+        ) or not isinstance(audit_row, Mapping) or set(audit_row) != {
             "stage",
             "ordinal",
             "provider_role",
@@ -1214,9 +1616,16 @@ def _validate_call_evidence(identity_calls: Any, audit_calls: Any) -> None:
             for field in ("stage", "ordinal", "provider_role")
         ):
             raise ValueError("build provenance call audit is inconsistent")
+        schema_version = (
+            _HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V1
+            if profile == HISTORICAL_PROVENANCE_PROFILE_V1
+            else _HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V2
+            if profile == HISTORICAL_PROVENANCE_PROFILE_V2
+            else PROVIDER_CALL_SCHEMA_VERSION
+        )
         reconstructed.append(
             {
-                "schema_version": PROVIDER_CALL_SCHEMA_VERSION,
+                "schema_version": schema_version,
                 **dict(identity_row),
                 "transport_audit": audit_row["transport_audit"],
             }
@@ -1225,7 +1634,7 @@ def _validate_call_evidence(identity_calls: Any, audit_calls: Any) -> None:
     for row in reconstructed:
         by_stage.setdefault(str(row["stage"]), []).append(row)
     for stage, rows in by_stage.items():
-        validate_provider_calls(rows, expected_stage=stage)
+        validate_provider_calls(rows, expected_stage=stage, profile=profile)
 
 
 def _validate_git_audit(value: Any) -> None:
@@ -1319,12 +1728,22 @@ def _valid_sha256(value: Any) -> bool:
 def _validate_native_build_profile(
     identity: Mapping[str, Any],
     audit: Mapping[str, Any],
+    *,
+    historical: bool,
 ) -> None:
+    source_fixed_members = (
+        _HISTORICAL_SOURCE_FIXED_MEMBERS_V1 if historical else SOURCE_FIXED_MEMBERS
+    )
+    prompt_revisions = (
+        dict(_HISTORICAL_PROMPT_REVISIONS_V1)
+        if historical
+        else PROMPT_REVISIONS
+    )
     source = identity.get("source")
     source_members = source.get("members") if isinstance(source, Mapping) else None
     if not isinstance(source_members, list) or [
         member.get("path") for member in source_members if isinstance(member, Mapping)
-    ] != sorted(SOURCE_FIXED_MEMBERS):
+    ] != sorted(source_fixed_members):
         raise ValueError("native build provenance source inventory is incomplete")
     if set(_mapping_keys(identity.get("inputs"))) != {
         "labeled_feedback",
@@ -1337,7 +1756,7 @@ def _validate_native_build_profile(
     prompts = identity.get("prompts")
     if not isinstance(prompts, list) or {
         row.get("name") for row in prompts if isinstance(row, Mapping)
-    } != set(PROMPT_REVISIONS):
+    } != set(prompt_revisions):
         raise ValueError("native build provenance prompt inventory is incomplete")
     providers = identity.get("providers")
     if not isinstance(providers, Mapping) or any(
@@ -1352,11 +1771,19 @@ def _validate_native_build_profile(
     seeds = identity.get("seeds")
     configuration = identity["resolved_configuration"]
     config = configuration["values"]
-    _validate_native_configuration(config)
+    if historical:
+        _validate_historical_native_configuration_v1(config)
+    else:
+        _validate_native_configuration(config)
     _validate_native_runtime_profile(identity.get("runtime_dependencies"), config)
     _validate_native_git_profile(audit.get("git"))
     for role in ("rubric", "embedding"):
-        _validate_native_provider_profile(role, providers[role], config)
+        _validate_native_provider_profile(
+            role,
+            providers[role],
+            config,
+            compare_current_default=not historical,
+        )
     expected_sampling = not_applicable("provider_does_not_use_sampling")
     if set(_mapping_keys(seeds)) != {
         "split",
@@ -1373,10 +1800,14 @@ def _validate_native_build_profile(
     native_marker = not_applicable("native_asset_has_no_parent")
     extension = lineage != native_marker
     calls = identity.get("calls")
-    if identity.get("algorithms") != build_algorithm_inventory(
-        config,
-        extension=extension,
-    ) or not isinstance(calls, list):
+    expected_algorithms = (
+        historical_algorithm_inventory_v1(config, extension=extension)
+        if historical
+        else build_algorithm_inventory(config, extension=extension)
+    )
+    if not _same_json(identity.get("algorithms"), expected_algorithms) or not isinstance(
+        calls, list
+    ):
         raise ValueError("native build provenance algorithm schema is inconsistent")
     for call in calls:
         if not isinstance(call, Mapping):
@@ -1384,8 +1815,14 @@ def _validate_native_build_profile(
         provider = providers.get(call.get("provider_role"))
         if not isinstance(provider, Mapping) or any(
             call.get(field) != provider.get(field) for field in ("provider", "model")
+        ) or (
+            "settings_sha256" in call
+            and call.get("settings_sha256")
+            != canonical_sha256(provider.get("settings"))
         ):
-            raise ValueError("native build provenance call provider is inconsistent")
+            raise ValueError(
+                "native build provenance call provider settings are inconsistent"
+            )
     for role in ("rubric", "embedding"):
         provider = providers[role]
         if provider.get("source") != "injected":
@@ -1427,10 +1864,54 @@ def _validate_native_configuration(value: Any) -> None:
         raise ValueError("native build provenance configuration is incomplete")
 
 
+def _validate_historical_native_configuration_v1(value: Any) -> None:
+    """Validate the closed config shape recorded by provenance v1."""
+    expected_fields = {
+        *_HISTORICAL_CONFIG_STRING_FIELDS_V1,
+        *_HISTORICAL_CONFIG_INTEGER_FIELDS_V1,
+        "match_threshold",
+        "max_unlabeled_to_trusted_ratio",
+        "synthetic_coverage_enabled",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected_fields:
+        raise ValueError("native build provenance configuration is invalid")
+    if any(
+        not isinstance(value.get(field), str)
+        or not value[field]
+        or _SECRET.search(value[field])
+        for field in _HISTORICAL_CONFIG_STRING_FIELDS_V1
+    ) or any(
+        not isinstance(value.get(field), int) or isinstance(value.get(field), bool)
+        for field in _HISTORICAL_CONFIG_INTEGER_FIELDS_V1
+    ):
+        raise ValueError("native build provenance configuration is invalid")
+    if (
+        value["cluster_count"] < 1
+        or value["batch_size"] < 1
+        or value["min_trusted_examples"] < 1
+        or value["min_trusted_groups"] < 0
+        or not 1 <= value["synthetic_cases_per_cluster"] <= 100
+        or not isinstance(value.get("match_threshold"), float)
+        or not 0.0 <= value["match_threshold"] <= 1.0
+        or not isinstance(value.get("synthetic_coverage_enabled"), bool)
+    ):
+        raise ValueError("native build provenance configuration is invalid")
+    ratio = value.get("max_unlabeled_to_trusted_ratio")
+    if ratio is not None and (
+        not isinstance(ratio, float)
+        or not ratio > 0
+        or ratio != ratio
+        or ratio == float("inf")
+    ):
+        raise ValueError("native build provenance configuration is invalid")
+
+
 def _validate_native_provider_profile(
     role: str,
     value: Mapping[str, Any],
     config: Mapping[str, Any],
+    *,
+    compare_current_default: bool = True,
 ) -> None:
     expected_settings = (
         {
@@ -1477,6 +1958,13 @@ def _validate_native_provider_profile(
         or value.get("model") != configured_model
     ):
         raise ValueError("native build provenance default provider is inconsistent")
+    if not compare_current_default:
+        if not _same_json(
+            value,
+            _historical_native_provider_profile_v1(role, value, config),
+        ):
+            raise ValueError("native build provenance provider settings differ")
+        return
 
     identity = {
         "provider": configured_provider,
@@ -1506,6 +1994,84 @@ def _validate_native_provider_profile(
     )
     if canonical_sha256(value) != canonical_sha256(expected):
         raise ValueError("native build provenance default provider profile differs")
+
+
+def _historical_native_provider_profile_v1(
+    role: str,
+    value: Mapping[str, Any],
+    config: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Reconstruct the immutable provider-settings semantics recorded by v1."""
+    unavailable_marker = unavailable("provider_does_not_expose_field")
+    sampling_marker = not_applicable("provider_does_not_use_sampling")
+    source = value.get("source")
+    provider = value.get("provider")
+    model = value.get("model")
+    if source == "injected":
+        settings = (
+            {
+                "timeout_seconds": dict(unavailable_marker),
+                "max_retries": dict(unavailable_marker),
+                "retry_backoff_seconds": dict(unavailable_marker),
+                "pipeline_batch_size": config["batch_size"],
+                "max_output_tokens": dict(unavailable_marker),
+                "temperature": dict(unavailable_marker),
+                "response_format": dict(unavailable_marker),
+                "seed": dict(unavailable_marker),
+            }
+            if role == "rubric"
+            else {
+                "timeout_seconds": dict(unavailable_marker),
+                "max_retries": dict(unavailable_marker),
+                "retry_backoff_seconds": dict(unavailable_marker),
+                "provider_batch_size": dict(unavailable_marker),
+                "response_format": dict(unavailable_marker),
+                "seed": dict(unavailable_marker),
+            }
+        )
+    elif role == "rubric" and provider == "openai":
+        model_lower = str(model).lower()
+        reasoning = any(
+            model_lower.startswith(prefix)
+            for prefix in ("o1", "o3", "o4", "gpt-5", "gpt5")
+        )
+        settings = {
+            "timeout_seconds": 300,
+            "max_retries": 3,
+            "retry_backoff_seconds": 2,
+            "pipeline_batch_size": config["batch_size"],
+            "max_output_tokens": 16384,
+            "temperature": dict(sampling_marker) if reasoning else 0.0,
+            "response_format": "json_object",
+            "seed": dict(sampling_marker),
+        }
+    elif role == "embedding" and provider == "openai":
+        settings = {
+            "timeout_seconds": 300,
+            "max_retries": 3,
+            "retry_backoff_seconds": 2,
+            "provider_batch_size": 128,
+            "response_format": "dense_float_vectors",
+            "seed": dict(sampling_marker),
+        }
+    elif role == "embedding" and provider == "tfidf":
+        settings = {
+            "timeout_seconds": dict(unavailable_marker),
+            "max_retries": dict(unavailable_marker),
+            "retry_backoff_seconds": dict(unavailable_marker),
+            "provider_batch_size": dict(unavailable_marker),
+            "response_format": dict(unavailable_marker),
+            "seed": dict(unavailable_marker),
+        }
+    else:
+        raise ValueError("native build provenance default provider is unsupported")
+    return {
+        "provider": provider,
+        "model": model,
+        "source": source,
+        "interface": "generate_json-v1" if role == "rubric" else "embed_texts-v1",
+        "settings": settings,
+    }
 
 
 def _valid_native_provider_setting(name: str, value: Any) -> bool:
@@ -1607,27 +2173,85 @@ def _validate_legacy_build_profile(
     ):
         raise ValueError("legacy build provenance runtime profile is inconsistent")
     seeds = identity.get("seeds")
+    configuration = identity.get("resolved_configuration")
+    config_values = (
+        configuration.get("values")
+        if isinstance(configuration, Mapping)
+        else None
+    )
     if not isinstance(seeds, Mapping) or set(seeds) != {
         "split",
         "rubric_sampling",
         "embedding_sampling",
     } or seeds.get("rubric_sampling") != marker or seeds.get(
         "embedding_sampling"
-    ) != marker:
+    ) != marker or not isinstance(config_values, Mapping) or not _same_json(
+        seeds.get("split"), config_values.get("split_seed")
+    ):
         raise ValueError("legacy build provenance seed profile is inconsistent")
-    lineage = identity.get("lineage")
-    if not _is_marker(lineage, status="not_applicable"):
-        required = {
-            "parent_asset_id",
-            "clustering_mode",
-            "added_labeled_record_ids",
-            "added_unlabeled_record_ids",
-            "parent_input_counts",
-            "extended_input_counts",
-            "parent_generation_id",
+    _validate_legacy_lineage_profile(identity.get("lineage"))
+
+
+def _validate_legacy_lineage_profile(value: Any) -> None:
+    """Validate the exact native/extension lineage shape written by adoption."""
+    if value == not_applicable("native_asset_has_no_parent"):
+        return
+    required = {
+        "parent_asset_id",
+        "clustering_mode",
+        "added_labeled_record_ids",
+        "added_unlabeled_record_ids",
+        "parent_input_counts",
+        "extended_input_counts",
+        "parent_generation_id",
+    }
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise ValueError("legacy extension provenance lineage is incomplete")
+    added_labeled = value.get("added_labeled_record_ids")
+    added_unlabeled = value.get("added_unlabeled_record_ids")
+    if any(
+        not isinstance(items, list)
+        or any(
+            not isinstance(item, str) or not item or _SECRET.search(item)
+            for item in items
+        )
+        or len(items) != len(set(items))
+        for items in (added_labeled, added_unlabeled)
+    ):
+        raise ValueError("legacy extension provenance lineage is invalid")
+    counts: list[dict[str, int]] = []
+    for field in ("parent_input_counts", "extended_input_counts"):
+        raw_counts = value.get(field)
+        if (
+            not isinstance(raw_counts, Mapping)
+            or set(raw_counts) != {"labeled", "unlabeled"}
+            or any(
+                not isinstance(raw_counts.get(name), int)
+                or isinstance(raw_counts.get(name), bool)
+                or raw_counts[name] < 0
+                for name in ("labeled", "unlabeled")
+            )
+        ):
+            raise ValueError("legacy extension provenance lineage is invalid")
+        counts.append(dict(raw_counts))
+    parent_counts, extended_counts = counts
+    if (
+        not isinstance(value.get("parent_asset_id"), str)
+        or not value["parent_asset_id"]
+        or _SECRET.search(value["parent_asset_id"])
+        or value.get("clustering_mode") not in {"keep", "refresh"}
+        or (
+            value.get("clustering_mode") == "keep" and bool(added_unlabeled)
+        )
+        or not isinstance(value.get("parent_generation_id"), str)
+        or not _GENERATION_ID.fullmatch(value["parent_generation_id"])
+        or extended_counts
+        != {
+            "labeled": parent_counts["labeled"] + len(added_labeled),
+            "unlabeled": parent_counts["unlabeled"] + len(added_unlabeled),
         }
-        if not isinstance(lineage, Mapping) or set(lineage) != required:
-            raise ValueError("legacy extension provenance lineage is incomplete")
+    ):
+        raise ValueError("legacy extension provenance lineage is invalid")
 
 
 def _mapping_keys(value: Any) -> tuple[Any, ...]:

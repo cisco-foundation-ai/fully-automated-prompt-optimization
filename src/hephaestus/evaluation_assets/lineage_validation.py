@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from src.hephaestus.evaluation_assets.control_jsonl import parse_strict_json_object
 from src.hephaestus.evaluation_assets.models import PipelineStage
 
 LINEAGE_SCHEMA_VERSION = "fapo-evaluation-asset-lineage-v1"
@@ -406,10 +407,7 @@ def _nonempty_string(value: Any) -> bool:
 
 
 def _json_object(path: Path) -> dict[str, Any]:
-    value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        raise ValueError("lineage document is not an object")
-    return value
+    return parse_strict_json_object(path.read_bytes())
 
 
 def _sha256(path: Path) -> str:

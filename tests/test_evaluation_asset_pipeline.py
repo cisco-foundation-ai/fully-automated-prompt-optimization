@@ -1691,8 +1691,8 @@ def test_revise_config_invalidates_only_dependent_stages(tmp_path: Path) -> None
     for stage_state in state.stages:
         stage_state.status = "completed"
         stage_state.message = "done"
-        stage_state.started_at = "start"
-        stage_state.completed_at = "end"
+        stage_state.started_at = "2026-08-20T00:00:00+00:00"
+        stage_state.completed_at = "2026-08-20T00:00:01+00:00"
     state.status = "failed"
     state.error = "stopped"
     state.counts = {

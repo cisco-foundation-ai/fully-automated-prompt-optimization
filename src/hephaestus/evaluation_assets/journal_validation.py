@@ -21,6 +21,7 @@ from src.hephaestus.evaluation_assets.control_jsonl import (
 )
 from src.hephaestus.evaluation_assets.journal_transitions import (
     JOURNAL_SCHEMA_VERSION,
+    _normalized_legacy_completed_state,
     append_jsonl_bytes,
     audit_descriptor,
     derive_adoption_plan,
@@ -30,12 +31,11 @@ from src.hephaestus.evaluation_assets.journal_transitions import (
 )
 from src.hephaestus.evaluation_assets.models import (
     CONFIG_STAGE_DEPENDENCIES,
-    STAGE_COUNT_KEYS,
-    STAGE_LABELS,
     STATE_SCHEMA_VERSION,
     EvaluationAssetConfig,
     PipelineStage,
     PipelineState,
+    StageState,
 )
 
 _OPERATION_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -65,7 +65,60 @@ _STAGE_STATE_FIELDS = {
 }
 _STAGE_STATUSES = {"pending", "running", "completed", "failed"}
 _CONFIG_FIELDS = set(EvaluationAssetConfig.__dataclass_fields__)
-_ALL_COUNT_KEYS = set().union(*STAGE_COUNT_KEYS.values())
+_STATE_V2_STAGE_ORDER = tuple(PipelineStage)
+_STATE_V2_STAGE_LABELS = {
+    PipelineStage.RAW_INPUTS: "Validate raw inputs",
+    PipelineStage.PREPARED_INPUTS: "Prepare canonical inputs",
+    PipelineStage.RUBRIC_EXTRACTION: "Create evaluation guidelines",
+    PipelineStage.INTENT_CLUSTERING: "Mine intent clusters",
+    PipelineStage.COVERAGE_DECISIONS: "Apply coverage decisions",
+    PipelineStage.LABEL_INFERENCE: "Infer reviewable labels",
+    PipelineStage.SYNTHETIC_COVERAGE: "Optional synthetic coverage",
+    PipelineStage.DATASET_SPLITS: "Build dataset splits",
+}
+_STATE_V2_STAGE_COUNT_KEYS = {
+    PipelineStage.RAW_INPUTS: frozenset(
+        {"feedback_records", "unlabeled_records"}
+    ),
+    PipelineStage.PREPARED_INPUTS: frozenset(
+        {"prepared_feedback", "prepared_intents"}
+    ),
+    PipelineStage.RUBRIC_EXTRACTION: frozenset(
+        {
+            "feedback_evidence",
+            "candidate_guidelines",
+            "evaluation_guidelines",
+            "trusted_cases",
+        }
+    ),
+    PipelineStage.INTENT_CLUSTERING: frozenset({"intent_clusters"}),
+    PipelineStage.COVERAGE_DECISIONS: frozenset(
+        {
+            "matched_clusters",
+            "needs_more_feedback_clusters",
+            "missing_label_clusters",
+            "labeling_queue_clusters",
+            "labeling_queue_traces",
+        }
+    ),
+    PipelineStage.LABEL_INFERENCE: frozenset(
+        {"inferred_cases", "review_clusters"}
+    ),
+    PipelineStage.SYNTHETIC_COVERAGE: frozenset(
+        {"synthetic_cases", "rejected_synthetic_cases"}
+    ),
+    PipelineStage.DATASET_SPLITS: frozenset(
+        {
+            "dataset_cases",
+            "train_cases",
+            "validation_cases",
+            "test_cases",
+            "regression_trusted_cases",
+            "triage_hold_cases",
+        }
+    ),
+}
+_ALL_COUNT_KEYS = frozenset().union(*_STATE_V2_STAGE_COUNT_KEYS.values())
 _EVENT_FIELDS = {
     "timestamp",
     "event",
@@ -295,7 +348,7 @@ def _validate_prepared(
 
     state_raw = _mapping(row["target_state"])
     _validate_state_shape(state_raw)
-    state = PipelineState.from_dict(state_raw)
+    state = _state_v2_from_validated_raw(state_raw)
     if (
         state.to_dict() != state_raw
         or state.tenant_id != layout.tenant_id
@@ -620,7 +673,7 @@ def _validate_adoption(
         if (
             receipt.get("stage") != stage.value
             or receipt.get("origin") != "legacy_adoption"
-            or set(counts) != STAGE_COUNT_KEYS[stage]
+            or set(counts) != _STATE_V2_STAGE_COUNT_KEYS[stage]
             or any(
                 isinstance(value, bool)
                 or not isinstance(value, int)
@@ -894,7 +947,7 @@ def _validate_mutable_target_state(
 ) -> PipelineStage:
     invalidated_names = {stage.value for stage in invalidated}
     invalidated_count_keys = {
-        key for stage in invalidated for key in STAGE_COUNT_KEYS[stage]
+        key for stage in invalidated for key in _STATE_V2_STAGE_COUNT_KEYS[stage]
     }
     for item in state.stages:
         if item.stage in invalidated_names and (
@@ -945,19 +998,7 @@ def _require_exact_plan(
 
 def _validate_before_state_shape(raw: Mapping[str, Any]) -> None:
     if raw.get("status") == "completed":
-        optional = {"schema_version", "mutation_sequence", "last_operation_id"}
-        if not (_STATE_FIELDS - optional) <= set(raw) <= _STATE_FIELDS:
-            raise ValueError("journal before state shape is invalid")
-        for value in raw.get("stages", []):
-            item = _mapping(value)
-            if not (
-                _STAGE_STATE_FIELDS - {"receipt_sha256"}
-            ) <= set(item) <= _STAGE_STATE_FIELDS:
-                raise ValueError("journal before stage state is invalid")
-        normalized = PipelineState.from_dict(raw)
-        if not normalized.legacy_completed:
-            raise ValueError("journal before state shape is invalid")
-        raw = normalized.to_dict()
+        raw = _normalized_legacy_completed_state(raw)
     else:
         _exact_keys(raw, _STATE_FIELDS)
     if (
@@ -1004,7 +1045,7 @@ def _validate_before_state_shape(raw: Mapping[str, Any]) -> None:
     ):
         raise ValueError("journal before counts are invalid")
     stages = list(raw["stages"])
-    ordered = tuple(PipelineStage)
+    ordered = _STATE_V2_STAGE_ORDER
     if len(stages) != len(ordered):
         raise ValueError("journal before stage inventory is invalid")
     for stage, value in zip(ordered, stages):
@@ -1012,7 +1053,7 @@ def _validate_before_state_shape(raw: Mapping[str, Any]) -> None:
         _exact_keys(item, _STAGE_STATE_FIELDS)
         if (
             item.get("stage") != stage.value
-            or item.get("label") != STAGE_LABELS[stage]
+            or item.get("label") != _STATE_V2_STAGE_LABELS[stage]
             or item.get("status") not in _STAGE_STATUSES
             or not isinstance(item.get("message"), str)
         ):
@@ -1077,7 +1118,7 @@ def _validate_state_shape(raw: Mapping[str, Any]) -> None:
     ):
         raise ValueError("journal target counts are invalid")
     stages = list(raw["stages"])
-    ordered = tuple(PipelineStage)
+    ordered = _STATE_V2_STAGE_ORDER
     if len(stages) != len(ordered):
         raise ValueError("journal target stage inventory is invalid")
     for stage, value in zip(ordered, stages):
@@ -1085,7 +1126,7 @@ def _validate_state_shape(raw: Mapping[str, Any]) -> None:
         _exact_keys(item, _STAGE_STATE_FIELDS)
         if (
             item.get("stage") != stage.value
-            or item.get("label") != STAGE_LABELS[stage]
+            or item.get("label") != _STATE_V2_STAGE_LABELS[stage]
             or item.get("status") not in _STAGE_STATUSES
             or not isinstance(item.get("message"), str)
         ):
@@ -1121,6 +1162,24 @@ def _validate_state_shape(raw: Mapping[str, Any]) -> None:
             or item["receipt_sha256"] is not None
         ):
             raise ValueError("journal active stage state is invalid")
+
+
+def _state_v2_from_validated_raw(raw: Mapping[str, Any]) -> PipelineState:
+    """Materialize an already validated v2 state without current registries."""
+    return PipelineState(
+        tenant_id=str(raw["tenant_id"]),
+        asset_id=str(raw["asset_id"]),
+        schema_version=str(raw["schema_version"]),
+        status=str(raw["status"]),
+        current_stage=raw["current_stage"],
+        created_at=str(raw["created_at"]),
+        updated_at=str(raw["updated_at"]),
+        error=raw["error"],
+        counts=dict(_mapping(raw["counts"])),
+        stages=[StageState(**dict(_mapping(item))) for item in raw["stages"]],
+        mutation_sequence=int(raw["mutation_sequence"]),
+        last_operation_id=str(raw["last_operation_id"]),
+    )
 
 
 def _validate_config_shape(raw: Mapping[str, Any]) -> None:

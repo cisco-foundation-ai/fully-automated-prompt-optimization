@@ -28,6 +28,7 @@ from src.hephaestus.artifact_io import (
     atomic_write_text as atomic_write_text,
 )
 from src.hephaestus.evaluation_assets.control_jsonl import (
+    parse_strict_json_object,
     read_strict_jsonl_objects,
 )
 from src.hephaestus.evaluation_assets.durability import (
@@ -36,6 +37,8 @@ from src.hephaestus.evaluation_assets.durability import (
     EvaluationAssetImmutableError,
     EvaluationAssetIntegrityError,
     EvaluationAssetLegacyError,
+    _exact_completed_state,
+    _exact_v2_state,
     _replay_config_history,
     _verify_prospective_legacy_adoption_candidate,
     build_stage_receipt,
@@ -67,6 +70,7 @@ from src.hephaestus.evaluation_assets.lineage_validation import (
 from src.hephaestus.evaluation_assets.models import (
     CONFIG_STAGE_DEPENDENCIES,
     STAGE_COUNT_KEYS,
+    STATE_SCHEMA_VERSION,
     EvaluationAssetConfig,
     PipelineStage,
     PipelineState,
@@ -996,7 +1000,7 @@ class EvaluationAssetLayout:
                 operation_id=operation_id,
                 prepared_at=timestamp,
             )
-            target_state = PipelineState.from_dict(plan["target_state"])
+            target_state = _exact_completed_state(plan["target_state"])
             try:
                 _verify_prospective_legacy_adoption_candidate(
                     self,
@@ -1256,7 +1260,10 @@ class EvaluationAssetLayout:
 
     def load_state(self) -> PipelineState:
         """Load this asset's persisted run state."""
-        return PipelineState.from_dict(read_json(self.state_path))
+        raw = parse_strict_json_object(self.state_path.read_bytes())
+        if raw.get("schema_version") == STATE_SCHEMA_VERSION:
+            return _exact_v2_state(raw)
+        return PipelineState.from_dict(raw)
 
     def save_state(self, state: PipelineState) -> None:
         """Atomically persist run state."""
@@ -1328,7 +1335,7 @@ class EvaluationAssetLayout:
         }
         self._append_journal_once(prepared)
         _fault_point("after_release_publication_prepared")
-        target_state = PipelineState.from_dict(plan["target_state"])
+        target_state = _exact_completed_state(plan["target_state"])
         verify_release_candidate(
             self,
             target_state,
@@ -1589,7 +1596,7 @@ class EvaluationAssetLayout:
                     self.asset_id,
                     "the recovery generation does not match its WAL target",
                 )
-            recovered_state = PipelineState.from_dict(target_state)
+            recovered_state = _exact_completed_state(target_state)
             verify_release_candidate(
                 self,
                 recovered_state,
@@ -1642,7 +1649,7 @@ class EvaluationAssetLayout:
                     self.asset_id,
                     "the recovery journal is missing target state",
                 )
-            recovered_state = PipelineState.from_dict(target_state)
+            recovered_state = _exact_completed_state(target_state)
             verify_release_candidate(
                 self,
                 recovered_state,

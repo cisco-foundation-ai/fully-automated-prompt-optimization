@@ -13,14 +13,83 @@ from typing import Any, Mapping, Sequence
 
 from src.hephaestus.evaluation_assets.models import (
     CONFIG_STAGE_DEPENDENCIES,
+    LEGACY_STATE_SCHEMA_VERSION,
     STAGE_COUNT_KEYS,
     STATE_SCHEMA_VERSION,
     EvaluationAssetConfig,
     PipelineStage,
-    PipelineState,
 )
 
 JOURNAL_SCHEMA_VERSION = "fapo-recovery-journal-v2"
+_RELEASE_STAGE_VALUES_V2 = (
+    "raw_inputs",
+    "prepared_inputs",
+    "rubric_extraction",
+    "intent_clustering",
+    "coverage_decisions",
+    "label_inference",
+    "synthetic_coverage",
+    "dataset_splits",
+)
+_RELEASE_STAGE_LABELS_V2 = {
+    "raw_inputs": "Validate raw inputs",
+    "prepared_inputs": "Prepare canonical inputs",
+    "rubric_extraction": "Create evaluation guidelines",
+    "intent_clustering": "Mine intent clusters",
+    "coverage_decisions": "Apply coverage decisions",
+    "label_inference": "Infer reviewable labels",
+    "synthetic_coverage": "Optional synthetic coverage",
+    "dataset_splits": "Build dataset splits",
+}
+_RELEASE_COUNT_FIELDS_V2 = {
+    "feedback_records",
+    "unlabeled_records",
+    "prepared_feedback",
+    "prepared_intents",
+    "feedback_evidence",
+    "candidate_guidelines",
+    "evaluation_guidelines",
+    "trusted_cases",
+    "intent_clusters",
+    "matched_clusters",
+    "needs_more_feedback_clusters",
+    "missing_label_clusters",
+    "labeling_queue_clusters",
+    "labeling_queue_traces",
+    "inferred_cases",
+    "review_clusters",
+    "synthetic_cases",
+    "rejected_synthetic_cases",
+    "dataset_cases",
+    "train_cases",
+    "validation_cases",
+    "test_cases",
+    "regression_trusted_cases",
+    "triage_hold_cases",
+}
+_LEGACY_STATE_FIELDS = {
+    "tenant_id",
+    "asset_id",
+    "schema_version",
+    "status",
+    "current_stage",
+    "created_at",
+    "updated_at",
+    "error",
+    "counts",
+    "stages",
+    "mutation_sequence",
+    "last_operation_id",
+}
+_LEGACY_STAGE_FIELDS = {
+    "stage",
+    "label",
+    "status",
+    "message",
+    "started_at",
+    "completed_at",
+    "receipt_sha256",
+}
 
 
 def canonical_jsonl_row_bytes(payload: Mapping[str, Any]) -> bytes:
@@ -193,6 +262,51 @@ def derive_rebuild_plan(
     }
 
 
+def _normalized_legacy_completed_state(
+    before_state: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Normalize the frozen receipt-free legacy sentinel without registries."""
+    normalized = deepcopy(dict(before_state))
+    normalized.setdefault("schema_version", LEGACY_STATE_SCHEMA_VERSION)
+    normalized.setdefault("mutation_sequence", 0)
+    normalized.setdefault("last_operation_id", None)
+    if (
+        set(normalized) != _LEGACY_STATE_FIELDS
+        or normalized.get("schema_version") != LEGACY_STATE_SCHEMA_VERSION
+        or normalized.get("status") != "completed"
+        or normalized.get("current_stage") is not None
+        or normalized.get("error") is not None
+        or isinstance(normalized.get("mutation_sequence"), bool)
+        or not isinstance(normalized.get("mutation_sequence"), int)
+        or normalized["mutation_sequence"] < 0
+        or normalized.get("last_operation_id") is not None
+        or not isinstance(normalized.get("counts"), Mapping)
+        or not isinstance(normalized.get("stages"), list)
+        or len(normalized["stages"]) != len(_RELEASE_STAGE_VALUES_V2)
+    ):
+        raise ValueError("adoption before state is not a legacy completion")
+    normalized_stages: list[dict[str, Any]] = []
+    for stage_value, raw_stage in zip(
+        _RELEASE_STAGE_VALUES_V2,
+        normalized["stages"],
+    ):
+        if not isinstance(raw_stage, Mapping):
+            raise ValueError("adoption before stage is invalid")
+        stage = dict(raw_stage)
+        stage.setdefault("receipt_sha256", None)
+        if (
+            set(stage) != _LEGACY_STAGE_FIELDS
+            or stage.get("stage") != stage_value
+            or stage.get("label") != _RELEASE_STAGE_LABELS_V2[stage_value]
+            or stage.get("status") != "completed"
+            or stage.get("receipt_sha256") is not None
+        ):
+            raise ValueError("adoption before stage is invalid")
+        normalized_stages.append(stage)
+    normalized["stages"] = normalized_stages
+    return normalized
+
+
 def derive_adoption_plan(
     before_config: Mapping[str, Any],
     before_state: Mapping[str, Any],
@@ -204,32 +318,29 @@ def derive_adoption_plan(
 ) -> dict[str, Any]:
     """Derive the only writer-reachable explicit legacy adoption payload."""
     del before_config
-    expected_stages = {stage.value for stage in PipelineStage}
+    expected_stages = set(_RELEASE_STAGE_VALUES_V2)
     if set(target_receipts) != expected_stages:
         raise ValueError("adoption receipt inventory is incomplete")
-    normalized_before = PipelineState.from_dict(dict(before_state))
-    if not normalized_before.legacy_completed:
-        raise ValueError("adoption before state is not a legacy completion")
-    target_state = normalized_before.to_dict()
+    target_state = _normalized_legacy_completed_state(before_state)
     target_state["schema_version"] = STATE_SCHEMA_VERSION
     target_state["status"] = "released"
     target_state["current_stage"] = None
     target_state["error"] = None
     target_state["updated_at"] = prepared_at
-    target_state["mutation_sequence"] = normalized_before.mutation_sequence + 1
+    target_state["mutation_sequence"] = target_state["mutation_sequence"] + 1
     target_state["last_operation_id"] = operation_id
     counts: dict[str, int] = {}
     receipt_hashes: dict[str, str] = {}
-    for stage in PipelineStage:
-        receipt = dict(target_receipts[stage.value])
-        receipt_hashes[stage.value] = persisted_sha256(receipt)
+    for stage_value in _RELEASE_STAGE_VALUES_V2:
+        receipt = dict(target_receipts[stage_value])
+        receipt_hashes[stage_value] = persisted_sha256(receipt)
         counts.update(dict(receipt["counts"]))
         stage_state = next(
             item
             for item in target_state["stages"]
-            if item["stage"] == stage.value
+            if item["stage"] == stage_value
         )
-        stage_state["receipt_sha256"] = receipt_hashes[stage.value]
+        stage_state["receipt_sha256"] = receipt_hashes[stage_value]
     target_state["counts"] = counts
     pointer = dict(release_pointer)
     result = {
@@ -263,17 +374,30 @@ def derive_release_publication_plan(
 ) -> dict[str, Any]:
     """Derive the only writer-reachable native release publication payload."""
     del before_config
-    state = PipelineState.from_dict(dict(before_state))
+    raw_stages = before_state.get("stages")
+    mutation_sequence = before_state.get("mutation_sequence")
     if (
-        state.schema_version != STATE_SCHEMA_VERSION
-        or state.status != "running"
-        or state.current_stage is not None
-        or state.error is not None
+        before_state.get("schema_version") != STATE_SCHEMA_VERSION
+        or before_state.get("status") != "running"
+        or before_state.get("current_stage") is not None
+        or before_state.get("error") is not None
+        or not isinstance(raw_stages, list)
+        or [
+            item.get("stage") if isinstance(item, Mapping) else None
+            for item in raw_stages
+        ]
+        != list(_RELEASE_STAGE_VALUES_V2)
         or any(
-            item.status != "completed" or item.receipt_sha256 is None
-            for item in state.stages
+            not isinstance(item, Mapping)
+            or item.get("status") != "completed"
+            or item.get("receipt_sha256") is None
+            for item in raw_stages
         )
-        or set(state.counts) != set().union(*STAGE_COUNT_KEYS.values())
+        or not isinstance(before_state.get("counts"), Mapping)
+        or set(before_state["counts"]) != _RELEASE_COUNT_FIELDS_V2
+        or not isinstance(mutation_sequence, int)
+        or isinstance(mutation_sequence, bool)
+        or mutation_sequence < 0
     ):
         raise ValueError("release before state is not a complete running build")
     pointer = dict(release_pointer)
@@ -289,7 +413,7 @@ def derive_release_publication_plan(
     target_state["current_stage"] = None
     target_state["error"] = None
     target_state["updated_at"] = prepared_at
-    target_state["mutation_sequence"] = state.mutation_sequence + 1
+    target_state["mutation_sequence"] = mutation_sequence + 1
     target_state["last_operation_id"] = operation_id
     return {
         "target_state": target_state,

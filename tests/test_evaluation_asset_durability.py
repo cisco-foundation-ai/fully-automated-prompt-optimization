@@ -10,14 +10,19 @@ import multiprocessing
 import shutil
 import sys
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import pytest
 
 from src.hephaestus import artifact_io
+from src.hephaestus.datasets import embedding_providers as embedding_provider_module
+from src.hephaestus.datasets import rubric_providers as rubric_provider_module
 from src.hephaestus.evaluation_assets import durability as durability_module
+from src.hephaestus.evaluation_assets import models as evaluation_asset_models
 from src.hephaestus.evaluation_assets import pipeline as pipeline_module
+from src.hephaestus.evaluation_assets import provenance as provenance_module
 from src.hephaestus.evaluation_assets import service as service_module
 from src.hephaestus.evaluation_assets import stage_three_contract
 from src.hephaestus.evaluation_assets import workspace as workspace_module
@@ -70,6 +75,7 @@ def _studio_persistence_paths(source_root: Path) -> tuple[Path, ...]:
         source_root / "datasets" / "intent_assets.py",
         source_root / "cli.py",
         source_root / "webui" / "data.py",
+        source_root / "webui" / "evaluation_assets_frontend.py",
         source_root / "webui" / "server.py",
         source_root / "webui" / "frontend.py",
         *(source_root / "evaluation_assets").rglob("*.py"),
@@ -278,6 +284,29 @@ _PERSISTENCE_DUMP_SINKS = {
 }
 _PERSISTENCE_CSV_FACTORIES = {"csv.DictWriter", "csv.writer"}
 _CALLABLE_FACTORIES = {"functools.partial"}
+_PERSISTENCE_MODULES = {
+    "builtins",
+    "csv",
+    "io",
+    "json",
+    "nt",
+    "os",
+    "pickle",
+    "posix",
+    "shutil",
+    "tempfile",
+    "toml",
+    "yaml",
+}
+_PERSISTENCE_NAMED_SINKS = {
+    "builtins.open",
+    "builtins.print",
+    "io.open",
+    "open",
+    "os.fdopen",
+    "os.open",
+    "tempfile.NamedTemporaryFile",
+}
 _AUDITED_PIPELINE_PARTIAL_TARGETS = {
     "_normalize_feedback_evidence_response",
     "_normalize_guideline_response",
@@ -365,20 +394,14 @@ def _persistence_binding_score(
     )
     attribute = node.attr if isinstance(node, ast.Attribute) else ""
     if (
-        qualified
+        qualified in _PERSISTENCE_MODULES
+        or qualified
         in _PERSISTENCE_DUMP_SINKS
         | _PERSISTENCE_COPY_SINKS
         | _PERSISTENCE_LOW_LEVEL_SINKS
         | _PERSISTENCE_CSV_FACTORIES
         | _CALLABLE_FACTORIES
-        | {
-            "builtins.open",
-            "io.open",
-            "open",
-            "os.fdopen",
-            "os.open",
-            "tempfile.NamedTemporaryFile",
-        }
+        | _PERSISTENCE_NAMED_SINKS
         or attribute in _PERSISTENCE_METHOD_SINKS | {"dump", "open"}
     ):
         return 1
@@ -416,16 +439,178 @@ def _explicit_persistence_reference(
         | _PERSISTENCE_COPY_SINKS
         | _PERSISTENCE_LOW_LEVEL_SINKS
         | _PERSISTENCE_CSV_FACTORIES
-        | {
-            "builtins.open",
-            "io.open",
-            "open",
-            "os.fdopen",
-            "os.open",
-            "tempfile.NamedTemporaryFile",
-        }
+        | _PERSISTENCE_NAMED_SINKS
         or attribute in _PERSISTENCE_METHOD_SINKS | {"dump", "open", "safe_dump"}
     )
+
+
+def _visible_persistence_references(tree: ast.AST) -> list[tuple[int, str]]:
+    """Return declared writer references that escape direct-call inspection."""
+    aliases: dict[str, str] = {}
+    imported_sinks: list[tuple[int, str]] = []
+    for candidate in ast.walk(tree):
+        if isinstance(candidate, ast.Import):
+            for item in candidate.names:
+                name = item.asname or item.name.split(".", 1)[0]
+                if item.name.split(".", 1)[0] in _PERSISTENCE_MODULES:
+                    aliases.setdefault(name, item.name)
+        elif isinstance(candidate, ast.ImportFrom) and candidate.module:
+            for item in candidate.names:
+                name = item.asname or item.name
+                qualified = _canonical_sink_name(
+                    f"{candidate.module}.{item.name}"
+                )
+                aliases.setdefault(name, qualified)
+                if qualified in (
+                    _PERSISTENCE_DUMP_SINKS
+                    | _PERSISTENCE_COPY_SINKS
+                    | _PERSISTENCE_LOW_LEVEL_SINKS
+                    | _PERSISTENCE_CSV_FACTORIES
+                    | _PERSISTENCE_NAMED_SINKS
+                ):
+                    imported_sinks.append((candidate.lineno, qualified))
+
+    # Escape analysis is deliberately conservative for the finite set of
+    # persistence modules above.  Resolve ordinary module rebindings before
+    # walking returns, containers, loop iterables, and callback arguments so a
+    # second-hop alias cannot hide a declared sink or factory.
+    module_alias_names = {
+        name for name, qualified in aliases.items() if qualified in _PERSISTENCE_MODULES
+    }
+    changed = True
+    while changed:
+        changed = False
+        for candidate in ast.walk(tree):
+            target: ast.AST | None = None
+            value: ast.AST | None = None
+            if isinstance(candidate, (ast.Assign, ast.AnnAssign)):
+                if isinstance(candidate, ast.Assign) and len(candidate.targets) == 1:
+                    target = candidate.targets[0]
+                elif isinstance(candidate, ast.AnnAssign):
+                    target = candidate.target
+                value = candidate.value
+            elif isinstance(candidate, ast.NamedExpr):
+                target = candidate.target
+                value = candidate.value
+            if not isinstance(target, ast.Name) or value is None:
+                continue
+            qualified = _qualified_ast_name(value, aliases)
+            root = qualified.split(".", 1)[0]
+            inherited_alias = (
+                isinstance(value, ast.Name) and value.id in module_alias_names
+            )
+            if root not in _PERSISTENCE_MODULES and not inherited_alias:
+                continue
+            if target.id not in module_alias_names:
+                module_alias_names.add(target.id)
+                aliases.setdefault(
+                    target.id,
+                    aliases.get(value.id, qualified)
+                    if isinstance(value, ast.Name)
+                    else qualified,
+                )
+                changed = True
+
+    parents = {
+        id(child): parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    references = list(imported_sinks)
+    for candidate in ast.walk(tree):
+        if not isinstance(candidate, (ast.Name, ast.Attribute)):
+            continue
+        parent = parents.get(id(candidate))
+        if isinstance(parent, ast.Call) and parent.func is candidate:
+            continue
+        qualified = _canonical_sink_name(
+            _qualified_ast_name(candidate, aliases)
+        )
+        attribute = candidate.attr if isinstance(candidate, ast.Attribute) else ""
+        receiver = candidate
+        while isinstance(receiver, ast.Attribute):
+            receiver = receiver.value
+        module_alias_sink = (
+            isinstance(candidate, ast.Attribute)
+            and isinstance(receiver, ast.Name)
+            and receiver.id in module_alias_names
+            and attribute
+            in {
+                name.rsplit(".", 1)[-1]
+                for name in (
+                    _PERSISTENCE_DUMP_SINKS
+                    | _PERSISTENCE_COPY_SINKS
+                    | _PERSISTENCE_LOW_LEVEL_SINKS
+                    | _PERSISTENCE_CSV_FACTORIES
+                    | _PERSISTENCE_NAMED_SINKS
+                )
+            }
+        )
+        simple_module_alias = (
+            isinstance(parent, ast.Assign)
+            and len(parent.targets) == 1
+            and isinstance(parent.targets[0], ast.Name)
+            and parent.value is candidate
+        ) or (
+            isinstance(parent, ast.AnnAssign)
+            and isinstance(parent.target, ast.Name)
+            and parent.value is candidate
+        ) or (
+            isinstance(parent, ast.NamedExpr)
+            and isinstance(parent.target, ast.Name)
+            and parent.value is candidate
+        )
+        safe_module_introspection = (
+            qualified in _PERSISTENCE_MODULES
+            and isinstance(parent, ast.Call)
+            and parent.args
+            and parent.args[0] is candidate
+            and _qualified_ast_name(parent.func, aliases)
+            in {"getattr", "builtins.getattr"}
+            and len(parent.args) >= 2
+            and isinstance(parent.args[1], ast.Constant)
+            and isinstance(parent.args[1].value, str)
+            and _canonical_sink_name(
+                f"{qualified}.{parent.args[1].value}"
+            )
+            not in (
+                _PERSISTENCE_DUMP_SINKS
+                | _PERSISTENCE_COPY_SINKS
+                | _PERSISTENCE_LOW_LEVEL_SINKS
+                | _PERSISTENCE_CSV_FACTORIES
+                | _PERSISTENCE_NAMED_SINKS
+            )
+            and parent.args[1].value
+            not in _PERSISTENCE_METHOD_SINKS | {"dump", "open", "safe_dump"}
+        )
+        module_escape = (
+            qualified in _PERSISTENCE_MODULES
+            or isinstance(candidate, ast.Name)
+            and candidate.id in module_alias_names
+        ) and not (
+            isinstance(parent, ast.Attribute) and parent.value is candidate
+        ) and not simple_module_alias and not safe_module_introspection
+        if module_escape or module_alias_sink or qualified in (
+            _PERSISTENCE_DUMP_SINKS
+            | _PERSISTENCE_COPY_SINKS
+            | _PERSISTENCE_LOW_LEVEL_SINKS
+            | _PERSISTENCE_CSV_FACTORIES
+            | _PERSISTENCE_NAMED_SINKS
+        ) or attribute in _PERSISTENCE_METHOD_SINKS | {
+            "dump",
+            "safe_dump",
+        }:
+            references.append(
+                (
+                    candidate.lineno,
+                    (
+                        f"{qualified}.*"
+                        if module_escape
+                        else qualified or f"method.{attribute}"
+                    ),
+                )
+            )
+    return references
 
 
 def _qualified_name_node(name: str) -> ast.AST:
@@ -804,10 +989,68 @@ def _call_binding_snapshots(
     return collector.calls, collector.sink_stores
 
 
+class _FunctionContextCollector(ast.NodeVisitor):
+    """Record the exact class/function stack enclosing each call."""
+
+    def __init__(self) -> None:
+        self.stack: list[str] = []
+        self.calls: dict[int, tuple[str, ...]] = {}
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.stack.append(node.name)
+        self.generic_visit(node)
+        self.stack.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.stack.append(node.name)
+        self.generic_visit(node)
+        self.stack.pop()
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_Call(self, node: ast.Call) -> None:
+        self.calls[id(node)] = tuple(self.stack)
+        self.generic_visit(node)
+
+
+def _call_function_contexts(tree: ast.AST) -> dict[int, tuple[str, ...]]:
+    collector = _FunctionContextCollector()
+    collector.visit(tree)
+    return collector.calls
+
+
+def _definition_context_at_line(tree: ast.AST, line: int) -> tuple[str, ...]:
+    """Return the exact nested class/function identity containing one line."""
+    parents = {
+        id(child): parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    candidates = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.lineno <= line <= (node.end_lineno or line)
+    ]
+    if not candidates:
+        return ()
+    current: ast.AST | None = min(
+        candidates,
+        key=lambda node: (node.end_lineno or line) - node.lineno,
+    )
+    context: list[str] = []
+    while current is not None:
+        if isinstance(current, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            context.append(current.name)
+        current = parents.get(id(current))
+    return tuple(reversed(context))
+
+
 def _studio_writer_violations(path: Path, source: str) -> list[str]:
     """Find direct persistence calls, resolving qualified and imported aliases."""
     tree = ast.parse(source, filename=str(path))
     call_bindings, sink_store_lines = _call_binding_snapshots(tree)
+    function_contexts = _call_function_contexts(tree)
 
     path_text = path.as_posix()
     artifact_seam = path_text.endswith("src/hephaestus/artifact_io.py")
@@ -817,9 +1060,64 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
     violations: list[str] = [
         f"{path.name}:{line}:os.write" for line in sink_store_lines
     ]
+    for line, operation in _visible_persistence_references(tree):
+        function_context = _definition_context_at_line(tree, line)
+        if artifact_seam and function_context and function_context[0] in {
+            "atomic_append_jsonl",
+            "atomic_copy_file",
+            "atomic_write_json",
+            "atomic_write_jsonl",
+            "atomic_write_text",
+            "_atomic_write_binary",
+            "_atomic_write_text",
+            "sync_directory",
+        }:
+            continue
+        if publication_seam and function_context and (
+            function_context[0] == "install_generation"
+        ):
+            continue
+        if path_text.endswith("src/hephaestus/webui/server.py") and (
+            function_context
+            in {
+                ("_Handler", "_send_file"),
+                ("_Handler", "_send_html"),
+                ("_Handler", "_send_json"),
+            }
+        ):
+            continue
+        violations.append(f"{path.name}:{line}:{operation}")
+    artifact_contexts = {
+        "atomic_append_jsonl",
+        "atomic_copy_file",
+        "atomic_write_json",
+        "atomic_write_jsonl",
+        "atomic_write_text",
+        "_atomic_write_binary",
+        "_atomic_write_text",
+        "sync_directory",
+    }
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
+        function_context = function_contexts.get(id(node), ())
+        artifact_function = (
+            artifact_seam
+            and bool(function_context)
+            and function_context[0] in artifact_contexts
+        )
+        publication_function = (
+            publication_seam
+            and bool(function_context)
+            and function_context[0] == "install_generation"
+        )
+        server_function = path_text.endswith(
+            "src/hephaestus/webui/server.py"
+        ) and function_context in {
+            ("_Handler", "_send_file"),
+            ("_Handler", "_send_html"),
+            ("_Handler", "_send_json"),
+        }
         assignments, aliases = call_bindings.get(id(node), ({}, {}))
         for argument in [
             *node.args,
@@ -886,7 +1184,7 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
             )
             if recognized:
                 allowed = (
-                    artifact_seam
+                    artifact_function
                     and (
                         sink in _PERSISTENCE_DUMP_SINKS
                         or sink == "shutil.copyfileobj"
@@ -894,8 +1192,8 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
                         or sink == "os.replace"
                         or method_node.value in {"write", "writelines", "truncate"}
                     )
-                ) or (publication_seam and sink == "os.rename") or (
-                    path_text.endswith("src/hephaestus/webui/server.py")
+                ) or (publication_function and sink == "os.rename") or (
+                    server_function
                     and receiver == "self.wfile"
                     and method_node.value == "write"
                 )
@@ -923,25 +1221,25 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
             "dump",
             "safe_dump",
         }:
-            if not (artifact_seam and qualified == "json.dump"):
+            if not (artifact_function and qualified == "json.dump"):
                 violations.append(f"{path.name}:{node.lineno}:{qualified or 'dump'}")
             continue
         if qualified in _PERSISTENCE_COPY_SINKS:
-            if not (artifact_seam and qualified == "shutil.copyfileobj"):
+            if not (artifact_function and qualified == "shutil.copyfileobj"):
                 violations.append(f"{path.name}:{node.lineno}:{qualified}")
             continue
         if qualified in _PERSISTENCE_CSV_FACTORIES:
             violations.append(f"{path.name}:{node.lineno}:{qualified}")
             continue
         if qualified in _PERSISTENCE_LOW_LEVEL_SINKS:
-            allowed = (artifact_seam and qualified == "os.replace") or (
-                publication_seam and qualified == "os.rename"
+            allowed = (artifact_function and qualified == "os.replace") or (
+                publication_function and qualified == "os.rename"
             )
             if not allowed:
                 violations.append(f"{path.name}:{node.lineno}:{qualified}")
             continue
         if qualified == "tempfile.NamedTemporaryFile":
-            if not artifact_seam:
+            if not artifact_function:
                 violations.append(
                     f"{path.name}:{node.lineno}:tempfile.NamedTemporaryFile"
                 )
@@ -1027,10 +1325,10 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
             "truncate",
         }:
             allowed = (
-                artifact_seam
+                artifact_function
                 and attribute in {"write", "writelines", "truncate"}
             ) or (
-                path_text.endswith("src/hephaestus/webui/server.py")
+                server_function
                 and attribute == "write"
                 and isinstance(resolved_func, ast.Attribute)
                 and _qualified_ast_name(
@@ -1075,6 +1373,7 @@ def test_studio_production_scope_has_no_direct_file_writers() -> None:
         "datasets/intent_assets.py",
         "cli.py",
         "webui/data.py",
+        "webui/evaluation_assets_frontend.py",
         "webui/server.py",
         "webui/frontend.py",
     } <= relative
@@ -1467,6 +1766,144 @@ def test_studio_production_scope_has_no_direct_file_writers() -> None:
             "getattr(builtins, 'print')('body', file=handle)",
             "builtins.print",
         ),
+        (
+            "import os\nfor emit in (os.write,):\n    emit(fd, b'body')",
+            "os.write",
+        ),
+        (
+            "import os\n"
+            "async for emit in async_iter((os.write,)):\n"
+            "    emit(fd, b'body')",
+            "os.write",
+        ),
+        (
+            "import os\n[emit(fd, b'body') for emit in (os.write,)]",
+            "os.write",
+        ),
+        (
+            "import os\n"
+            "writers = (os.write,)\n"
+            "for emit in writers:\n"
+            "    emit(fd, b'body')",
+            "os.write",
+        ),
+        ("import os\nconsumer([{'writers': (os.write,)}])", "os.write"),
+        ("import os\ncallback = os.write", "os.write"),
+        ("from os import write as callback", "os.write"),
+        ("import os\ndef writer():\n    return os.write", "os.write"),
+        (
+            "import os\n"
+            "def writer():\n"
+            "    return {'writers': [(os.write,)]}",
+            "os.write",
+        ),
+        (
+            "import os\n"
+            "def writer():\n"
+            "    return os.write\n"
+            "writer()(fd, b'body')",
+            "os.write",
+        ),
+        (
+            "import csv\nmodule = csv\ndef factory():\n    return module.writer",
+            "csv.writer",
+        ),
+        (
+            "import csv\nmodule = csv\n"
+            "for factory in (module.writer,):\n    factory(handle)",
+            "csv.writer",
+        ),
+        (
+            "import csv\nmodule = csv\n"
+            "async for factory in async_iter((module.DictWriter,)):\n"
+            "    factory(handle, fields)",
+            "csv.DictWriter",
+        ),
+        (
+            "import csv\nmodule = csv\n"
+            "[factory(handle) for factory in (module.writer,)]",
+            "csv.writer",
+        ),
+        (
+            "import csv\nmodule = csv\n"
+            "consumer([{'factories': (module.writer,)}])",
+            "csv.writer",
+        ),
+        (
+            "import builtins\nconsumer([{'writers': (builtins.print,)}])",
+            "builtins.print",
+        ),
+        (
+            "import shutil\nmodule = shutil\ndef factory():\n"
+            "    return module.copyfile",
+            "shutil.copyfile",
+        ),
+        (
+            "import tempfile\nmodule = tempfile\n"
+            "for factory in (module.NamedTemporaryFile,):\n    factory('w')",
+            "tempfile.NamedTemporaryFile",
+        ),
+        (
+            "import shutil\n"
+            "module = safe if condition else shutil\n"
+            "module.copyfile(source, destination)",
+            "shutil.copyfile",
+        ),
+        (
+            "import tempfile\n"
+            "if condition:\n    module = safe\n"
+            "else:\n    module = tempfile\n"
+            "module.NamedTemporaryFile('w')",
+            "tempfile.NamedTemporaryFile",
+        ),
+        (
+            "import csv\n"
+            "module = safe if condition else csv\n"
+            "consumer(module.writer)",
+            "csv.writer",
+        ),
+        (
+            "import shutil\n"
+            "def get_module():\n    return shutil\n"
+            "get_module().copyfile(source, destination)",
+            "shutil",
+        ),
+        (
+            "import shutil\n"
+            "for module in (safe, shutil):\n"
+            "    module.copyfile(source, destination)",
+            "shutil",
+        ),
+        (
+            "import shutil\n"
+            "[module.copyfile(source, destination) "
+            "for module in (safe, shutil)]",
+            "shutil",
+        ),
+        (
+            "import shutil\n"
+            "modules = {'copy': shutil}\n"
+            "modules['copy'].copyfile(source, destination)",
+            "shutil",
+        ),
+        (
+            "import shutil\n"
+            "holder.module = shutil\n"
+            "holder.module.copyfile(source, destination)",
+            "shutil",
+        ),
+        (
+            "import shutil\n"
+            "holder['module'] = shutil\n"
+            "holder['module'].copyfile(source, destination)",
+            "shutil",
+        ),
+        (
+            "import tempfile\n"
+            "holder.module: object = tempfile\n"
+            "holder.module.NamedTemporaryFile('w')",
+            "tempfile",
+        ),
     ],
 )
 def test_studio_writer_guard_rejects_qualified_and_aliased_forms(
@@ -1586,22 +2023,76 @@ def test_studio_writer_guard_rejects_ambiguous_exact_seam_bindings(
     [
         (
             Path("src/hephaestus/artifact_io.py"),
-            "import json, os, shutil, tempfile\n"
-            "json.dump({}, handle)\n"
-            "handle.write('body')\n"
-            "shutil.copyfileobj(source, handle)\n"
-            "tempfile.NamedTemporaryFile('wb')\n"
-            "os.replace(source, target)\n"
-            "getattr(os, 'replace')(source, target)",
+            "import os\ndef unauthorized():\n    os.replace(source, target)",
         ),
         (
             Path("src/hephaestus/evaluation_assets/publication.py"),
-            "import os\nos.rename(temporary, target)\n"
-            "getattr(os, 'rename')(temporary, target)",
+            "import os\ndef unauthorized():\n    os.rename(source, target)",
         ),
         (
             Path("src/hephaestus/webui/server.py"),
-            "self.wfile.write(body)",
+            "class Handler:\n"
+            "    def unauthorized(self):\n"
+            "        self.wfile.write(body)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "class Evil:\n"
+            "    def atomic_write_json(self):\n"
+            "        os.replace(source, target)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/publication.py"),
+            "import os\n"
+            "class Evil:\n"
+            "    def install_generation(self):\n"
+            "        os.rename(source, target)",
+        ),
+        (
+            Path("src/hephaestus/webui/server.py"),
+            "class Evil:\n"
+            "    def _send_json(self):\n"
+            "        self.wfile.write(body)",
+        ),
+    ],
+)
+def test_studio_writer_guard_rejects_writers_outside_exact_audited_functions(
+    path: Path,
+    source: str,
+) -> None:
+    """A trusted module path does not authorize a new writer function."""
+    assert _studio_writer_violations(path, source)
+
+
+@pytest.mark.parametrize(
+    ("path", "source"),
+    [
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import json, os, shutil, tempfile\n"
+            "def atomic_write_json():\n"
+            "    json.dump({}, handle)\n"
+            "    handle.write('body')\n"
+            "def atomic_copy_file():\n"
+            "    shutil.copyfileobj(source, handle)\n"
+            "def _atomic_write_binary():\n"
+            "    tempfile.NamedTemporaryFile('wb')\n"
+            "    os.replace(source, target)\n"
+            "    getattr(os, 'replace')(source, target)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/publication.py"),
+            "import os\n"
+            "def install_generation():\n"
+            "    os.rename(temporary, target)\n"
+            "    getattr(os, 'rename')(temporary, target)",
+        ),
+        (
+            Path("src/hephaestus/webui/server.py"),
+            "class _Handler:\n"
+            "    def _send_json(self):\n"
+            "        self.wfile.write(body)",
         ),
         (
             Path("src/hephaestus/webui/data.py"),
@@ -1732,6 +2223,48 @@ class _SuccessfulRubricProvider:
                 }
                 for row in payload["clusters"]
             ]
+        }
+
+
+class _SuccessfulDefaultRubricProvider(_SuccessfulRubricProvider):
+    """Credential-free stand-in with the built-in OpenAI settings profile."""
+
+    provider_name = "openai"
+
+    def __init__(self, model: str, max_output_tokens: int = 16384) -> None:
+        super().__init__()
+        self.model = model
+        self.timeout_seconds = 300
+        self.max_retries = 3
+        self.retry_backoff_seconds = 2
+        self.max_output_tokens = max_output_tokens
+        self.temperature = {
+            "status": "not_applicable",
+            "reason": "provider_does_not_use_sampling",
+        }
+        self.response_format = "json_object"
+        self.seed = {
+            "status": "not_applicable",
+            "reason": "provider_does_not_use_sampling",
+        }
+
+
+class _SuccessfulDefaultEmbeddingProvider(_SuccessfulEmbeddingProvider):
+    """Credential-free stand-in with the built-in OpenAI settings profile."""
+
+    provider_name = "openai"
+
+    def __init__(self, model: str) -> None:
+        super().__init__()
+        self.model = model
+        self.timeout_seconds = 300
+        self.max_retries = 3
+        self.retry_backoff_seconds = 2
+        self.batch_size = 128
+        self.response_format = "dense_float_vectors"
+        self.seed = {
+            "status": "not_applicable",
+            "reason": "provider_does_not_use_sampling",
         }
 
 
@@ -2465,11 +2998,16 @@ def test_injected_provider_identity_is_receipted_and_manifested_as_actual(
     )
     identity = rubric_receipt["provider_identity"]
     assert identity == {
-        "rubric": {
-            "model": "actual-rubric",
-            "provider": "injected-rubric",
-            "source": "injected",
-        }
+        "rubric": provenance_module.provider_settings(
+            rubric,
+            role="rubric",
+            identity={
+                "model": "actual-rubric",
+                "provider": "injected-rubric",
+                "source": "injected",
+            },
+            pipeline_batch_size=3,
+        )
     }
     assert rubric_receipt["provider_identity_sha256"] == canonical_sha256(identity)
     manifest = json.loads(pipeline.layout.manifest_path.read_text(encoding="utf-8"))
@@ -2502,6 +3040,56 @@ def test_injected_provider_identity_is_receipted_and_manifested_as_actual(
     assert {row["rubric_provider"] for row in inferred} == {"injected-rubric"}
 
 
+def test_mutable_resume_invalidates_from_changed_injected_provider_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Request-affecting provider settings are receipt dependencies."""
+    pipeline, rubric, embedding = _create_pipeline(tmp_path)
+    rubric.timeout_seconds = 10
+    original_run_stage = EvaluationAssetPipeline._run_stage
+
+    def fail_at_clustering(
+        instance: EvaluationAssetPipeline,
+        stage: PipelineStage,
+    ) -> dict[str, int]:
+        if stage == PipelineStage.INTENT_CLUSTERING:
+            raise RuntimeError("pause after rubric receipt")
+        return original_run_stage(instance, stage)
+
+    monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", fail_at_clustering)
+    with pytest.raises(RuntimeError, match="pause after rubric receipt"):
+        pipeline.run()
+    old_receipt = pipeline.layout.receipt_path(
+        PipelineStage.RUBRIC_EXTRACTION
+    ).read_bytes()
+
+    changed_rubric = _SuccessfulRubricProvider()
+    changed_rubric.timeout_seconds = 11
+    rerun_stages: list[PipelineStage] = []
+
+    def record_stage(
+        instance: EvaluationAssetPipeline,
+        stage: PipelineStage,
+    ) -> dict[str, int]:
+        rerun_stages.append(stage)
+        return original_run_stage(instance, stage)
+
+    monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", record_stage)
+    released = EvaluationAssetPipeline(
+        pipeline.layout,
+        rubric_provider=changed_rubric,
+        embedding_provider=embedding,
+    ).run()
+
+    assert released.status == "released"
+    assert rerun_stages[0] == PipelineStage.RUBRIC_EXTRACTION
+    assert pipeline.layout.receipt_path(
+        PipelineStage.RUBRIC_EXTRACTION
+    ).read_bytes() != old_receipt
+    assert changed_rubric.calls > 0
+
+
 def test_released_verification_reaggregates_authenticated_provider_ledgers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2515,9 +3103,11 @@ def test_released_verification_reaggregates_authenticated_provider_ledgers(
     def capture(
         provenance: Mapping[str, Any],
         ledgers: Mapping[str, Sequence[Mapping[str, Any]]],
+        *,
+        profile: str,
     ) -> None:
         seen.update({stage: [dict(row) for row in rows] for stage, rows in ledgers.items()})
-        original(provenance, ledgers)
+        original(provenance, ledgers, profile=profile)
 
     monkeypatch.setattr(
         durability_module,
@@ -2679,11 +3269,18 @@ def test_refresh_extension_accepts_complete_new_embedding_identity(
             encoding="utf-8"
         )
     )
-    assert receipt["provider_identity"]["embedding"] == {
-        "provider": "new-embedding-provider",
-        "model": "new-embedding-model",
-        "source": "injected",
-    }
+    assert receipt["provider_identity"]["embedding"] == (
+        provenance_module.provider_settings(
+            new_embedding,
+            role="embedding",
+            identity={
+                "provider": "new-embedding-provider",
+                "model": "new-embedding-model",
+                "source": "injected",
+            },
+            pipeline_batch_size=child.load_config().batch_size,
+        )
+    )
 
 
 @pytest.mark.parametrize(
@@ -3243,7 +3840,9 @@ def test_pipeline_writes_receipt_commit_markers_and_releases(tmp_path: Path) -> 
         assert receipt_path.is_file()
         assert stage_state.receipt_sha256 == file_sha256(receipt_path)
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-        assert receipt["schema_version"] == "fapo-stage-receipt-v1"
+        assert receipt["schema_version"] == (
+            durability_module.STAGE_RECEIPT_SCHEMA_VERSION
+        )
         assert receipt["stage"] == stage.value
         assert receipt["stage_index"] == index
         assert receipt["resolved_config_sha256"]
@@ -3570,7 +4169,7 @@ def test_released_verification_authenticates_config_and_terminal_state(
 ) -> None:
     """A release binds its persisted config, identity, stage set, and count shape."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    released = pipeline.run()
     layout = pipeline.layout
     if corruption.startswith("config_"):
         payload = json.loads(layout.config_path.read_text(encoding="utf-8"))
@@ -3612,7 +4211,7 @@ def test_released_verification_authenticates_config_and_terminal_state(
     before = _authority_bytes(layout)
 
     with pytest.raises(EvaluationAssetIntegrityError):
-        verify_released_asset(layout, layout.load_state())
+        verify_released_asset(layout, released)
 
     assert _authority_bytes(layout) == before
 
@@ -6992,7 +7591,11 @@ def test_final_release_verification_validates_every_stage_provenance(
     monkeypatch.setattr(durability_module, "validate_stage_provenance", record)
     verify_released_asset(pipeline.layout, released)
 
-    assert {stage for stage, profile in calls if profile == "native"} == {
+    assert {
+        stage
+        for stage, profile in calls
+        if profile == provenance_module.HISTORICAL_PROVENANCE_PROFILE_V2
+    } == {
         stage.value for stage in PipelineStage
     }
 
@@ -7017,7 +7620,12 @@ def test_legacy_adoption_candidate_validates_every_stage_provenance(
     adopted = layout.adopt_legacy()
 
     assert adopted.status == "released"
-    assert {stage for stage, profile in calls if profile == "legacy"} == {
+    assert {
+        stage
+        for stage, profile in calls
+        if profile
+        == provenance_module.HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2
+    } == {
         stage.value for stage in PipelineStage
     }
 
@@ -7282,6 +7890,361 @@ def test_reanchored_build_handoff_corruption_fails_before_any_resume_write(
     assert _authority_bytes(layout) == before
 
 
+@pytest.mark.parametrize("receipt_fact", ["provider", "source"])
+def test_historical_stage_receipt_facts_are_bound_to_build_provenance(
+    tmp_path: Path,
+    receipt_fact: str,
+) -> None:
+    """A self-consistent receipt cannot contradict captured build/stage facts."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    stage = PipelineStage.RUBRIC_EXTRACTION
+    receipt = json.loads(layout.receipt_path(stage).read_text(encoding="utf-8"))
+    if receipt_fact == "provider":
+        receipt["provider_identity"]["rubric"]["model"] = "substituted-model"
+        receipt["provider_identity_sha256"] = canonical_sha256(
+            receipt["provider_identity"]
+        )
+    else:
+        receipt["code"]["members"][0]["sha256"] = "0" * 64
+        receipt["code"]["fingerprint"] = canonical_sha256(
+            receipt["code"]["members"]
+        )
+        receipt["code_sha256"] = canonical_sha256(receipt["code"])
+    provenance = json.loads(
+        layout.build_provenance_path.read_text(encoding="utf-8")
+    )
+
+    with pytest.raises(ValueError, match="receipt.*build"):
+        durability_module._validate_stage_provenance_evidence(
+            layout,
+            stage,
+            receipt,
+            layout.load_config(),
+            release_provenance=provenance,
+            historical_evidence=True,
+        )
+
+
+def test_stage_and_build_historical_profiles_cannot_be_hybridized(
+    tmp_path: Path,
+) -> None:
+    """Every native stage record uses the release build's schema generation."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    stage = PipelineStage.RAW_INPUTS
+    receipt = json.loads(layout.receipt_path(stage).read_text(encoding="utf-8"))
+    provenance = json.loads(
+        layout.build_provenance_path.read_text(encoding="utf-8")
+    )
+    stage_payload = json.loads(
+        layout.stage_provenance_path(stage).read_text(encoding="utf-8")
+    )
+    stage_payload["schema_version"] = "fapo-stage-provenance-v1"
+
+    with pytest.raises(ValueError, match="provenance profiles differ"):
+        durability_module._validate_stage_provenance_evidence(
+            layout,
+            stage,
+            receipt,
+            layout.load_config(),
+            artifact_overrides={
+                layout.stage_provenance_path(stage): json.dumps(
+                    stage_payload
+                ).encode("utf-8")
+            },
+            release_provenance=provenance,
+            historical_evidence=True,
+        )
+
+
+def test_receipt_and_stage_historical_profiles_cannot_be_hybridized(
+    tmp_path: Path,
+) -> None:
+    """A release cannot combine a v1 receipt with v2 stage evidence."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    released = pipeline.run()
+    layout = pipeline.layout
+    stage = PipelineStage.RUBRIC_EXTRACTION
+    receipt = json.loads(layout.receipt_path(stage).read_text(encoding="utf-8"))
+    receipt["schema_version"] = "fapo-stage-receipt-v1"
+    artifact_io.atomic_write_json(layout.receipt_path(stage), receipt)
+    next(
+        item for item in released.stages if item.stage == stage.value
+    ).receipt_sha256 = file_sha256(layout.receipt_path(stage))
+
+    with pytest.raises(EvaluationAssetIntegrityError, match="stage provenance"):
+        verify_stage_receipt(
+            layout,
+            released,
+            stage,
+            layout.load_config(),
+            prompt_values={},
+            compare_current_dependencies=False,
+        )
+
+
+def _write_ambiguous_build_provenance(
+    layout: EvaluationAssetLayout,
+    corruption: str,
+) -> None:
+    path = layout.build_provenance_path
+    payload = path.read_text(encoding="utf-8")
+    if corruption == "duplicate":
+        payload = payload.replace(
+            '"schema_version":',
+            '"schema_version":"sk-build-canary","schema_version":',
+            1,
+        )
+    else:
+        assert corruption == "nonfinite"
+        payload = payload.replace(
+            '"audit":',
+            '"audit":{"secret":NaN},"audit":',
+            1,
+        )
+    artifact_io.atomic_write_text(path, payload)
+
+
+@pytest.mark.parametrize("corruption", ["duplicate", "nonfinite"])
+def test_completed_candidate_strictly_parses_build_provenance_before_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    corruption: str,
+) -> None:
+    """Ambiguous build bytes cannot pass a completed-handoff preflight."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+
+    def inject(name: str) -> None:
+        if name == "after_stage_8_receipt_state_complete":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(pipeline_module, "_publication_fault_point", inject)
+    with pytest.raises(_InjectedFault):
+        pipeline.run()
+    layout = pipeline.layout
+    _write_ambiguous_build_provenance(layout, corruption)
+    receipt_path = layout.receipt_path(PipelineStage.DATASET_SPLITS)
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    build_hash = file_sha256(layout.build_provenance_path)
+    build_relative = layout.build_provenance_path.relative_to(layout.root).as_posix()
+    output = next(row for row in receipt["outputs"] if row["path"] == build_relative)
+    output["sha256"] = build_hash
+    output["bytes"] = layout.build_provenance_path.stat().st_size
+    receipt["build_provenance_sha256"] = build_hash
+    artifact_io.atomic_write_json(receipt_path, receipt)
+    state = layout.load_state()
+    next(
+        item
+        for item in state.stages
+        if item.stage == PipelineStage.DATASET_SPLITS.value
+    ).receipt_sha256 = file_sha256(receipt_path)
+    layout.save_state(state)
+    before = _authority_bytes(layout)
+    monkeypatch.setattr(pipeline_module, "_publication_fault_point", lambda name: None)
+
+    with pytest.raises(EvaluationAssetIntegrityError) as caught:
+        EvaluationAssetPipeline(layout).run()
+
+    assert caught.value.__cause__ is not None
+    assert "control JSON" in str(caught.value.__cause__)
+    assert _authority_bytes(layout) == before
+
+
+@pytest.mark.parametrize("corruption", ["duplicate", "nonfinite"])
+def test_final_publication_links_strictly_parse_build_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    corruption: str,
+) -> None:
+    """Final release verification rejects ambiguous authenticated build bytes."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    released = pipeline.run()
+    layout = pipeline.layout
+    receipts = durability_module.verify_receipt_chain(layout, released)
+    journal = durability_module.validate_recovery_journal(
+        layout,
+        _read_jsonl(layout.recovery_journal_path),
+    )
+    snapshot = durability_module.resolve_evaluation_asset_release(
+        layout.published_datasets,
+        expected_tenant_id=layout.tenant_id,
+        expected_asset_id=layout.asset_id,
+        trusted_root=layout.tenant_root,
+    )
+    _write_ambiguous_build_provenance(layout, corruption)
+    monkeypatch.setattr(
+        durability_module,
+        "resolve_evaluation_asset_release",
+        lambda *args, **kwargs: replace(
+            snapshot,
+            build_provenance_sha256=file_sha256(layout.build_provenance_path),
+        ),
+    )
+    before = _authority_bytes(layout)
+
+    with pytest.raises(ValueError, match="control JSON"):
+        durability_module._verify_release_publication_links(
+            layout,
+            released,
+            receipts,
+            journal,
+            layout.load_config(),
+        )
+
+    assert _authority_bytes(layout) == before
+
+
+@pytest.mark.parametrize("build_fact", ["configuration", "input"])
+def test_build_provenance_is_bound_to_persisted_release_inputs(
+    tmp_path: Path,
+    build_fact: str,
+) -> None:
+    """Self-rehashed build claims must equal config and Stage 1 authority."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    released = pipeline.run()
+    layout = pipeline.layout
+    receipts = durability_module.verify_receipt_chain(layout, released)
+    provenance = json.loads(
+        layout.build_provenance_path.read_text(encoding="utf-8")
+    )
+    if build_fact == "configuration":
+        values = provenance["identity"]["resolved_configuration"]["values"]
+        values["cluster_count"] += 1
+        provenance["identity"]["resolved_configuration"]["sha256"] = (
+            canonical_sha256(values)
+        )
+    else:
+        provenance["identity"]["inputs"]["labeled_feedback"]["rows"] += 1
+    provenance["identity_sha256"] = canonical_sha256(provenance["identity"])
+
+    with pytest.raises(ValueError, match="build provenance.*authority"):
+        durability_module._verify_build_provenance_authority_links(
+            layout,
+            provenance,
+            receipts,
+            layout.load_config(),
+        )
+
+
+def test_build_input_rows_are_derived_from_strict_source_jsonl(
+    tmp_path: Path,
+) -> None:
+    """Matching manifest/build claims cannot overstate actual source rows."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    released = pipeline.run()
+    layout = pipeline.layout
+    receipts = durability_module.verify_receipt_chain(layout, released)
+    input_manifest_path = layout.artifact_path(
+        PipelineStage.RAW_INPUTS,
+        "input_manifest.json",
+    )
+    input_manifest = json.loads(input_manifest_path.read_text(encoding="utf-8"))
+    input_manifest["inputs"]["labeled_feedback"]["rows"] = 8
+    artifact_io.atomic_write_json(input_manifest_path, input_manifest)
+    provenance = json.loads(
+        layout.build_provenance_path.read_text(encoding="utf-8")
+    )
+    provenance["identity"]["inputs"]["labeled_feedback"]["rows"] = 8
+    provenance["identity_sha256"] = canonical_sha256(provenance["identity"])
+
+    with pytest.raises(ValueError, match="build provenance.*authority"):
+        durability_module._verify_build_provenance_authority_links(
+            layout,
+            provenance,
+            receipts,
+            layout.load_config(),
+        )
+
+
+@pytest.mark.parametrize("blank_position", ["leading", "interior"])
+def test_release_input_row_authority_preserves_contract_blank_line_semantics(
+    tmp_path: Path,
+    blank_position: str,
+) -> None:
+    """Release row cross-links ignore blank physical input lines like Stage 1."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    layout = pipeline.layout
+    if blank_position == "leading":
+        artifact_io.atomic_write_text(
+            layout.feedback_path,
+            "\n" + layout.feedback_path.read_text(encoding="utf-8"),
+        )
+    else:
+        first = json.loads(layout.unlabeled_path.read_text(encoding="utf-8"))
+        second = {**first, "record_id": "unlabeled-2", "group_id": "group-2"}
+        artifact_io.atomic_write_text(
+            layout.unlabeled_path,
+            json.dumps(first) + "\n\n" + json.dumps(second) + "\n",
+        )
+
+    released = pipeline.run()
+
+    assert released.status == "released"
+    verify_released_asset(layout, released)
+
+
+def test_extension_build_lineage_is_bound_to_local_lineage_authority(
+    tmp_path: Path,
+) -> None:
+    """Extension build hashes cannot contradict validated local lineage files."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    parent = pipeline.layout
+    child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
+    child.initialize_extension(
+        parent,
+        additional_feedback=_write_additional_feedback(parent.tenants_root),
+        additional_unlabeled=None,
+        clustering_mode="keep",
+    )
+    released = EvaluationAssetPipeline(
+        child,
+        rubric_provider=_SuccessfulRubricProvider(),
+        embedding_provider=_SuccessfulEmbeddingProvider(),
+    ).run()
+    receipts = durability_module.verify_receipt_chain(child, released)
+    provenance = json.loads(
+        child.build_provenance_path.read_text(encoding="utf-8")
+    )
+    dependencies = provenance["identity"]["lineage"]["file_dependencies"]
+    dependencies["reuse_manifest_sha256"] = "0" * 64
+    provenance["audit"]["lineage_files"]["reuse_manifest_sha256"] = "0" * 64
+    provenance["identity_sha256"] = canonical_sha256(provenance["identity"])
+
+    with pytest.raises(ValueError, match="build provenance.*authority"):
+        durability_module._verify_build_provenance_authority_links(
+            child,
+            provenance,
+            receipts,
+            child.load_config(),
+        )
+
+
+@pytest.mark.parametrize("lineage_path", ["lineage", "reuse"])
+def test_native_release_rejects_dangling_lineage_authority_symlinks(
+    tmp_path: Path,
+    lineage_path: str,
+) -> None:
+    """A dangling local lineage marker cannot change meaning after release."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    released = pipeline.run()
+    path = (
+        pipeline.layout.lineage_path
+        if lineage_path == "lineage"
+        else pipeline.layout.reuse_manifest_path
+    )
+    path.symlink_to(tmp_path / "absent-lineage-target.json")
+
+    with pytest.raises(
+        EvaluationAssetIntegrityError,
+        match="released control evidence",
+    ):
+        verify_released_asset(pipeline.layout, released)
+
+
 _COMPLETED_STATE_INTEGER_FIELDS = (
     "mutation_sequence",
     "candidate_guidelines",
@@ -7349,6 +8312,60 @@ def completed_handoff_template(
             pipeline.run()
     finally:
         workspace_module._fault_point = original_fault_point
+    return pipeline.layout.tenants_root
+
+
+@pytest.fixture(scope="module")
+def default_provider_completed_handoff_template(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Path:
+    """Create a credential-free handoff recorded as built-in default providers."""
+    template_root = tmp_path_factory.mktemp("default-provider-handoff")
+    tenants_root = template_root / "tenants"
+    feedback, unlabeled = _write_input_pair(tenants_root)
+    patch = pytest.MonkeyPatch()
+    patch.setattr(
+        pipeline_module,
+        "OpenAIRubricProvider",
+        _SuccessfulDefaultRubricProvider,
+    )
+    patch.setattr(
+        pipeline_module,
+        "OpenAIEmbeddingProvider",
+        _SuccessfulDefaultEmbeddingProvider,
+    )
+    patch.setattr(
+        rubric_provider_module,
+        "OpenAIRubricProvider",
+        _SuccessfulDefaultRubricProvider,
+    )
+    patch.setattr(
+        embedding_provider_module,
+        "OpenAIEmbeddingProvider",
+        _SuccessfulDefaultEmbeddingProvider,
+    )
+    pipeline = EvaluationAssetPipeline.create(
+        tenants_root,
+        EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
+        feedback,
+        unlabeled,
+    )
+    original_fault_point = workspace_module._fault_point
+
+    def inject(name: str) -> None:
+        if name == "after_stage_8_receipt_state_complete":
+            raise _InjectedFault(name)
+
+    workspace_module._fault_point = inject
+    try:
+        with pytest.raises(
+            _InjectedFault,
+            match="after_stage_8_receipt_state_complete",
+        ):
+            pipeline.run()
+    finally:
+        workspace_module._fault_point = original_fault_point
+        patch.undo()
     return pipeline.layout.tenants_root
 
 
@@ -7562,6 +8579,275 @@ def test_completed_stage_authority_downgrade_fails_without_writes(
         ).run()
 
     assert _authority_bytes(layout) == before
+
+
+@pytest.mark.parametrize(
+    "current_stage",
+    [PipelineStage.DATASET_SPLITS.value, None],
+    ids=["stage-8-handoff", "post-stage-event-handoff"],
+)
+@pytest.mark.parametrize(
+    "schema_damage",
+    ["removed", "explicit-v1"],
+)
+@pytest.mark.parametrize("missing_stage_receipt", [False, True])
+@pytest.mark.parametrize("downgraded_status", ["running", "completed"])
+@pytest.mark.parametrize(
+    "config_updates",
+    [None, {}, {"match_threshold": 0.2}],
+    ids=["no-update", "empty-update", "nonempty-update"],
+)
+def test_native_handoff_schema_downgrade_fails_without_writes_or_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completed_handoff_template: Path,
+    current_stage: str | None,
+    schema_damage: str,
+    missing_stage_receipt: bool,
+    downgraded_status: str,
+    config_updates: dict[str, Any] | None,
+) -> None:
+    """Non-v2 control cannot reclassify receipt-backed native authority."""
+    tenants_root = tmp_path / "tenants"
+    shutil.copytree(completed_handoff_template, tenants_root)
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    payload = json.loads(layout.state_path.read_text(encoding="utf-8"))
+    payload["current_stage"] = current_stage
+    payload["status"] = downgraded_status
+    if schema_damage == "removed":
+        del payload["schema_version"]
+    else:
+        assert schema_damage == "explicit-v1"
+        payload["schema_version"] = "fapo-evaluation-asset-state-v1"
+    if missing_stage_receipt:
+        del payload["stages"][-1]["receipt_sha256"]
+    artifact_io.atomic_write_json(layout.state_path, payload)
+    before = _authority_bytes(layout)
+    rubric = _SuccessfulRubricProvider()
+    embedding = _SuccessfulEmbeddingProvider()
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("downgraded native authority reran pipeline work")
+
+    rubric.generate_json = forbidden  # type: ignore[method-assign]
+    embedding.embed_texts = forbidden  # type: ignore[method-assign]
+    monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", forbidden)
+
+    with pytest.raises(
+        EvaluationAssetIntegrityError,
+        match="completed release candidate control",
+    ):
+        EvaluationAssetPipeline(
+            layout,
+            rubric_provider=rubric,
+            embedding_provider=embedding,
+        ).run(config_updates=config_updates)
+
+    assert _authority_bytes(layout) == before
+    assert rubric.calls == 0
+    assert embedding.calls == 0
+
+
+@pytest.mark.parametrize("schema_mode", ["removed", "explicit-v1"])
+@pytest.mark.parametrize(
+    "legacy_event",
+    [None, "stage_completed", "pipeline_completed"],
+    ids=["no-event", "historical-stage-event", "historical-completion-event"],
+)
+def test_receipt_free_legacy_status_checkpoint_remains_mutable(
+    tmp_path: Path,
+    schema_mode: str,
+    legacy_event: str | None,
+) -> None:
+    """A genuine receipt-free legacy prefix may still resume into v2."""
+    pipeline, rubric, embedding = _create_pipeline(tmp_path)
+    layout = pipeline.layout
+    payload = json.loads(layout.state_path.read_text(encoding="utf-8"))
+    payload.update(
+        status="running",
+        current_stage=PipelineStage.RAW_INPUTS.value,
+        error=None,
+    )
+    if schema_mode == "removed":
+        del payload["schema_version"]
+    else:
+        payload["schema_version"] = "fapo-evaluation-asset-state-v1"
+    artifact_io.atomic_write_json(layout.state_path, payload)
+    if legacy_event is not None:
+        artifact_io.atomic_append_jsonl(
+            layout.events_path,
+            {"event": legacy_event},
+        )
+
+    released = EvaluationAssetPipeline(
+        layout,
+        rubric_provider=rubric,
+        embedding_provider=embedding,
+    ).run()
+
+    assert released.status == "released"
+    assert released.schema_version == STATE_SCHEMA_VERSION
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    ["stage-provenance", "provider-ledger", "release-event", "event-node"],
+)
+def test_legacy_completed_sentinel_rejects_task4_native_evidence(
+    tmp_path: Path,
+    evidence: str,
+) -> None:
+    """Task 4 evidence cannot hide behind the pre-v2 completed sentinel."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+    if evidence == "stage-provenance":
+        artifact_io.atomic_write_json(
+            layout.stage_provenance_path(PipelineStage.RAW_INPUTS),
+            {},
+        )
+    elif evidence == "provider-ledger":
+        artifact_io.atomic_write_jsonl(
+            layout.artifact_path(
+                PipelineStage.RUBRIC_EXTRACTION,
+                "provider_calls.jsonl",
+            ),
+            [],
+        )
+    elif evidence == "release-event":
+        artifact_io.atomic_append_jsonl(
+            layout.events_path,
+            {"event": "pipeline_released"},
+        )
+    else:
+        assert evidence == "event-node"
+        layout.events_path.unlink()
+        layout.events_path.mkdir()
+    before = _authority_bytes(layout)
+
+    with pytest.raises(
+        EvaluationAssetIntegrityError,
+        match="completed release candidate control",
+    ):
+        durability_module.load_completed_release_handoff_control(layout)
+
+    assert _authority_bytes(layout) == before
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        "state-receipt",
+        "receipt-file",
+        "stage-provenance",
+        "provider-ledger",
+        "build-provenance",
+        "journal",
+        "pointer",
+        "generation-manifest",
+        "dataset-manifest",
+        "asset-manifest",
+        "generations-directory",
+        "publication-event",
+        "event-node",
+    ],
+)
+def test_non_v2_native_authority_detector_is_read_only_and_complete(
+    tmp_path: Path,
+    evidence: str,
+) -> None:
+    """Every native authority family prevents a non-v2 mutable fallback."""
+    layout = EvaluationAssetLayout(tmp_path / "tenants", "tenant_a", "v1")
+    layout.root.mkdir(parents=True)
+    raw_state: dict[str, Any] = {"stages": []}
+    if evidence == "state-receipt":
+        raw_state["stages"] = [{"receipt_sha256": "0" * 64}]
+    elif evidence == "receipt-file":
+        artifact_io.atomic_write_json(
+            layout.receipt_path(PipelineStage.RAW_INPUTS),
+            {},
+        )
+    elif evidence == "stage-provenance":
+        artifact_io.atomic_write_json(
+            layout.stage_provenance_path(PipelineStage.RAW_INPUTS),
+            {},
+        )
+    elif evidence == "provider-ledger":
+        artifact_io.atomic_write_jsonl(
+            layout.artifact_path(
+                PipelineStage.RUBRIC_EXTRACTION,
+                "provider_calls.jsonl",
+            ),
+            [],
+        )
+    elif evidence == "build-provenance":
+        artifact_io.atomic_write_json(layout.build_provenance_path, {})
+    elif evidence == "journal":
+        artifact_io.atomic_write_jsonl(layout.recovery_journal_path, [{}])
+    elif evidence == "pointer":
+        artifact_io.atomic_write_json(layout.release_pointer_path, {})
+    elif evidence == "generation-manifest":
+        artifact_io.atomic_write_json(
+            layout.artifact_path(
+                PipelineStage.DATASET_SPLITS,
+                "generation_manifest.json",
+            ),
+            {},
+        )
+    elif evidence == "dataset-manifest":
+        artifact_io.atomic_write_json(
+            layout.artifact_path(
+                PipelineStage.DATASET_SPLITS,
+                "dataset_manifest.json",
+            ),
+            {},
+        )
+    elif evidence == "asset-manifest":
+        artifact_io.atomic_write_json(layout.manifest_path, {})
+    elif evidence == "generations-directory":
+        layout.generations_root.mkdir(parents=True)
+    elif evidence == "publication-event":
+        assert evidence == "publication-event"
+        artifact_io.atomic_write_jsonl(
+            layout.events_path,
+            [{"event": "pipeline_released"}],
+        )
+    else:
+        assert evidence == "event-node"
+        layout.events_path.mkdir()
+    before = _tree_bytes(layout.tenant_root)
+
+    assert durability_module._has_native_authority_evidence(layout, raw_state)
+    assert _tree_bytes(layout.tenant_root) == before
+
+
+def test_non_v2_provider_ledger_detection_uses_frozen_stage_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Current provider-role drift cannot hide a historical Task 4 ledger."""
+    layout = EvaluationAssetLayout(tmp_path / "tenants", "tenant_a", "v1")
+    artifact_io.atomic_write_jsonl(
+        layout.artifact_path(
+            PipelineStage.RUBRIC_EXTRACTION,
+            "provider_calls.jsonl",
+        ),
+        [],
+    )
+    monkeypatch.setattr(
+        durability_module,
+        "STAGE_SPECIFICATIONS",
+        {
+            stage: replace(specification, provider_roles=())
+            for stage, specification in STAGE_SPECIFICATIONS.items()
+        },
+    )
+
+    assert durability_module._has_native_authority_evidence(
+        layout,
+        {"stages": []},
+    )
 
 
 @pytest.mark.parametrize("replacement", [True, 1.0])
@@ -7910,6 +9196,242 @@ def test_completed_handoff_publishes_captured_generation_after_dependency_drift(
     assert released.status == "released"
     assert rubric.calls == 0
     assert embedding.calls == 0
+    assert receipt_path.read_bytes() == receipt_before
+    assert _tree_bytes(layout.generations_root / generation_id) == generation_before
+    release_rows = [
+        row
+        for row in _read_jsonl(layout.recovery_journal_path)
+        if row.get("kind") == "release_publication"
+    ]
+    assert [row["phase"] for row in release_rows] == ["prepared", "committed"]
+    release_events = [
+        row
+        for row in _read_jsonl(layout.events_path)
+        if row.get("event") == "pipeline_released"
+    ]
+    assert len(release_events) == 1
+    assert released.last_operation_id == release_rows[0]["operation_id"]
+    assert release_events[0]["operation_id"] == released.last_operation_id
+    verify_released_asset(layout, released)
+
+
+@pytest.mark.parametrize("release_kind", ["native", "adopted"])
+def test_released_restart_uses_only_frozen_state_profiles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    release_kind: str,
+) -> None:
+    """Current labels cannot strand native or adopted persisted releases."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    if release_kind == "adopted":
+        _downgrade_to_legacy_completed(layout)
+        layout.adopt_legacy()
+    labels = dict(evaluation_asset_models.STAGE_LABELS)
+    labels[PipelineStage.RAW_INPUTS] = "Current deployment label"
+    monkeypatch.setattr(evaluation_asset_models, "STAGE_LABELS", labels)
+    fresh_layout = EvaluationAssetLayout(
+        layout.tenants_root,
+        layout.tenant_id,
+        layout.asset_id,
+    )
+
+    released = fresh_layout.load_state()
+
+    assert next(
+        item
+        for item in released.stages
+        if item.stage == PipelineStage.RAW_INPUTS.value
+    ).label == "Validate raw inputs"
+    verify_released_asset(fresh_layout, released)
+    with pytest.raises(EvaluationAssetImmutableError):
+        EvaluationAssetPipeline(fresh_layout).run()
+
+
+@pytest.mark.parametrize(
+    "current_stage",
+    [PipelineStage.DATASET_SPLITS.value, None],
+    ids=["stage-8-handoff", "post-stage-event-handoff"],
+)
+@pytest.mark.parametrize(
+    "registry_drift",
+    [
+        "prompt-and-revision",
+        "source-inventory",
+        "algorithm-revision",
+        "default-provider-absent",
+        "default-provider-settings",
+        "stage-specification",
+        "state-registry",
+        "receipt-schema",
+        "provenance-schema",
+    ],
+)
+@pytest.mark.parametrize(
+    "config_updates",
+    [None, {}],
+    ids=["no-update-argument", "empty-update-map"],
+)
+def test_default_provider_handoff_uses_only_versioned_historical_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    default_provider_completed_handoff_template: Path,
+    current_stage: str | None,
+    registry_drift: str,
+    config_updates: dict[str, Any] | None,
+) -> None:
+    """Current registries/providers cannot strand captured v1 provenance."""
+    tenants_root = tmp_path / "tenants"
+    shutil.copytree(default_provider_completed_handoff_template, tenants_root)
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    state_payload = json.loads(layout.state_path.read_text(encoding="utf-8"))
+    state_payload["current_stage"] = current_stage
+    artifact_io.atomic_write_json(layout.state_path, state_payload)
+    receipt_path = layout.receipt_path(PipelineStage.DATASET_SPLITS)
+    receipt_before = receipt_path.read_bytes()
+    generation_manifest = json.loads(
+        layout.artifact_path(
+            PipelineStage.DATASET_SPLITS,
+            "generation_manifest.json",
+        ).read_text(encoding="utf-8")
+    )
+    generation_id = generation_manifest["generation_id"]
+    generation_before = _tree_bytes(layout.generations_root / generation_id)
+    constructor_calls = {"rubric": 0, "embedding": 0}
+
+    def current_rubric(
+        model: str,
+        max_output_tokens: int = 16384,
+    ) -> _SuccessfulDefaultRubricProvider:
+        constructor_calls["rubric"] += 1
+        if registry_drift == "default-provider-absent":
+            raise RuntimeError("current rubric provider is unavailable")
+        provider = _SuccessfulDefaultRubricProvider(model, max_output_tokens)
+        if registry_drift == "default-provider-settings":
+            provider.timeout_seconds += 1
+        return provider
+
+    def current_embedding(model: str) -> _SuccessfulDefaultEmbeddingProvider:
+        constructor_calls["embedding"] += 1
+        if registry_drift == "default-provider-absent":
+            raise RuntimeError("current embedding provider is unavailable")
+        provider = _SuccessfulDefaultEmbeddingProvider(model)
+        if registry_drift == "default-provider-settings":
+            provider.batch_size += 1
+        return provider
+
+    for module in (pipeline_module, rubric_provider_module):
+        monkeypatch.setattr(module, "OpenAIRubricProvider", current_rubric)
+    for module in (pipeline_module, embedding_provider_module):
+        monkeypatch.setattr(module, "OpenAIEmbeddingProvider", current_embedding)
+
+    if registry_drift == "prompt-and-revision":
+        revisions = dict(provenance_module.PROMPT_REVISIONS)
+        revisions["evidence_extraction"] = "v2"
+        monkeypatch.setattr(provenance_module, "PROMPT_REVISIONS", revisions)
+        monkeypatch.setattr(durability_module, "PROMPT_REVISIONS", revisions)
+        prompts = {
+            stage: dict(values)
+            for stage, values in pipeline_module.STAGE_PROMPTS.items()
+        }
+        prompts[PipelineStage.RUBRIC_EXTRACTION][
+            "evidence_extraction"
+        ] += "\nCurrent deployment prompt revision."
+        monkeypatch.setattr(pipeline_module, "STAGE_PROMPTS", prompts)
+    elif registry_drift == "source-inventory":
+        monkeypatch.setattr(
+            provenance_module,
+            "SOURCE_FIXED_MEMBERS",
+            (*provenance_module.SOURCE_FIXED_MEMBERS, "new-source-member.py"),
+        )
+    elif registry_drift == "algorithm-revision":
+        current_inventory = provenance_module.build_algorithm_inventory
+
+        def drifted_inventory(
+            config: Mapping[str, Any],
+            *,
+            extension: bool,
+        ) -> dict[str, Any]:
+            inventory = current_inventory(config, extension=extension)
+            inventory["raw_inputs"] = "fapo-evaluation-input-v2"
+            return inventory
+
+        monkeypatch.setattr(
+            provenance_module,
+            "build_algorithm_inventory",
+            drifted_inventory,
+        )
+        monkeypatch.setattr(
+            durability_module,
+            "build_algorithm_inventory",
+            drifted_inventory,
+        )
+    elif registry_drift == "stage-specification":
+        current_specifications = dict(durability_module.STAGE_SPECIFICATIONS)
+        current_specifications[PipelineStage.RUBRIC_EXTRACTION] = replace(
+            current_specifications[PipelineStage.RUBRIC_EXTRACTION],
+            provider_roles=(),
+        )
+        monkeypatch.setattr(
+            durability_module,
+            "STAGE_SPECIFICATIONS",
+            current_specifications,
+        )
+    elif registry_drift == "state-registry":
+        labels = dict(evaluation_asset_models.STAGE_LABELS)
+        labels[PipelineStage.RAW_INPUTS] = "Current deployment label"
+        count_keys = dict(durability_module.STAGE_COUNT_KEYS)
+        count_keys[PipelineStage.RAW_INPUTS] = (
+            *count_keys[PipelineStage.RAW_INPUTS],
+            "future_count",
+        )
+        monkeypatch.setattr(evaluation_asset_models, "STAGE_LABELS", labels)
+        monkeypatch.setattr(durability_module, "STAGE_COUNT_KEYS", count_keys)
+    elif registry_drift == "receipt-schema":
+        monkeypatch.setattr(
+            durability_module,
+            "STAGE_RECEIPT_SCHEMA_VERSION",
+            "fapo-stage-receipt-v3",
+        )
+        monkeypatch.setattr(
+            durability_module,
+            "_STAGE_RECEIPT_FIELDS",
+            {*durability_module._STAGE_RECEIPT_FIELDS, "future_field"},
+        )
+    elif registry_drift == "provenance-schema":
+        monkeypatch.setattr(
+            provenance_module,
+            "PROVIDER_CALL_SCHEMA_VERSION",
+            "fapo-provider-call-v3",
+        )
+        monkeypatch.setattr(
+            provenance_module,
+            "STAGE_PROVENANCE_SCHEMA_VERSION",
+            "fapo-stage-provenance-v3",
+        )
+        monkeypatch.setattr(
+            provenance_module,
+            "BUILD_PROVENANCE_SCHEMA_VERSION",
+            "fapo-evaluation-build-provenance-v3",
+        )
+        monkeypatch.setattr(
+            provenance_module,
+            "BUILD_IDENTITY_SCHEMA_VERSION",
+            "fapo-evaluation-build-identity-v3",
+        )
+
+    def forbidden_stage(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("historical handoff reran a completed stage")
+
+    monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", forbidden_stage)
+
+    released = EvaluationAssetPipeline(layout).run(
+        config_updates=config_updates
+    )
+
+    assert released.status == "released"
+    assert constructor_calls == {"rubric": 0, "embedding": 0}
     assert receipt_path.read_bytes() == receipt_before
     assert _tree_bytes(layout.generations_root / generation_id) == generation_before
     release_rows = [
@@ -9204,6 +10726,8 @@ def _downgrade_to_legacy_completed(layout: EvaluationAssetLayout) -> None:
     workspace_module.atomic_write_json(layout.state_path, state)
     for stage in PipelineStage:
         layout.receipt_path(stage).unlink()
+        layout.stage_provenance_path(stage).unlink(missing_ok=True)
+        layout.artifact_path(stage, "provider_calls.jsonl").unlink(missing_ok=True)
     layout.recovery_journal_path.unlink(missing_ok=True)
     layout.release_pointer_path.unlink(missing_ok=True)
     layout.build_provenance_path.unlink(missing_ok=True)
@@ -9211,6 +10735,14 @@ def _downgrade_to_legacy_completed(layout: EvaluationAssetLayout) -> None:
         PipelineStage.DATASET_SPLITS,
         "generation_manifest.json",
     ).unlink(missing_ok=True)
+    artifact_io.atomic_write_jsonl(
+        layout.events_path,
+        [
+            event
+            for event in _read_jsonl(layout.events_path)
+            if event.get("event") != "pipeline_released"
+        ],
+    )
     if layout.generations_root.exists():
         shutil.rmtree(layout.generations_root)
     published_files = {}
