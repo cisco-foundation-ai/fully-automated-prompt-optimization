@@ -249,6 +249,10 @@ operations also authenticate writer chronology through mutation identity,
 configuration history, and monotonic event prefixes while allowing ordinary
 stage events between mutations. A committed legacy adoption is terminal and
 must retain its exact target config, state, receipts, and audit prefixes.
+When no operation remains outstanding, a final committed configuration revision
+or checkpoint rebuild must retain its exact target configuration and complete
+target configuration history. Its state and event log may continue through
+ordinary pipeline lifecycle and stage progress after the commit.
 Standalone candidate and released verification use this same complete journal
 validator. Pre-WAL history compatibility comes only from the final validated
 adoption transaction whose target hashes match the semantically replayed

@@ -161,7 +161,11 @@ prior target mutation/config identity and audit chronology; ordinary pipeline
 stage events may extend the event prefix between mutations. A committed legacy
 adoption is the terminal operation and requires exact target config/state,
 every target receipt, exact audit prefixes, and its commit. Standalone candidate
-and persisted release verification call this same complete validator. Legacy
+and persisted release verification call this same complete validator. With no
+outstanding operation, a final committed configuration revision or checkpoint
+rebuild requires its exact target configuration and complete target
+configuration history; state and events may continue through normal pipeline
+lifecycle and stage progress after commit. Legacy
 history compatibility is authorized only by the final validated adoption
 prepare—committed or the one legitimate outstanding crash state—whose target
 receipt hashes match the verified receipts. The authenticated adoption

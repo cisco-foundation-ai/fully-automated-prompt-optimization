@@ -365,6 +365,8 @@ def _validate_prepared(
             if not final_operation:
                 raise ValueError("committed adoption is not terminal")
             _validate_committed_adoption_terminal(layout, row, target)
+        elif final_operation:
+            _validate_committed_mutation_terminal(layout, row, target)
         return
     _validate_intermediate_authority(
         layout,
@@ -606,6 +608,23 @@ def _validate_committed_adoption_terminal(
         current = path.read_bytes() if present else b""
         if audit_descriptor(current, present=present) != target_descriptor:
             raise ValueError("committed adoption audit is not at the target")
+
+
+def _validate_committed_mutation_terminal(
+    layout: Any,
+    row: Mapping[str, Any],
+    target: Mapping[str, Any],
+) -> None:
+    if _file_sha256(layout.config_path) != target["config_sha256"]:
+        raise ValueError("committed mutation config is not at the target")
+    audit = _mapping(row["audit"])
+    target_descriptor = _audit_descriptor_mapping(
+        _mapping(audit["config_history"])["target"]
+    )
+    present = layout.config_history_path.is_file()
+    current = layout.config_history_path.read_bytes() if present else b""
+    if audit_descriptor(current, present=present) != target_descriptor:
+        raise ValueError("committed mutation config history is not at the target")
 
 
 def _validate_event(

@@ -2899,6 +2899,118 @@ def test_ordered_complete_revision_pairs_remain_exact_recovery_noop(
     assert _authority_bytes(layout) == before
 
 
+@pytest.mark.parametrize(
+    "operation_kind",
+    ["configuration_revision", "checkpoint_rebuild"],
+)
+@pytest.mark.parametrize(
+    "damage",
+    ["config_tamper", "unjournaled_history_suffix"],
+)
+def test_final_committed_mutation_recovery_rejects_unjournaled_config_authority(
+    tmp_path: Path,
+    operation_kind: str,
+    damage: str,
+) -> None:
+    """Final revision/rebuild recovery binds exact config and history authority."""
+    layout = _layout_after_final_committed_mutation(
+        tmp_path,
+        operation_kind=operation_kind,
+        lifecycle="released",
+    )
+    if damage == "config_tamper":
+        config = json.loads(layout.config_path.read_text(encoding="utf-8"))
+        config["batch_size"] += 1
+        artifact_io.atomic_write_json(layout.config_path, config)
+    else:
+        history = _read_jsonl(layout.config_history_path)
+        extra = json.loads(json.dumps(history[-1]))
+        extra["operation_id"] = "f" * 32
+        extra["revision"] = len(history) + 1
+        history.append(extra)
+        artifact_io.atomic_write_jsonl(layout.config_history_path, history)
+        receipt_path = layout.receipt_path(PipelineStage.DATASET_SPLITS)
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["config_history_sha256"] = file_sha256(
+            layout.config_history_path
+        )
+        artifact_io.atomic_write_json(receipt_path, receipt)
+        state = layout.load_state()
+        next(
+            item
+            for item in state.stages
+            if item.stage == PipelineStage.DATASET_SPLITS.value
+        ).receipt_sha256 = file_sha256(receipt_path)
+        artifact_io.atomic_write_json(layout.state_path, state.to_dict())
+    before = _authority_bytes(layout)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        layout.recover()
+
+    assert _authority_bytes(layout) == before
+
+
+@pytest.mark.parametrize(
+    "operation_kind",
+    ["configuration_revision", "checkpoint_rebuild"],
+)
+@pytest.mark.parametrize("lifecycle", ["running", "failed", "released"])
+def test_final_committed_mutation_recovery_allows_pipeline_advancement(
+    tmp_path: Path,
+    operation_kind: str,
+    lifecycle: str,
+) -> None:
+    """Current state and ordinary events may advance after mutation commit."""
+    layout = _layout_after_final_committed_mutation(
+        tmp_path,
+        operation_kind=operation_kind,
+        lifecycle=lifecycle,
+    )
+    prepared = [
+        row
+        for row in _read_jsonl(layout.recovery_journal_path)
+        if row["phase"] == "prepared"
+    ][-1]
+    assert prepared["kind"] == operation_kind
+    assert (
+        prepared["audit"]["events"]["target"]["row_count"]
+        < len(_read_jsonl(layout.events_path))
+    )
+    assert layout.load_state().status == lifecycle
+    before = _authority_bytes(layout)
+
+    assert layout.recover() == []
+    assert layout.recover() == []
+    assert _authority_bytes(layout) == before
+
+
+def test_committed_revision_prefix_with_outstanding_prepare_recovers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A final outstanding prepare governs current controls after a valid prefix."""
+    layout = _release_with_config_revisions(tmp_path, revision_count=1)
+    state = layout.load_state()
+    state.status = "failed"
+    layout.save_state(state)
+
+    def stop_after_prepare(name: str) -> None:
+        if name == "after_prepared_journal":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", stop_after_prepare)
+    with pytest.raises(_InjectedFault):
+        layout.revise_config({"split_seed": 73})
+    prepared = _read_jsonl(layout.recovery_journal_path)[-1]
+    assert prepared["phase"] == "prepared"
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+
+    assert layout.recover() == [prepared["operation_id"]]
+    after = _authority_bytes(layout)
+    assert layout.recover() == []
+    assert _authority_bytes(layout) == after
+
+
 def test_recovery_rejects_reordered_committed_prefix_before_outstanding_prepare(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5005,6 +5117,61 @@ def _release_with_config_revisions(
             rubric_provider=rubric,
             embedding_provider=embedding,
         ).run(config_updates=revision_updates)
+    return pipeline.layout
+
+
+def _layout_after_final_committed_mutation(
+    tmp_path: Path,
+    *,
+    operation_kind: str,
+    lifecycle: str,
+) -> EvaluationAssetLayout:
+    """Build a writer-reachable post-commit state for revision/rebuild recovery."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    state = pipeline.layout.load_state()
+    state.status = "failed"
+    pipeline.layout.save_state(state)
+    config_updates: dict[str, Any] | None
+    if operation_kind == "configuration_revision":
+        config_updates = {"match_threshold": 0.2}
+    elif operation_kind == "checkpoint_rebuild":
+        config_updates = None
+        target = pipeline.layout.artifact_path(
+            PipelineStage.COVERAGE_DECISIONS,
+            "intent_matches.jsonl",
+        )
+        target.write_bytes(target.read_bytes() + b" \n")
+    else:
+        raise AssertionError(operation_kind)
+
+    if lifecycle == "running":
+        def stop_after_pipeline_started() -> None:
+            raise _InjectedFault("after_pipeline_started")
+
+        with pytest.raises(_InjectedFault, match="after_pipeline_started"):
+            pipeline.run(
+                config_updates=config_updates,
+                _preflight_accepted_callback=stop_after_pipeline_started,
+            )
+    elif lifecycle == "failed":
+        def fail_stage(stage: PipelineStage) -> dict[str, int]:
+            raise _InjectedFault(f"failed_{stage.value}")
+
+        pipeline._run_stage = fail_stage  # type: ignore[method-assign]
+        with pytest.raises(_InjectedFault, match="failed_"):
+            pipeline.run(config_updates=config_updates)
+    elif lifecycle == "released":
+        pipeline.run(config_updates=config_updates)
+    else:
+        raise AssertionError(lifecycle)
+
+    prepared = [
+        row
+        for row in _read_jsonl(pipeline.layout.recovery_journal_path)
+        if row["phase"] == "prepared"
+    ]
+    assert prepared[-1]["kind"] == operation_kind
     return pipeline.layout
 
 
