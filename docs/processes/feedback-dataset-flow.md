@@ -110,14 +110,23 @@ written for a new build or silently treated as released. `events.jsonl`
 provides append-only operational history. A mutable resume verifies the
 completed receipt prefix and rebuilds from the first incomplete or invalid
 stage; a released asset is immutable and fails closed on any receipt or
-artifact mismatch.
+artifact mismatch. Released verification also authenticates the exact v2
+control state and identities, replays configuration history to justify every
+receipt's full resolved-config hash, and binds Stage 8 to the current persisted
+configuration without requiring the current checkout to equal historical code.
 
 Provider transport plus semantic response validation and normalization share
 one sanitized boundary. Failures retain their original exception as an
 in-memory chained cause, but persisted state, stage messages, and events contain
-only the stage, configured provider and model, fixed exception category, and an
+only the stage, actual provider and model, fixed exception category, and an
 allowlisted causal summary. Raw provider messages, request/response bodies,
 credentials, and arbitrary payload text are never persisted.
+
+Injected providers remain injected. Default providers are constructed lazily
+under the asset lock only after recovery, immutable/integrity checks, optional
+revision, and configuration reload. Their actual identity is shared by errors,
+receipts, and the asset manifest, so a revision cannot call an old provider
+while claiming a new one.
 
 Individual Studio JSON, JSONL, Markdown/text, copied, event, and configuration
 history files use same-directory temporary files, flush and `fsync`,
@@ -127,6 +136,10 @@ removes its temporary file. One deterministic collection-level file lock per
 asset protects every high-level mutation across processes. Configuration
 revision, checkpoint rebuild, and legacy adoption use an append-only recovery
 journal whose prepared payload rolls forward idempotently.
+Before roll-forward, recovery validates the complete journal schema, unique
+operation identity, tenant/asset-bound target config and state, before/target
+hashes, cleanup suffix, audit rows, and the on-disk intermediate state. A
+parseable but inconsistent journal therefore fails before any authority write.
 
 These are single-file and authority-ordering guarantees. Stage 8 verifies all
 four current catalog copies before `released`, but Task 3 does not make those
@@ -176,13 +189,17 @@ leaves the child root absent. The child records `lineage.json`,
 `reuse_manifest.json`, the parent Stage 8 receipt hash, released-state hash, and
 source-lineage hash. Parent snapshot artifacts are copied into
 `stages/01_raw_inputs/parent_snapshot/` with hashes, so the child has no runtime
-dependency on the parent directory.
+dependency on the parent directory. Lineage and reuse documents use strict
+schemas and must agree field-for-field on parent release evidence, seeded and
+reused stages, counts, and the exact snapshot inventory. Stages 3–8 receipt the
+lineage/reuse files and every snapshot they consume; Stage 8 also inventories
+the two control documents as required outputs.
 
 The Studio and `assets extend` CLI expose two modes:
 
 | Mode | Allowed additions | Stage behavior |
 |---|---|---|
-| `keep` | Labeled feedback only | Merge and validate full inputs; prepare canonical inputs; extract evidence only for added feedback; rebuild guidelines across the complete evidence pool; reuse the exact Stage 4 inventory; recalculate Stages 5–8 |
+| `keep` | Labeled feedback only | Merge and validate full inputs; prepare canonical inputs; extract evidence only for added feedback; rebuild guidelines across the complete evidence pool; restore the exact Stage 4 inventory from the verified child snapshot on every run or rebuild; recalculate Stages 5–8 without reclustering |
 | `refresh` | Labeled feedback, unlabeled records, or both | Merge and validate full inputs; extract only added feedback evidence; rebuild guidelines; rerun Stage 4 over the combined unlabeled pool; recalculate Stages 5–8 |
 
 Keep mode requires the parent's embedding provider, embedding model, cluster
@@ -526,9 +543,13 @@ python -m hephaestus.cli assets adopt \
 ```
 
 Successful adoption writes historical receipts with unavailable provenance for
-facts the old build did not record, then transitions to `released`. Invalid
-adoption changes no authority and directs the operator to repair or create a
-new asset. The Studio exposes the same locked core operation.
+facts the old build did not record, then transitions to `released`. Before any
+write it strictly validates canonical source/prepared identity, guidelines or
+legacy rubrics, clusters, coverage references, inferred/synthetic provenance,
+case schemas, group-safe split partitions, trusted-only regression data,
+manifests, counts, and the four catalog copies. Invalid adoption changes no
+authority and directs the operator to repair or create a new asset. The Studio
+exposes the same locked core operation.
 
 Pass optional decision flags to revise and resume in one command:
 

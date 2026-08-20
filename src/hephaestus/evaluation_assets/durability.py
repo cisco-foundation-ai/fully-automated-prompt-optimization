@@ -12,6 +12,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from src.hephaestus.evaluation_assets.legacy_validation import (
+    validate_legacy_stage_semantics,
+)
+from src.hephaestus.evaluation_assets.lineage_validation import (
+    extension_receipt_input_paths,
+    extension_receipt_output_paths,
+    validate_extension_evidence,
+)
 from src.hephaestus.evaluation_assets.models import (
     CONFIG_STAGE_DEPENDENCIES,
     STAGE_COUNT_KEYS,
@@ -258,6 +266,7 @@ def build_stage_receipt(
     *,
     completed_at: str,
     prompt_values: Mapping[str, str],
+    provider_identity: Mapping[str, Any] | None = None,
     origin: str = "native",
     historical_unavailable: bool = False,
     upstream_receipts: Mapping[PipelineStage, Mapping[str, Any]] | None = None,
@@ -282,6 +291,10 @@ def build_stage_receipt(
         )
         for input_stage, name in direct_inputs
     ]
+    inputs.extend(
+        _file_record(layout, path, scope="asset")
+        for path in extension_receipt_input_paths(layout, stage)
+    )
     outputs = [
         _file_record(
             layout,
@@ -318,6 +331,10 @@ def build_stage_receipt(
         )
         for name in specification.required_catalog_outputs
     )
+    outputs.extend(
+        _file_record(layout, path, scope="asset", required=True)
+        for path in extension_receipt_output_paths(layout, stage)
+    )
     upstream = []
     for dependency in specification.upstream_stages:
         if upstream_receipts is None:
@@ -344,6 +361,8 @@ def build_stage_receipt(
     providers = (
         unavailable
         if historical_unavailable
+        else dict(provider_identity)
+        if provider_identity is not None
         else _provider_identity(config, specification.provider_roles)
     )
     code = unavailable if historical_unavailable else _code_identity()
@@ -360,6 +379,7 @@ def build_stage_receipt(
         "resolved_config_sha256": canonical_sha256(resolved_config),
         "dependency_config_sha256": canonical_sha256(dependency_config),
         "prompt_set_sha256": canonical_sha256(prompts),
+        "provider_identity": providers,
         "provider_identity_sha256": canonical_sha256(providers),
         "provider_calls_sha256": canonical_sha256(unavailable),
         "code": code,
@@ -372,6 +392,7 @@ def current_dependency_hashes(
     stage: PipelineStage,
     config: EvaluationAssetConfig,
     prompt_values: Mapping[str, str],
+    provider_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, str]:
     """Return mutable-resume dependency identities for one stage."""
     specification = STAGE_SPECIFICATIONS[stage]
@@ -391,7 +412,9 @@ def current_dependency_hashes(
         ),
         "prompt_set_sha256": canonical_sha256(prompts),
         "provider_identity_sha256": canonical_sha256(
-            _provider_identity(config, specification.provider_roles)
+            dict(provider_identity)
+            if provider_identity is not None
+            else _provider_identity(config, specification.provider_roles)
         ),
         "code_sha256": canonical_sha256(code),
     }
@@ -399,13 +422,19 @@ def current_dependency_hashes(
 
 def verify_released_asset(layout: Any, state: PipelineState) -> None:
     """Verify a released receipt/artifact chain without current-code equality."""
-    if state.status != "released":
+    try:
+        config = _validate_released_control_state(layout, state)
+        config_hashes = _replay_config_history(layout, config)
+        receipts = verify_receipt_chain(layout, state)
+        _verify_receipt_config_history(layout, receipts, config_hashes, config)
+    except EvaluationAssetIntegrityError:
+        raise
+    except (KeyError, OSError, TypeError, UnicodeError, ValueError) as exc:
         raise EvaluationAssetIntegrityError(
             layout.tenant_id,
             layout.asset_id,
-            "the persisted lifecycle is not released",
-        )
-    verify_receipt_chain(layout, state)
+            "released control evidence is invalid",
+        ) from exc
 
 
 def released_parent_evidence(
@@ -443,11 +472,15 @@ def released_parent_evidence(
     }
 
 
-def verify_receipt_chain(layout: Any, state: PipelineState) -> None:
+def verify_receipt_chain(
+    layout: Any,
+    state: PipelineState,
+) -> dict[PipelineStage, dict[str, Any]]:
     """Verify all historical receipts without comparing the current checkout."""
     config = layout.load_config()
+    receipts: dict[PipelineStage, dict[str, Any]] = {}
     for stage in PipelineStage:
-        verify_stage_receipt(
+        receipts[stage] = verify_stage_receipt(
             layout,
             state,
             stage,
@@ -455,6 +488,7 @@ def verify_receipt_chain(layout: Any, state: PipelineState) -> None:
             prompt_values={},
             compare_current_dependencies=False,
         )
+    return receipts
 
 
 def mutable_rebuild_boundary(
@@ -462,6 +496,10 @@ def mutable_rebuild_boundary(
     state: PipelineState,
     config: EvaluationAssetConfig,
     prompt_values_by_stage: Mapping[PipelineStage, Mapping[str, str]],
+    provider_identities_by_stage: Mapping[
+        PipelineStage,
+        Mapping[str, Any],
+    ] | None = None,
 ) -> PipelineStage | None:
     """Return the first incomplete or invalid mutable checkpoint boundary."""
     _verify_raw_snapshot_floor(layout, state)
@@ -476,6 +514,7 @@ def mutable_rebuild_boundary(
                 stage,
                 config,
                 prompt_values=prompt_values_by_stage.get(stage, {}),
+                provider_identity=(provider_identities_by_stage or {}).get(stage),
                 compare_current_dependencies=True,
             )
         except EvaluationAssetIntegrityError:
@@ -490,6 +529,7 @@ def verify_stage_receipt(
     config: EvaluationAssetConfig,
     *,
     prompt_values: Mapping[str, str],
+    provider_identity: Mapping[str, Any] | None = None,
     compare_current_dependencies: bool,
 ) -> dict[str, Any]:
     """Verify one receipt, its declared files, and its upstream chain."""
@@ -553,6 +593,16 @@ def verify_stage_receipt(
         )
         for input_stage, name in direct_inputs
     }
+    try:
+        expected_inputs.update(
+            (
+                "asset",
+                path.relative_to(layout.root).as_posix(),
+            )
+            for path in extension_receipt_input_paths(layout, stage)
+        )
+    except (KeyError, OSError, TypeError, UnicodeError, ValueError) as exc:
+        raise _integrity(layout, stage, "extension input evidence is inconsistent") from exc
     recorded_inputs = {
         (str(item.get("scope")), str(item.get("path")))
         for item in inputs
@@ -585,7 +635,13 @@ def verify_stage_receipt(
     if not isinstance(counts, Mapping):
         raise _integrity(layout, stage, "receipt counts are invalid")
     for key in STAGE_COUNT_KEYS[stage]:
-        if key not in counts or int(counts[key]) != state.counts.get(key):
+        value = counts.get(key)
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            or value != state.counts.get(key)
+        ):
             raise _integrity(layout, stage, "receipt counts do not match state")
 
     if compare_current_dependencies:
@@ -593,6 +649,7 @@ def verify_stage_receipt(
             stage,
             config,
             prompt_values,
+            provider_identity,
         )
         if any(
             receipt.get(key) != expected_value
@@ -600,6 +657,177 @@ def verify_stage_receipt(
         ):
             raise _integrity(layout, stage, "mutable dependencies changed")
     return dict(receipt)
+
+
+def _validate_released_control_state(
+    layout: Any,
+    state: PipelineState,
+) -> EvaluationAssetConfig:
+    if state.schema_version != "fapo-evaluation-asset-state-v2" or (
+        state.status != "released"
+    ):
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "the persisted lifecycle is not a v2 release",
+        )
+    raw_state = _read_json_object(layout.state_path)
+    if raw_state != state.to_dict():
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "the supplied state does not match persisted authority",
+        )
+    if state.tenant_id != layout.tenant_id or state.asset_id != layout.asset_id:
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "released state identity is inconsistent",
+        )
+    if state.current_stage is not None or state.error is not None:
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "released terminal state is inconsistent",
+        )
+    if not state.created_at or not state.updated_at:
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "released timestamps are incomplete",
+        )
+    expected_stages = [stage.value for stage in PipelineStage]
+    if [stage.stage for stage in state.stages] != expected_stages or any(
+        stage.status != "completed" or not stage.receipt_sha256
+        for stage in state.stages
+    ):
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "released stage authority is incomplete",
+        )
+    expected_counts = {
+        key for keys in STAGE_COUNT_KEYS.values() for key in keys
+    }
+    if set(state.counts) != expected_counts or any(
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < 0
+        for value in state.counts.values()
+    ):
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "released count authority is invalid",
+        )
+    raw_sequence = raw_state.get("mutation_sequence")
+    if (
+        not isinstance(raw_sequence, int)
+        or isinstance(raw_sequence, bool)
+        or raw_sequence < 0
+    ):
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "released mutation identity is invalid",
+        )
+    raw_config = _read_json_object(layout.config_path)
+    config = EvaluationAssetConfig.from_dict(raw_config)
+    if raw_config != config.to_dict() or (
+        config.tenant_id != layout.tenant_id
+        or config.asset_id != layout.asset_id
+    ):
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "released configuration identity is inconsistent",
+        )
+    return config
+
+
+def _replay_config_history(
+    layout: Any,
+    current_config: EvaluationAssetConfig,
+) -> list[str]:
+    rows = _read_jsonl_objects(layout.config_history_path)
+    if not rows:
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "configuration history is missing",
+        )
+    first = rows[0]
+    if first.get("revision") != 1 or first.get("event") not in {
+        "configuration_created",
+        "configuration_inherited",
+    }:
+        raise ValueError("configuration history origin is invalid")
+    initial = first.get("configuration")
+    if not isinstance(initial, Mapping):
+        raise ValueError("configuration history origin is incomplete")
+    replayed = EvaluationAssetConfig.from_dict(initial).to_dict()
+    snapshots = [canonical_sha256(replayed)]
+    for revision, row in enumerate(rows[1:], start=2):
+        if row.get("revision") != revision or row.get("event") != (
+            "configuration_updated"
+        ):
+            raise ValueError("configuration history sequence is invalid")
+        changes = row.get("changed_fields")
+        if not isinstance(changes, Mapping) or not changes:
+            raise ValueError("configuration history changes are invalid")
+        updated = dict(replayed)
+        for field, change in changes.items():
+            if field not in updated or not isinstance(change, Mapping) or set(
+                change
+            ) != {"previous", "new"}:
+                raise ValueError("configuration history change is invalid")
+            if change["previous"] != updated[field]:
+                raise ValueError("configuration history predecessor is invalid")
+            updated[field] = change["new"]
+        replayed = EvaluationAssetConfig.from_dict(updated).to_dict()
+        snapshots.append(canonical_sha256(replayed))
+    if replayed != current_config.to_dict():
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "configuration history does not reach persisted configuration",
+        )
+    return snapshots
+
+
+def _verify_receipt_config_history(
+    layout: Any,
+    receipts: Mapping[PipelineStage, Mapping[str, Any]],
+    config_hashes: Sequence[str],
+    current_config: EvaluationAssetConfig,
+) -> None:
+    history_index = 0
+    for stage in PipelineStage:
+        receipt_hash = receipts[stage].get("resolved_config_sha256")
+        match = next(
+            (
+                index
+                for index in range(history_index, len(config_hashes))
+                if config_hashes[index] == receipt_hash
+            ),
+            None,
+        )
+        if match is None:
+            raise EvaluationAssetIntegrityError(
+                layout.tenant_id,
+                layout.asset_id,
+                "a receipt configuration lacks revision-history authority",
+            )
+        history_index = match
+    final_hash = receipts[PipelineStage.DATASET_SPLITS].get(
+        "resolved_config_sha256"
+    )
+    if final_hash != canonical_sha256(current_config.to_dict()):
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "the final receipt does not authenticate persisted configuration",
+        )
 
 
 def _verify_raw_snapshot_floor(layout: Any, state: PipelineState) -> None:
@@ -676,6 +904,16 @@ def _expected_output_locations(
         )
         for name in specification.required_catalog_outputs
     )
+    try:
+        expected.update(
+            (
+                "asset",
+                path.relative_to(layout.root).as_posix(),
+            )
+            for path in extension_receipt_output_paths(layout, stage)
+        )
+    except (KeyError, OSError, TypeError, UnicodeError, ValueError) as exc:
+        raise _integrity(layout, stage, "extension output evidence is inconsistent") from exc
     return expected
 
 
@@ -696,15 +934,17 @@ def validate_legacy_release_candidate(
     if config.tenant_id != layout.tenant_id or config.asset_id != layout.asset_id:
         raise _legacy_invalid(layout)
     try:
+        artifact_profiles: dict[PipelineStage, str] = {}
         for stage in PipelineStage:
             if _stage_state(state, stage).status != "completed":
                 raise ValueError("legacy stage is incomplete")
             specification = STAGE_SPECIFICATIONS[stage]
-            required_outputs, direct_inputs, _ = _stage_artifact_profile(
+            required_outputs, direct_inputs, artifact_profile = _stage_artifact_profile(
                 layout,
                 stage,
                 allow_legacy=True,
             )
+            artifact_profiles[stage] = artifact_profile
             paths = [
                 layout.artifact_path(stage, name) for name in required_outputs
             ]
@@ -725,6 +965,8 @@ def validate_legacy_release_candidate(
                 if not path.is_file():
                     raise ValueError("required artifact is missing")
                 _validate_artifact_syntax(layout, stage, path)
+
+        validate_legacy_stage_semantics(layout, artifact_profiles)
 
         input_manifest = _read_json_object(
             layout.artifact_path(PipelineStage.RAW_INPUTS, "input_manifest.json")
@@ -997,45 +1239,11 @@ def _verify_extension_lineage(
     layout: Any,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     try:
-        lineage = _read_json_object(layout.lineage_path)
-        reuse = _read_json_object(layout.reuse_manifest_path)
-        if lineage.get("asset_id") != layout.asset_id:
-            raise ValueError("lineage asset identity is inconsistent")
-        parent_asset_id = lineage.get("parent_asset_id")
-        if not isinstance(parent_asset_id, str) or not parent_asset_id:
-            raise ValueError("lineage parent identity is missing")
-        if reuse.get("parent_asset_id") != parent_asset_id:
-            raise ValueError("reuse parent identity is inconsistent")
-        snapshot = reuse.get("parent_snapshot")
-        if not isinstance(snapshot, Mapping):
-            raise ValueError("parent snapshot inventory is missing")
-        expected_snapshot_path = layout.parent_snapshot.relative_to(
-            layout.root
-        ).as_posix()
-        if snapshot.get("path") != expected_snapshot_path:
-            raise ValueError("parent snapshot path is inconsistent")
-        artifacts = snapshot.get("artifacts")
-        if not isinstance(artifacts, list) or not artifacts:
-            raise ValueError("parent snapshot inventory is empty")
-        seen: set[str] = set()
-        for item in artifacts:
-            if not isinstance(item, Mapping):
-                raise ValueError("parent snapshot row is invalid")
-            relative = Path(str(item.get("file") or ""))
-            if (
-                relative.is_absolute()
-                or len(relative.parts) != 1
-                or relative.name in seen
-            ):
-                raise ValueError("parent snapshot path is unsafe")
-            seen.add(relative.name)
-            path = layout.parent_snapshot / relative
-            if not path.is_file() or item.get("sha256") != file_sha256(path):
-                raise ValueError("parent snapshot hash is inconsistent")
-        manifest = _read_json_object(layout.manifest_path)
-        if manifest.get("lineage") != lineage:
-            raise ValueError("asset manifest lineage is inconsistent")
-        return lineage, reuse
+        evidence = validate_extension_evidence(
+            layout,
+            require_asset_manifest=True,
+        )
+        return evidence.lineage, evidence.reuse
     except EvaluationAssetIntegrityError:
         raise
     except (KeyError, OSError, TypeError, UnicodeError, ValueError) as exc:

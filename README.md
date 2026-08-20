@@ -213,15 +213,24 @@ receipt commit marker under `receipts/`; `pipeline_state.json` references its
 hash, and `events.jsonl` retains the append-only history. Resume verifies the
 completed receipt prefix and rebuilds from its first invalid boundary. Missing
 or corrupt immutable raw snapshots require repair or a new asset. A released
-asset is read-only: verification fails closed, and changes require a child
-version.
+asset is read-only: verification binds the exact v2 control state, persisted
+configuration history, receipt chain, and required artifact hashes while
+treating historical code identity as audit evidence. Any mismatch fails closed,
+and changes require a child version.
 
 Configuration revisions and checkpoint rebuilds first append a durable
 prepared record to `recovery_journal.jsonl`, then make stale stage state
 nonauthoritative, and only afterward remove stale files. A later run rolls any
 prepared operation forward idempotently before it evaluates the receipt chain.
+Recovery authenticates the journal schema, operation and tenant/asset identity,
+before/target hashes, and allowable intermediate control state before writing.
 One cross-process per-asset lock protects create, run/resume, revision,
 adoption, and extension mutations across library, CLI, and Studio callers.
+Default providers are constructed only after that lock, recovery, lifecycle
+checks, revision, and configuration reload; receipts identify the provider
+instance and model actually used. Service jobs persist `queued`, then return
+acceptance only after separate lock and preflight decisions from the live
+worker, without abandoning a lock-owning worker on a fixed timeout.
 
 After Stage 8 succeeds, the authoritative split artifacts remain inside the
 asset workspace and four consumer-facing copies are published to:
@@ -278,8 +287,10 @@ Released assets also expose **Extend asset**, which creates a new immutable
 version from additional canonical data:
 
 - **Keep original clustering** accepts labeled additions only. It reuses the
-  parent's Stage 4 inventory, extracts evidence only for new feedback, and
-  rebuilds Stage 3 guidelines across the complete trusted evidence pool.
+  parent's Stage 4 inventory from the child's verified self-contained snapshot,
+  including after an earlier-stage resume, extracts evidence only for new
+  feedback, and rebuilds Stage 3 guidelines across the complete trusted
+  evidence pool. It never silently reclusters.
 - **Rerun clustering** accepts new unlabeled records, rebuilds Stage 4 over the
   combined traffic, and writes `cluster_lineage.jsonl` to relate previous and
   current clusters.
@@ -287,7 +298,9 @@ version from additional canonical data:
 Both modes recalculate coverage, inferred labels, optional synthesis, and
 complete dataset splits in the new version. Parent and child locks are acquired
 in deterministic order; the parent receipt and source-lineage evidence must
-verify before the child root is created. The parent asset is never changed.
+verify before the child root is created. Stages 3–8 receipt the exact lineage,
+reuse, and parent-snapshot inputs they consume, and Stage 8 anchors the lineage
+and reuse manifests as required outputs. The parent asset is never changed.
 
 ### Use the CLI
 

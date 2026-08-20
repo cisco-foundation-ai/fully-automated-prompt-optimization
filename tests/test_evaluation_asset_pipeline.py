@@ -1074,7 +1074,7 @@ def test_provider_failure_persists_only_sanitized_causal_summary(
     )
     assert expected_stage.value in persisted
     assert "provider=openai" in persisted
-    assert "model=safe-" in persisted
+    assert "model=fake-" in persisted
     assert "cause=RuntimeError" in persisted
     assert "summary=provider operation failed" in persisted
     assert "sk-live-secret-token" not in persisted

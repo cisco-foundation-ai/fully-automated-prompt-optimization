@@ -26,7 +26,7 @@ from typing import (
     TypeVar,
 )
 
-from src.hephaestus.artifact_io import atomic_write_text
+from src.hephaestus.artifact_io import atomic_copy_file, atomic_write_text
 from src.hephaestus.datasets.embedding_providers import (
     OpenAIEmbeddingProvider,
     validate_embedding_vectors,
@@ -55,6 +55,7 @@ from src.hephaestus.datasets.intent_assets import (
 )
 from src.hephaestus.datasets.rubric_providers import OpenAIRubricProvider
 from src.hephaestus.evaluation_assets.durability import (
+    STAGE_SPECIFICATIONS,
     EvaluationAssetImmutableError,
     EvaluationAssetLegacyError,
     build_stage_receipt,
@@ -214,28 +215,87 @@ class EvaluationAssetPipeline:
             if layout.lineage_path.is_file()
             else {}
         )
-        if self.config.rubric_provider != "openai" and rubric_provider is None:
-            raise ValueError(f"Unsupported rubric provider: {self.config.rubric_provider}")
-        if (
-            self.config.embedding_provider not in {"openai", "tfidf"}
-            and embedding_provider is None
-        ):
-            raise ValueError(
-                f"Unsupported embedding provider: {self.config.embedding_provider}"
-            )
-        self.rubric_provider = rubric_provider or OpenAIRubricProvider(
-            model=self.config.rubric_model,
-            # Reasoning models (e.g. gpt-5.x) count reasoning tokens against this
-            # budget before any JSON is emitted. 8192 could be exhausted by a long
-            # reasoning trace, yielding a 400 / empty response that fails the whole
-            # rubric_extraction stage. Give reasoning ample headroom over the output.
-            max_output_tokens=16384,
-        )
+        self._injected_rubric_provider = rubric_provider
+        self._injected_embedding_provider = embedding_provider
+        self.rubric_provider = rubric_provider
         self.embedding_provider = embedding_provider
-        if self.embedding_provider is None and self.config.embedding_provider == "openai":
+        self._provider_identities: dict[str, dict[str, str]] = {}
+        self.last_revision: Optional[Dict[str, Any]] = None
+
+    def _configure_providers(self) -> None:
+        """Resolve providers from the recovered, revised configuration under lock."""
+        if self._injected_rubric_provider is not None:
+            self.rubric_provider = self._injected_rubric_provider
+            rubric_source = "injected"
+        elif self.config.rubric_provider == "openai":
+            self.rubric_provider = OpenAIRubricProvider(
+                model=self.config.rubric_model,
+                # Reasoning models consume reasoning tokens before emitting JSON.
+                max_output_tokens=16384,
+            )
+            rubric_source = "default"
+        else:
+            raise ValueError(
+                f"Unsupported rubric provider: {self.config.rubric_provider}"
+            )
+
+        if self._injected_embedding_provider is not None:
+            self.embedding_provider = self._injected_embedding_provider
+            embedding_source = "injected"
+        elif self.config.embedding_provider == "openai":
             self.embedding_provider = OpenAIEmbeddingProvider(
                 model=self.config.embedding_model
             )
+            embedding_source = "default"
+        elif self.config.embedding_provider == "tfidf":
+            self.embedding_provider = None
+            embedding_source = "default"
+        else:
+            raise ValueError(
+                f"Unsupported embedding provider: {self.config.embedding_provider}"
+            )
+
+        self._provider_identities = {
+            "rubric": self._actual_provider_identity(
+                self.rubric_provider,
+                configured_provider=self.config.rubric_provider,
+                configured_model=self.config.rubric_model,
+                source=rubric_source,
+            ),
+            "embedding": self._actual_provider_identity(
+                self.embedding_provider,
+                configured_provider=self.config.embedding_provider,
+                configured_model=self.config.embedding_model,
+                source=embedding_source,
+            ),
+        }
+
+    @staticmethod
+    def _actual_provider_identity(
+        provider: Any,
+        *,
+        configured_provider: str,
+        configured_model: str,
+        source: str,
+    ) -> dict[str, str]:
+        provider_name = str(
+            getattr(provider, "provider_name", configured_provider)
+        ).strip()
+        model = str(getattr(provider, "model", configured_model)).strip()
+        if not provider_name or not model:
+            raise ValueError("Provider identity requires non-empty provider and model")
+        return {"provider": provider_name, "model": model, "source": source}
+
+    def _provider_identity_for_stage(
+        self,
+        stage: PipelineStage,
+    ) -> dict[str, Any]:
+        roles = STAGE_SPECIFICATIONS[stage].provider_roles
+        return (
+            {role: dict(self._provider_identities[role]) for role in roles}
+            if roles
+            else {"status": "not_applicable"}
+        )
 
     def _call_rubric_provider(
         self,
@@ -244,6 +304,8 @@ class EvaluationAssetPipeline:
         payload: Mapping[str, Any],
         normalize: Callable[[Mapping[str, Any]], RubricResponseT],
     ) -> RubricResponseT:
+        if self.rubric_provider is None:
+            raise RuntimeError("Rubric provider is not configured")
         try:
             response = self.rubric_provider.generate_json(system_prompt, payload)
             if not isinstance(response, Mapping):
@@ -252,8 +314,8 @@ class EvaluationAssetPipeline:
         except Exception as exc:
             raise ProviderCallError(
                 stage=stage,
-                provider=self.config.rubric_provider,
-                model=self.config.rubric_model,
+                provider=self._provider_identities["rubric"]["provider"],
+                model=self._provider_identities["rubric"]["model"],
                 cause=exc,
             ) from exc
 
@@ -269,8 +331,8 @@ class EvaluationAssetPipeline:
         except Exception as exc:
             raise ProviderCallError(
                 stage=stage,
-                provider=self.config.embedding_provider,
-                model=self.config.embedding_model,
+                provider=self._provider_identities["embedding"]["provider"],
+                model=self._provider_identities["embedding"]["model"],
                 cause=exc,
             ) from exc
 
@@ -305,9 +367,12 @@ class EvaluationAssetPipeline:
         config_updates: Optional[Mapping[str, Any]] = None,
         lock_timeout: float = 0,
         _lock_acquired_callback: Optional[Callable[[], None]] = None,
+        _preflight_accepted_callback: Optional[Callable[[], None]] = None,
     ) -> PipelineState:
         """Run or resume all incomplete stages."""
         with self.layout.asset_lock(lock_timeout):
+            if _lock_acquired_callback is not None:
+                _lock_acquired_callback()
             self.layout._recover_locked()
             state = self.layout.load_state()
             if state.status == "released":
@@ -328,11 +393,17 @@ class EvaluationAssetPipeline:
                 else None
             )
             self.config = self.layout.load_config()
-            return self._run_locked(_lock_acquired_callback)
+            self.lineage = (
+                json.loads(self.layout.lineage_path.read_text(encoding="utf-8"))
+                if self.layout.lineage_path.is_file()
+                else {}
+            )
+            self._configure_providers()
+            return self._run_locked(_preflight_accepted_callback)
 
     def _run_locked(
         self,
-        lock_acquired_callback: Optional[Callable[[], None]] = None,
+        preflight_accepted_callback: Optional[Callable[[], None]] = None,
     ) -> PipelineState:
         """Run while the caller holds the asset mutation lock."""
         state = self.layout.load_state()
@@ -342,6 +413,10 @@ class EvaluationAssetPipeline:
             state,
             self.config,
             STAGE_PROMPTS,
+            {
+                stage: self._provider_identity_for_stage(stage)
+                for stage in PipelineStage
+            },
         )
         if boundary is not None:
             boundary_index = list(PipelineStage).index(boundary)
@@ -355,8 +430,8 @@ class EvaluationAssetPipeline:
         state.error = None
         self.layout.save_state(state)
         self.layout.append_event("pipeline_started")
-        if lock_acquired_callback is not None:
-            lock_acquired_callback()
+        if preflight_accepted_callback is not None:
+            preflight_accepted_callback()
 
         for stage in PipelineStage:
             stage_state = next(item for item in state.stages if item.stage == stage.value)
@@ -391,6 +466,7 @@ class EvaluationAssetPipeline:
                 counts,
                 completed_at=completed_at,
                 prompt_values=STAGE_PROMPTS.get(stage, {}),
+                provider_identity=self._provider_identity_for_stage(stage),
             )
             atomic_write_json(self.layout.receipt_path(stage), receipt)
             stage_state.receipt_sha256 = file_sha256(
@@ -571,7 +647,7 @@ class EvaluationAssetPipeline:
                     partial(
                         _normalize_feedback_evidence_response,
                         batch=batch,
-                        rubric_model=self.config.rubric_model,
+                        rubric_model=self._provider_identities["rubric"]["model"],
                     ),
                 )
             )
@@ -615,7 +691,7 @@ class EvaluationAssetPipeline:
                     _normalize_guideline_response,
                     route=route,
                     evidence=route_evidence,
-                    rubric_model=self.config.rubric_model,
+                    rubric_model=self._provider_identities["rubric"]["model"],
                 ),
             )
             candidates.extend(route_candidates)
@@ -632,7 +708,7 @@ class EvaluationAssetPipeline:
                 _rubric_from_guidelines(
                     str(row["record_id"]),
                     guideline_by_record[str(row["record_id"])],
-                    self.config.rubric_model,
+                    self._provider_identities["rubric"]["model"],
                 ),
                 self.config.asset_id,
             )
@@ -665,14 +741,23 @@ class EvaluationAssetPipeline:
             PipelineStage.INTENT_CLUSTERING,
             "cluster_lineage.jsonl",
         )
-        if (
-            self.lineage.get("clustering_mode") == "keep"
-            and inventory_path.is_file()
-            and lineage_path.is_file()
-        ):
+        if self.lineage.get("clustering_mode") == "keep":
+            snapshot = self.layout.parent_snapshot / "parent_intent_inventory.jsonl"
+            atomic_copy_file(snapshot, inventory_path)
             clusters = [_intent_cluster(row) for row in _load_jsonl(inventory_path)]
             assert_unique_cluster_ids(clusters)
-            _load_jsonl(lineage_path)
+            write_jsonl(
+                lineage_path,
+                [
+                    {
+                        "previous_cluster_id": cluster.cluster_id,
+                        "new_cluster_id": cluster.cluster_id,
+                        "member_overlap": 1.0,
+                        "relationship": "reused",
+                    }
+                    for cluster in clusters
+                ],
+            )
             return {"intent_clusters": len(clusters)}
         rows = _load_jsonl(
             self.layout.artifact_path(
@@ -980,7 +1065,7 @@ class EvaluationAssetPipeline:
                     partial(
                         _normalize_inferred_rubric_response,
                         batch=batch,
-                        rubric_model=self.config.rubric_model,
+                        rubric_model=self._provider_identities["rubric"]["model"],
                     ),
                 )
             )
@@ -1109,10 +1194,12 @@ class EvaluationAssetPipeline:
             "asset_id": self.config.asset_id,
             "tenant_id": self.config.tenant_id,
             "providers": {
-                "rubric_provider": self.config.rubric_provider,
-                "rubric_model": self.config.rubric_model,
-                "embedding_provider": self.config.embedding_provider,
-                "embedding_model": self.config.embedding_model,
+                "rubric_provider": self._provider_identities["rubric"]["provider"],
+                "rubric_model": self._provider_identities["rubric"]["model"],
+                "embedding_provider": self._provider_identities["embedding"][
+                    "provider"
+                ],
+                "embedding_model": self._provider_identities["embedding"]["model"],
             },
             "evaluation_guidelines": {
                 "schema_version": (

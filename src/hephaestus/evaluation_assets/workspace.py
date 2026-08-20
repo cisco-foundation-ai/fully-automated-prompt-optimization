@@ -42,6 +42,15 @@ from src.hephaestus.evaluation_assets.durability import (
     verify_released_asset,
 )
 from src.hephaestus.evaluation_assets.input_contract import validate_input_records
+from src.hephaestus.evaluation_assets.journal_validation import (
+    JOURNAL_SCHEMA_VERSION,
+    validate_recovery_journal,
+)
+from src.hephaestus.evaluation_assets.lineage_validation import (
+    LINEAGE_SCHEMA_VERSION,
+    REUSE_SCHEMA_VERSION,
+    SNAPSHOT_SCHEMA_VERSION,
+)
 from src.hephaestus.evaluation_assets.models import (
     CONFIG_STAGE_DEPENDENCIES,
     STAGE_COUNT_KEYS,
@@ -72,40 +81,6 @@ LEGACY_DIRECTORIES = (
     "review_queues",
     "dataset_splits",
 )
-STAGE_ARTIFACTS = {
-    PipelineStage.RUBRIC_EXTRACTION: (
-        "feedback_evidence.jsonl",
-        "candidate_guidelines.jsonl",
-        "evaluation_guidelines.jsonl",
-        "feedback_rubrics.jsonl",
-        "trusted_intents.jsonl",
-        "trusted_cases.jsonl",
-    ),
-    PipelineStage.INTENT_CLUSTERING: (
-        "intent_inventory.jsonl",
-        "cluster_lineage.jsonl",
-    ),
-    PipelineStage.COVERAGE_DECISIONS: (
-        "intent_matches.jsonl",
-        "coverage_report.md",
-        "review_queue/labeling_queue.jsonl",
-    ),
-    PipelineStage.LABEL_INFERENCE: (
-        "inferred_unlabeled_cluster_rubrics.jsonl",
-        "inferred_unlabeled_labels.jsonl",
-        "missing_labeled_feedback_clusters.jsonl",
-        "missing_labeled_feedback_report.md",
-        "inferred_cases.jsonl",
-    ),
-    PipelineStage.SYNTHETIC_COVERAGE: (
-        "synthetic_candidates.jsonl",
-        "rejected_synthetic.jsonl",
-        "synthetic_filter_issues.jsonl",
-        "synthetic_cases.jsonl",
-    ),
-}
-
-
 def utc_now() -> str:
     """Return a stable ISO-8601 UTC timestamp."""
     return datetime.now(timezone.utc).isoformat()
@@ -446,6 +421,7 @@ class EvaluationAssetLayout:
         additional_unlabeled: Optional[Path],
         clustering_mode: str,
         config_updates: Optional[Mapping[str, Any]] = None,
+        initial_status: str = "draft",
         lock_timeout: float = 0,
     ) -> PipelineState:
         """Create a child only after verifying its immutable released parent."""
@@ -457,6 +433,7 @@ class EvaluationAssetLayout:
                 additional_unlabeled=additional_unlabeled,
                 clustering_mode=clustering_mode,
                 config_updates=config_updates,
+                initial_status=initial_status,
             )
 
     def _initialize_extension_locked(
@@ -467,10 +444,13 @@ class EvaluationAssetLayout:
         additional_unlabeled: Optional[Path],
         clustering_mode: str,
         config_updates: Optional[Mapping[str, Any]],
+        initial_status: str,
     ) -> PipelineState:
         """Initialize an extension while both parent and child locks are held."""
         if clustering_mode not in {"keep", "refresh"}:
             raise ValueError("clustering_mode must be 'keep' or 'refresh'")
+        if initial_status not in {"draft", "queued"}:
+            raise ValueError("initial_status must be draft or queued")
         if parent.tenant_id != self.tenant_id:
             raise ValueError("parent and child assets must belong to the same tenant")
         if parent.asset_id == self.asset_id:
@@ -584,6 +564,13 @@ class EvaluationAssetLayout:
             seeded_artifacts.append(name)
 
         snapshot_sources = {
+            **{
+                f"parent_{name}": parent.artifact_path(
+                    PipelineStage.RUBRIC_EXTRACTION,
+                    name,
+                )
+                for name in stage_three_artifacts
+            },
             "parent_intent_inventory.jsonl": parent.artifact_path(
                 PipelineStage.INTENT_CLUSTERING,
                 "intent_inventory.jsonl",
@@ -623,6 +610,7 @@ class EvaluationAssetLayout:
                 {
                     "file": name,
                     "sha256": _sha256_path(destination),
+                    "bytes": destination.stat().st_size,
                 }
             )
 
@@ -661,8 +649,10 @@ class EvaluationAssetLayout:
 
         timestamp = utc_now()
         state = PipelineState.new(config, timestamp)
+        state.status = initial_status
 
         lineage = {
+            "schema_version": LINEAGE_SCHEMA_VERSION,
             "asset_id": self.asset_id,
             "parent_asset_id": parent.asset_id,
             "creation_mode": "incremental_feedback",
@@ -685,9 +675,12 @@ class EvaluationAssetLayout:
             },
         }
         reuse_manifest = {
+            "schema_version": REUSE_SCHEMA_VERSION,
+            "asset_id": self.asset_id,
             "parent_asset_id": parent.asset_id,
             "parent_release": parent_release,
             "parent_snapshot": {
+                "schema_version": SNAPSHOT_SCHEMA_VERSION,
                 "path": self.parent_snapshot.relative_to(self.root).as_posix(),
                 "artifacts": snapshot_artifacts,
             },
@@ -824,7 +817,7 @@ class EvaluationAssetLayout:
                 "details": {"previous_status": "completed"},
             }
             prepared = {
-                "schema_version": "fapo-recovery-journal-v1",
+                "schema_version": JOURNAL_SCHEMA_VERSION,
                 "operation_id": operation_id,
                 "kind": "legacy_adoption",
                 "phase": "prepared",
@@ -832,6 +825,14 @@ class EvaluationAssetLayout:
                 "before": {
                     "config_sha256": file_sha256(self.config_path),
                     "state_sha256": file_sha256(self.state_path),
+                },
+                "target": {
+                    "config_sha256": file_sha256(self.config_path),
+                    "state_sha256": persisted_json_sha256(target_state.to_dict()),
+                    "receipt_sha256": {
+                        stage.value: persisted_json_sha256(receipts[stage])
+                        for stage in PipelineStage
+                    },
                 },
                 "target_receipts": {
                     stage.value: receipts[stage] for stage in PipelineStage
@@ -969,7 +970,7 @@ class EvaluationAssetLayout:
             "revision": revision,
         }
         prepared = {
-            "schema_version": "fapo-recovery-journal-v1",
+            "schema_version": JOURNAL_SCHEMA_VERSION,
             "operation_id": operation_id,
             "kind": "configuration_revision",
             "phase": "prepared",
@@ -977,6 +978,10 @@ class EvaluationAssetLayout:
             "before": {
                 "config_sha256": file_sha256(self.config_path),
                 "state_sha256": file_sha256(self.state_path),
+            },
+            "target": {
+                "config_sha256": persisted_json_sha256(revised.to_dict()),
+                "state_sha256": persisted_json_sha256(target_state.to_dict()),
             },
             "target_config": revised.to_dict(),
             "target_state": target_state.to_dict(),
@@ -1008,6 +1013,14 @@ class EvaluationAssetLayout:
     def _recover_locked(self) -> list[str]:
         """Recover prepared operations while the caller holds the asset lock."""
         entries = self._read_control_log(self.recovery_journal_path)
+        try:
+            validate_recovery_journal(self, entries)
+        except (KeyError, OSError, TypeError, UnicodeError, ValueError) as exc:
+            raise EvaluationAssetIntegrityError(
+                self.tenant_id,
+                self.asset_id,
+                "recovery journal authority is inconsistent",
+            ) from exc
         committed = {
             str(row.get("operation_id"))
             for row in entries
@@ -1106,7 +1119,7 @@ class EvaluationAssetLayout:
     def _commit_journal_operation(self, prepared: Mapping[str, Any]) -> None:
         self._append_journal_once(
             {
-                "schema_version": "fapo-recovery-journal-v1",
+                "schema_version": JOURNAL_SCHEMA_VERSION,
                 "operation_id": str(prepared["operation_id"]),
                 "kind": str(prepared["kind"]),
                 "phase": "committed",
@@ -1281,12 +1294,19 @@ class EvaluationAssetLayout:
             "details": {"stage": boundary.value},
         }
         prepared = {
-            "schema_version": "fapo-recovery-journal-v1",
+            "schema_version": JOURNAL_SCHEMA_VERSION,
             "operation_id": operation_id,
             "kind": "checkpoint_rebuild",
             "phase": "prepared",
             "prepared_at": timestamp,
-            "before": {"state_sha256": file_sha256(self.state_path)},
+            "before": {
+                "config_sha256": file_sha256(self.config_path),
+                "state_sha256": file_sha256(self.state_path),
+            },
+            "target": {
+                "config_sha256": file_sha256(self.config_path),
+                "state_sha256": persisted_json_sha256(target_state.to_dict()),
+            },
             "target_state": target_state.to_dict(),
             "event_entry": event_entry,
             "invalidated_stages": [stage.value for stage in invalidated],

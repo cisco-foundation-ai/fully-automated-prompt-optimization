@@ -258,12 +258,18 @@ class PipelineState:
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "PipelineState":
         """Load state written by :meth:`to_dict`."""
-        raw_schema = raw.get("schema_version")
-        schema_version = (
-            str(raw_schema)
-            if raw_schema
-            else LEGACY_STATE_SCHEMA_VERSION
-        )
+        if "schema_version" not in raw:
+            schema_version = LEGACY_STATE_SCHEMA_VERSION
+        else:
+            raw_schema = raw["schema_version"]
+            if not isinstance(raw_schema, str) or raw_schema not in {
+                LEGACY_STATE_SCHEMA_VERSION,
+                STATE_SCHEMA_VERSION,
+            }:
+                raise ValueError(
+                    f"Unsupported evaluation asset state schema: {raw_schema!r}"
+                )
+            schema_version = raw_schema
         status = str(raw.get("status") or "queued")
         _validate_pipeline_status(schema_version, status)
         stages = [

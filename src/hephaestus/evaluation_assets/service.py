@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
 
@@ -14,6 +15,17 @@ from src.hephaestus.evaluation_assets.durability import EvaluationAssetBusyError
 from src.hephaestus.evaluation_assets.models import EvaluationAssetConfig
 from src.hephaestus.evaluation_assets.pipeline import EvaluationAssetPipeline
 from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
+
+
+@dataclass
+class _WorkerAdmission:
+    """Two-phase decision shared between a request and its background worker."""
+
+    lock_decided: threading.Event = field(default_factory=threading.Event)
+    preflight_decided: threading.Event = field(default_factory=threading.Event)
+    lock_acquired: bool = False
+    preflight_accepted: bool = False
+    error: Optional[Exception] = None
 
 
 class EvaluationAssetRunManager:
@@ -43,20 +55,16 @@ class EvaluationAssetRunManager:
                 unlabeled_source,
                 initial_status="queued",
             )
-            acquired = threading.Event()
-            result: Dict[str, Exception] = {}
+            admission = _WorkerAdmission()
             thread = threading.Thread(
                 target=self._run_pipeline,
-                args=(key, pipeline, acquired, result, None),
+                args=(key, pipeline, admission, None),
                 name=f"evaluation-asset-{config.tenant_id}-{config.asset_id}",
                 daemon=True,
             )
             self._threads[key] = thread
             thread.start()
-        if not acquired.wait(5):
-            raise RuntimeError("evaluation asset pipeline lock handshake timed out")
-        if "error" in result:
-            raise result["error"]
+        self._await_admission(admission)
         return pipeline.layout.load_state().to_dict()
 
     def resume(
@@ -73,20 +81,16 @@ class EvaluationAssetRunManager:
                 raise RuntimeError("evaluation asset pipeline is already running")
             layout = EvaluationAssetLayout(self.tenants_root, tenant_id, asset_id)
             pipeline = EvaluationAssetPipeline(layout)
-            acquired = threading.Event()
-            result: Dict[str, Exception] = {}
+            admission = _WorkerAdmission()
             thread = threading.Thread(
                 target=self._run_pipeline,
-                args=(key, pipeline, acquired, result, dict(config_updates or {})),
+                args=(key, pipeline, admission, dict(config_updates or {})),
                 name=f"evaluation-asset-{tenant_id}-{asset_id}",
                 daemon=True,
             )
             self._threads[key] = thread
             thread.start()
-        if not acquired.wait(5):
-            raise RuntimeError("evaluation asset pipeline lock handshake timed out")
-        if "error" in result:
-            raise result["error"]
+        self._await_admission(admission)
         response = layout.load_state().to_dict()
         response["resume"] = pipeline.last_revision
         return response
@@ -127,22 +131,19 @@ class EvaluationAssetRunManager:
                 additional_unlabeled=additional_unlabeled,
                 clustering_mode=clustering_mode,
                 config_updates=config_updates,
+                initial_status="queued",
             )
             pipeline = EvaluationAssetPipeline(layout)
-            acquired = threading.Event()
-            result: Dict[str, Exception] = {}
+            admission = _WorkerAdmission()
             thread = threading.Thread(
                 target=self._run_pipeline,
-                args=(key, pipeline, acquired, result, None),
+                args=(key, pipeline, admission, None),
                 name=f"evaluation-asset-{tenant_id}-{asset_id}",
                 daemon=True,
             )
             self._threads[key] = thread
             thread.start()
-        if not acquired.wait(5):
-            raise RuntimeError("evaluation asset pipeline lock handshake timed out")
-        if "error" in result:
-            raise result["error"]
+        self._await_admission(admission)
         return layout.load_state().to_dict()
 
     def adopt(self, tenant_id: str, asset_id: str) -> Dict[str, Any]:
@@ -160,26 +161,47 @@ class EvaluationAssetRunManager:
         self,
         key: Tuple[str, str],
         pipeline: EvaluationAssetPipeline,
-        acquired: threading.Event,
-        result: Dict[str, Exception],
+        admission: _WorkerAdmission,
         config_updates: Optional[Mapping[str, Any]],
     ) -> None:
+        def lock_acquired() -> None:
+            admission.lock_acquired = True
+            admission.lock_decided.set()
+
+        def preflight_accepted() -> None:
+            admission.preflight_accepted = True
+            admission.preflight_decided.set()
+
         try:
             pipeline.run(
                 config_updates=config_updates,
-                _lock_acquired_callback=acquired.set,
+                _lock_acquired_callback=lock_acquired,
+                _preflight_accepted_callback=preflight_accepted,
             )
         except EvaluationAssetBusyError as exc:
-            result["error"] = exc
-            acquired.set()
+            admission.error = exc
         except Exception as exc:
             # The pipeline persists the safe failed-stage/error-summary contract.
-            if not acquired.is_set():
-                result["error"] = exc
-                acquired.set()
+            admission.error = exc
             return
         finally:
+            admission.lock_decided.set()
+            admission.preflight_decided.set()
             with self._lock:
                 current = self._threads.get(key)
                 if current is threading.current_thread():
                     self._threads.pop(key, None)
+
+    @staticmethod
+    def _await_admission(admission: _WorkerAdmission) -> None:
+        """Wait for a live worker's lock and preflight decisions without abandonment."""
+        admission.lock_decided.wait()
+        if not admission.lock_acquired:
+            if admission.error is not None:
+                raise admission.error
+            raise RuntimeError("evaluation asset pipeline lock decision failed")
+        admission.preflight_decided.wait()
+        if not admission.preflight_accepted:
+            if admission.error is not None:
+                raise admission.error
+            raise RuntimeError("evaluation asset pipeline preflight decision failed")
