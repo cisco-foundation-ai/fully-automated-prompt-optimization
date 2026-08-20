@@ -22,6 +22,11 @@ from src.hephaestus.evaluation_assets.input_contract import (
     validate_input_records,
 )
 from src.hephaestus.evaluation_assets.models import PipelineStage
+from src.hephaestus.evaluation_assets.stage_three_contract import (
+    replay_legacy_stage_three,
+    replay_native_stage_three,
+    validate_native_guideline_rows,
+)
 
 _MATCH_STATUSES = {
     "matched_trusted_intent",
@@ -175,6 +180,20 @@ def _validate_stage_three(
     stage = PipelineStage.RUBRIC_EXTRACTION
     trusted_intent_rows = _rows(layout.artifact_path(stage, "trusted_intents.jsonl"))
     trusted_intents = _unique_by(trusted_intent_rows, "intent_id")
+    trusted_cases = _case_rows(layout.artifact_path(stage, "trusted_cases.jsonl"))
+    if profile == "legacy":
+        rubric_rows = _rows(layout.artifact_path(stage, "feedback_rubrics.jsonl"))
+        replayed = replay_legacy_stage_three(
+            list(feedback_by_id.values()),
+            rubric_rows,
+            asset_id=layout.asset_id,
+        )
+        if (
+            trusted_intent_rows != replayed["trusted_intents"]
+            or trusted_cases != replayed["trusted_cases"]
+        ):
+            raise ValueError("legacy Stage 3 derivatives do not reproduce")
+        return trusted_intents, trusted_cases
     for row in trusted_intent_rows:
         _nonempty_string(row, "label")
         _string_list(row, "texts", require_nonempty=True)
@@ -190,7 +209,6 @@ def _validate_stage_three(
         if "feedback_polarities" in metadata:
             _string_list(metadata, "feedback_polarities")
 
-    trusted_cases = _case_rows(layout.artifact_path(stage, "trusted_cases.jsonl"))
     trusted_cases_by_id = _unique_by(trusted_cases, "case_id")
     expected_case_ids = {f"feedback-{record_id}" for record_id in feedback_by_id}
     if set(trusted_cases_by_id) != expected_case_ids:
@@ -207,51 +225,6 @@ def _validate_stage_three(
         ):
             raise ValueError("trusted case provenance is inconsistent")
         _validate_expected(case["expected"])
-
-    if profile == "legacy":
-        rubric_rows = _rows(layout.artifact_path(stage, "feedback_rubrics.jsonl"))
-        rubrics = _unique_by(rubric_rows, "record_id")
-        if set(rubrics) != set(feedback_by_id):
-            raise ValueError("legacy rubrics do not exactly cover feedback")
-        for row in rubric_rows:
-            scoreable = False
-            for field in ("must", "must_not", "should"):
-                if field in row:
-                    scoreable = bool(_string_list(row, field)) or scoreable
-            checks = _mapping_list(row, "deterministic_checks", default_empty=True)
-            if "confidence" in row:
-                _number(row, "confidence", minimum=0.0, maximum=1.0)
-            if "intent_label" in row:
-                _nonempty_string(row, "intent_label")
-            if "tool_expectations" in row:
-                _object(row, "tool_expectations")
-            _nullable_string(row, "reference_output")
-            if not scoreable and not checks and not row.get("reference_output"):
-                raise ValueError("legacy rubric has no scoreable expected value")
-        covered = {
-            source_id
-            for row in trusted_intent_rows
-            for source_id in _string_list(_object(row, "metadata"), "source_record_ids")
-        }
-        if covered != set(feedback_by_id):
-            raise ValueError("trusted intents do not exactly cover legacy rubrics")
-        intent_sources = {
-            intent_id: set(
-                _string_list(_object(intent, "metadata"), "source_record_ids")
-            )
-            for intent_id, intent in trusted_intents.items()
-        }
-        for case in trusted_cases:
-            source_id = str(case["case_id"])[len("feedback-") :]
-            linked = case["expected"].get("evaluation_guideline_ids", [])
-            if not isinstance(linked, list) or any(
-                not isinstance(intent_id, str)
-                or intent_id not in intent_sources
-                or source_id not in intent_sources[intent_id]
-                for intent_id in linked
-            ):
-                raise ValueError("legacy trusted case intent lineage is invalid")
-        return trusted_intents, trusted_cases
 
     evidence_rows = _rows(layout.artifact_path(stage, "feedback_evidence.jsonl"))
     evidence = _unique_by(evidence_rows, "record_id")
@@ -395,6 +368,30 @@ def _validate_stage_three(
             != "evaluation_guideline_from_trusted_feedback"
         ):
             raise ValueError("trusted case evidence lineage is inconsistent")
+    validate_native_guideline_rows(guideline_rows)
+    manifest = _json_object(layout.manifest_path)
+    providers = _object(manifest, "providers")
+    evidence_provider_pairs = {
+        (row["guideline_provider"], row["guideline_model"])
+        for row in evidence_rows
+    }
+    if evidence_provider_pairs != {
+        (providers.get("rubric_provider"), providers.get("rubric_model"))
+    }:
+        raise ValueError("Stage 3 provider evidence differs from the manifest")
+    replayed = replay_native_stage_three(
+        list(feedback_by_id.values()),
+        evidence_rows,
+        candidate_rows,
+        asset_id=layout.asset_id,
+    )
+    if (
+        candidate_rows != replayed["candidates"]
+        or guideline_rows != replayed["guidelines"]
+        or trusted_intent_rows != replayed["trusted_intents"]
+        or trusted_cases != replayed["trusted_cases"]
+    ):
+        raise ValueError("native Stage 3 derivatives do not reproduce")
     return trusted_intents, trusted_cases
 
 

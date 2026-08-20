@@ -27,6 +27,9 @@ from src.hephaestus.artifact_io import (
 from src.hephaestus.artifact_io import (
     atomic_write_text as atomic_write_text,
 )
+from src.hephaestus.evaluation_assets.control_jsonl import (
+    read_strict_jsonl_objects,
+)
 from src.hephaestus.evaluation_assets.durability import (
     STAGE_SPECIFICATIONS,
     EvaluationAssetBusyError,
@@ -38,12 +41,19 @@ from src.hephaestus.evaluation_assets.durability import (
     persisted_json_sha256,
     released_parent_evidence,
     validate_legacy_release_candidate,
+    verify_raw_snapshot_floor,
     verify_release_candidate,
     verify_released_asset,
 )
 from src.hephaestus.evaluation_assets.input_contract import validate_input_records
-from src.hephaestus.evaluation_assets.journal_validation import (
+from src.hephaestus.evaluation_assets.journal_transitions import (
     JOURNAL_SCHEMA_VERSION,
+    derive_adoption_plan,
+    derive_audit_transition,
+    derive_rebuild_plan,
+    derive_revision_plan,
+)
+from src.hephaestus.evaluation_assets.journal_validation import (
     validate_recovery_journal,
 )
 from src.hephaestus.evaluation_assets.lineage_validation import (
@@ -54,7 +64,6 @@ from src.hephaestus.evaluation_assets.lineage_validation import (
 from src.hephaestus.evaluation_assets.models import (
     CONFIG_STAGE_DEPENDENCIES,
     STAGE_COUNT_KEYS,
-    STATE_SCHEMA_VERSION,
     EvaluationAssetConfig,
     PipelineStage,
     PipelineState,
@@ -140,6 +149,7 @@ def _required_extension_provider_identity(
     configured_model: str,
     decision: Mapping[str, str],
     updates: Mapping[str, Any],
+    allow_replacement: bool = False,
 ) -> tuple[str, str]:
     """Require an explicit child choice when parent evidence cannot be inherited."""
     provider_field = f"{role}_provider"
@@ -160,6 +170,20 @@ def _required_extension_provider_identity(
             )
         return explicit_provider.strip(), explicit_model.strip()
     producing = (str(decision["provider"]), str(decision["model"]))
+    if allow_replacement and producing != configured:
+        explicit_provider = updates.get(provider_field)
+        explicit_model = updates.get(model_field)
+        if (
+            not isinstance(explicit_provider, str)
+            or not explicit_provider.strip()
+            or not isinstance(explicit_model, str)
+            or not explicit_model.strip()
+        ):
+            raise ValueError(
+                "extension requires an explicit provider identity because "
+                f"released parent {role} evidence differs from configuration"
+            )
+        return explicit_provider.strip(), explicit_model.strip()
     if producing != configured and (
         updates.get(provider_field),
         updates.get(model_field),
@@ -602,6 +626,7 @@ class EvaluationAssetLayout:
                 "embedding",
             ),
             updates=updates,
+            allow_replacement=clustering_mode == "refresh",
         )
         merged_config = parent_config.to_dict()
         merged_config.update(updates)
@@ -845,6 +870,12 @@ class EvaluationAssetLayout:
                     self.asset_id,
                     "only a pre-v2 completed state can be adopted",
                 )
+            if any(self.receipt_path(stage).exists() for stage in PipelineStage):
+                raise EvaluationAssetLegacyError(
+                    self.tenant_id,
+                    self.asset_id,
+                    "legacy receipt authority must be repaired before adoption",
+                )
             try:
                 _validate_source_rows(self.feedback_path, labeled=True)
                 _validate_source_rows(self.unlabeled_path, labeled=False)
@@ -894,24 +925,19 @@ class EvaluationAssetLayout:
                 ) from exc
 
             operation_id = uuid.uuid4().hex
-            target_state = PipelineState.from_dict(state.to_dict())
-            target_state.schema_version = STATE_SCHEMA_VERSION
-            target_state.status = "released"
-            target_state.current_stage = None
-            target_state.error = None
-            target_state.counts = counts
-            target_state.updated_at = timestamp
-            target_state.mutation_sequence = state.mutation_sequence + 1
-            target_state.last_operation_id = operation_id
-            for stage in PipelineStage:
-                stage_state = next(
-                    item
-                    for item in target_state.stages
-                    if item.stage == stage.value
-                )
-                stage_state.receipt_sha256 = persisted_json_sha256(
-                    receipts[stage]
-                )
+            before_config = config.to_dict()
+            before_state = read_json(self.state_path)
+            target_receipts = {
+                stage.value: receipts[stage] for stage in PipelineStage
+            }
+            plan = derive_adoption_plan(
+                before_config,
+                before_state,
+                target_receipts,
+                operation_id=operation_id,
+                prepared_at=timestamp,
+            )
+            target_state = PipelineState.from_dict(plan["target_state"])
             try:
                 verify_release_candidate(
                     self,
@@ -931,48 +957,42 @@ class EvaluationAssetLayout:
                     self.asset_id,
                     "required release evidence failed verification",
                 ) from exc
-            event_entry = {
-                "timestamp": timestamp,
-                "event": "legacy_asset_adopted",
-                "tenant_id": self.tenant_id,
-                "asset_id": self.asset_id,
-                "operation_id": operation_id,
-                "details": {"previous_status": "completed"},
-            }
             prepared = {
                 "schema_version": JOURNAL_SCHEMA_VERSION,
                 "operation_id": operation_id,
                 "kind": "legacy_adoption",
                 "phase": "prepared",
                 "prepared_at": timestamp,
+                "request": {},
+                "before_config": before_config,
+                "before_state": before_state,
                 "before": {
                     "config_sha256": file_sha256(self.config_path),
                     "state_sha256": file_sha256(self.state_path),
                 },
                 "target": {
                     "config_sha256": file_sha256(self.config_path),
-                    "state_sha256": persisted_json_sha256(target_state.to_dict()),
-                    "receipt_sha256": {
-                        stage.value: persisted_json_sha256(receipts[stage])
-                        for stage in PipelineStage
-                    },
+                    "state_sha256": persisted_json_sha256(plan["target_state"]),
+                    "receipt_sha256": plan["receipt_sha256"],
                 },
-                "target_receipts": {
-                    stage.value: receipts[stage] for stage in PipelineStage
-                },
-                "target_state": target_state.to_dict(),
-                "event_entry": event_entry,
-                "result": {"status": "released"},
+                "target_receipts": target_receipts,
+                "target_state": plan["target_state"],
+                "event_entry": plan["event_entry"],
+                "result": plan["result"],
+                "audit": self._journal_audit_transitions(
+                    history_entry=None,
+                    event_entry=plan["event_entry"],
+                ),
             }
             self._append_journal_once(prepared)
             _fault_point("after_prepared_journal")
             self._install_adoption_receipts(prepared)
             _fault_point("after_receipts_install")
             verify_release_candidate(self, target_state)
-            atomic_write_json(self.state_path, target_state.to_dict())
+            atomic_write_json(self.state_path, plan["target_state"])
             _fault_point("after_state_replace")
             verify_released_asset(self, target_state)
-            self._append_jsonl_once(self.events_path, event_entry)
+            self._append_jsonl_once(self.events_path, plan["event_entry"])
             _fault_point("after_event_append")
             self._commit_journal_operation(prepared)
             return target_state
@@ -1013,6 +1033,7 @@ class EvaluationAssetLayout:
                 self.asset_id,
                 "explicit verification and adoption are required before revision",
             )
+        verify_raw_snapshot_floor(self, state)
         current = self.load_config()
         unknown = set(updates) - set(CONFIG_STAGE_DEPENDENCIES)
         if unknown:
@@ -1038,94 +1059,63 @@ class EvaluationAssetLayout:
                 "resume_from_stage": None,
             }
 
-        ordered_stages = list(PipelineStage)
-        earliest = min(
-            (CONFIG_STAGE_DEPENDENCIES[key] for key in changes),
-            key=ordered_stages.index,
-        )
-        invalidated = ordered_stages[ordered_stages.index(earliest) :]
-        resume_stage = next(
-            (
-                stage
-                for stage in ordered_stages
-                if next(
-                    item for item in state.stages if item.stage == stage.value
-                ).status
-                != "completed"
-            ),
-            earliest,
-        )
         revision = self._config_revision_count() + 1
         operation_id = uuid.uuid4().hex
         timestamp = utc_now()
-        target_state = self._target_invalidated_state(
-            state,
-            invalidated,
-            resume_stage=resume_stage,
+        before_config = current.to_dict()
+        before_state = state.to_dict()
+        plan = derive_revision_plan(
+            before_config,
+            before_state,
+            updates,
             operation_id=operation_id,
-            timestamp=timestamp,
+            prepared_at=timestamp,
+            revision=revision,
         )
-        history_entry = {
-            "timestamp": timestamp,
-            "revision": revision,
-            "event": "configuration_updated",
-            "operation_id": operation_id,
-            "changed_fields": changes,
-            "invalidated_from_stage": earliest.value,
-            "resume_from_stage": resume_stage.value,
-        }
-        event_entry = {
-            "timestamp": timestamp,
-            "event": "configuration_updated",
-            "tenant_id": self.tenant_id,
-            "asset_id": self.asset_id,
-            "operation_id": operation_id,
-            "details": {
-                "revision": revision,
-                "changed_fields": changes,
-                "invalidated_from_stage": earliest.value,
-                "resume_from_stage": resume_stage.value,
-            },
-        }
-        result = {
-            "changed_fields": changes,
-            "invalidated_from_stage": earliest.value,
-            "resume_from_stage": resume_stage.value,
-            "revision": revision,
-        }
+        target_state = PipelineState.from_dict(plan["target_state"])
+        result = dict(plan["result"])
         prepared = {
             "schema_version": JOURNAL_SCHEMA_VERSION,
             "operation_id": operation_id,
             "kind": "configuration_revision",
             "phase": "prepared",
             "prepared_at": timestamp,
+            "request": {"updates": dict(updates)},
+            "before_config": before_config,
+            "before_state": before_state,
             "before": {
                 "config_sha256": file_sha256(self.config_path),
                 "state_sha256": file_sha256(self.state_path),
             },
             "target": {
-                "config_sha256": persisted_json_sha256(revised.to_dict()),
-                "state_sha256": persisted_json_sha256(target_state.to_dict()),
+                "config_sha256": persisted_json_sha256(plan["target_config"]),
+                "state_sha256": persisted_json_sha256(plan["target_state"]),
             },
-            "target_config": revised.to_dict(),
-            "target_state": target_state.to_dict(),
-            "history_entry": history_entry,
-            "event_entry": event_entry,
-            "invalidated_stages": [stage.value for stage in invalidated],
+            "target_config": plan["target_config"],
+            "target_state": plan["target_state"],
+            "history_entry": plan["history_entry"],
+            "event_entry": plan["event_entry"],
+            "invalidated_stages": plan["invalidated_stages"],
             "result": result,
+            "audit": self._journal_audit_transitions(
+                history_entry=plan["history_entry"],
+                event_entry=plan["event_entry"],
+            ),
         }
         self._append_journal_once(prepared)
         _fault_point("after_prepared_journal")
-        atomic_write_json(self.config_path, revised.to_dict())
+        atomic_write_json(self.config_path, plan["target_config"])
         _fault_point("after_config_replace")
         atomic_write_json(self.state_path, target_state.to_dict())
         _fault_point("after_state_replace")
-        self._append_jsonl_once(self.config_history_path, history_entry)
+        self._append_jsonl_once(self.config_history_path, plan["history_entry"])
         _fault_point("after_history_append")
-        self._append_jsonl_once(self.events_path, event_entry)
+        self._append_jsonl_once(self.events_path, plan["event_entry"])
         _fault_point("after_event_append")
         _fault_point("before_cleanup")
-        self._clear_stage_outputs(invalidated)
+        self._clear_stage_outputs(
+            [PipelineStage(value) for value in plan["invalidated_stages"]]
+        )
         self._commit_journal_operation(prepared)
         return result
 
@@ -1252,6 +1242,34 @@ class EvaluationAssetLayout:
             }
         )
 
+    def _journal_audit_transitions(
+        self,
+        *,
+        history_entry: Mapping[str, Any] | None,
+        event_entry: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Authenticate both append-only prefixes before preparing a mutation."""
+        self._read_control_log(self.config_history_path)
+        self._read_control_log(self.events_path)
+        history_present = self.config_history_path.is_file()
+        history_bytes = (
+            self.config_history_path.read_bytes() if history_present else b""
+        )
+        events_present = self.events_path.is_file()
+        events_bytes = self.events_path.read_bytes() if events_present else b""
+        return {
+            "config_history": derive_audit_transition(
+                history_bytes,
+                present=history_present,
+                appended_row=history_entry,
+            ),
+            "events": derive_audit_transition(
+                events_bytes,
+                present=events_present,
+                appended_row=event_entry,
+            ),
+        }
+
     def _append_journal_once(self, payload: Mapping[str, Any]) -> None:
         self._append_jsonl_once(
             self.recovery_journal_path,
@@ -1275,17 +1293,8 @@ class EvaluationAssetLayout:
         atomic_append_jsonl(path, payload)
 
     def _read_control_log(self, path: Path) -> list[Dict[str, Any]]:
-        if not path.is_file():
-            return []
-        rows: list[Dict[str, Any]] = []
         try:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                row = json.loads(line)
-                if not isinstance(row, dict):
-                    raise ValueError("control row is not an object")
-                rows.append(row)
+            rows = read_strict_jsonl_objects(path)
         except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
             raise EvaluationAssetIntegrityError(
                 self.tenant_id,
@@ -1293,41 +1302,6 @@ class EvaluationAssetLayout:
                 "a durable control log is malformed",
             ) from exc
         return rows
-
-    def _target_invalidated_state(
-        self,
-        state: PipelineState,
-        invalidated: Sequence[PipelineStage],
-        *,
-        resume_stage: PipelineStage,
-        operation_id: str,
-        timestamp: str,
-    ) -> PipelineState:
-        target = PipelineState.from_dict(state.to_dict())
-        invalidated_names = {stage.value for stage in invalidated}
-        invalidated_count_keys = {
-            key for stage in invalidated for key in STAGE_COUNT_KEYS[stage]
-        }
-        target.counts = {
-            key: value
-            for key, value in target.counts.items()
-            if key not in invalidated_count_keys
-        }
-        for stage_state in target.stages:
-            if stage_state.stage not in invalidated_names:
-                continue
-            stage_state.status = "pending"
-            stage_state.message = ""
-            stage_state.started_at = None
-            stage_state.completed_at = None
-            stage_state.receipt_sha256 = None
-        target.status = "queued"
-        target.current_stage = resume_stage.value
-        target.error = None
-        target.updated_at = timestamp
-        target.mutation_sequence += 1
-        target.last_operation_id = operation_id
-        return target
 
     def config_revision_summary(self) -> Dict[str, Any]:
         """Return bounded configuration revision metadata for the Studio."""
@@ -1399,52 +1373,54 @@ class EvaluationAssetLayout:
         boundary: PipelineStage,
     ) -> PipelineState:
         """Make a stage suffix nonauthoritative before best-effort cleanup."""
-        ordered_stages = list(PipelineStage)
-        invalidated = ordered_stages[ordered_stages.index(boundary) :]
         operation_id = uuid.uuid4().hex
         timestamp = utc_now()
-        target_state = self._target_invalidated_state(
-            state,
-            invalidated,
-            resume_stage=boundary,
+        before_config = self.load_config().to_dict()
+        before_state = state.to_dict()
+        plan = derive_rebuild_plan(
+            before_config,
+            before_state,
+            boundary,
             operation_id=operation_id,
-            timestamp=timestamp,
+            prepared_at=timestamp,
         )
-        event_entry = {
-            "timestamp": timestamp,
-            "event": "checkpoint_rebuild_started",
-            "tenant_id": self.tenant_id,
-            "asset_id": self.asset_id,
-            "operation_id": operation_id,
-            "details": {"stage": boundary.value},
-        }
+        target_state = PipelineState.from_dict(plan["target_state"])
         prepared = {
             "schema_version": JOURNAL_SCHEMA_VERSION,
             "operation_id": operation_id,
             "kind": "checkpoint_rebuild",
             "phase": "prepared",
             "prepared_at": timestamp,
+            "request": {"boundary": boundary.value},
+            "before_config": before_config,
+            "before_state": before_state,
             "before": {
                 "config_sha256": file_sha256(self.config_path),
                 "state_sha256": file_sha256(self.state_path),
             },
             "target": {
                 "config_sha256": file_sha256(self.config_path),
-                "state_sha256": persisted_json_sha256(target_state.to_dict()),
+                "state_sha256": persisted_json_sha256(plan["target_state"]),
             },
-            "target_state": target_state.to_dict(),
-            "event_entry": event_entry,
-            "invalidated_stages": [stage.value for stage in invalidated],
-            "result": {"resume_from_stage": boundary.value},
+            "target_state": plan["target_state"],
+            "event_entry": plan["event_entry"],
+            "invalidated_stages": plan["invalidated_stages"],
+            "result": plan["result"],
+            "audit": self._journal_audit_transitions(
+                history_entry=None,
+                event_entry=plan["event_entry"],
+            ),
         }
         self._append_journal_once(prepared)
         _fault_point("after_prepared_journal")
         atomic_write_json(self.state_path, target_state.to_dict())
         _fault_point("after_state_replace")
-        self._append_jsonl_once(self.events_path, event_entry)
+        self._append_jsonl_once(self.events_path, plan["event_entry"])
         _fault_point("after_event_append")
         _fault_point("before_cleanup")
-        self._clear_stage_outputs(invalidated)
+        self._clear_stage_outputs(
+            [PipelineStage(value) for value in plan["invalidated_stages"]]
+        )
         self._commit_journal_operation(prepared)
         return target_state
 

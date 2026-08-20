@@ -14,6 +14,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from src.hephaestus.evaluation_assets.control_jsonl import (
+    read_strict_jsonl_objects,
+)
+from src.hephaestus.evaluation_assets.journal_transitions import (
+    JOURNAL_SCHEMA_VERSION,
+)
 from src.hephaestus.evaluation_assets.legacy_validation import (
     validate_legacy_stage_semantics,
 )
@@ -506,11 +512,19 @@ def _verify_release_evidence(
             state,
             require_persisted_state=require_persisted_state,
         )
-        config_hashes = _replay_config_history(layout, config, state)
         verified_receipts = (
             _verify_candidate_receipts(layout, state, candidate_receipts)
             if candidate_receipts is not None
             else verify_receipt_chain(layout, state)
+        )
+        config_hashes = _replay_config_history(
+            layout,
+            config,
+            state,
+            allow_pre_wal_history=all(
+                receipt.get("origin") == "legacy_adoption"
+                for receipt in verified_receipts.values()
+            ),
         )
         _verify_receipt_config_history(
             layout,
@@ -861,8 +875,10 @@ def _replay_config_history(
     layout: Any,
     current_config: EvaluationAssetConfig,
     state: PipelineState,
+    *,
+    allow_pre_wal_history: bool,
 ) -> list[str]:
-    rows = _read_jsonl_objects(layout.config_history_path)
+    rows = read_strict_jsonl_objects(layout.config_history_path)
     if not rows:
         raise EvaluationAssetIntegrityError(
             layout.tenant_id,
@@ -907,17 +923,17 @@ def _replay_config_history(
         raise ValueError("extension configuration history origin is invalid")
 
     journal_rows = (
-        _read_jsonl_objects(layout.recovery_journal_path)
+        read_strict_jsonl_objects(layout.recovery_journal_path)
         if layout.recovery_journal_path.is_file()
         else []
     )
-    revision_prepares = [
+    revision_journal_rows = [
         row
         for row in journal_rows
         if row.get("kind") == "configuration_revision"
-        and row.get("phase") == "prepared"
     ]
     snapshots = [canonical_sha256(replayed)]
+    update_rows: list[Mapping[str, Any]] = []
     previous_timestamp = datetime.fromisoformat(str(first["timestamp"]))
     for revision, row in enumerate(rows[1:], start=2):
         timestamp = row.get("timestamp")
@@ -964,23 +980,25 @@ def _replay_config_history(
             PipelineStage(str(row.get("resume_from_stage")))
         except ValueError as exc:
             raise ValueError("configuration history resume stage is invalid") from exc
-        if revision_prepares:
-            matching = [
-                prepared
-                for prepared in revision_prepares
-                if prepared.get("operation_id") == operation_id
-                and prepared.get("history_entry") == row
-            ]
-            matching_commits = [
-                committed
-                for committed in journal_rows
-                if committed.get("operation_id") == operation_id
-                and committed.get("kind") == "configuration_revision"
-                and committed.get("phase") == "committed"
-            ]
-            if len(matching) != 1 or len(matching_commits) != 1:
-                raise ValueError("configuration history journal authority is invalid")
+        update_rows.append(row)
         snapshots.append(canonical_sha256(replayed))
+    if not allow_pre_wal_history:
+        if len(revision_journal_rows) != 2 * len(update_rows):
+            raise ValueError("configuration history journal authority is invalid")
+        for index, history_entry in enumerate(update_rows):
+            prepared = revision_journal_rows[2 * index]
+            committed = revision_journal_rows[2 * index + 1]
+            operation_id = history_entry["operation_id"]
+            if (
+                prepared.get("schema_version") != JOURNAL_SCHEMA_VERSION
+                or prepared.get("phase") != "prepared"
+                or prepared.get("operation_id") != operation_id
+                or prepared.get("history_entry") != history_entry
+                or committed.get("schema_version") != JOURNAL_SCHEMA_VERSION
+                or committed.get("phase") != "committed"
+                or committed.get("operation_id") != operation_id
+            ):
+                raise ValueError("configuration history journal authority is invalid")
     if replayed != current_config.to_dict():
         raise EvaluationAssetIntegrityError(
             layout.tenant_id,

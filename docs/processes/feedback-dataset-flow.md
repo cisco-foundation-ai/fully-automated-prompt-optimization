@@ -112,8 +112,9 @@ completed receipt prefix and rebuilds from the first incomplete or invalid
 stage; a released asset is immutable and fails closed on any receipt or
 artifact mismatch. Released verification also authenticates the exact v2
 control state and identities, replays configuration history to justify every
-receipt's full resolved-config hash, requires the exact versioned history row
-schemas and exact journal correspondence when revision evidence is present, and
+receipt's full resolved-config hash, requires each native configuration update
+to have exactly one earlier byte-equivalent version 2 prepare and one later
+matching commit in revision order, and
 binds Stage 8 to the exact persisted configuration-history bytes and current
 configuration without requiring the current checkout to equal historical code.
 
@@ -141,12 +142,16 @@ removes its temporary file. One deterministic collection-level file lock per
 asset protects every high-level mutation across processes. Configuration
 revision, checkpoint rebuild, and legacy adoption use an append-only recovery
 journal whose prepared payload rolls forward idempotently.
-Before roll-forward, recovery validates the complete journal schema, unique
-operation identity, tenant/asset-bound target config and state, exact nested
-result/history/event schemas, changed-field and stage-suffix semantics,
-before/target hashes, prepare-before-commit ordering, audit rows, and only the
-operation-reachable on-disk control pairs. A parseable, rehashed, but
-inconsistent journal therefore fails before any authority write.
+Before roll-forward, recovery validates the complete version 2 journal schema,
+unique operation identity, authenticated raw pre-operation config/state,
+tenant/asset-bound target config and state, exact nested request/result/history/
+event schemas, changed-field and stage-suffix semantics, before/target hashes,
+strict contiguous prepare/commit ordering, and byte-exact before/target prefix
+descriptors for both append-only audit logs. Only writer-reachable on-disk
+control and audit phases are accepted. Version 1 or mixed-version journals
+require explicit repair because they do not contain enough before-state
+evidence for safe automatic recovery. A parseable, rehashed, but inconsistent
+journal therefore fails before any authority write.
 
 These are single-file and authority-ordering guarantees. Stage 8 verifies all
 four current catalog copies before `released`, but Task 3 does not make those
@@ -209,14 +214,15 @@ The Studio and `assets extend` CLI expose two modes:
 | `keep` | Labeled feedback only | Merge and validate full inputs; prepare canonical inputs; extract evidence only for added feedback; rebuild guidelines across the complete evidence pool; restore the exact Stage 4 inventory from the verified child snapshot on every run or rebuild; recalculate Stages 5–8 without reclustering |
 | `refresh` | Labeled feedback, unlabeled records, or both | Merge and validate full inputs; extract only added feedback evidence; rebuild guidelines; rerun Stage 4 over the combined unlabeled pool; recalculate Stages 5–8 |
 
-Keep mode requires the parent's embedding provider, embedding model, cluster
-count, and guideline model. Refresh mode may select a new embedding model and
-cluster count but retains the guideline model so the trusted pool does not mix
-guideline-generation versions. These comparisons use verified receipt evidence
-from the producing providers, not potentially stale configured defaults. When
-legacy adoption records a producing identity as historically unavailable, the
-child must explicitly select a complete provider/model identity before its root
-is created.
+Keep mode requires the parent's producing embedding provider/model, cluster
+count, and guideline provider/model. Refresh retains the producing guideline
+identity but may select a complete new embedding provider/model pair and cluster
+count. These comparisons use verified receipt evidence, not potentially stale
+configured defaults. If producing embedding evidence differs from configuration,
+refresh omission or a partial pair fails before the child root is created;
+keep must explicitly select the producing pair. When legacy adoption records a
+producing identity as historically unavailable, either mode requires a complete
+explicit provider/model identity.
 
 Feedback collected for a Stage 5 queue item may use the same `record_id` as its
 original unlabeled trace. The trace remains in the intent inventory so traffic
@@ -664,6 +670,19 @@ Stage 3 deliberately separates evidence from generalization:
    guideline level. `trusted_cases.jsonl` embeds the applicable guideline IDs
    and complete guideline snapshots so split files remain independently
    usable.
+
+The live writer and legacy-adoption verifier share this transformation
+contract. Candidate criteria accept only `required`, `prohibited`, or
+`preferred`; severities accept `critical`, `major`, or `minor`; evaluator type
+and fallback accept `state_check`, `deterministic_check`,
+`semantic_trajectory`, `llm_judge`, or `human_review`. Scoring remains a
+nonempty producer-defined string, applicability is a string or JSON mapping,
+and tool expectations are a finite JSON mapping. Adoption deterministically
+replays candidate compilation and every derived guideline, trusted-intent, and
+trusted-case field. Genuine pre-guideline rubric layouts are replayed against
+their historical trusted intent/case writer rather than being coerced into the
+native schema. Any mismatch fails before receipts, journal, state, history,
+events, or catalog authority changes.
 
 Evaluator plans use this preference order:
 

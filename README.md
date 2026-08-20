@@ -207,6 +207,11 @@ the Studio has no remote persistence backend for this workspace.
 | 7. Expand coverage | Optionally generate and filter a configured number of synthetic cases per supported cluster. |
 | 8. Build splits | Create group-safe train, validation, and test splits plus an automatic, trusted-only 20% regression gate, then publish those four datasets to the tenant dataset catalog. |
 
+Stage 3 uses one shared producer/verification contract: supported candidate
+domains are validated before persistence, compiled guidelines and their trusted
+intent/case derivatives are deterministic, and legacy adoption replays the
+exact native or historical transformation before accepting existing bytes.
+
 The top-level lifecycle is exactly `draft`, `queued`, `running`,
 `awaiting_review`, `released`, or `failed`. Each completed stage has an atomic
 receipt commit marker under `receipts/`; `pipeline_state.json` references its
@@ -225,8 +230,13 @@ prepared record to `recovery_journal.jsonl`, then make stale stage state
 nonauthoritative, and only afterward remove stale files. A later run rolls any
 prepared operation forward idempotently before it evaluates the receipt chain.
 Recovery authenticates the journal schema, operation and tenant/asset identity,
-exact nested target/audit semantics, prepare-before-commit order, before/target
-hashes, and only operation-reachable intermediate control pairs before writing.
+the complete pre-operation config/state snapshot, exact nested target semantics,
+byte-exact before/target prefixes for configuration history and events,
+prepare-before-commit order, before/target hashes, and only operation-reachable
+intermediate control pairs before writing. Version 2 operations form strict
+contiguous prepare/commit pairs with at most one trailing prepare. Version 1 or
+mixed-version journals require explicit repair because they lack the complete
+before-state evidence needed for safe roll-forward.
 One cross-process per-asset lock protects create, run/resume, revision,
 adoption, and extension mutations across library, CLI, and Studio callers.
 Default providers are constructed only after that lock, recovery, lifecycle
@@ -306,9 +316,13 @@ in deterministic order; the parent receipt and source-lineage evidence must
 verify before the child root is created. Stages 3–8 receipt the exact lineage,
 reuse, and parent-snapshot inputs they consume, and Stage 8 anchors the lineage
 and reuse manifests as required outputs. Producing provider identities come
-from verified parent receipts; a historically unavailable identity requires an
-explicit complete child provider/model selection. The parent asset is never
-changed.
+from verified parent receipts. Both modes retain the guideline identity, and
+keep mode also retains the producing embedding identity. Refresh may choose a
+complete new embedding provider/model pair; if receipt evidence differs from
+stale configuration, omission or a partial pair is rejected instead of
+inheriting that configuration. A historically unavailable identity likewise
+requires an explicit complete child provider/model selection. The parent asset
+is never changed.
 
 ### Use the CLI
 
