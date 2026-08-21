@@ -638,6 +638,26 @@ deletes publication history. Pre-v2 adoption performs the same materialization
 and publication as its single terminal operation, while interim v2 releases
 without a pointer fail closed with repair/rebuild guidance.
 
+The verified directory-creation concurrency contract covers every Evaluation
+Asset Studio authority-root, authority-ancestor, stage, receipt,
+publication-catalog, generation, and generation-staging directory creator
+reached through repository, CLI, or Studio entry points. They serialize on the
+already-open parent directory and use private names, no-follow opens, namespace
+and inode/type rechecks, and no-replace installation. A finite guard rejects
+`Path.mkdir`, `os.mkdir`, and `os.makedirs` aliases or escapes, including
+literal `operator.attrgetter` and `operator.methodcaller` persistence
+attributes; it makes no arbitrary claim for unresolved dynamic attribute names.
+The only exceptions are the exact `create_and_open_local_directory_at` call,
+the generic parent bootstraps in `_atomic_write_text` and
+`_atomic_write_binary`, and the deprecated non-Studio
+`assemble_dataset_bundle`. A live complete-release check proves that those
+compatibility bootstraps do not create directories in this boundary.
+POSIX `mkdirat` does not atomically return a descriptor, so this is not a
+guarantee against arbitrary noncooperating mutation by another process running
+as the same OS user between `mkdirat` and `openat`. Such a process is outside the
+trusted local-writer boundary; deployments must isolate the workspace from
+unaudited same-identity filesystem writers.
+
 PR2 also writes receipt-backed provider-call ledgers for Stages 3–7 and a
 body-free `build_provenance.json`. Its deterministic identity covers the full
 declared source inventory, resolved defaults, runtime dependencies, inputs,

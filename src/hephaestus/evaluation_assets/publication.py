@@ -24,6 +24,7 @@ from src.hephaestus.artifact_io import (
 )
 from src.hephaestus.evaluation_assets.control_jsonl import (
     LocalAuthorityFile,
+    create_and_open_local_directory_at,
     open_local_authority_directory,
     read_local_authority_file_with_identity_at,
     resolve_local_authority_file,
@@ -230,22 +231,30 @@ def install_generation(
                 )
 
             temporary_name = f".{generation_id}.{uuid.uuid4().hex}.tmp"
-            os.mkdir(temporary_name, 0o700, dir_fd=generations_descriptor)
-            temporary_descriptor = _open_exact_child_directory(
-                generations_descriptor,
-                temporary_name,
+            temporary_descriptor, temporary_identity = (
+                create_and_open_local_directory_at(
+                    generations_descriptor,
+                    temporary_name,
+                    final_mode=0o700,
+                    replacement_error=(
+                        "new temporary generation was replaced before opening"
+                    ),
+                )
             )
             try:
-                if os.listdir(temporary_descriptor):
-                    raise ValueError(
-                        "new temporary generation was replaced before opening"
-                    )
-                temporary_stat = os.fstat(temporary_descriptor)
-                temporary_identity = (
-                    temporary_stat.st_dev,
-                    temporary_stat.st_ino,
-                    stat.S_IFMT(temporary_stat.st_mode),
+                named_before_mutation = os.stat(
+                    temporary_name,
+                    dir_fd=generations_descriptor,
+                    follow_symlinks=False,
                 )
+                if (
+                    named_before_mutation.st_dev,
+                    named_before_mutation.st_ino,
+                    stat.S_IFMT(named_before_mutation.st_mode),
+                ) != temporary_identity:
+                    raise ValueError(
+                        "temporary generation changed before first mutation"
+                    )
                 _call_fault(fault_hook, "after_generation_temp_created")
                 for split in LOGICAL_SPLITS:
                     atomic_write_bytes_at(
@@ -324,6 +333,7 @@ def install_generation(
                         generation_id,
                         rejected_name,
                         expected_source=temporary_identity,
+                        restore_source_on_mismatch=True,
                     ):
                         raise OSError(
                             "raced generation install could not be quarantined"
@@ -825,13 +835,17 @@ def _open_or_create_child_directory(
     try:
         return _open_exact_child_directory(parent_descriptor, name)
     except FileNotFoundError:
-        os.mkdir(name, 0o755, dir_fd=parent_descriptor)
-        descriptor = _open_exact_child_directory(parent_descriptor, name)
-        if os.listdir(descriptor):
-            os.close(descriptor)
-            raise ValueError(
-                "new generation directory was replaced before opening"
+        try:
+            descriptor, _ = create_and_open_local_directory_at(
+                parent_descriptor,
+                name,
+                final_mode=0o755,
+                replacement_error=(
+                    "new generation directory was replaced before opening"
+                ),
             )
+        except FileExistsError:
+            return _open_exact_child_directory(parent_descriptor, name)
         return descriptor
 
 

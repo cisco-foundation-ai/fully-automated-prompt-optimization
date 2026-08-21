@@ -1101,8 +1101,10 @@ def test_generation_temp_creation_rejects_foreign_replacement(
 ) -> None:
     """A foreign directory replacing the new staging name is never populated."""
     catalog = tmp_path / "catalog"
-    parked = tmp_path / "parked-owned-staging"
-    foreign = tmp_path / "foreign-staging"
+    generations = catalog / "generations"
+    generations.mkdir(parents=True)
+    parked = generations / "parked-owned-staging"
+    foreign = generations / "foreign-staging"
     foreign.mkdir()
     (foreign / "KEEP").write_bytes(b"KEEP")
     original = publication_module.os.mkdir
@@ -1118,10 +1120,15 @@ def test_generation_temp_creation_rejects_foreign_replacement(
         original(path, mode, dir_fd=dir_fd)
         if (
             isinstance(path, str)
-            and path.endswith(".tmp")
+            and path.startswith("..sha256-")
+            and path.endswith(".directory")
             and dir_fd is not None
             and not attacked
         ):
+            control_jsonl_module.fcntl.flock(
+                dir_fd,
+                control_jsonl_module.fcntl.LOCK_UN,
+            )
             created = catalog / "generations" / path
             created.rename(parked)
             foreign.rename(created)
@@ -1141,8 +1148,437 @@ def test_generation_temp_creation_rejects_foreign_replacement(
     live = next(
         path
         for path in (catalog / "generations").iterdir()
-        if path.name.endswith(".tmp")
+        if path.name.endswith(".directory")
     )
     assert attacked
     assert (live / "KEEP").read_bytes() == b"KEEP"
     assert not any(parked.iterdir())
+
+
+def test_release_pointer_exchange_race_restores_concurrent_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rejected pointer writer cannot remain authoritative after a raw race."""
+    catalog = tmp_path / "catalog"
+    old_generation = install_generation(
+        catalog,
+        tenant_id="tenant",
+        asset_id="asset",
+        split_paths=_splits(tmp_path / "old", "old"),
+        build_fingerprint="1" * 64,
+    )
+    new_generation = install_generation(
+        catalog,
+        tenant_id="tenant",
+        asset_id="asset",
+        split_paths=_splits(tmp_path / "new", "new"),
+        build_fingerprint="2" * 64,
+    )
+    old_pointer = build_release_pointer(
+        tenant_id="tenant",
+        asset_id="asset",
+        generation=old_generation,
+        stage_8_receipt_sha256="3" * 64,
+        build_provenance_sha256="4" * 64,
+        published_at="2026-08-20T00:00:00+00:00",
+    )
+    new_pointer = build_release_pointer(
+        tenant_id="tenant",
+        asset_id="asset",
+        generation=new_generation,
+        stage_8_receipt_sha256="5" * 64,
+        build_provenance_sha256="6" * 64,
+        published_at="2026-08-20T00:00:01+00:00",
+    )
+    write_release_pointer(catalog, old_pointer)
+    pointer_path = catalog / "release.json"
+    parked_old = catalog / "parked-old-release.json"
+    original = artifact_io._rename_with_flags_at
+    attacked = False
+
+    def race_after_identity_check(
+        directory_descriptor: int,
+        source_name: str,
+        target_name: str,
+        *,
+        darwin_flags: int,
+        linux_flags: int,
+    ) -> bool:
+        nonlocal attacked
+        if target_name == "release.json" and linux_flags == 2 and not attacked:
+            pointer_path.rename(parked_old)
+            pointer_path.write_bytes(b"FOREIGN-POINTER")
+            attacked = True
+        return original(
+            directory_descriptor,
+            source_name,
+            target_name,
+            darwin_flags=darwin_flags,
+            linux_flags=linux_flags,
+        )
+
+    monkeypatch.setattr(
+        artifact_io,
+        "_rename_with_flags_at",
+        race_after_identity_check,
+    )
+    with pytest.raises(ValueError):
+        write_release_pointer(catalog, new_pointer)
+
+    assert attacked
+    assert pointer_path.read_bytes() == b"FOREIGN-POINTER"
+    assert parked_old.read_bytes() == publication_module._persisted_json_bytes(
+        old_pointer
+    )
+    assert any(
+        path.read_bytes() == publication_module._persisted_json_bytes(new_pointer)
+        for path in catalog.iterdir()
+        if path.name.startswith(".release.json.")
+    )
+
+    monkeypatch.setattr(artifact_io, "_rename_with_flags_at", original)
+    write_release_pointer(catalog, new_pointer)
+    assert pointer_path.read_bytes() == publication_module._persisted_json_bytes(
+        new_pointer
+    )
+    assert parked_old.read_bytes() == publication_module._persisted_json_bytes(
+        old_pointer
+    )
+
+
+def test_generation_install_race_quarantines_foreign_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A source-name race cannot install a foreign immutable generation."""
+    catalog = tmp_path / "catalog"
+    parked_owned = tmp_path / "parked-owned-generation"
+    foreign = tmp_path / "foreign-generation"
+    foreign.mkdir()
+    (foreign / "KEEP").write_bytes(b"FOREIGN")
+    original = artifact_io._rename_with_flags_at
+    attacked = False
+
+    def race_after_identity_check(
+        directory_descriptor: int,
+        source_name: str,
+        target_name: str,
+        *,
+        darwin_flags: int,
+        linux_flags: int,
+    ) -> bool:
+        nonlocal attacked
+        if (
+            target_name.startswith("sha256-")
+            and source_name.endswith(".tmp")
+            and linux_flags == 1
+            and not attacked
+        ):
+            staging = catalog / "generations" / source_name
+            staging.rename(parked_owned)
+            foreign.rename(staging)
+            attacked = True
+        return original(
+            directory_descriptor,
+            source_name,
+            target_name,
+            darwin_flags=darwin_flags,
+            linux_flags=linux_flags,
+        )
+
+    monkeypatch.setattr(
+        artifact_io,
+        "_rename_with_flags_at",
+        race_after_identity_check,
+    )
+    with pytest.raises(ValueError):
+        install_generation(
+            catalog,
+            tenant_id="tenant",
+            asset_id="asset",
+            split_paths=_splits(tmp_path),
+            build_fingerprint="a" * 64,
+        )
+
+    assert attacked
+    assert not any(
+        path.name.startswith("sha256-")
+        for path in (catalog / "generations").iterdir()
+    )
+    assert parked_owned.is_dir()
+    assert not (parked_owned / "KEEP").exists()
+    assert any(
+        (path / "KEEP").read_bytes() == b"FOREIGN"
+        for path in (catalog / "generations").iterdir()
+        if path.name.startswith(".sha256-") and (path / "KEEP").is_file()
+    )
+
+    monkeypatch.setattr(artifact_io, "_rename_with_flags_at", original)
+    generation = install_generation(
+        catalog,
+        tenant_id="tenant",
+        asset_id="asset",
+        split_paths=_splits(tmp_path),
+        build_fingerprint="a" * 64,
+    )
+    assert generation.generation_dir.is_dir()
+    assert any(
+        (path / "KEEP").read_bytes() == b"FOREIGN"
+        for path in (catalog / "generations").iterdir()
+        if path.name.startswith(".sha256-") and (path / "KEEP").is_file()
+    )
+
+
+def test_detectable_empty_foreign_generations_namespace_change_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An extra sibling trace fails before a foreign catalog is populated."""
+    catalog = tmp_path / "catalog"
+    catalog.mkdir()
+    parked_owned = catalog / "parked-owned-generations"
+    foreign = catalog / "foreign-generations"
+    foreign_descriptor: int | None = None
+    original = publication_module.os.mkdir
+    attacked = False
+
+    def replace_created_generations(
+        path: str | bytes | Path,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        nonlocal attacked, foreign_descriptor
+        original(path, mode, dir_fd=dir_fd)
+        if (
+            isinstance(path, str)
+            and path.startswith(".generations.")
+            and path.endswith(".directory")
+            and dir_fd is not None
+            and not attacked
+        ):
+            created = catalog / path
+            created.rename(parked_owned)
+            original(foreign.name, mode, dir_fd=dir_fd)
+            foreign_descriptor = publication_module.os.open(
+                foreign,
+                publication_module.os.O_RDONLY
+                | getattr(publication_module.os, "O_DIRECTORY", 0),
+            )
+            foreign.rename(created)
+            attacked = True
+
+    monkeypatch.setattr(
+        publication_module.os,
+        "mkdir",
+        replace_created_generations,
+    )
+    try:
+        with pytest.raises(ValueError):
+            install_generation(
+                catalog,
+                tenant_id="tenant",
+                asset_id="asset",
+                split_paths=_splits(tmp_path),
+                build_fingerprint="a" * 64,
+            )
+        assert attacked
+        assert foreign_descriptor is not None
+        assert publication_module.os.listdir(foreign_descriptor) == []
+        assert publication_module.os.listdir(parked_owned) == []
+        monkeypatch.setattr(publication_module.os, "mkdir", original)
+        generation = install_generation(
+            catalog,
+            tenant_id="tenant",
+            asset_id="asset",
+            split_paths=_splits(tmp_path),
+            build_fingerprint="a" * 64,
+        )
+        assert generation.generation_dir.is_dir()
+        assert publication_module.os.listdir(foreign_descriptor) == []
+    finally:
+        if foreign_descriptor is not None:
+            publication_module.os.close(foreign_descriptor)
+
+
+def test_detectable_empty_foreign_staging_namespace_change_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An extra sibling trace fails before foreign staging is populated."""
+    catalog = tmp_path / "catalog"
+    generations = catalog / "generations"
+    generations.mkdir(parents=True)
+    parked_owned = generations / "parked-owned-staging"
+    foreign = generations / "foreign-staging"
+    foreign_descriptor: int | None = None
+    original = publication_module.os.mkdir
+    attacked = False
+
+    def replace_created_staging(
+        path: str | bytes | Path,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        nonlocal attacked, foreign_descriptor
+        original(path, mode, dir_fd=dir_fd)
+        if (
+            isinstance(path, str)
+            and path.startswith("..sha256-")
+            and path.endswith(".directory")
+            and dir_fd is not None
+            and not attacked
+        ):
+            staging = catalog / "generations" / path
+            staging.rename(parked_owned)
+            original(foreign.name, mode, dir_fd=dir_fd)
+            foreign_descriptor = publication_module.os.open(
+                foreign,
+                publication_module.os.O_RDONLY
+                | getattr(publication_module.os, "O_DIRECTORY", 0),
+            )
+            foreign.rename(staging)
+            attacked = True
+
+    monkeypatch.setattr(publication_module.os, "mkdir", replace_created_staging)
+    try:
+        with pytest.raises(ValueError):
+            install_generation(
+                catalog,
+                tenant_id="tenant",
+                asset_id="asset",
+                split_paths=_splits(tmp_path),
+                build_fingerprint="a" * 64,
+            )
+        assert attacked
+        assert foreign_descriptor is not None
+        assert publication_module.os.listdir(foreign_descriptor) == []
+        assert publication_module.os.listdir(parked_owned) == []
+        assert not any(
+            path.name.startswith("sha256-")
+            for path in (catalog / "generations").iterdir()
+        )
+        monkeypatch.setattr(publication_module.os, "mkdir", original)
+        generation = install_generation(
+            catalog,
+            tenant_id="tenant",
+            asset_id="asset",
+            split_paths=_splits(tmp_path),
+            build_fingerprint="a" * 64,
+        )
+        assert generation.generation_dir.is_dir()
+        assert publication_module.os.listdir(foreign_descriptor) == []
+    finally:
+        if foreign_descriptor is not None:
+            publication_module.os.close(foreign_descriptor)
+
+
+def test_generation_quarantine_raw_race_restores_concurrent_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A generation-quarantine race restores the concurrent final directory."""
+    catalog = tmp_path / "catalog"
+    generations = catalog / "generations"
+    generations.mkdir(parents=True)
+    foreign = generations / "foreign-generation"
+    foreign.mkdir()
+    (foreign / "KEEP").write_bytes(b"FOREIGN")
+    foreign_details = foreign.stat()
+    foreign_identity = (
+        foreign_details.st_dev,
+        foreign_details.st_ino,
+        foreign_details.st_mode & 0o170000,
+    )
+    foreign_descriptor = publication_module.os.open(
+        foreign,
+        publication_module.os.O_RDONLY
+        | getattr(publication_module.os, "O_DIRECTORY", 0),
+    )
+    parked_owned = generations / "parked-owned-generation"
+    original_install = publication_module.rename_noreplace_at
+    original_raw = artifact_io._rename_with_flags_at
+    mutated = False
+    attacked = False
+    final_name: str | None = None
+
+    def mutate_staging(
+        directory_descriptor: int,
+        source_name: str,
+        target_name: str,
+        **kwargs: Any,
+    ) -> bool:
+        nonlocal mutated
+        if target_name.startswith("sha256-") and not mutated:
+            (generations / source_name / "train.jsonl").write_bytes(b"EVIL")
+            mutated = True
+        return original_install(
+            directory_descriptor,
+            source_name,
+            target_name,
+            **kwargs,
+        )
+
+    def race_quarantine(
+        directory_descriptor: int,
+        source_name: str,
+        target_name: str,
+        *,
+        darwin_flags: int,
+        linux_flags: int,
+    ) -> bool:
+        nonlocal attacked, final_name
+        if (
+            source_name.startswith("sha256-")
+            and target_name.endswith(".rejected")
+            and linux_flags == 1
+            and not attacked
+        ):
+            final_name = source_name
+            installed = generations / source_name
+            installed.rename(parked_owned)
+            foreign.rename(installed)
+            attacked = True
+        return original_raw(
+            directory_descriptor,
+            source_name,
+            target_name,
+            darwin_flags=darwin_flags,
+            linux_flags=linux_flags,
+        )
+
+    monkeypatch.setattr(
+        publication_module,
+        "rename_noreplace_at",
+        mutate_staging,
+    )
+    monkeypatch.setattr(
+        artifact_io,
+        "_rename_with_flags_at",
+        race_quarantine,
+    )
+    try:
+        with pytest.raises(ValueError):
+            install_generation(
+                catalog,
+                tenant_id="tenant",
+                asset_id="asset",
+                split_paths=_splits(tmp_path),
+                build_fingerprint="a" * 64,
+            )
+
+        assert mutated
+        assert attacked
+        assert final_name is not None
+        restored = (generations / final_name).stat()
+        assert (
+            restored.st_dev,
+            restored.st_ino,
+            restored.st_mode & 0o170000,
+        ) == foreign_identity
+        assert publication_module.os.listdir(foreign_descriptor) == ["KEEP"]
+        assert (parked_owned / "train.jsonl").read_bytes() == b"EVIL"
+    finally:
+        publication_module.os.close(foreign_descriptor)

@@ -19,7 +19,6 @@ from typing import Any, Mapping, Sequence
 from src.hephaestus.evaluation_assets.control_jsonl import (
     parse_strict_json_object,
     parse_strict_jsonl_objects,
-    read_strict_jsonl_objects,
     resolve_local_authority_file,
 )
 from src.hephaestus.evaluation_assets.journal_transitions import (
@@ -1626,10 +1625,10 @@ def _stage_suffix(value: Any, *, historical: bool) -> tuple[str, ...]:
 
 
 def _audit_rows(layout: Any, path: Path) -> list[dict[str, Any]]:
-    return read_strict_jsonl_objects(
-        path,
-        trusted_root=layout.tenants_root,
-    )
+    present, payload = _local_authority_file(layout, path)
+    if not present:
+        return []
+    return parse_strict_jsonl_objects(payload)
 
 
 def _strict_jsonl_bytes(raw: bytes) -> None:

@@ -1450,7 +1450,7 @@ class EvaluationAssetPipeline:
             sample_ratio=LABELING_QUEUE_SAMPLE_RATIO,
             max_per_cluster=LABELING_QUEUE_MAX_PER_CLUSTER,
         )
-        write_jsonl(
+        self.layout._write_authority_jsonl(
             self.layout.artifact_path(
                 PipelineStage.COVERAGE_DECISIONS,
                 "review_queue/labeling_queue.jsonl",

@@ -96,8 +96,14 @@ def rename_noreplace_at(
     destination: str,
     *,
     expected_source: tuple[int, int, int] | None = None,
+    restore_source_on_mismatch: bool = False,
 ) -> bool:
-    """Atomically rename only when the destination name is absent."""
+    """Atomically rename only when the destination name is absent.
+
+    A post-syscall source-identity mismatch is recovered according to the
+    caller's namespace contract.  Installs restore the destination to absent;
+    quarantine moves restore the raced node to the authoritative source name.
+    """
     if expected_source is not None:
         source_details = os.stat(
             source,
@@ -110,13 +116,99 @@ def rename_noreplace_at(
             stat.S_IFMT(source_details.st_mode),
         ) != expected_source:
             raise ValueError("rename source is not the expected identity")
-    return _rename_with_flags_at(
+    installed = _rename_with_flags_at(
         directory_descriptor,
         source,
         destination,
         darwin_flags=0x00000004,
         linux_flags=1,
     )
+    if not installed or expected_source is None:
+        return installed
+    destination_details = os.stat(
+        destination,
+        dir_fd=directory_descriptor,
+        follow_symlinks=False,
+    )
+    destination_identity = (
+        destination_details.st_dev,
+        destination_details.st_ino,
+        stat.S_IFMT(destination_details.st_mode),
+    )
+    if destination_identity == expected_source:
+        return True
+
+    # The source name changed after the identity check but before the native
+    # no-replace syscall.  Quarantine callers must put that exact raced node
+    # back at the authoritative source name; installs instead restore the
+    # authoritative destination to its pre-call absent state.
+    if restore_source_on_mismatch:
+        if not _rename_with_flags_at(
+            directory_descriptor,
+            destination,
+            source,
+            darwin_flags=0x00000004,
+            linux_flags=1,
+        ):
+            raise OSError("raced rename source could not be restored")
+        restored_details = os.stat(
+            source,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        restored_identity = (
+            restored_details.st_dev,
+            restored_details.st_ino,
+            stat.S_IFMT(restored_details.st_mode),
+        )
+        try:
+            os.stat(
+                destination,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            destination_absent = True
+        else:
+            destination_absent = False
+        if restored_identity != destination_identity or not destination_absent:
+            raise OSError("raced rename source recovery could not be verified")
+        os.fsync(directory_descriptor)
+        raise ValueError("rename source changed during quarantine")
+
+    rejected_name = f".{destination}.{uuid.uuid4().hex}.rejected"
+    if not _rename_with_flags_at(
+        directory_descriptor,
+        destination,
+        rejected_name,
+        darwin_flags=0x00000004,
+        linux_flags=1,
+    ):
+        raise OSError("raced rename source could not be quarantined")
+    rejected_details = os.stat(
+        rejected_name,
+        dir_fd=directory_descriptor,
+        follow_symlinks=False,
+    )
+    rejected_identity = (
+        rejected_details.st_dev,
+        rejected_details.st_ino,
+        stat.S_IFMT(rejected_details.st_mode),
+    )
+    try:
+        os.stat(
+            destination,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        destination_absent = True
+    else:
+        destination_absent = False
+    if rejected_identity != destination_identity or not destination_absent:
+        raise OSError("raced rename source recovery could not be verified")
+    os.fsync(directory_descriptor)
+    raise ValueError("rename source changed during installation")
 
 
 def rename_exchange_at(
@@ -153,6 +245,72 @@ def rename_exchange_at(
         linux_flags=2,
     ):
         raise OSError("atomic exchange unexpectedly found a competing target")
+    source_after = os.stat(
+        source,
+        dir_fd=directory_descriptor,
+        follow_symlinks=False,
+    )
+    destination_after = os.stat(
+        destination,
+        dir_fd=directory_descriptor,
+        follow_symlinks=False,
+    )
+    source_after_identity = (
+        source_after.st_dev,
+        source_after.st_ino,
+        stat.S_IFMT(source_after.st_mode),
+    )
+    destination_after_identity = (
+        destination_after.st_dev,
+        destination_after.st_ino,
+        stat.S_IFMT(destination_after.st_mode),
+    )
+    source_mismatch = (
+        expected_source is not None
+        and destination_after_identity != expected_source
+    )
+    destination_mismatch = (
+        expected_destination is not None
+        and source_after_identity != expected_destination
+    )
+    if not source_mismatch and not destination_mismatch:
+        return
+
+    # Reverse this operation's exact exchange before reporting the failed
+    # compare-and-swap.  This makes the pre-syscall concurrent target live
+    # again and retains this operation's source under its private name.
+    if not _rename_with_flags_at(
+        directory_descriptor,
+        source,
+        destination,
+        darwin_flags=0x00000002,
+        linux_flags=2,
+    ):
+        raise OSError("raced rename exchange could not be reversed")
+    restored_source = os.stat(
+        source,
+        dir_fd=directory_descriptor,
+        follow_symlinks=False,
+    )
+    restored_destination = os.stat(
+        destination,
+        dir_fd=directory_descriptor,
+        follow_symlinks=False,
+    )
+    if (
+        restored_source.st_dev,
+        restored_source.st_ino,
+        stat.S_IFMT(restored_source.st_mode),
+    ) != destination_after_identity or (
+        restored_destination.st_dev,
+        restored_destination.st_ino,
+        stat.S_IFMT(restored_destination.st_mode),
+    ) != source_after_identity:
+        raise OSError("raced rename exchange recovery could not be verified")
+    os.fsync(directory_descriptor)
+    if source_mismatch:
+        raise ValueError("rename source changed during exchange")
+    raise ValueError("rename destination changed during exchange")
 
 
 def atomic_write_bytes_at(
@@ -251,6 +409,7 @@ def atomic_write_bytes_at(
                     filename,
                     rejected_name,
                     expected_source=temporary_identity,
+                    restore_source_on_mismatch=True,
                 ):
                     raise OSError(
                         "raced authority installation could not be quarantined"

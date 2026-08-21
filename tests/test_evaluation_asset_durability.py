@@ -7,6 +7,7 @@ from __future__ import annotations
 import ast
 import json
 import multiprocessing
+import os
 import re
 import shutil
 import subprocess
@@ -500,10 +501,13 @@ def _obvious_string_receiver(
 
 
 _PERSISTENCE_METHOD_SINKS = {
+    "mkdir",
     "rename",
     "replace",
+    "rmdir",
     "touch",
     "truncate",
+    "unlink",
     "write",
     "write_bytes",
     "write_text",
@@ -519,11 +523,17 @@ _PERSISTENCE_COPY_SINKS = {
     "shutil.copyfileobj",
     "shutil.copytree",
     "shutil.move",
+    "shutil.rmtree",
 }
 _PERSISTENCE_LOW_LEVEL_SINKS = {
     "ctypes.CDLL",
     "os.copy_file_range",
     "os.ftruncate",
+    "os.makedirs",
+    "os.mkdir",
+    "os.remove",
+    "os.removedirs",
+    "os.rmdir",
     "os.pwrite",
     "os.pwritev",
     "os.rename",
@@ -544,6 +554,23 @@ _PERSISTENCE_DUMP_SINKS = {
 }
 _PERSISTENCE_CSV_FACTORIES = {"csv.DictWriter", "csv.writer"}
 _CALLABLE_FACTORIES = {"functools.partial"}
+_OPERATOR_ATTRIBUTE_FACTORIES = {
+    "operator.attrgetter",
+    "operator.methodcaller",
+}
+_PERSISTENCE_OPERATOR_ATTRIBUTES = frozenset(
+    _PERSISTENCE_METHOD_SINKS
+    | {
+        qualified.rsplit(".", 1)[-1]
+        for qualified in (
+            _PERSISTENCE_COPY_SINKS
+            | _PERSISTENCE_LOW_LEVEL_SINKS
+            | _PERSISTENCE_DUMP_SINKS
+            | _PERSISTENCE_CSV_FACTORIES
+        )
+    }
+    | {"dump", "open", "safe_dump"}
+)
 _PERSISTENCE_MODULES = {
     "builtins",
     "csv",
@@ -649,6 +676,32 @@ def _expanded_factory_call(
         )
         resolved_func = _assigned_ast_node(node.func, assignments)
     return node, expanded
+
+
+def _literal_operator_persistence_attribute(
+    call: ast.Call,
+    qualified_factory: str,
+    assignments: Mapping[str, ast.AST],
+) -> str | None:
+    """Resolve only literal persistence attributes from finite operator factories."""
+    if qualified_factory not in _OPERATOR_ATTRIBUTE_FACTORIES or not call.args:
+        return None
+    candidates = (
+        call.args
+        if qualified_factory == "operator.attrgetter"
+        else call.args[:1]
+    )
+    for candidate in candidates:
+        resolved = _assigned_ast_node(candidate, assignments)
+        if not isinstance(resolved, ast.Constant) or not isinstance(
+            resolved.value,
+            str,
+        ):
+            continue
+        attribute = resolved.value.rsplit(".", 1)[-1]
+        if attribute in _PERSISTENCE_OPERATOR_ATTRIBUTES:
+            return attribute
+    return None
 
 
 def _persistence_binding_score(
@@ -1430,6 +1483,23 @@ def _inside_exact_handler_method(
     )
 
 
+def _has_only_literal_true_keywords(
+    call: ast.Call,
+    names: set[str],
+) -> bool:
+    """Match one direct no-positional call with exact literal-true options."""
+    return bool(
+        not call.args
+        and len(call.keywords) == len(names)
+        and {keyword.arg for keyword in call.keywords} == names
+        and all(
+            isinstance(keyword.value, ast.Constant)
+            and keyword.value.value is True
+            for keyword in call.keywords
+        )
+    )
+
+
 def _studio_writer_violations(path: Path, source: str) -> list[str]:
     """Find direct persistence calls, resolving qualified and imported aliases."""
     tree = ast.parse(source, filename=str(path))
@@ -1463,6 +1533,9 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
     )
     control_seam = path_text.endswith(
         "src/hephaestus/evaluation_assets/control_jsonl.py"
+    )
+    deprecated_assembler_seam = path_text.endswith(
+        "src/hephaestus/datasets/evaluation_assets.py"
     )
     artifact_contexts = {
         "atomic_append_jsonl",
@@ -1522,6 +1595,14 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
                 definition_counts,
             )
         )
+        legacy_temp_cleanup_function = (
+            artifact_seam
+            and _inside_exact_top_level_function(
+                function_context,
+                {"_atomic_write_text", "_atomic_write_binary"},
+                definition_counts,
+            )
+        )
         bound_descriptor_function = (
             artifact_seam
             and _inside_exact_top_level_function(
@@ -1562,6 +1643,22 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
                 definition_counts,
             )
         )
+        bound_directory_creation_function = (
+            control_seam
+            and _inside_exact_top_level_function(
+                function_context,
+                {"create_and_open_local_directory_at"},
+                definition_counts,
+            )
+        )
+        deprecated_assembler_function = (
+            deprecated_assembler_seam
+            and _inside_exact_top_level_function(
+                function_context,
+                {"assemble_dataset_bundle"},
+                definition_counts,
+            )
+        )
         server_function = path_text.endswith(
             "src/hephaestus/webui/server.py"
         ) and _inside_exact_handler_method(
@@ -1595,6 +1692,59 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
         )
         attribute = (
             resolved_func.attr if isinstance(resolved_func, ast.Attribute) else ""
+        )
+        operator_attribute = _literal_operator_persistence_attribute(
+            inspected_call,
+            qualified,
+            assignments,
+        )
+        if operator_attribute is not None:
+            violations.append(
+                f"{path.name}:{node.lineno}:{qualified}({operator_attribute})"
+            )
+            continue
+        literal_bound_directory_mkdir = (
+            bound_directory_creation_function
+            and qualified == "os.mkdir"
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "os"
+            and node.func.attr == "mkdir"
+            and len(node.args) == 2
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == "private_name"
+            and isinstance(node.args[1], ast.Name)
+            and node.args[1].id == "private_mode"
+            and len(node.keywords) == 1
+            and node.keywords[0].arg == "dir_fd"
+            and isinstance(node.keywords[0].value, ast.Name)
+            and node.keywords[0].value.id == "parent_descriptor"
+        )
+        literal_artifact_parent_mkdir = (
+            legacy_temp_cleanup_function
+            and attribute == "mkdir"
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "mkdir"
+            and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr == "parent"
+            and isinstance(node.func.value.value, ast.Name)
+            and node.func.value.value.id == "path"
+            and _has_only_literal_true_keywords(
+                node,
+                {"parents", "exist_ok"},
+            )
+        )
+        literal_deprecated_assembler_mkdir = (
+            deprecated_assembler_function
+            and attribute == "mkdir"
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "mkdir"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "output_dir"
+            and _has_only_literal_true_keywords(
+                node,
+                {"parents", "exist_ok"},
+            )
         )
 
         if (
@@ -1706,6 +1856,8 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
                 control_function and qualified == "os.unlink"
             ) or (
                 native_rename_function and qualified == "ctypes.CDLL"
+            ) or (
+                literal_bound_directory_mkdir
             )
             if not allowed:
                 violations.append(f"{path.name}:{node.lineno}:{qualified}")
@@ -1791,6 +1943,9 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
                 )
             continue
         if attribute in {
+            "mkdir",
+            "rmdir",
+            "unlink",
             "write",
             "writeheader",
             "writerow",
@@ -1798,9 +1953,24 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
             "writelines",
             "truncate",
         }:
+            literal_legacy_temp_unlink = (
+                legacy_temp_cleanup_function
+                and attribute == "unlink"
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "unlink"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "temporary_path"
+                and not node.args
+                and len(node.keywords) == 1
+                and node.keywords[0].arg == "missing_ok"
+                and isinstance(node.keywords[0].value, ast.Constant)
+                and node.keywords[0].value.value is True
+            )
             allowed = (
                 artifact_function
                 and attribute in {"write", "writelines", "truncate"}
+            ) or literal_legacy_temp_unlink or literal_artifact_parent_mkdir or (
+                literal_deprecated_assembler_mkdir
             ) or (
                 server_function
                 and attribute == "write"
@@ -15369,8 +15539,8 @@ def test_created_authority_ancestor_rejects_foreign_replacement(
     trusted_root = tmp_path / "trusted"
     trusted_root.mkdir()
     target = trusted_root / "v1" / "stages"
-    parked = tmp_path / "parked-owned-v1"
-    foreign = tmp_path / "foreign-v1"
+    parked = trusted_root / "parked-owned-v1"
+    foreign = trusted_root / "foreign-v1"
     foreign.mkdir()
     (foreign / "KEEP").write_bytes(b"KEEP")
     original = control_jsonl_module.os.mkdir
@@ -15384,9 +15554,20 @@ def test_created_authority_ancestor_rejects_foreign_replacement(
     ) -> None:
         nonlocal replaced
         original(path, mode, dir_fd=dir_fd)
-        if path == "v1" and dir_fd is not None and not replaced:
-            (trusted_root / "v1").rename(parked)
-            foreign.rename(trusted_root / "v1")
+        if (
+            isinstance(path, str)
+            and path.startswith(".v1.")
+            and path.endswith(".directory")
+            and dir_fd is not None
+            and not replaced
+        ):
+            control_jsonl_module.fcntl.flock(
+                dir_fd,
+                control_jsonl_module.fcntl.LOCK_UN,
+            )
+            created = trusted_root / path
+            created.rename(parked)
+            foreign.rename(created)
             replaced = True
 
     monkeypatch.setattr(control_jsonl_module.os, "mkdir", replace_created_directory)
@@ -15400,8 +15581,14 @@ def test_created_authority_ancestor_rejects_foreign_replacement(
             raise AssertionError("foreign directory was accepted")
 
     assert replaced
-    assert (trusted_root / "v1" / "KEEP").read_bytes() == b"KEEP"
-    assert not (trusted_root / "v1" / "stages").exists()
+    live = next(
+        path
+        for path in trusted_root.iterdir()
+        if path.name.endswith(".directory") and (path / "KEEP").is_file()
+    )
+    assert (live / "KEEP").read_bytes() == b"KEEP"
+    assert not (live / "stages").exists()
+    assert not (trusted_root / "v1").exists()
     assert not any(parked.iterdir())
 
 
@@ -15446,9 +15633,20 @@ def test_absent_authority_root_rejects_foreign_replacement(
     ) -> None:
         nonlocal replaced
         original(path, mode, dir_fd=dir_fd)
-        if path == trusted_root.name and dir_fd is not None and not replaced:
-            trusted_root.rename(parked)
-            foreign.rename(trusted_root)
+        if (
+            isinstance(path, str)
+            and path.startswith(f".{trusted_root.name}.")
+            and path.endswith(".directory")
+            and dir_fd is not None
+            and not replaced
+        ):
+            control_jsonl_module.fcntl.flock(
+                dir_fd,
+                control_jsonl_module.fcntl.LOCK_UN,
+            )
+            created = trusted_root.parent / path
+            created.rename(parked)
+            foreign.rename(created)
             replaced = True
 
     monkeypatch.setattr(control_jsonl_module.os, "mkdir", replace_created_root)
@@ -15462,8 +15660,14 @@ def test_absent_authority_root_rejects_foreign_replacement(
             raise AssertionError("foreign trusted root was accepted")
 
     assert replaced
-    assert (trusted_root / "KEEP").read_bytes() == b"KEEP"
-    assert not (trusted_root / "tenant_a").exists()
+    live = next(
+        path
+        for path in trusted_root.parent.iterdir()
+        if path.name.endswith(".directory") and (path / "KEEP").is_file()
+    )
+    assert (live / "KEEP").read_bytes() == b"KEEP"
+    assert not (live / "tenant_a").exists()
+    assert not trusted_root.exists()
     assert not any(parked.iterdir())
 
 
@@ -15841,3 +16045,1048 @@ def test_atomic_rollback_does_not_exchange_over_late_foreign_leaf(
     hidden = [path for path in trusted_root.iterdir() if path.name.startswith(".control")]
     assert len(hidden) == 1
     assert hidden[0].read_bytes() == b"MUTATED-OLD"
+
+
+def test_atomic_absent_install_recovers_foreign_source_renamed_after_precheck(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A source-name race cannot leave a foreign node authoritative."""
+    trusted_root = tmp_path / "trusted"
+    trusted_root.mkdir()
+    target = trusted_root / "control.json"
+    parked_owned = trusted_root / "parked-owned-control.json"
+    original = artifact_io._rename_with_flags_at
+    attacked = False
+
+    def race_after_identity_check(
+        directory_descriptor: int,
+        source_name: str,
+        target_name: str,
+        *,
+        darwin_flags: int,
+        linux_flags: int,
+    ) -> bool:
+        nonlocal attacked
+        if target_name == target.name and linux_flags == 1 and not attacked:
+            (trusted_root / source_name).rename(parked_owned)
+            (trusted_root / source_name).write_bytes(b"FOREIGN")
+            attacked = True
+        return original(
+            directory_descriptor,
+            source_name,
+            target_name,
+            darwin_flags=darwin_flags,
+            linux_flags=linux_flags,
+        )
+
+    monkeypatch.setattr(
+        artifact_io,
+        "_rename_with_flags_at",
+        race_after_identity_check,
+    )
+    with control_jsonl_module.open_local_authority_directory(
+        trusted_root,
+        trusted_root,
+    ) as descriptor:
+        with pytest.raises(ValueError):
+            artifact_io.atomic_write_bytes_at(
+                descriptor,
+                target.name,
+                b"NEW",
+                expected_target=None,
+            )
+
+    assert attacked
+    assert not target.exists()
+    assert parked_owned.read_bytes() == b"NEW"
+    assert any(
+        path.read_bytes() == b"FOREIGN"
+        for path in trusted_root.iterdir()
+        if path.name.startswith(".control.json.")
+    )
+
+    monkeypatch.setattr(artifact_io, "_rename_with_flags_at", original)
+    with control_jsonl_module.open_local_authority_directory(
+        trusted_root,
+        trusted_root,
+    ) as descriptor:
+        artifact_io.atomic_write_bytes_at(
+            descriptor,
+            target.name,
+            b"RETRY",
+            expected_target=None,
+        )
+    assert target.read_bytes() == b"RETRY"
+
+
+def test_atomic_existing_install_restores_concurrent_target_after_exchange_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A target-name race cannot leave a rejected writer authoritative."""
+    trusted_root = tmp_path / "trusted"
+    trusted_root.mkdir()
+    target = trusted_root / "control.json"
+    target.write_bytes(b"OLD")
+    expected = target.stat()
+    expected_identity = (
+        expected.st_dev,
+        expected.st_ino,
+        expected.st_mode & 0o170000,
+    )
+    parked_old = trusted_root / "parked-old-control.json"
+    original = artifact_io._rename_with_flags_at
+    attacked = False
+
+    def race_after_identity_check(
+        directory_descriptor: int,
+        source_name: str,
+        target_name: str,
+        *,
+        darwin_flags: int,
+        linux_flags: int,
+    ) -> bool:
+        nonlocal attacked
+        if target_name == target.name and linux_flags == 2 and not attacked:
+            target.rename(parked_old)
+            target.write_bytes(b"FOREIGN")
+            attacked = True
+        return original(
+            directory_descriptor,
+            source_name,
+            target_name,
+            darwin_flags=darwin_flags,
+            linux_flags=linux_flags,
+        )
+
+    monkeypatch.setattr(
+        artifact_io,
+        "_rename_with_flags_at",
+        race_after_identity_check,
+    )
+    with control_jsonl_module.open_local_authority_directory(
+        trusted_root,
+        trusted_root,
+    ) as descriptor:
+        with pytest.raises(ValueError):
+            artifact_io.atomic_write_bytes_at(
+                descriptor,
+                target.name,
+                b"NEW",
+                expected_target=expected_identity,
+                expected_target_content=b"OLD",
+            )
+
+    assert attacked
+    assert target.read_bytes() == b"FOREIGN"
+    assert parked_old.read_bytes() == b"OLD"
+    assert any(
+        path.read_bytes() == b"NEW"
+        for path in trusted_root.iterdir()
+        if path.name.startswith(".control.json.")
+    )
+
+    monkeypatch.setattr(artifact_io, "_rename_with_flags_at", original)
+    retry_expected = target.stat()
+    with control_jsonl_module.open_local_authority_directory(
+        trusted_root,
+        trusted_root,
+    ) as descriptor:
+        artifact_io.atomic_write_bytes_at(
+            descriptor,
+            target.name,
+            b"RETRY",
+            expected_target=(
+                retry_expected.st_dev,
+                retry_expected.st_ino,
+                retry_expected.st_mode & 0o170000,
+            ),
+            expected_target_content=b"FOREIGN",
+        )
+    assert target.read_bytes() == b"RETRY"
+    assert parked_old.read_bytes() == b"OLD"
+
+
+def test_detectable_empty_foreign_root_namespace_change_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An extra sibling trace fails closed before a foreign root is used."""
+    trusted_root = tmp_path / "tenants"
+    target = trusted_root / "tenant_a"
+    parked_owned = tmp_path / "parked-owned-tenants"
+    foreign = tmp_path / "foreign-tenants"
+    foreign_descriptor: int | None = None
+    original = control_jsonl_module.os.mkdir
+    attacked = False
+
+    def replace_created_root(
+        path: str | bytes | Path,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        nonlocal attacked, foreign_descriptor
+        original(path, mode, dir_fd=dir_fd)
+        if (
+            isinstance(path, str)
+            and path.startswith(f".{trusted_root.name}.")
+            and path.endswith(".directory")
+            and dir_fd is not None
+            and not attacked
+        ):
+            created = trusted_root.parent / path
+            created.rename(parked_owned)
+            original(foreign.name, mode, dir_fd=dir_fd)
+            foreign_descriptor = os.open(
+                foreign,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            foreign.rename(created)
+            attacked = True
+
+    monkeypatch.setattr(control_jsonl_module.os, "mkdir", replace_created_root)
+    try:
+        with pytest.raises(ValueError):
+            with control_jsonl_module.open_local_authority_directory(
+                target,
+                trusted_root,
+                create=True,
+            ):
+                raise AssertionError("empty foreign root was accepted")
+        assert attacked
+        assert foreign_descriptor is not None
+        assert os.listdir(foreign_descriptor) == []
+        assert os.listdir(parked_owned) == []
+        monkeypatch.setattr(control_jsonl_module.os, "mkdir", original)
+        with control_jsonl_module.open_local_authority_directory(
+            target,
+            trusted_root,
+            create=True,
+        ):
+            pass
+        assert target.is_dir()
+        assert os.listdir(foreign_descriptor) == []
+    finally:
+        if foreign_descriptor is not None:
+            os.close(foreign_descriptor)
+
+
+def test_detectable_empty_foreign_ancestor_namespace_change_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An extra sibling trace fails closed before a foreign ancestor is used."""
+    trusted_root = tmp_path / "trusted"
+    trusted_root.mkdir()
+    target = trusted_root / "v1" / "stages"
+    parked_owned = trusted_root / "parked-owned-v1"
+    foreign = trusted_root / "foreign-v1"
+    foreign_descriptor: int | None = None
+    original = control_jsonl_module.os.mkdir
+    attacked = False
+
+    def replace_created_ancestor(
+        path: str | bytes | Path,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        nonlocal attacked, foreign_descriptor
+        original(path, mode, dir_fd=dir_fd)
+        if (
+            isinstance(path, str)
+            and path.startswith(".v1.")
+            and path.endswith(".directory")
+            and dir_fd is not None
+            and not attacked
+        ):
+            created = trusted_root / path
+            created.rename(parked_owned)
+            original(foreign.name, mode, dir_fd=dir_fd)
+            foreign_descriptor = os.open(
+                foreign,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            foreign.rename(created)
+            attacked = True
+
+    monkeypatch.setattr(
+        control_jsonl_module.os,
+        "mkdir",
+        replace_created_ancestor,
+    )
+    try:
+        with pytest.raises(ValueError):
+            with control_jsonl_module.open_local_authority_directory(
+                target,
+                trusted_root,
+                create=True,
+            ):
+                raise AssertionError("empty foreign ancestor was accepted")
+        assert attacked
+        assert foreign_descriptor is not None
+        assert os.listdir(foreign_descriptor) == []
+        assert os.listdir(parked_owned) == []
+        monkeypatch.setattr(control_jsonl_module.os, "mkdir", original)
+        with control_jsonl_module.open_local_authority_directory(
+            target,
+            trusted_root,
+            create=True,
+        ):
+            pass
+        assert target.is_dir()
+        assert os.listdir(foreign_descriptor) == []
+    finally:
+        if foreign_descriptor is not None:
+            os.close(foreign_descriptor)
+
+
+def test_directory_creation_holds_bound_parent_lock_through_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every supported creator mutation stays inside the parent lock."""
+    parent_descriptor = os.open(
+        tmp_path,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    )
+    original_flock = control_jsonl_module.fcntl.flock
+    original_mkdir = control_jsonl_module.os.mkdir
+    original_rename = control_jsonl_module.rename_noreplace_at
+    locked = False
+    observed = {"mkdir": False, "install": False}
+
+    def record_lock(descriptor: int, operation: int) -> None:
+        nonlocal locked
+        original_flock(descriptor, operation)
+        if descriptor == parent_descriptor:
+            if operation & control_jsonl_module.fcntl.LOCK_UN:
+                locked = False
+            elif operation & control_jsonl_module.fcntl.LOCK_EX:
+                locked = True
+
+    def require_lock_for_mkdir(
+        path: str | bytes | Path,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        if dir_fd == parent_descriptor:
+            assert locked
+            observed["mkdir"] = True
+        original_mkdir(path, mode, dir_fd=dir_fd)
+
+    def require_lock_for_install(
+        directory_descriptor: int,
+        source: str,
+        destination: str,
+        **kwargs: Any,
+    ) -> bool:
+        if directory_descriptor == parent_descriptor:
+            assert locked
+            observed["install"] = True
+        return original_rename(
+            directory_descriptor,
+            source,
+            destination,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(control_jsonl_module.fcntl, "flock", record_lock)
+    monkeypatch.setattr(control_jsonl_module.os, "mkdir", require_lock_for_mkdir)
+    monkeypatch.setattr(
+        control_jsonl_module,
+        "rename_noreplace_at",
+        require_lock_for_install,
+    )
+    directory_descriptor: int | None = None
+    try:
+        directory_descriptor, _ = (
+            control_jsonl_module.create_and_open_local_directory_at(
+                parent_descriptor,
+                "owned",
+                final_mode=0o700,
+                replacement_error="replacement",
+            )
+        )
+        assert observed == {"mkdir": True, "install": True}
+        assert not locked
+    finally:
+        if directory_descriptor is not None:
+            os.close(directory_descriptor)
+        os.close(parent_descriptor)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "origin-bool",
+        "origin-float",
+        "inherited-origin-bool",
+        "update-previous-bool",
+        "update-new-float",
+        "current-config-bool",
+    ],
+)
+def test_pre_v2_config_history_classifier_rejects_type_coercions(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    """Historical classification uses exact JSON scalar types throughout."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    layout = pipeline.layout
+    if mutation == "inherited-origin-bool":
+        pipeline.run()
+        parent = layout
+        layout = EvaluationAssetLayout(
+            parent.tenants_root,
+            parent.tenant_id,
+            "v2",
+        )
+        layout.initialize_extension(
+            parent,
+            additional_feedback=_write_additional_feedback(parent.tenants_root),
+            additional_unlabeled=None,
+            clustering_mode="keep",
+        )
+    rows = _read_jsonl(layout.config_history_path)
+    config = json.loads(layout.config_path.read_text(encoding="utf-8"))
+    if mutation in {"origin-bool", "inherited-origin-bool"}:
+        rows[0]["configuration"]["cluster_count"] = True
+        config["cluster_count"] = True
+    elif mutation == "origin-float":
+        rows[0]["configuration"]["cluster_count"] = 1.0
+        config["cluster_count"] = 1.0
+    elif mutation == "current-config-bool":
+        config["cluster_count"] = True
+    else:
+        update: dict[str, Any] = {
+            "timestamp": rows[0]["timestamp"],
+            "revision": 2,
+            "event": "configuration_updated",
+            "changed_fields": {
+                "cluster_count": {"previous": 1, "new": 2},
+            },
+            "invalidated_from_stage": "intent_clustering",
+            "resume_from_stage": "intent_clustering",
+        }
+        if mutation == "update-previous-bool":
+            update["changed_fields"]["cluster_count"]["previous"] = True
+        else:
+            update["changed_fields"]["cluster_count"]["new"] = 2.0
+        rows.append(update)
+        config["cluster_count"] = 2 if mutation == "update-previous-bool" else 2.0
+    artifact_io.atomic_write_jsonl(layout.config_history_path, rows)
+    artifact_io.atomic_write_json(layout.config_path, config)
+
+    assert durability_module._has_native_config_history_authority(layout)
+
+
+@pytest.mark.parametrize("schema_mode", ["missing", "v1"])
+def test_type_coerced_pre_v2_history_fails_before_calls_or_writes(
+    tmp_path: Path,
+    schema_mode: str,
+) -> None:
+    """A downgraded native history cannot cross provider or write boundaries."""
+    pipeline, rubric, embedding = _create_pipeline(tmp_path)
+    layout = pipeline.layout
+    rows = _read_jsonl(layout.config_history_path)
+    config = json.loads(layout.config_path.read_text(encoding="utf-8"))
+    rows[0]["configuration"]["cluster_count"] = True
+    config["cluster_count"] = True
+    state = json.loads(layout.state_path.read_text(encoding="utf-8"))
+    if schema_mode == "missing":
+        state.pop("schema_version")
+    else:
+        state["schema_version"] = "fapo-evaluation-asset-state-v1"
+    artifact_io.atomic_write_jsonl(layout.config_history_path, rows)
+    artifact_io.atomic_write_json(layout.config_path, config)
+    artifact_io.atomic_write_json(layout.state_path, state)
+    before = _authority_bytes(layout)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        EvaluationAssetPipeline(
+            layout,
+            rubric_provider=rubric,
+            embedding_provider=embedding,
+        ).run()
+
+    assert rubric.calls == 0
+    assert embedding.calls == 0
+    assert _authority_bytes(layout) == before
+
+
+def test_revised_release_journal_uses_captured_config_history_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A revised release uses captured history and reports post-capture drift."""
+    layout = _release_with_config_revisions(tmp_path, revision_count=1)
+    state = layout.load_state()
+    before = _authority_bytes(layout)
+    history_key = next(
+        key for key in before if key.endswith("config_history.jsonl")
+    )
+    swapped_history = before[history_key] + b'{"post_capture":true}\n'
+    original_resolve = journal_validation_module.resolve_local_authority_file
+    original_capture = durability_module._capture_release_authority
+    live_reopens = 0
+    capture_calls = 0
+
+    def reject_live_history(
+        path: Path,
+        trusted_root: Path,
+        **kwargs: Any,
+    ) -> Any:
+        nonlocal live_reopens
+        if Path(path) == layout.config_history_path:
+            live_reopens += 1
+            raise AssertionError("closed snapshot escaped to live config history")
+        return original_resolve(path, trusted_root, **kwargs)
+
+    def capture_then_swap(target_layout: EvaluationAssetLayout) -> Any:
+        nonlocal capture_calls
+        captured = original_capture(target_layout)
+        capture_calls += 1
+        if capture_calls == 1:
+            layout.config_history_path.write_bytes(swapped_history)
+        return captured
+
+    monkeypatch.setattr(
+        journal_validation_module,
+        "resolve_local_authority_file",
+        reject_live_history,
+    )
+    monkeypatch.setattr(
+        durability_module,
+        "_capture_release_authority",
+        capture_then_swap,
+    )
+
+    with pytest.raises(
+        EvaluationAssetIntegrityError,
+        match="release authority changed during verification",
+    ):
+        verify_released_asset(layout, state)
+
+    after = _authority_bytes(layout)
+    expected = dict(before)
+    expected[history_key] = swapped_history
+    assert live_reopens == 0
+    assert capture_calls == 2
+    assert after == expected
+
+
+def test_outstanding_revision_journal_uses_captured_config_history_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Outstanding revision validation never escapes its supplied snapshot."""
+    layout = _release_with_config_revisions(tmp_path, revision_count=1)
+    _make_released_checkpoint_mutable(layout)
+
+    def stop_after_prepare(name: str) -> None:
+        if name == "after_prepared_journal":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", stop_after_prepare)
+    with pytest.raises(_InjectedFault):
+        layout.revise_config({"split_seed": 73})
+    entries = _read_jsonl(layout.recovery_journal_path)
+    prepared = entries[-1]
+    assert prepared["phase"] == "prepared"
+
+    snapshot, snapshot_records = durability_module._capture_release_authority(layout)
+    before = _authority_bytes(layout)
+    history_key = next(
+        key for key in before if key.endswith("config_history.jsonl")
+    )
+    swapped_history = before[history_key] + b'{"post_capture":true}\n'
+    layout.config_history_path.write_bytes(swapped_history)
+    original_resolve = journal_validation_module.resolve_local_authority_file
+    live_reopens = 0
+
+    def reject_live_history(
+        path: Path,
+        trusted_root: Path,
+        **kwargs: Any,
+    ) -> Any:
+        nonlocal live_reopens
+        if Path(path) == layout.config_history_path:
+            live_reopens += 1
+            raise AssertionError("closed snapshot escaped to live config history")
+        return original_resolve(path, trusted_root, **kwargs)
+
+    monkeypatch.setattr(
+        journal_validation_module,
+        "resolve_local_authority_file",
+        reject_live_history,
+    )
+    validated = journal_validation_module.validate_recovery_journal(
+        layout,
+        entries,
+        artifact_overrides=snapshot,
+    )
+
+    current_snapshot, current_records = durability_module._capture_release_authority(
+        layout
+    )
+    after = _authority_bytes(layout)
+    expected = dict(before)
+    expected[history_key] = swapped_history
+    assert validated.outstanding is not None
+    assert validated.outstanding["operation_id"] == prepared["operation_id"]
+    assert live_reopens == 0
+    assert (current_snapshot, current_records) != (snapshot, snapshot_records)
+    assert after == expected
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from pathlib import Path\nPath('x').unlink()",
+        "from pathlib import Path\nPath('x').rmdir()",
+        "import os\nos.remove('x')",
+        "import os\nos.unlink('x')",
+        "import os\nos.rmdir('x')",
+        "import os\nos.removedirs('x')",
+        "import shutil\nshutil.rmtree('x')",
+        "from os import remove as erase\nerase('x')",
+        "import os as operating_system\noperating_system.remove('x')",
+        "import os\nerase = os.remove\nerase('x')",
+        "import shutil\nconsumer([shutil.rmtree])",
+        "import os\nholder.callback = os.removedirs",
+    ],
+)
+def test_studio_writer_guard_rejects_finite_deletion_aliases(source: str) -> None:
+    """Every ordinary finite deletion spelling remains behind audited seams."""
+    assert _studio_writer_violations(
+        Path("src/hephaestus/evaluation_assets/example.py"),
+        source,
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from pathlib import Path\nPath('x').mkdir()",
+        "import os\nos.mkdir('x')",
+        "import os\nos.makedirs('x')",
+        "from os import mkdir as make\nmake('x')",
+        "from os import makedirs as make\nmake('x')",
+        "import os as operating_system\noperating_system.mkdir('x')",
+        "import os as operating_system\noperating_system.makedirs('x')",
+        "import os\nmake = os.mkdir\nmake('x')",
+        "import os\nconsumer([os.makedirs])",
+        "import os\nholder.callback = os.mkdir",
+        "from pathlib import Path\ngetattr(Path('x'), 'mkdir')()",
+    ],
+)
+def test_studio_writer_guard_rejects_finite_directory_creation_aliases(
+    source: str,
+) -> None:
+    """Every ordinary finite directory-creation spelling is guarded."""
+    assert _studio_writer_violations(
+        Path("src/hephaestus/evaluation_assets/example.py"),
+        source,
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import operator\noperator.methodcaller('mkdir')(Path('x'))",
+        "import operator\noperator.attrgetter('mkdir')(Path('x'))()",
+        "import operator\noperator.methodcaller('makedirs', 'x')(os)",
+        "import operator\noperator.attrgetter('makedirs')(os)('x')",
+        "from operator import methodcaller\nmethodcaller('mkdir')(Path('x'))",
+        "from operator import attrgetter as get\nget('mkdir')(Path('x'))()",
+        "import operator as op\nop.methodcaller('mkdir')(Path('x'))",
+        "import operator\nmake = operator.methodcaller\nmake('mkdir')(Path('x'))",
+        "import operator\nconsumer(operator.methodcaller('mkdir'))",
+        "import operator\ncallback = operator.attrgetter('mkdir')",
+        "import operator\nreturn_callback(operator.attrgetter('path.mkdir'))",
+        "import operator\ncallbacks = [operator.methodcaller('mkdir')]",
+    ],
+)
+def test_studio_writer_guard_rejects_literal_operator_sink_factories(
+    source: str,
+) -> None:
+    """Finite literal operator factories cannot hide persistence methods."""
+    assert _studio_writer_violations(
+        Path("src/hephaestus/evaluation_assets/example.py"),
+        source,
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import operator\noperator.methodcaller('upper')('value')",
+        "import operator\noperator.attrgetter('model')(provider)",
+        "import operator\noperator.methodcaller(method_name)(target)",
+        "import operator\noperator.attrgetter(attribute_name)(target)",
+    ],
+)
+def test_studio_writer_guard_keeps_nonpersistent_operator_factories(
+    source: str,
+) -> None:
+    """The finite guard makes no claim about dynamic operator factories."""
+    assert _studio_writer_violations(
+        Path("src/hephaestus/evaluation_assets/example.py"),
+        source,
+    ) == []
+
+
+@pytest.mark.parametrize(
+    ("path", "source"),
+    [
+        (
+            Path("src/hephaestus/evaluation_assets/control_jsonl.py"),
+            "import os\n"
+            "def create_and_open_local_directory_at():\n"
+            "    os.mkdir(private_name, private_mode, dir_fd=parent_descriptor)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "def _atomic_write_text():\n"
+            "    path.parent.mkdir(parents=True, exist_ok=True)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "def _atomic_write_binary():\n"
+            "    path.parent.mkdir(parents=True, exist_ok=True)",
+        ),
+        (
+            Path("src/hephaestus/datasets/evaluation_assets.py"),
+            "def assemble_dataset_bundle():\n"
+            "    output_dir.mkdir(parents=True, exist_ok=True)",
+        ),
+    ],
+)
+def test_studio_writer_guard_keeps_exact_directory_creation_seams(
+    path: Path,
+    source: str,
+) -> None:
+    """Only the four reviewed directory-bootstrap call shapes remain allowed."""
+    assert _studio_writer_violations(path, source) == []
+
+
+@pytest.mark.parametrize(
+    ("path", "source"),
+    [
+        (
+            Path("src/hephaestus/evaluation_assets/control_jsonl.py"),
+            "import os\n"
+            "def create_and_open_local_directory_at():\n"
+            "    os.mkdir(private_name, private_mode)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/control_jsonl.py"),
+            "import os\n"
+            "def create_and_open_local_directory_at():\n"
+            "    os.mkdir(private_name, private_mode, dir_fd=other_descriptor)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/control_jsonl.py"),
+            "import os\n"
+            "def create_and_open_local_directory_at():\n"
+            "    make = os.mkdir\n"
+            "    make(private_name, private_mode, dir_fd=parent_descriptor)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "def _atomic_write_text():\n"
+            "    other.parent.mkdir(parents=True, exist_ok=True)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "def _atomic_write_binary():\n"
+            "    path.parent.mkdir(parents=False, exist_ok=True)",
+        ),
+        (
+            Path("src/hephaestus/datasets/evaluation_assets.py"),
+            "def assemble_dataset_bundle():\n"
+            "    other_dir.mkdir(parents=True, exist_ok=True)",
+        ),
+        (
+            Path("src/hephaestus/datasets/evaluation_assets.py"),
+            "def assemble_dataset_bundle():\n"
+            "    output_dir.mkdir(**options)",
+        ),
+        (
+            Path("src/hephaestus/datasets/evaluation_assets.py"),
+            "def other_assembler():\n"
+            "    output_dir.mkdir(parents=True, exist_ok=True)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import operator\n"
+            "def _atomic_write_text():\n"
+            "    operator.methodcaller("
+            "'mkdir', parents=True, exist_ok=True)(path.parent)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/control_jsonl.py"),
+            "import operator\n"
+            "def create_and_open_local_directory_at():\n"
+            "    operator.methodcaller("
+            "'mkdir', private_name, private_mode, "
+            "dir_fd=parent_descriptor)(os)",
+        ),
+    ],
+)
+def test_studio_writer_guard_rejects_nearby_directory_creation_seams(
+    path: Path,
+    source: str,
+) -> None:
+    """A trusted module or function name cannot broaden a reviewed mkdir seam."""
+    assert _studio_writer_violations(path, source)
+
+
+def test_eas_directory_creation_never_bootstraps_through_compatibility_seams(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Canonical Studio creation never asks a generic Path.mkdir to create."""
+    tenants_root = tmp_path / "tenants"
+    feedback, unlabeled = _write_input_pair(tenants_root)
+    rubric = _SuccessfulRubricProvider()
+    embedding = _SuccessfulEmbeddingProvider()
+    original_mkdir = Path.mkdir
+    compatibility_creations: list[Path] = []
+
+    def observe_compatibility_mkdir(
+        path: Path,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        missing = not path.exists()
+        original_mkdir(path, *args, **kwargs)
+        if missing:
+            compatibility_creations.append(path)
+
+    monkeypatch.setattr(Path, "mkdir", observe_compatibility_mkdir)
+
+    pipeline = EvaluationAssetPipeline.create(
+        tenants_root,
+        EvaluationAssetConfig(
+            tenant_id="tenant_a",
+            asset_id="v1",
+            rubric_provider="fake",
+            rubric_model=rubric.model,
+            embedding_provider="fake",
+            embedding_model=embedding.model,
+            cluster_count=1,
+        ),
+        feedback,
+        unlabeled,
+        rubric_provider=rubric,
+        embedding_provider=embedding,
+    )
+    released = pipeline.run()
+
+    assert released.status == "released"
+    assert compatibility_creations == []
+
+
+def test_eas_keep_extension_never_bootstraps_through_compatibility_seams(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Extension authority and generation parents use the bound helper too."""
+    parent_pipeline, _, _ = _create_pipeline(tmp_path)
+    parent_pipeline.run()
+    parent = parent_pipeline.layout
+    additional = _write_additional_feedback(parent.tenants_root)
+    original_mkdir = Path.mkdir
+    compatibility_creations: list[Path] = []
+
+    def observe_compatibility_mkdir(
+        path: Path,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        missing = not path.exists()
+        original_mkdir(path, *args, **kwargs)
+        if missing:
+            compatibility_creations.append(path)
+
+    monkeypatch.setattr(Path, "mkdir", observe_compatibility_mkdir)
+    child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
+    child.initialize_extension(
+        parent,
+        additional_feedback=additional,
+        additional_unlabeled=None,
+        clustering_mode="keep",
+    )
+    released = EvaluationAssetPipeline(
+        child,
+        rubric_provider=_SuccessfulRubricProvider(),
+        embedding_provider=_SuccessfulEmbeddingProvider(),
+    ).run()
+
+    assert released.status == "released"
+    assert child.historical_parent_snapshot.is_dir()
+    assert compatibility_creations == []
+
+
+def test_cleanup_raw_rename_race_restores_concurrent_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cleanup-source race restores the concurrent node to its live name."""
+    trusted_root = tmp_path / "trusted"
+    trusted_root.mkdir()
+    target = trusted_root / "target.jsonl"
+    target.write_bytes(b"OLD\n")
+    parked_old = trusted_root / "parked-old.jsonl"
+    original = artifact_io._rename_with_flags_at
+    foreign_identity: tuple[int, int, int] | None = None
+    attacked = False
+
+    def race_after_identity_check(
+        directory_descriptor: int,
+        source_name: str,
+        target_name: str,
+        *,
+        darwin_flags: int,
+        linux_flags: int,
+    ) -> bool:
+        nonlocal attacked, foreign_identity
+        if (
+            source_name == target.name
+            and target_name.endswith(".removed")
+            and linux_flags == 1
+            and not attacked
+        ):
+            target.rename(parked_old)
+            target.write_bytes(b"FOREIGN\n")
+            foreign = target.stat()
+            foreign_identity = (
+                foreign.st_dev,
+                foreign.st_ino,
+                foreign.st_mode & 0o170000,
+            )
+            attacked = True
+        return original(
+            directory_descriptor,
+            source_name,
+            target_name,
+            darwin_flags=darwin_flags,
+            linux_flags=linux_flags,
+        )
+
+    monkeypatch.setattr(
+        artifact_io,
+        "_rename_with_flags_at",
+        race_after_identity_check,
+    )
+
+    with pytest.raises(ValueError):
+        control_jsonl_module.remove_local_authority_file(target, trusted_root)
+
+    restored = target.stat()
+    assert attacked
+    assert foreign_identity is not None
+    assert (
+        restored.st_dev,
+        restored.st_ino,
+        restored.st_mode & 0o170000,
+    ) == foreign_identity
+    assert target.read_bytes() == b"FOREIGN\n"
+    assert parked_old.read_bytes() == b"OLD\n"
+
+
+@pytest.mark.parametrize(
+    "parent_asset_id",
+    [
+        "",
+        "   ",
+        " parent ",
+        "../v0",
+        "v1",
+        "-v0",
+        "v0/name",
+        "a" * 129,
+    ],
+)
+@pytest.mark.parametrize("schema_mode", ["missing", "v1"])
+def test_malformed_inherited_pre_v2_history_fails_before_calls_or_writes(
+    tmp_path: Path,
+    parent_asset_id: str,
+    schema_mode: str,
+) -> None:
+    """Malformed historical parent identity is native before any side effect."""
+    pipeline, rubric, embedding = _create_pipeline(tmp_path)
+    layout = pipeline.layout
+    rows = _read_jsonl(layout.config_history_path)
+    rows[0]["event"] = "configuration_inherited"
+    rows[0]["parent_asset_id"] = parent_asset_id
+    state = json.loads(layout.state_path.read_text(encoding="utf-8"))
+    if schema_mode == "missing":
+        state.pop("schema_version")
+    else:
+        state["schema_version"] = "fapo-evaluation-asset-state-v1"
+    artifact_io.atomic_write_jsonl(layout.config_history_path, rows)
+    artifact_io.atomic_write_json(layout.state_path, state)
+    before = _authority_bytes(layout)
+
+    assert durability_module._has_native_config_history_authority(layout)
+    with pytest.raises(EvaluationAssetIntegrityError):
+        EvaluationAssetPipeline(
+            layout,
+            rubric_provider=rubric,
+            embedding_provider=embedding,
+        ).run()
+
+    assert rubric.calls == 0
+    assert embedding.calls == 0
+    assert _authority_bytes(layout) == before
+
+
+def test_exact_pre_v2_inherited_history_remains_compatible(tmp_path: Path) -> None:
+    """A genuine stripped parent identity remains in the legacy profile."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    layout = pipeline.layout
+    rows = _read_jsonl(layout.config_history_path)
+    rows[0]["event"] = "configuration_inherited"
+    rows[0]["parent_asset_id"] = "v0"
+    artifact_io.atomic_write_jsonl(layout.config_history_path, rows)
+
+    assert not durability_module._has_native_config_history_authority(layout)
+
+
+@pytest.mark.parametrize(
+    "function_name",
+    ["atomic_write_json", "atomic_write_bytes_at"],
+)
+def test_studio_writer_guard_rejects_unlink_in_broad_artifact_seams(
+    function_name: str,
+) -> None:
+    """Only the two exact legacy temporary-cleanup functions may unlink."""
+    source = (
+        "from pathlib import Path\n"
+        f"def {function_name}():\n"
+        "    Path('authority.json').unlink()\n"
+    )
+    assert _studio_writer_violations(
+        Path("src/hephaestus/artifact_io.py"),
+        source,
+    )
+
+
+def test_studio_writer_guard_keeps_exact_legacy_temp_unlink_seam() -> None:
+    """The literal missing-ok temporary cleanup remains audited and allowed."""
+    source = (
+        "from pathlib import Path\n"
+        "def _atomic_write_text():\n"
+        "    temporary_path = Path('temporary')\n"
+        "    temporary_path.unlink(missing_ok=True)\n"
+    )
+    assert not _studio_writer_violations(
+        Path("src/hephaestus/artifact_io.py"),
+        source,
+    )

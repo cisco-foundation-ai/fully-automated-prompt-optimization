@@ -151,6 +151,31 @@ asset protects every high-level mutation across processes. Configuration
 revision, checkpoint rebuild, native release publication, and legacy adoption
 use an append-only recovery journal whose prepared payload rolls forward
 idempotently.
+
+Directory creation has an explicit local concurrency boundary. Every
+Evaluation Asset Studio authority-root, authority-ancestor, stage, receipt,
+publication-catalog, generation, and generation-staging directory creator
+reached through repository, CLI, or Studio entry points uses the same
+descriptor-relative helper while holding an exclusive lock on the already-open
+parent directory. The finite production guard rejects other `Path.mkdir`,
+`os.mkdir`, and `os.makedirs` spellings, including literal persistence
+attributes constructed through `operator.attrgetter` or
+`operator.methodcaller`; unresolved dynamic attribute names are outside this
+finite claim. It admits only the literal internal `os.mkdir` in
+`create_and_open_local_directory_at`, the generic parent bootstraps in
+`_atomic_write_text` and `_atomic_write_binary`, and the deprecated non-Studio
+`assemble_dataset_bundle`; a live complete-release assertion proves that the
+compatibility bootstraps do not create any directory in the authority or
+generation boundary. Private names, no-follow opens, complete
+parent-inventory checks, exact inode/type rechecks, and no-replace installation
+fail closed for preexisting, linked, wrong-type, detectably substituted, or
+competing cooperating-writer entries. POSIX `mkdirat` does not atomically return
+an open descriptor, however, so these checks are not a claim of safety against
+an arbitrary noncooperating process running as the same OS user that mutates
+the parent namespace between `mkdirat` and `openat`. Deployments must keep the
+Studio workspace writable only by the Studio's trusted OS identity and must not
+run unaudited same-identity filesystem writers concurrently.
+
 Before roll-forward, recovery validates the complete version 2 journal schema,
 unique operation identity, authenticated raw pre-operation config/state,
 tenant/asset-bound target config and state, exact nested request/result/history/

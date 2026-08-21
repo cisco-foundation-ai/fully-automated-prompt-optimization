@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import stat
@@ -37,6 +38,148 @@ def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
         and left.st_ino == right.st_ino
         and stat.S_IFMT(left.st_mode) == stat.S_IFMT(right.st_mode)
     )
+
+
+def _local_directory_inventory_at(
+    directory_descriptor: int,
+) -> dict[str, tuple[int, int, int]]:
+    """Capture every direct child's exact no-follow identity."""
+    inventory: dict[str, tuple[int, int, int]] = {}
+    for child in os.listdir(directory_descriptor):
+        details = os.stat(
+            child,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        inventory[child] = (
+            details.st_dev,
+            details.st_ino,
+            stat.S_IFMT(details.st_mode),
+        )
+    return inventory
+
+
+def create_and_open_local_directory_at(
+    parent_descriptor: int,
+    name: str,
+    *,
+    final_mode: int,
+    replacement_error: str,
+) -> tuple[int, tuple[int, int, int]]:
+    """Privately build and install one directory under the writer lock.
+
+    Cooperating creators serialize on the already-bound parent descriptor.
+    The parent inventory detects unaccounted namespace changes before the new
+    private entry is opened or mutated, and the opened identity is rechecked
+    through no-replace installation.  This is defense in depth, not an atomic
+    ``mkdir`` ownership proof: POSIX returns no descriptor from ``mkdirat``.
+    The supported boundary therefore requires every same-identity Studio
+    writer to honor this lock; arbitrary noncooperating same-UID mutation in
+    the ``mkdir``-to-``open`` interval is outside that boundary.
+    """
+    if not name or Path(name).name != name:
+        raise ValueError("local authority directory must be one path component")
+    private_mode = 0o500
+    name_tag = hashlib.sha256(os.fsencode(name)).hexdigest()[:16]
+    private_name = (
+        f".{name[:24]}.{name_tag}.{uuid.uuid4().hex}.directory"
+    )
+    fcntl.flock(parent_descriptor, fcntl.LOCK_EX)
+    try:
+        before_creation = _local_directory_inventory_at(parent_descriptor)
+        if name in before_creation or private_name in before_creation:
+            raise FileExistsError(name)
+        os.mkdir(private_name, private_mode, dir_fd=parent_descriptor)
+        after_creation = _local_directory_inventory_at(parent_descriptor)
+        expected_names = {*before_creation, private_name}
+        if set(after_creation) != expected_names or any(
+            after_creation.get(child) != identity
+            for child, identity in before_creation.items()
+        ):
+            raise ValueError(replacement_error)
+        created = os.stat(
+            private_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            stat.S_ISLNK(created.st_mode)
+            or not stat.S_ISDIR(created.st_mode)
+            or stat.S_IMODE(created.st_mode) != private_mode
+            or after_creation.get(private_name)
+            != (
+                created.st_dev,
+                created.st_ino,
+                stat.S_IFMT(created.st_mode),
+            )
+        ):
+            raise ValueError(replacement_error)
+        directory_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_DIRECTORY", 0)
+        )
+        try:
+            descriptor = os.open(
+                private_name,
+                directory_flags,
+                dir_fd=parent_descriptor,
+            )
+        except OSError as exc:
+            raise ValueError(replacement_error) from exc
+        opened = os.fstat(descriptor)
+        if not _same_file_identity(opened, created) or os.listdir(descriptor):
+            os.close(descriptor)
+            raise ValueError(replacement_error)
+        identity = (
+            opened.st_dev,
+            opened.st_ino,
+            stat.S_IFMT(opened.st_mode),
+        )
+        os.fchmod(descriptor, final_mode)
+        rebound = os.stat(
+            private_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            rebound.st_dev,
+            rebound.st_ino,
+            stat.S_IFMT(rebound.st_mode),
+        ) != identity:
+            os.close(descriptor)
+            raise ValueError(replacement_error)
+        if not rename_noreplace_at(
+            parent_descriptor,
+            private_name,
+            name,
+            expected_source=identity,
+        ):
+            os.close(descriptor)
+            raise ValueError(replacement_error)
+        installed = os.stat(
+            name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            installed.st_dev,
+            installed.st_ino,
+            stat.S_IFMT(installed.st_mode),
+        ) != identity:
+            os.close(descriptor)
+            raise ValueError(replacement_error)
+        after_install = _local_directory_inventory_at(parent_descriptor)
+        expected_installed = dict(before_creation)
+        expected_installed[name] = identity
+        if after_install != expected_installed:
+            os.close(descriptor)
+            raise ValueError(replacement_error)
+        os.fsync(parent_descriptor)
+        return descriptor, identity
+    finally:
+        fcntl.flock(parent_descriptor, fcntl.LOCK_UN)
 
 
 def _open_local_authority_root(
@@ -80,15 +223,24 @@ def _open_local_authority_root(
                     dir_fd=parent_descriptor,
                     follow_symlinks=False,
                 )
-                created = False
             except FileNotFoundError:
-                os.mkdir(root_name, 0o755, dir_fd=parent_descriptor)
-                created = True
-                root_before = os.stat(
-                    root_name,
-                    dir_fd=parent_descriptor,
-                    follow_symlinks=False,
-                )
+                try:
+                    root_descriptor, _ = create_and_open_local_directory_at(
+                        parent_descriptor,
+                        root_name,
+                        final_mode=0o755,
+                        replacement_error=(
+                            "new local authority root was replaced before opening"
+                        ),
+                    )
+                except FileExistsError:
+                    root_before = os.stat(
+                        root_name,
+                        dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                else:
+                    return root_descriptor
             if stat.S_ISLNK(root_before.st_mode) or not stat.S_ISDIR(
                 root_before.st_mode
             ):
@@ -107,11 +259,6 @@ def _open_local_authority_root(
             if not _same_file_identity(root_opened, root_before):
                 os.close(root_descriptor)
                 raise ValueError("local authority root changed while opening")
-            if created and os.listdir(root_descriptor):
-                os.close(root_descriptor)
-                raise ValueError(
-                    "new local authority root was replaced before opening"
-                )
             return root_descriptor
         except OSError as exc:
             raise ValueError("local authority root is missing or unsafe") from exc
@@ -157,7 +304,6 @@ def open_local_authority_directory(
     )
     try:
         for part in relative.parts:
-            created = False
             try:
                 before = os.stat(
                     part,
@@ -169,13 +315,25 @@ def open_local_authority_directory(
                     raise ValueError(
                         "local authority directory is missing"
                     ) from None
-                os.mkdir(part, 0o755, dir_fd=current_descriptor)
-                created = True
-                before = os.stat(
-                    part,
-                    dir_fd=current_descriptor,
-                    follow_symlinks=False,
-                )
+                try:
+                    next_descriptor, _ = create_and_open_local_directory_at(
+                        current_descriptor,
+                        part,
+                        final_mode=0o755,
+                        replacement_error=(
+                            "new local authority directory was replaced before opening"
+                        ),
+                    )
+                except FileExistsError:
+                    before = os.stat(
+                        part,
+                        dir_fd=current_descriptor,
+                        follow_symlinks=False,
+                    )
+                else:
+                    os.close(current_descriptor)
+                    current_descriptor = next_descriptor
+                    continue
             if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
                 raise ValueError(
                     "local authority ancestor is not an exact directory"
@@ -194,11 +352,6 @@ def open_local_authority_directory(
             if not _same_file_identity(opened, before):
                 os.close(next_descriptor)
                 raise ValueError("local authority ancestor changed while opening")
-            if created and os.listdir(next_descriptor):
-                os.close(next_descriptor)
-                raise ValueError(
-                    "new local authority directory was replaced before opening"
-                )
             os.close(current_descriptor)
             current_descriptor = next_descriptor
         yield current_descriptor
@@ -364,7 +517,6 @@ def resolve_local_authority_file(
         ):
             raise ValueError("local authority root changed while opening")
         for part in relative.parts[:-1]:
-            created = False
             try:
                 before = os.stat(
                     part,
@@ -380,13 +532,25 @@ def resolve_local_authority_file(
                     )
                 if access == "read":
                     raise ValueError("local authority ancestor is missing") from None
-                os.mkdir(part, 0o755, dir_fd=current_descriptor)
-                created = True
-                before = os.stat(
-                    part,
-                    dir_fd=current_descriptor,
-                    follow_symlinks=False,
-                )
+                try:
+                    next_descriptor, _ = create_and_open_local_directory_at(
+                        current_descriptor,
+                        part,
+                        final_mode=0o755,
+                        replacement_error=(
+                            "new local authority directory was replaced before opening"
+                        ),
+                    )
+                except FileExistsError:
+                    before = os.stat(
+                        part,
+                        dir_fd=current_descriptor,
+                        follow_symlinks=False,
+                    )
+                else:
+                    os.close(current_descriptor)
+                    current_descriptor = next_descriptor
+                    continue
             if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
                 raise ValueError(
                     "local authority ancestor is not an exact directory"
@@ -409,11 +573,6 @@ def resolve_local_authority_file(
             ):
                 os.close(next_descriptor)
                 raise ValueError("local authority ancestor changed while opening")
-            if created and os.listdir(next_descriptor):
-                os.close(next_descriptor)
-                raise ValueError(
-                    "new local authority directory was replaced before opening"
-                )
             os.close(current_descriptor)
             current_descriptor = next_descriptor
 
@@ -718,6 +877,7 @@ def remove_local_authority_file(
                 leaf_name,
                 quarantine_name,
                 expected_source=expected,
+                restore_source_on_mismatch=True,
             ):
                 raise ValueError("local authority cleanup quarantine collided")
             quarantined = os.stat(

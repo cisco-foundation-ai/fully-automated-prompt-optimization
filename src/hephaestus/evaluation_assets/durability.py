@@ -26,9 +26,11 @@ from src.hephaestus.evaluation_assets.control_jsonl import (
 )
 from src.hephaestus.evaluation_assets.input_contract import validate_input_records
 from src.hephaestus.evaluation_assets.journal_transitions import (
+    _LEGACY_SAFE_ASSET_ID_V1,
     JOURNAL_SCHEMA_VERSION,
     PERSISTED_CONFIG_STAGE_DEPENDENCIES_V2,
     PERSISTED_STAGE_VALUES_V2,
+    _legacy_config_value,
     is_exact_legacy_event_row_v1,
     normalized_legacy_completed_state_v1,
 )
@@ -641,12 +643,57 @@ _CONFIG_FIELDS = (
     | _CONFIG_OPTIONAL_FLOAT_FIELDS
     | _CONFIG_BOOLEAN_FIELDS
 )
+_PRE_V2_CONFIG_FIELDS = frozenset(
+    {
+        "asset_id",
+        "batch_size",
+        "cluster_count",
+        "embedding_model",
+        "embedding_provider",
+        "match_threshold",
+        "max_unlabeled_to_trusted_ratio",
+        "min_trusted_examples",
+        "min_trusted_groups",
+        "rubric_model",
+        "rubric_provider",
+        "split_seed",
+        "synthetic_cases_per_cluster",
+        "synthetic_coverage_enabled",
+        "tenant_id",
+    }
+)
 _COMPLETED_COUNT_FIELDS = _HISTORICAL_COMPLETED_COUNT_FIELDS_V1
 
 
 def _is_json_integer(value: Any) -> bool:
     """Return whether a strict JSON scalar is an integer but not a boolean."""
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_exact_pre_v2_config_value(field: str, value: Any) -> bool:
+    """Validate one scalar against the immutable pre-v2 writer domain."""
+    if field in {"asset_id", "tenant_id"}:
+        return isinstance(value, str) and bool(value)
+    return _legacy_config_value(field, value)
+
+
+def _exact_pre_v2_config_mapping(
+    layout: Any,
+    value: Any,
+) -> dict[str, Any]:
+    """Return one type-exact configuration from the frozen pre-v2 profile."""
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != _PRE_V2_CONFIG_FIELDS
+        or any(
+            not _is_exact_pre_v2_config_value(str(field), item)
+            for field, item in value.items()
+        )
+        or value.get("tenant_id") != layout.tenant_id
+        or value.get("asset_id") != layout.asset_id
+    ):
+        raise ValueError("pre-v2 configuration is invalid")
+    return dict(value)
 
 
 def _exact_v2_state(
@@ -1649,35 +1696,42 @@ def _has_native_config_history_authority(layout: Any) -> bool:
                 if event == "configuration_inherited"
                 else _CREATED_HISTORY_FIELDS
             )
-            configuration = row.get("configuration")
-            try:
-                parsed = EvaluationAssetConfig.from_dict(configuration)
-            except (AttributeError, KeyError, TypeError, ValueError):
-                return True
+            revision = row.get("revision")
             if (
                 index != 1
                 or set(row) != expected
-                or row.get("revision") != 1
+                or not _is_json_integer(revision)
+                or revision != 1
                 or not _canonical_utc_timestamp(row.get("timestamp"))
-                or not isinstance(configuration, Mapping)
-                or parsed.to_dict() != dict(configuration)
-                or parsed.tenant_id != layout.tenant_id
-                or parsed.asset_id != layout.asset_id
             ):
                 return True
-            if event == "configuration_inherited" and not isinstance(
-                row.get("parent_asset_id"), str
-            ):
+            try:
+                configuration = _exact_pre_v2_config_mapping(
+                    layout,
+                    row.get("configuration"),
+                )
+            except (TypeError, ValueError):
                 return True
-            replayed = parsed.to_dict()
+            if event == "configuration_inherited":
+                parent_asset_id = row.get("parent_asset_id")
+                if (
+                    not isinstance(parent_asset_id, str)
+                    or _LEGACY_SAFE_ASSET_ID_V1.fullmatch(parent_asset_id)
+                    is None
+                    or parent_asset_id == layout.asset_id
+                ):
+                    return True
+            replayed = configuration
             previous_timestamp = datetime.fromisoformat(str(row["timestamp"]))
             continue
         changes = row.get("changed_fields")
         timestamp = row.get("timestamp")
+        revision = row.get("revision")
         if (
             event != "configuration_updated"
             or set(row) != legacy_update_fields
-            or row.get("revision") != index
+            or not _is_json_integer(revision)
+            or revision != index
             or index < 2
             or replayed is None
             or previous_timestamp is None
@@ -1697,16 +1751,25 @@ def _has_native_config_history_authority(layout: Any) -> bool:
                 or field not in updated
                 or not isinstance(change, Mapping)
                 or set(change) != {"previous", "new"}
-                or change.get("previous") != updated[field]
-                or change.get("new") == updated[field]
+                or not _is_exact_pre_v2_config_value(
+                    str(field),
+                    change.get("previous"),
+                )
+                or not _is_exact_pre_v2_config_value(
+                    str(field),
+                    change.get("new"),
+                )
+                or canonical_json_bytes(change.get("previous"))
+                != canonical_json_bytes(updated[field])
+                or canonical_json_bytes(change.get("new"))
+                == canonical_json_bytes(updated[field])
             ):
                 return True
             updated[field] = change["new"]
         try:
-            parsed_update = EvaluationAssetConfig.from_dict(updated)
-        except (AttributeError, KeyError, TypeError, ValueError):
+            replayed = _exact_pre_v2_config_mapping(layout, updated)
+        except (TypeError, ValueError):
             return True
-        replayed = parsed_update.to_dict()
         earliest = min(
             (
                 PERSISTED_CONFIG_STAGE_DEPENDENCIES_V2[field]
@@ -1728,10 +1791,10 @@ def _has_native_config_history_authority(layout: Any) -> bool:
         if config_authority.data is None:
             return True
         raw_config = parse_strict_json_object(config_authority.data)
-        current = EvaluationAssetConfig.from_dict(raw_config)
+        current = _exact_pre_v2_config_mapping(layout, raw_config)
     except (OSError, TypeError, UnicodeError, ValueError):
         return True
-    if current.to_dict() != raw_config or current.to_dict() != replayed:
+    if canonical_json_bytes(current) != canonical_json_bytes(replayed):
         return True
     return False
 

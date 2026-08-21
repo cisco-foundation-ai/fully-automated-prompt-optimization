@@ -261,6 +261,25 @@ require explicit repair because they lack the complete before-state evidence
 needed for safe roll-forward.
 One cross-process per-asset lock protects create, run/resume, revision,
 adoption, and extension mutations across library, CLI, and Studio callers.
+Every Evaluation Asset Studio authority-root, authority-ancestor, stage,
+receipt, publication-catalog, generation, and generation-staging directory
+creator also takes an exclusive lock on the already-open parent and uses the
+same descriptor-relative helper with private names, no-follow opens, exact
+identity rechecks, and no-replace installation. The finite production guard
+rejects other `Path.mkdir`, `os.mkdir`, and `os.makedirs` spellings, including
+literal persistence attributes constructed through `operator.attrgetter` or
+`operator.methodcaller`; unresolved dynamic attribute names are outside this
+finite claim. Its only directory-creation compatibility seams are the literal
+internal `os.mkdir` in `create_and_open_local_directory_at`, the generic parent
+bootstraps in
+`_atomic_write_text` and `_atomic_write_binary`, and the deprecated non-Studio
+`assemble_dataset_bundle`; a live release check verifies that the latter three
+never bootstrap the authority or generation directories listed above.
+This boundary fails closed on preexisting or detectably substituted nodes.
+POSIX does not provide an atomic `mkdirat`-and-return-descriptor operation, so
+the workspace must not be concurrently mutated by an unaudited process running
+as the same OS user during directory creation; use an exclusive trusted OS
+identity and filesystem permissions for the Studio workspace.
 Default providers are constructed only after that lock, recovery, lifecycle
 and immutable raw-snapshot checks, revision, and configuration reload. Injected
 providers must declare nonblank `provider_name` and `model` attributes; receipts
