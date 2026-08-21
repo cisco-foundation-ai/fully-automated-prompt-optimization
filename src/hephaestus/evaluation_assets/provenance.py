@@ -20,6 +20,10 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from src.hephaestus.artifact_io import atomic_write_jsonl
+from src.hephaestus.evaluation_assets.control_jsonl import (
+    resolve_local_authority_file,
+    write_local_authority_jsonl,
+)
 from src.hephaestus.evaluation_assets.lineage_validation import (
     validate_parent_release_evidence,
     validate_provenance_lineage_identity,
@@ -834,9 +838,25 @@ def write_provider_call_ledger(
     rows: Sequence[Mapping[str, Any]],
     *,
     stage: str,
+    trusted_root: Path | None = None,
 ) -> None:
     """Validate then atomically persist one stage-local call ledger."""
-    atomic_write_jsonl(path, validate_provider_calls(rows, expected_stage=stage))
+    validated = validate_provider_calls(rows, expected_stage=stage)
+    if trusted_root is None:
+        atomic_write_jsonl(path, validated)
+        return
+    current = resolve_local_authority_file(
+        path,
+        trusted_root,
+        access="read_optional",
+    )
+    write_local_authority_jsonl(
+        path,
+        trusted_root,
+        validated,
+        expected_current=current.data if current.exists else None,
+        check_expected_current=True,
+    )
 
 
 def build_stage_provenance(

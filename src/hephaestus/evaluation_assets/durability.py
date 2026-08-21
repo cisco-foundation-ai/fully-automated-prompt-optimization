@@ -9,19 +9,28 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 from src.hephaestus.evaluation_assets.control_jsonl import (
+    capture_local_authority_tree,
     parse_strict_json_object,
+    parse_strict_jsonl_objects,
     read_strict_jsonl_objects,
+    resolve_local_authority_file,
 )
 from src.hephaestus.evaluation_assets.input_contract import validate_input_records
 from src.hephaestus.evaluation_assets.journal_transitions import (
     JOURNAL_SCHEMA_VERSION,
+    PERSISTED_CONFIG_STAGE_DEPENDENCIES_V2,
+    PERSISTED_STAGE_VALUES_V2,
+    is_exact_legacy_event_row_v1,
+    normalized_legacy_completed_state_v1,
 )
 from src.hephaestus.evaluation_assets.journal_validation import (
     ValidatedRecoveryJournal,
@@ -37,7 +46,9 @@ from src.hephaestus.evaluation_assets.lineage_validation import (
 )
 from src.hephaestus.evaluation_assets.models import (
     CONFIG_STAGE_DEPENDENCIES,
+    LEGACY_STATE_SCHEMA_VERSION,
     STAGE_COUNT_KEYS,
+    STAGE_LABELS,
     STATE_SCHEMA_VERSION,
     TOP_LEVEL_STATUSES,
     EvaluationAssetConfig,
@@ -68,6 +79,11 @@ from src.hephaestus.evaluation_assets.publication import (
     resolve_evaluation_asset_release,
     validate_evaluation_asset_release_candidate,
     validate_historical_generation,
+)
+
+_RELEASE_AUTHORITY_SNAPSHOT: ContextVar[Mapping[Path, bytes] | None] = ContextVar(
+    "evaluation_asset_release_authority_snapshot",
+    default=None,
 )
 
 STAGE_RECEIPT_SCHEMA_VERSION = "fapo-stage-receipt-v2"
@@ -128,6 +144,19 @@ _UPDATED_HISTORY_FIELDS = {
 }
 
 
+class _HistoricalPipelineStageV2(str, Enum):
+    """Immutable stage keys for persisted v1/v2 release authority."""
+
+    RAW_INPUTS = "raw_inputs"
+    PREPARED_INPUTS = "prepared_inputs"
+    RUBRIC_EXTRACTION = "rubric_extraction"
+    INTENT_CLUSTERING = "intent_clustering"
+    COVERAGE_DECISIONS = "coverage_decisions"
+    LABEL_INFERENCE = "label_inference"
+    SYNTHETIC_COVERAGE = "synthetic_coverage"
+    DATASET_SPLITS = "dataset_splits"
+
+
 @dataclass(frozen=True)
 class StageSpecification:
     """Declarative artifact and dependency contract for one pipeline stage."""
@@ -158,22 +187,22 @@ _LEGACY_CATALOG_OUTPUTS = (
 )
 
 _HISTORICAL_STAGE_SPECIFICATIONS_V1 = MappingProxyType({
-    PipelineStage.RAW_INPUTS: StageSpecification(
+    _HistoricalPipelineStageV2.RAW_INPUTS: StageSpecification(
         required_outputs=("input_manifest.json",),
         direct_inputs=(
-            (PipelineStage.RAW_INPUTS, "labeled_feedback.jsonl"),
-            (PipelineStage.RAW_INPUTS, "unlabeled.jsonl"),
+            (_HistoricalPipelineStageV2.RAW_INPUTS, "labeled_feedback.jsonl"),
+            (_HistoricalPipelineStageV2.RAW_INPUTS, "unlabeled.jsonl"),
         ),
     ),
-    PipelineStage.PREPARED_INPUTS: StageSpecification(
+    _HistoricalPipelineStageV2.PREPARED_INPUTS: StageSpecification(
         required_outputs=("normalized_feedback.jsonl", "intent_records.jsonl"),
         direct_inputs=(
-            (PipelineStage.RAW_INPUTS, "labeled_feedback.jsonl"),
-            (PipelineStage.RAW_INPUTS, "unlabeled.jsonl"),
+            (_HistoricalPipelineStageV2.RAW_INPUTS, "labeled_feedback.jsonl"),
+            (_HistoricalPipelineStageV2.RAW_INPUTS, "unlabeled.jsonl"),
         ),
-        upstream_stages=(PipelineStage.RAW_INPUTS,),
+        upstream_stages=(_HistoricalPipelineStageV2.RAW_INPUTS,),
     ),
-    PipelineStage.RUBRIC_EXTRACTION: StageSpecification(
+    _HistoricalPipelineStageV2.RUBRIC_EXTRACTION: StageSpecification(
         required_outputs=(
             "feedback_evidence.jsonl",
             "candidate_guidelines.jsonl",
@@ -182,11 +211,11 @@ _HISTORICAL_STAGE_SPECIFICATIONS_V1 = MappingProxyType({
             "trusted_cases.jsonl",
         ),
         direct_inputs=(
-            (PipelineStage.PREPARED_INPUTS, "normalized_feedback.jsonl"),
+            (_HistoricalPipelineStageV2.PREPARED_INPUTS, "normalized_feedback.jsonl"),
         ),
         upstream_stages=(
-            PipelineStage.RAW_INPUTS,
-            PipelineStage.PREPARED_INPUTS,
+            _HistoricalPipelineStageV2.RAW_INPUTS,
+            _HistoricalPipelineStageV2.PREPARED_INPUTS,
         ),
         config_fields=("rubric_provider", "rubric_model", "batch_size"),
         prompt_names=("evidence_extraction", "guideline_synthesis"),
@@ -197,12 +226,14 @@ _HISTORICAL_STAGE_SPECIFICATIONS_V1 = MappingProxyType({
             "trusted_cases.jsonl",
         ),
     ),
-    PipelineStage.INTENT_CLUSTERING: StageSpecification(
+    _HistoricalPipelineStageV2.INTENT_CLUSTERING: StageSpecification(
         required_outputs=("intent_inventory.jsonl",),
-        direct_inputs=((PipelineStage.PREPARED_INPUTS, "intent_records.jsonl"),),
+        direct_inputs=(
+            (_HistoricalPipelineStageV2.PREPARED_INPUTS, "intent_records.jsonl"),
+        ),
         upstream_stages=(
-            PipelineStage.RAW_INPUTS,
-            PipelineStage.PREPARED_INPUTS,
+            _HistoricalPipelineStageV2.RAW_INPUTS,
+            _HistoricalPipelineStageV2.PREPARED_INPUTS,
         ),
         config_fields=(
             "embedding_provider",
@@ -211,22 +242,22 @@ _HISTORICAL_STAGE_SPECIFICATIONS_V1 = MappingProxyType({
         ),
         provider_roles=("embedding",),
     ),
-    PipelineStage.COVERAGE_DECISIONS: StageSpecification(
+    _HistoricalPipelineStageV2.COVERAGE_DECISIONS: StageSpecification(
         required_outputs=(
             "intent_matches.jsonl",
             "coverage_report.md",
             "review_queue/labeling_queue.jsonl",
         ),
         direct_inputs=(
-            (PipelineStage.PREPARED_INPUTS, "intent_records.jsonl"),
-            (PipelineStage.RUBRIC_EXTRACTION, "trusted_intents.jsonl"),
-            (PipelineStage.INTENT_CLUSTERING, "intent_inventory.jsonl"),
+            (_HistoricalPipelineStageV2.PREPARED_INPUTS, "intent_records.jsonl"),
+            (_HistoricalPipelineStageV2.RUBRIC_EXTRACTION, "trusted_intents.jsonl"),
+            (_HistoricalPipelineStageV2.INTENT_CLUSTERING, "intent_inventory.jsonl"),
         ),
         upstream_stages=(
-            PipelineStage.RAW_INPUTS,
-            PipelineStage.PREPARED_INPUTS,
-            PipelineStage.RUBRIC_EXTRACTION,
-            PipelineStage.INTENT_CLUSTERING,
+            _HistoricalPipelineStageV2.RAW_INPUTS,
+            _HistoricalPipelineStageV2.PREPARED_INPUTS,
+            _HistoricalPipelineStageV2.RUBRIC_EXTRACTION,
+            _HistoricalPipelineStageV2.INTENT_CLUSTERING,
         ),
         config_fields=(
             "embedding_provider",
@@ -238,7 +269,7 @@ _HISTORICAL_STAGE_SPECIFICATIONS_V1 = MappingProxyType({
         ),
         provider_roles=("embedding",),
     ),
-    PipelineStage.LABEL_INFERENCE: StageSpecification(
+    _HistoricalPipelineStageV2.LABEL_INFERENCE: StageSpecification(
         required_outputs=(
             "inferred_unlabeled_cluster_rubrics.jsonl",
             "inferred_unlabeled_labels.jsonl",
@@ -247,27 +278,36 @@ _HISTORICAL_STAGE_SPECIFICATIONS_V1 = MappingProxyType({
             "inferred_cases.jsonl",
         ),
         direct_inputs=(
-            (PipelineStage.RAW_INPUTS, "unlabeled.jsonl"),
-            (PipelineStage.PREPARED_INPUTS, "normalized_feedback.jsonl"),
-            (PipelineStage.PREPARED_INPUTS, "intent_records.jsonl"),
-            (PipelineStage.RUBRIC_EXTRACTION, "evaluation_guidelines.jsonl"),
-            (PipelineStage.INTENT_CLUSTERING, "intent_inventory.jsonl"),
-            (PipelineStage.COVERAGE_DECISIONS, "intent_matches.jsonl"),
+            (_HistoricalPipelineStageV2.RAW_INPUTS, "unlabeled.jsonl"),
+            (_HistoricalPipelineStageV2.PREPARED_INPUTS, "normalized_feedback.jsonl"),
+            (_HistoricalPipelineStageV2.PREPARED_INPUTS, "intent_records.jsonl"),
+            (
+                _HistoricalPipelineStageV2.RUBRIC_EXTRACTION,
+                "evaluation_guidelines.jsonl",
+            ),
+            (_HistoricalPipelineStageV2.INTENT_CLUSTERING, "intent_inventory.jsonl"),
+            (_HistoricalPipelineStageV2.COVERAGE_DECISIONS, "intent_matches.jsonl"),
         ),
-        upstream_stages=tuple(list(PipelineStage)[:5]),
+        upstream_stages=(
+            _HistoricalPipelineStageV2.RAW_INPUTS,
+            _HistoricalPipelineStageV2.PREPARED_INPUTS,
+            _HistoricalPipelineStageV2.RUBRIC_EXTRACTION,
+            _HistoricalPipelineStageV2.INTENT_CLUSTERING,
+            _HistoricalPipelineStageV2.COVERAGE_DECISIONS,
+        ),
         config_fields=("rubric_provider", "rubric_model", "batch_size"),
         prompt_names=("label_inference",),
         provider_roles=("rubric",),
         legacy_direct_inputs=(
-            (PipelineStage.RAW_INPUTS, "unlabeled.jsonl"),
-            (PipelineStage.PREPARED_INPUTS, "normalized_feedback.jsonl"),
-            (PipelineStage.PREPARED_INPUTS, "intent_records.jsonl"),
-            (PipelineStage.RUBRIC_EXTRACTION, "feedback_rubrics.jsonl"),
-            (PipelineStage.INTENT_CLUSTERING, "intent_inventory.jsonl"),
-            (PipelineStage.COVERAGE_DECISIONS, "intent_matches.jsonl"),
+            (_HistoricalPipelineStageV2.RAW_INPUTS, "unlabeled.jsonl"),
+            (_HistoricalPipelineStageV2.PREPARED_INPUTS, "normalized_feedback.jsonl"),
+            (_HistoricalPipelineStageV2.PREPARED_INPUTS, "intent_records.jsonl"),
+            (_HistoricalPipelineStageV2.RUBRIC_EXTRACTION, "feedback_rubrics.jsonl"),
+            (_HistoricalPipelineStageV2.INTENT_CLUSTERING, "intent_inventory.jsonl"),
+            (_HistoricalPipelineStageV2.COVERAGE_DECISIONS, "intent_matches.jsonl"),
         ),
     ),
-    PipelineStage.SYNTHETIC_COVERAGE: StageSpecification(
+    _HistoricalPipelineStageV2.SYNTHETIC_COVERAGE: StageSpecification(
         required_outputs=(
             "synthetic_candidates.jsonl",
             "rejected_synthetic.jsonl",
@@ -275,16 +315,23 @@ _HISTORICAL_STAGE_SPECIFICATIONS_V1 = MappingProxyType({
             "synthetic_cases.jsonl",
         ),
         direct_inputs=(
-            (PipelineStage.PREPARED_INPUTS, "intent_records.jsonl"),
-            (PipelineStage.RUBRIC_EXTRACTION, "trusted_cases.jsonl"),
-            (PipelineStage.INTENT_CLUSTERING, "intent_inventory.jsonl"),
+            (_HistoricalPipelineStageV2.PREPARED_INPUTS, "intent_records.jsonl"),
+            (_HistoricalPipelineStageV2.RUBRIC_EXTRACTION, "trusted_cases.jsonl"),
+            (_HistoricalPipelineStageV2.INTENT_CLUSTERING, "intent_inventory.jsonl"),
             (
-                PipelineStage.LABEL_INFERENCE,
+                _HistoricalPipelineStageV2.LABEL_INFERENCE,
                 "inferred_unlabeled_cluster_rubrics.jsonl",
             ),
-            (PipelineStage.LABEL_INFERENCE, "inferred_cases.jsonl"),
+            (_HistoricalPipelineStageV2.LABEL_INFERENCE, "inferred_cases.jsonl"),
         ),
-        upstream_stages=tuple(list(PipelineStage)[:6]),
+        upstream_stages=(
+            _HistoricalPipelineStageV2.RAW_INPUTS,
+            _HistoricalPipelineStageV2.PREPARED_INPUTS,
+            _HistoricalPipelineStageV2.RUBRIC_EXTRACTION,
+            _HistoricalPipelineStageV2.INTENT_CLUSTERING,
+            _HistoricalPipelineStageV2.COVERAGE_DECISIONS,
+            _HistoricalPipelineStageV2.LABEL_INFERENCE,
+        ),
         config_fields=(
             "rubric_provider",
             "rubric_model",
@@ -295,17 +342,25 @@ _HISTORICAL_STAGE_SPECIFICATIONS_V1 = MappingProxyType({
         prompt_names=("synthetic_coverage",),
         provider_roles=("rubric",),
     ),
-    PipelineStage.DATASET_SPLITS: StageSpecification(
+    _HistoricalPipelineStageV2.DATASET_SPLITS: StageSpecification(
         required_outputs=_SPLIT_OUTPUTS
         + ("dataset_manifest.json", "generation_manifest.json"),
         legacy_required_outputs=_SPLIT_OUTPUTS + ("dataset_manifest.json",),
         direct_inputs=(
-            (PipelineStage.RAW_INPUTS, "input_manifest.json"),
-            (PipelineStage.RUBRIC_EXTRACTION, "trusted_cases.jsonl"),
-            (PipelineStage.LABEL_INFERENCE, "inferred_cases.jsonl"),
-            (PipelineStage.SYNTHETIC_COVERAGE, "synthetic_cases.jsonl"),
+            (_HistoricalPipelineStageV2.RAW_INPUTS, "input_manifest.json"),
+            (_HistoricalPipelineStageV2.RUBRIC_EXTRACTION, "trusted_cases.jsonl"),
+            (_HistoricalPipelineStageV2.LABEL_INFERENCE, "inferred_cases.jsonl"),
+            (_HistoricalPipelineStageV2.SYNTHETIC_COVERAGE, "synthetic_cases.jsonl"),
         ),
-        upstream_stages=tuple(list(PipelineStage)[:7]),
+        upstream_stages=(
+            _HistoricalPipelineStageV2.RAW_INPUTS,
+            _HistoricalPipelineStageV2.PREPARED_INPUTS,
+            _HistoricalPipelineStageV2.RUBRIC_EXTRACTION,
+            _HistoricalPipelineStageV2.INTENT_CLUSTERING,
+            _HistoricalPipelineStageV2.COVERAGE_DECISIONS,
+            _HistoricalPipelineStageV2.LABEL_INFERENCE,
+            _HistoricalPipelineStageV2.SYNTHETIC_COVERAGE,
+        ),
         config_fields=("split_seed",),
         required_asset_outputs=("asset_manifest.json", "build_provenance.json"),
     ),
@@ -314,36 +369,55 @@ STAGE_SPECIFICATIONS = dict(_HISTORICAL_STAGE_SPECIFICATIONS_V1)
 
 _HISTORICAL_STAGE_LABELS_V1 = MappingProxyType(
     {
-        PipelineStage.RAW_INPUTS: "Validate raw inputs",
-        PipelineStage.PREPARED_INPUTS: "Prepare canonical inputs",
-        PipelineStage.RUBRIC_EXTRACTION: "Create evaluation guidelines",
-        PipelineStage.INTENT_CLUSTERING: "Mine intent clusters",
-        PipelineStage.COVERAGE_DECISIONS: "Apply coverage decisions",
-        PipelineStage.LABEL_INFERENCE: "Infer reviewable labels",
-        PipelineStage.SYNTHETIC_COVERAGE: "Optional synthetic coverage",
-        PipelineStage.DATASET_SPLITS: "Build dataset splits",
+        _HistoricalPipelineStageV2.RAW_INPUTS: "Validate raw inputs",
+        _HistoricalPipelineStageV2.PREPARED_INPUTS: "Prepare canonical inputs",
+        _HistoricalPipelineStageV2.RUBRIC_EXTRACTION: "Create evaluation guidelines",
+        _HistoricalPipelineStageV2.INTENT_CLUSTERING: "Mine intent clusters",
+        _HistoricalPipelineStageV2.COVERAGE_DECISIONS: "Apply coverage decisions",
+        _HistoricalPipelineStageV2.LABEL_INFERENCE: "Infer reviewable labels",
+        _HistoricalPipelineStageV2.SYNTHETIC_COVERAGE: "Optional synthetic coverage",
+        _HistoricalPipelineStageV2.DATASET_SPLITS: "Build dataset splits",
     }
 )
 _HISTORICAL_PIPELINE_STAGES_V1 = (
-    PipelineStage.RAW_INPUTS,
-    PipelineStage.PREPARED_INPUTS,
-    PipelineStage.RUBRIC_EXTRACTION,
-    PipelineStage.INTENT_CLUSTERING,
-    PipelineStage.COVERAGE_DECISIONS,
-    PipelineStage.LABEL_INFERENCE,
-    PipelineStage.SYNTHETIC_COVERAGE,
-    PipelineStage.DATASET_SPLITS,
+    _HistoricalPipelineStageV2.RAW_INPUTS,
+    _HistoricalPipelineStageV2.PREPARED_INPUTS,
+    _HistoricalPipelineStageV2.RUBRIC_EXTRACTION,
+    _HistoricalPipelineStageV2.INTENT_CLUSTERING,
+    _HistoricalPipelineStageV2.COVERAGE_DECISIONS,
+    _HistoricalPipelineStageV2.LABEL_INFERENCE,
+    _HistoricalPipelineStageV2.SYNTHETIC_COVERAGE,
+    _HistoricalPipelineStageV2.DATASET_SPLITS,
+)
+if tuple(stage.value for stage in _HISTORICAL_PIPELINE_STAGES_V1) != (
+    PERSISTED_STAGE_VALUES_V2
+):
+    raise RuntimeError("persisted stage profiles are inconsistent")
+_HISTORICAL_STAGE_BY_VALUE_V1 = MappingProxyType(
+    {stage.value: stage for stage in _HISTORICAL_PIPELINE_STAGES_V1}
+)
+_HISTORICAL_STAGE_INDEX_V1 = MappingProxyType(
+    {
+        stage: index
+        for index, stage in enumerate(_HISTORICAL_PIPELINE_STAGES_V1, start=1)
+    }
+)
+_HISTORICAL_STAGE_INDEX_BY_VALUE_V1 = MappingProxyType(
+    {
+        stage.value: index
+        for stage, index in _HISTORICAL_STAGE_INDEX_V1.items()
+    }
 )
 
 _HISTORICAL_STAGE_COUNT_KEYS_V1 = MappingProxyType(
     {
-        PipelineStage.RAW_INPUTS: frozenset(
+        _HistoricalPipelineStageV2.RAW_INPUTS: frozenset(
             {"feedback_records", "unlabeled_records"}
         ),
-        PipelineStage.PREPARED_INPUTS: frozenset(
+        _HistoricalPipelineStageV2.PREPARED_INPUTS: frozenset(
             {"prepared_feedback", "prepared_intents"}
         ),
-        PipelineStage.RUBRIC_EXTRACTION: frozenset(
+        _HistoricalPipelineStageV2.RUBRIC_EXTRACTION: frozenset(
             {
                 "feedback_evidence",
                 "candidate_guidelines",
@@ -351,8 +425,8 @@ _HISTORICAL_STAGE_COUNT_KEYS_V1 = MappingProxyType(
                 "trusted_cases",
             }
         ),
-        PipelineStage.INTENT_CLUSTERING: frozenset({"intent_clusters"}),
-        PipelineStage.COVERAGE_DECISIONS: frozenset(
+        _HistoricalPipelineStageV2.INTENT_CLUSTERING: frozenset({"intent_clusters"}),
+        _HistoricalPipelineStageV2.COVERAGE_DECISIONS: frozenset(
             {
                 "matched_clusters",
                 "needs_more_feedback_clusters",
@@ -361,13 +435,13 @@ _HISTORICAL_STAGE_COUNT_KEYS_V1 = MappingProxyType(
                 "labeling_queue_traces",
             }
         ),
-        PipelineStage.LABEL_INFERENCE: frozenset(
+        _HistoricalPipelineStageV2.LABEL_INFERENCE: frozenset(
             {"inferred_cases", "review_clusters"}
         ),
-        PipelineStage.SYNTHETIC_COVERAGE: frozenset(
+        _HistoricalPipelineStageV2.SYNTHETIC_COVERAGE: frozenset(
             {"synthetic_cases", "rejected_synthetic_cases"}
         ),
-        PipelineStage.DATASET_SPLITS: frozenset(
+        _HistoricalPipelineStageV2.DATASET_SPLITS: frozenset(
             {
                 "dataset_cases",
                 "train_cases",
@@ -405,6 +479,117 @@ def canonical_json_bytes(payload: Any) -> bytes:
 def canonical_sha256(payload: Any) -> str:
     """Hash one canonical JSON value."""
     return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+
+
+def _local_authority_bytes(layout: Any, path: Path) -> bytes:
+    """Read one exact no-follow authority file beneath the tenants root."""
+    snapshot = _RELEASE_AUTHORITY_SNAPSHOT.get()
+    if snapshot is not None:
+        lexical_path = Path(path).absolute()
+        try:
+            return snapshot[lexical_path]
+        except KeyError as exc:
+            raise ValueError("release authority snapshot is incomplete") from exc
+    authority = resolve_local_authority_file(
+        path,
+        layout.tenants_root,
+        access="read",
+    )
+    if authority.data is None:
+        raise ValueError("local authority read did not return bytes")
+    return authority.data
+
+
+def _local_authority_sha256(layout: Any, path: Path) -> str:
+    """Hash the exact bytes read from one no-follow authority handle."""
+    return hashlib.sha256(_local_authority_bytes(layout, path)).hexdigest()
+
+
+def _local_authority_node_exists(layout: Any, path: Path) -> bool:
+    """Observe one authority node without following it or splitting probes."""
+    try:
+        return resolve_local_authority_file(
+            path,
+            layout.tenants_root,
+            access="read_optional",
+        ).exists
+    except (OSError, ValueError):
+        return True
+
+
+def _validate_local_authority_layout(layout: Any) -> None:
+    """Preflight every mutable or persisted local authority file without writes."""
+    workspace_generation_manifest = layout.artifact_path(
+        _HISTORICAL_PIPELINE_STAGES_V1[-1],
+        "generation_manifest.json",
+    )
+    paths = [
+        layout.state_path,
+        layout.config_path,
+        layout.config_history_path,
+        layout.events_path,
+        layout.recovery_journal_path,
+        layout.historical_feedback_path,
+        layout.historical_unlabeled_path,
+        layout.lineage_path,
+        layout.reuse_manifest_path,
+        layout.build_provenance_path,
+        layout.manifest_path,
+        layout.release_pointer_path,
+        layout.artifact_path(
+            _HISTORICAL_PIPELINE_STAGES_V1[0],
+            "input_manifest.json",
+        ),
+        layout.artifact_path(
+            _HISTORICAL_PIPELINE_STAGES_V1[-1],
+            "dataset_manifest.json",
+        ),
+        workspace_generation_manifest,
+    ]
+    for stage in _HISTORICAL_PIPELINE_STAGES_V1:
+        paths.extend(
+            (
+                layout.receipt_path(stage),
+                layout.stage_provenance_path(stage),
+                layout.artifact_path(stage, "provider_calls.jsonl"),
+            )
+        )
+    captured = {
+        path: resolve_local_authority_file(
+            path,
+            layout.tenants_root,
+            access="read_optional",
+        )
+        for path in paths
+    }
+    generation_ids: set[str] = set()
+    for control_path in (workspace_generation_manifest, layout.release_pointer_path):
+        control = captured[control_path]
+        if not control.exists:
+            continue
+        raw = control.data
+        if raw is None:
+            continue
+        try:
+            generation_id = parse_strict_json_object(raw).get("generation_id")
+        except ValueError:
+            continue
+        if isinstance(generation_id, str) and re.fullmatch(
+            r"sha256-[0-9a-f]{64}",
+            generation_id,
+        ):
+            generation_ids.add(generation_id)
+    for generation_id in generation_ids:
+        generation_root = layout.generations_root / generation_id
+        for name in (
+            "generation_manifest.json",
+            *(f"{split}.jsonl" for split in ("train", "validation", "test", "regression_trusted")),
+        ):
+            resolve_local_authority_file(
+                generation_root / name,
+                layout.tenants_root,
+                access="read_optional",
+            )
 
 
 _PIPELINE_STATE_FIELDS = {
@@ -464,8 +649,28 @@ def _is_json_integer(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _exact_v2_state(raw: Mapping[str, Any]) -> PipelineState:
-    """Validate and load one closed, type-exact v2 state object."""
+def _exact_v2_state(
+    raw: Mapping[str, Any],
+    *,
+    historical: bool = True,
+) -> PipelineState:
+    """Validate a closed v2 state against a historical or authoring profile."""
+    ordered_stages = (
+        _HISTORICAL_PIPELINE_STAGES_V1
+        if historical
+        else tuple(PipelineStage)
+    )
+    stage_labels = (
+        _HISTORICAL_STAGE_LABELS_V1 if historical else STAGE_LABELS
+    )
+    if historical:
+        count_fields = _COMPLETED_COUNT_FIELDS
+        current_count_fields = frozenset()
+    else:
+        current_count_fields = frozenset().union(
+            *(frozenset(STAGE_COUNT_KEYS[stage]) for stage in ordered_stages)
+        )
+        count_fields = _COMPLETED_COUNT_FIELDS | current_count_fields
     if set(raw) != _PIPELINE_STATE_FIELDS:
         raise ValueError("v2 state field inventory is invalid")
     if any(
@@ -490,7 +695,7 @@ def _exact_v2_state(raw: Mapping[str, Any]) -> PipelineState:
     if raw.get("current_stage") is not None and (
         not isinstance(raw["current_stage"], str)
         or raw["current_stage"]
-        not in {stage.value for stage in _HISTORICAL_PIPELINE_STAGES_V1}
+        not in {stage.value for stage in ordered_stages}
     ):
         raise ValueError("v2 state stage cursor is invalid")
     if raw.get("error") is not None and not isinstance(raw["error"], str):
@@ -506,7 +711,7 @@ def _exact_v2_state(raw: Mapping[str, Any]) -> PipelineState:
     counts = raw.get("counts")
     if (
         not isinstance(counts, dict)
-        or not set(counts) <= _COMPLETED_COUNT_FIELDS
+        or not set(counts) <= count_fields
         or any(
             not _is_json_integer(value) or value < 0
             for value in counts.values()
@@ -514,11 +719,34 @@ def _exact_v2_state(raw: Mapping[str, Any]) -> PipelineState:
     ):
         raise ValueError("v2 state count identity is invalid")
     stages = raw.get("stages")
-    if not isinstance(stages, list) or len(stages) != len(
-        _HISTORICAL_PIPELINE_STAGES_V1
-    ):
+    if not isinstance(stages, list):
         raise ValueError("v2 state stage inventory is invalid")
-    for expected_stage, stage in zip(_HISTORICAL_PIPELINE_STAGES_V1, stages):
+    current_stage_values = {stage.value for stage in ordered_stages}
+    historical_stage_values = {
+        stage.value for stage in _HISTORICAL_PIPELINE_STAGES_V1
+    }
+    raw_stage_values = [
+        stage.get("stage") if isinstance(stage, Mapping) else None
+        for stage in stages
+    ]
+    if historical:
+        if raw_stage_values != [stage.value for stage in ordered_stages]:
+            raise ValueError("v2 state stage inventory is invalid")
+    elif (
+        len(raw_stage_values) != len(set(raw_stage_values))
+        or frozenset(raw_stage_values)
+        not in {frozenset(current_stage_values), frozenset(historical_stage_values)}
+    ):
+        raise ValueError("v2 mutable state stage inventory is invalid")
+    labels_by_value: dict[str, frozenset[str]] = {}
+    for stage, label in _HISTORICAL_STAGE_LABELS_V1.items():
+        labels_by_value[stage.value] = frozenset({label})
+    for stage, label in stage_labels.items():
+        labels_by_value[stage.value] = labels_by_value.get(
+            stage.value,
+            frozenset(),
+        ) | frozenset({label})
+    for index, stage in enumerate(stages):
         if not isinstance(stage, dict) or set(stage) != _STAGE_STATE_FIELDS:
             raise ValueError("v2 state stage schema is invalid")
         if any(
@@ -527,8 +755,10 @@ def _exact_v2_state(raw: Mapping[str, Any]) -> PipelineState:
         ):
             raise ValueError("v2 state stage scalar identity is invalid")
         if (
-            stage["stage"] != expected_stage.value
-            or stage["label"] != _HISTORICAL_STAGE_LABELS_V1[expected_stage]
+            stage["stage"] not in labels_by_value
+            or stage["label"] not in labels_by_value[stage["stage"]]
+            or historical
+            and stage["stage"] != ordered_stages[index].value
             or stage["status"] not in {"pending", "running", "completed", "failed"}
         ):
             raise ValueError("v2 state stage lifecycle is invalid")
@@ -546,6 +776,14 @@ def _exact_v2_state(raw: Mapping[str, Any]) -> PipelineState:
             stage["receipt_sha256"]
         ):
             raise ValueError("v2 state stage receipt identity is invalid")
+    if not historical:
+        normalized = PipelineState.from_dict(raw)
+        normalized.counts = {
+            key: value
+            for key, value in normalized.counts.items()
+            if key in current_count_fields
+        }
+        return normalized
     return PipelineState(
         tenant_id=raw["tenant_id"],
         asset_id=raw["asset_id"],
@@ -632,7 +870,7 @@ def file_sha256(path: Path) -> str:
 
 def build_stage_receipt(
     layout: Any,
-    stage: PipelineStage,
+    stage: PipelineStage | str,
     config: EvaluationAssetConfig,
     counts: Mapping[str, int],
     *,
@@ -643,14 +881,57 @@ def build_stage_receipt(
     historical_unavailable: bool = False,
     upstream_receipts: Mapping[PipelineStage, Mapping[str, Any]] | None = None,
     artifact_overrides: Mapping[Path, bytes] | None = None,
+    artifact_path_overrides: Mapping[tuple[str, str], Path] | None = None,
+    artifact_profile_override: str | None = None,
 ) -> dict[str, Any]:
     """Build one receipt after all declared stage outputs exist."""
-    specification = STAGE_SPECIFICATIONS[stage]
-    required_outputs, direct_inputs, artifact_profile = _stage_artifact_profile(
-        layout,
-        stage,
-        allow_legacy=origin == "legacy_adoption",
+    stage_value = str(getattr(stage, "value", stage))
+    stage = (
+        _HISTORICAL_STAGE_BY_VALUE_V1[stage_value]
+        if historical_unavailable
+        else PipelineStage(stage_value)
     )
+    specification = (
+        _HISTORICAL_STAGE_SPECIFICATIONS_V1[stage]
+        if historical_unavailable
+        else STAGE_SPECIFICATIONS[stage]
+    )
+    if artifact_profile_override is not None:
+        if origin != "legacy_adoption" or artifact_profile_override not in {
+            "native",
+            "legacy",
+        }:
+            raise ValueError("receipt artifact profile override is invalid")
+        artifact_profile = artifact_profile_override
+        required_outputs, direct_inputs = _declared_artifacts_for_profile(
+            specification,
+            artifact_profile,
+        )
+    else:
+        required_outputs, direct_inputs, artifact_profile = _stage_artifact_profile(
+            layout,
+            stage,
+            allow_legacy=origin == "legacy_adoption",
+            specification=specification,
+            artifact_snapshot=(
+                dict(artifact_overrides)
+                if origin == "legacy_adoption" and artifact_overrides is not None
+                else None
+            ),
+        )
+
+    def selected_path(selected_stage: PipelineStage, name: str) -> Path:
+        key = (selected_stage.value, name)
+        if artifact_path_overrides is not None:
+            try:
+                return artifact_path_overrides[key]
+            except KeyError as exc:
+                raise ValueError(
+                    "legacy artifact path snapshot is incomplete"
+                ) from exc
+        return layout.artifact_path(selected_stage, name)
+
+    closed_legacy_snapshot = origin == "legacy_adoption"
     unavailable = (
         LEGACY_UNAVAILABLE_PROVENANCE
         if historical_unavailable
@@ -659,9 +940,10 @@ def build_stage_receipt(
     inputs = [
         _file_record(
             layout,
-            layout.artifact_path(input_stage, name),
+            selected_path(input_stage, name),
             scope="asset",
             artifact_overrides=artifact_overrides,
+            closed_overrides=closed_legacy_snapshot,
         )
         for input_stage, name in direct_inputs
     ]
@@ -671,16 +953,23 @@ def build_stage_receipt(
             path,
             scope="asset",
             artifact_overrides=artifact_overrides,
+            closed_overrides=closed_legacy_snapshot,
         )
-        for path in extension_receipt_input_paths(layout, stage)
+        for path in extension_receipt_input_paths(
+            layout,
+            stage,
+            historical=historical_unavailable,
+            artifact_overrides=artifact_overrides,
+        )
     )
     outputs = [
         _file_record(
             layout,
-            layout.artifact_path(stage, name),
+            selected_path(stage, name),
             scope="asset",
             required=True,
             artifact_overrides=artifact_overrides,
+            closed_overrides=closed_legacy_snapshot,
         )
         for name in required_outputs
     ]
@@ -702,16 +991,23 @@ def build_stage_receipt(
                 scope="asset",
                 required=True,
                 artifact_overrides=artifact_overrides,
+                closed_overrides=closed_legacy_snapshot,
             )
         )
-    if stage == PipelineStage.INTENT_CLUSTERING and layout.lineage_path.is_file():
+    lineage_present = (
+        layout.lineage_path in artifact_overrides
+        if artifact_overrides is not None
+        else layout.lineage_path.is_file()
+    )
+    if stage.value == "intent_clustering" and lineage_present:
         outputs.append(
             _file_record(
                 layout,
-                layout.artifact_path(stage, "cluster_lineage.jsonl"),
+                selected_path(stage, "cluster_lineage.jsonl"),
                 scope="asset",
                 required=True,
                 artifact_overrides=artifact_overrides,
+                closed_overrides=closed_legacy_snapshot,
             )
         )
     outputs.extend(
@@ -721,6 +1017,7 @@ def build_stage_receipt(
             scope="asset",
             required=True,
             artifact_overrides=artifact_overrides,
+            closed_overrides=closed_legacy_snapshot,
         )
         for name in specification.required_asset_outputs
     )
@@ -731,6 +1028,7 @@ def build_stage_receipt(
             scope="tenant",
             required=True,
             artifact_overrides=artifact_overrides,
+            closed_overrides=closed_legacy_snapshot,
         )
         for name in specification.required_catalog_outputs
     )
@@ -741,16 +1039,24 @@ def build_stage_receipt(
             scope="asset",
             required=True,
             artifact_overrides=artifact_overrides,
+            closed_overrides=closed_legacy_snapshot,
         )
-        for path in extension_receipt_output_paths(layout, stage)
+        for path in extension_receipt_output_paths(
+            layout,
+            stage,
+            historical=historical_unavailable,
+            artifact_overrides=artifact_overrides,
+        )
     )
     upstream = []
     for dependency in specification.upstream_stages:
         if upstream_receipts is None:
             receipt_path = layout.receipt_path(dependency)
-            receipt_hash = file_sha256(receipt_path)
+            receipt_hash = _local_authority_sha256(layout, receipt_path)
         else:
-            receipt_hash = persisted_json_sha256(upstream_receipts[dependency])
+            receipt_hash = persisted_json_sha256(
+                upstream_receipts[dependency.value]
+            )
         upstream.append({"stage": dependency.value, "sha256": receipt_hash})
 
     resolved_config = config.to_dict()
@@ -778,14 +1084,21 @@ def build_stage_receipt(
     provider_calls_sha256 = (
         canonical_sha256(unavailable)
         if historical_unavailable
-        else file_sha256(layout.artifact_path(stage, "provider_calls.jsonl"))
+        else _local_authority_sha256(
+            layout,
+            layout.artifact_path(stage, "provider_calls.jsonl"),
+        )
         if specification.provider_roles
         else canonical_sha256(not_applicable("stage_has_no_provider_role"))
     )
     receipt = {
         "schema_version": STAGE_RECEIPT_SCHEMA_VERSION,
         "stage": stage.value,
-        "stage_index": list(PipelineStage).index(stage) + 1,
+        "stage_index": (
+            _HISTORICAL_STAGE_INDEX_BY_VALUE_V1[stage.value]
+            if historical_unavailable
+            else list(PipelineStage).index(stage) + 1
+        ),
         "origin": origin,
         "artifact_profile": artifact_profile,
         "completed_at": completed_at,
@@ -802,15 +1115,17 @@ def build_stage_receipt(
         "code_sha256": canonical_sha256(code),
         "counts": {str(key): int(value) for key, value in counts.items()},
     }
-    if stage == PipelineStage.DATASET_SPLITS:
-        receipt["config_history_sha256"] = file_sha256(
+    if stage.value == "dataset_splits":
+        receipt["config_history_sha256"] = _local_authority_sha256(
+            layout,
             layout.config_history_path
         )
-        receipt["build_provenance_sha256"] = file_sha256(
+        receipt["build_provenance_sha256"] = _local_authority_sha256(
+            layout,
             layout.build_provenance_path
         )
         generation_manifest_path = layout.artifact_path(
-            PipelineStage.DATASET_SPLITS,
+            stage,
             "generation_manifest.json",
         )
         generation_override = (artifact_overrides or {}).get(
@@ -819,7 +1134,7 @@ def build_stage_receipt(
         receipt["generation_manifest_sha256"] = (
             hashlib.sha256(generation_override).hexdigest()
             if generation_override is not None
-            else file_sha256(generation_manifest_path)
+            else _local_authority_sha256(layout, generation_manifest_path)
         )
     return receipt
 
@@ -898,9 +1213,44 @@ def verify_completed_release_candidate(
     layout: Any,
     state: PipelineState,
 ) -> Any:
+    """Verify one completed handoff against a single closed authority snapshot."""
+    try:
+        authority_snapshot, authority_records = _capture_release_authority(layout)
+    except (OSError, TypeError, ValueError) as exc:
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "completed release candidate evidence is invalid; restore it from a "
+            "verified backup or rebuild a new asset version",
+        ) from exc
+    snapshot_token = _RELEASE_AUTHORITY_SNAPSHOT.set(authority_snapshot)
+    try:
+        generation = _verify_completed_release_candidate(layout, state)
+        current_snapshot, current_records = _capture_release_authority(layout)
+        if (
+            current_snapshot != authority_snapshot
+            or current_records != authority_records
+        ):
+            raise EvaluationAssetIntegrityError(
+                layout.tenant_id,
+                layout.asset_id,
+                "completed handoff authority changed during verification",
+            )
+        return generation
+    finally:
+        _RELEASE_AUTHORITY_SNAPSHOT.reset(snapshot_token)
+
+
+def _verify_completed_release_candidate(
+    layout: Any,
+    state: PipelineState,
+) -> Any:
     """Read-only verify a fully receipted native handoff before any resume write."""
     try:
-        persisted_state = parse_strict_json_object(layout.state_path.read_bytes())
+        _validate_local_authority_layout(layout)
+        persisted_state = parse_strict_json_object(
+            _local_authority_bytes(layout, layout.state_path)
+        )
         exact_state = _exact_completed_state(persisted_state)
         if (
             canonical_json_bytes(persisted_state)
@@ -910,15 +1260,16 @@ def verify_completed_release_candidate(
             or state.schema_version != "fapo-evaluation-asset-state-v2"
             or state.status != "running"
             or state.error is not None
-            or state.current_stage
-            not in {None, PipelineStage.DATASET_SPLITS.value}
+            or state.current_stage not in {None, "dataset_splits"}
             or any(
                 item.status != "completed" or not item.receipt_sha256
                 for item in state.stages
             )
         ):
             raise ValueError("completed handoff lifecycle is invalid")
-        raw_config = parse_strict_json_object(layout.config_path.read_bytes())
+        raw_config = parse_strict_json_object(
+            _local_authority_bytes(layout, layout.config_path)
+        )
         config = _exact_evaluation_asset_config(raw_config)
         if (
             config.tenant_id != layout.tenant_id
@@ -936,17 +1287,18 @@ def verify_completed_release_candidate(
         )
         _verify_receipt_config_history(layout, receipts, config_hashes, config)
         provenance = parse_strict_json_object(
-            layout.build_provenance_path.read_bytes()
+            _local_authority_bytes(layout, layout.build_provenance_path)
         )
         build_profile = historical_build_provenance_profile(provenance)
         validate_build_provenance_call_ledgers(
             provenance,
             {
-                stage_value: read_strict_jsonl_objects(
+                stage_value: _read_jsonl_objects(
+                    layout,
                     layout.artifact_path(
-                        PipelineStage(stage_value),
+                        _HISTORICAL_STAGE_BY_VALUE_V1[stage_value],
                         "provider_calls.jsonl",
-                    )
+                    ),
                 )
                 for stage_value in historical_provider_call_stages(build_profile)
             },
@@ -958,7 +1310,7 @@ def verify_completed_release_candidate(
             receipts,
             config,
         )
-        for stage in PipelineStage:
+        for stage in _HISTORICAL_PIPELINE_STAGES_V1:
             _validate_stage_provenance_evidence(
                 layout,
                 stage,
@@ -968,10 +1320,13 @@ def verify_completed_release_candidate(
                 historical_evidence=True,
             )
         workspace_generation_manifest = parse_strict_json_object(
-            layout.artifact_path(
-                PipelineStage.DATASET_SPLITS,
-                "generation_manifest.json",
-            ).read_bytes()
+            _local_authority_bytes(
+                layout,
+                layout.artifact_path(
+                    _HISTORICAL_PIPELINE_STAGES_V1[-1],
+                    "generation_manifest.json",
+                ),
+            )
         )
         generation_id = workspace_generation_manifest.get("generation_id")
         if not isinstance(generation_id, str):
@@ -1011,7 +1366,10 @@ def load_completed_release_handoff_control(
     immutable historical handoff.
     """
     try:
-        raw_state = parse_strict_json_object(layout.state_path.read_bytes())
+        _validate_local_authority_layout(layout)
+        raw_state = parse_strict_json_object(
+            _local_authority_bytes(layout, layout.state_path)
+        )
         if _is_exact_legacy_completed_sentinel(layout, raw_state):
             return None
         if raw_state.get("schema_version") != STATE_SCHEMA_VERSION:
@@ -1020,7 +1378,18 @@ def load_completed_release_handoff_control(
                     "non-v2 state retains native receipt or publication authority"
                 )
             return None
-        _exact_v2_state(raw_state)
+        if raw_state.get("status") == "released":
+            _exact_v2_state(raw_state)
+            raw_config = parse_strict_json_object(
+                _local_authority_bytes(layout, layout.config_path)
+            )
+            config = _exact_evaluation_asset_config(raw_config)
+            if (
+                config.tenant_id != layout.tenant_id
+                or config.asset_id != layout.asset_id
+            ):
+                raise ValueError("released configuration identity is invalid")
+            return None
         raw_stages = raw_state.get("stages")
         raw_counts = raw_state.get("counts")
         complete_counts = isinstance(raw_counts, dict) and (
@@ -1031,31 +1400,68 @@ def load_completed_release_handoff_control(
             and len(raw_stages) == len(_HISTORICAL_PIPELINE_STAGES_V1)
             and all(isinstance(stage, dict) for stage in raw_stages)
         )
+        frozen_stage_inventory = regular_stage_inventory and [
+            stage.get("stage") for stage in raw_stages
+        ] == list(PERSISTED_STAGE_VALUES_V2)
         all_receipts = regular_stage_inventory and all(
             stage.get("receipt_sha256") is not None for stage in raw_stages
         )
         all_completed = regular_stage_inventory and all(
             stage.get("status") == "completed" for stage in raw_stages
         )
-        if not complete_counts and not all_receipts and not all_completed:
+        eligible_handoff_lifecycle = (
+            raw_state.get("status") == "running"
+            and raw_state.get("error") is None
+            and raw_state.get("current_stage") in {None, "dataset_splits"}
+        )
+        if not eligible_handoff_lifecycle:
+            if (
+                raw_state.get("status") == "running"
+                and frozen_stage_inventory
+                and (complete_counts or all_receipts or all_completed)
+            ):
+                raise ValueError("completed handoff lifecycle is invalid")
+            if isinstance(raw_stages, list) and any(
+                isinstance(stage, Mapping)
+                and stage.get("receipt_sha256") is not None
+                for stage in raw_stages
+            ):
+                raw_config = parse_strict_json_object(
+                    _local_authority_bytes(layout, layout.config_path)
+                )
+                config = _exact_evaluation_asset_config(raw_config)
+                if (
+                    config.tenant_id != layout.tenant_id
+                    or config.asset_id != layout.asset_id
+                ):
+                    raise ValueError(
+                        "receipted checkpoint configuration is invalid"
+                    )
+            _exact_v2_state(raw_state, historical=False)
             return None
+        if not frozen_stage_inventory or (
+            not complete_counts and not all_receipts and not all_completed
+        ):
+            _exact_v2_state(raw_state, historical=False)
+            return None
+        _exact_v2_state(raw_state)
         state = _exact_completed_state(raw_state)
         if state.tenant_id != layout.tenant_id or state.asset_id != layout.asset_id:
             raise ValueError("completed handoff state identity is invalid")
-        raw_config = parse_strict_json_object(layout.config_path.read_bytes())
+        raw_config = parse_strict_json_object(
+            _local_authority_bytes(layout, layout.config_path)
+        )
         config = _exact_evaluation_asset_config(raw_config)
         if (
             config.tenant_id != layout.tenant_id
             or config.asset_id != layout.asset_id
         ):
             raise ValueError("completed handoff configuration is invalid")
-        if state.status in {"failed", "released"}:
-            return None
         if (
             state.status != "running"
             or state.error is not None
             or state.current_stage
-            not in {None, PipelineStage.DATASET_SPLITS.value}
+            not in {None, "dataset_splits"}
         ):
             raise ValueError("completed handoff lifecycle is invalid")
         return state, config
@@ -1098,9 +1504,14 @@ def _is_exact_legacy_completed_sentinel(
         "started_at",
         "completed_at",
     }
+    actual_state_fields = set(raw_state)
+    exact_state_fields = actual_state_fields == expected_state_fields or (
+        actual_state_fields == expected_state_fields | {"schema_version"}
+        and raw_state.get("schema_version") == LEGACY_STATE_SCHEMA_VERSION
+    )
     stages = raw_state.get("stages")
     if (
-        set(raw_state) != expected_state_fields
+        not exact_state_fields
         or raw_state.get("status") != "completed"
         or not isinstance(stages, list)
         or len(stages) != len(_HISTORICAL_PIPELINE_STAGES_V1)
@@ -1108,15 +1519,21 @@ def _is_exact_legacy_completed_sentinel(
             not isinstance(stage, Mapping) or set(stage) != expected_stage_fields
             for stage in stages
         )
-        or not PipelineState.from_dict(raw_state).legacy_completed
     ):
         return False
+    try:
+        normalized_legacy_completed_state_v1(raw_state)
+    except (KeyError, TypeError, ValueError):
+        return False
     native_authority_paths = [
-        *(layout.receipt_path(stage) for stage in PipelineStage),
-        *(layout.stage_provenance_path(stage) for stage in PipelineStage),
+        *(layout.receipt_path(stage) for stage in _HISTORICAL_PIPELINE_STAGES_V1),
+        *(
+            layout.stage_provenance_path(stage)
+            for stage in _HISTORICAL_PIPELINE_STAGES_V1
+        ),
         *(
             layout.artifact_path(
-                PipelineStage(stage_value),
+                _HISTORICAL_STAGE_BY_VALUE_V1[stage_value],
                 "provider_calls.jsonl",
             )
             for stage_value in historical_provider_call_stages(
@@ -1127,24 +1544,31 @@ def _is_exact_legacy_completed_sentinel(
         layout.recovery_journal_path,
         layout.release_pointer_path,
         layout.artifact_path(
-            PipelineStage.DATASET_SPLITS,
+            _HISTORICAL_PIPELINE_STAGES_V1[-1],
             "generation_manifest.json",
         ),
         layout.generations_root,
     ]
     if any(
-        path.exists() or path.is_symlink() for path in native_authority_paths
+        _local_authority_node_exists(layout, path)
+        for path in native_authority_paths
     ):
         return False
-    if not layout.events_path.is_file():
-        return not (
-            layout.events_path.exists() or layout.events_path.is_symlink()
-        )
     try:
-        events = read_strict_jsonl_objects(layout.events_path)
+        events = read_strict_jsonl_objects(
+            layout.events_path,
+            trusted_root=layout.tenants_root,
+        )
     except (OSError, TypeError, UnicodeError, ValueError):
         return False
-    return not any(row.get("event") == "pipeline_released" for row in events)
+    return all(
+        is_exact_legacy_event_row_v1(
+            row,
+            tenant_id=layout.tenant_id,
+            asset_id=layout.asset_id,
+        )
+        for row in events
+    )
 
 
 def _has_native_authority_evidence(
@@ -1160,11 +1584,14 @@ def _has_native_authority_evidence(
         return True
 
     native_paths = [
-        *(layout.receipt_path(stage) for stage in PipelineStage),
-        *(layout.stage_provenance_path(stage) for stage in PipelineStage),
+        *(layout.receipt_path(stage) for stage in _HISTORICAL_PIPELINE_STAGES_V1),
+        *(
+            layout.stage_provenance_path(stage)
+            for stage in _HISTORICAL_PIPELINE_STAGES_V1
+        ),
         *(
             layout.artifact_path(
-                PipelineStage(stage_value),
+                _HISTORICAL_STAGE_BY_VALUE_V1[stage_value],
                 "provider_calls.jsonl",
             )
             for stage_value in historical_provider_call_stages(
@@ -1175,27 +1602,181 @@ def _has_native_authority_evidence(
         layout.recovery_journal_path,
         layout.release_pointer_path,
         layout.artifact_path(
-            PipelineStage.DATASET_SPLITS,
+            _HISTORICAL_PIPELINE_STAGES_V1[-1],
             "generation_manifest.json",
         ),
         layout.artifact_path(
-            PipelineStage.DATASET_SPLITS,
+            _HISTORICAL_PIPELINE_STAGES_V1[-1],
             "dataset_manifest.json",
         ),
         layout.manifest_path,
     ]
-    if any(path.exists() or path.is_symlink() for path in native_paths):
+    if any(_local_authority_node_exists(layout, path) for path in native_paths):
         return True
-    if layout.generations_root.exists() or layout.generations_root.is_symlink():
+    if _local_authority_node_exists(layout, layout.generations_root):
         return True
 
-    if not layout.events_path.is_file():
-        return layout.events_path.exists() or layout.events_path.is_symlink()
+    return _has_native_config_history_authority(
+        layout
+    ) or _has_native_event_authority(layout)
+
+
+def _has_native_config_history_authority(layout: Any) -> bool:
+    """Reject any history row outside the exact pre-v2 writer profiles."""
     try:
-        events = read_strict_jsonl_objects(layout.events_path)
+        authority = resolve_local_authority_file(
+            layout.config_history_path,
+            layout.tenants_root,
+            access="read_optional",
+        )
+        if not authority.exists:
+            return False
+        if authority.data is None:
+            return True
+        rows = parse_strict_jsonl_objects(authority.data)
     except (OSError, TypeError, UnicodeError, ValueError):
         return True
-    return any(row.get("event") == "pipeline_released" for row in events)
+    if not rows:
+        return True
+    legacy_update_fields = _UPDATED_HISTORY_FIELDS - {"operation_id"}
+    replayed: dict[str, Any] | None = None
+    previous_timestamp: datetime | None = None
+    for index, row in enumerate(rows, start=1):
+        event = row.get("event")
+        if event in {"configuration_created", "configuration_inherited"}:
+            expected = (
+                _INHERITED_HISTORY_FIELDS
+                if event == "configuration_inherited"
+                else _CREATED_HISTORY_FIELDS
+            )
+            configuration = row.get("configuration")
+            try:
+                parsed = EvaluationAssetConfig.from_dict(configuration)
+            except (AttributeError, KeyError, TypeError, ValueError):
+                return True
+            if (
+                index != 1
+                or set(row) != expected
+                or row.get("revision") != 1
+                or not _canonical_utc_timestamp(row.get("timestamp"))
+                or not isinstance(configuration, Mapping)
+                or parsed.to_dict() != dict(configuration)
+                or parsed.tenant_id != layout.tenant_id
+                or parsed.asset_id != layout.asset_id
+            ):
+                return True
+            if event == "configuration_inherited" and not isinstance(
+                row.get("parent_asset_id"), str
+            ):
+                return True
+            replayed = parsed.to_dict()
+            previous_timestamp = datetime.fromisoformat(str(row["timestamp"]))
+            continue
+        changes = row.get("changed_fields")
+        timestamp = row.get("timestamp")
+        if (
+            event != "configuration_updated"
+            or set(row) != legacy_update_fields
+            or row.get("revision") != index
+            or index < 2
+            or replayed is None
+            or previous_timestamp is None
+            or not _canonical_utc_timestamp(timestamp)
+            or not isinstance(changes, Mapping)
+            or not changes
+        ):
+            return True
+        parsed_timestamp = datetime.fromisoformat(str(timestamp))
+        if parsed_timestamp < previous_timestamp:
+            return True
+        previous_timestamp = parsed_timestamp
+        updated = dict(replayed)
+        for field, change in changes.items():
+            if (
+                field not in PERSISTED_CONFIG_STAGE_DEPENDENCIES_V2
+                or field not in updated
+                or not isinstance(change, Mapping)
+                or set(change) != {"previous", "new"}
+                or change.get("previous") != updated[field]
+                or change.get("new") == updated[field]
+            ):
+                return True
+            updated[field] = change["new"]
+        try:
+            parsed_update = EvaluationAssetConfig.from_dict(updated)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return True
+        replayed = parsed_update.to_dict()
+        earliest = min(
+            (
+                PERSISTED_CONFIG_STAGE_DEPENDENCIES_V2[field]
+                for field in changes
+            ),
+            key=PERSISTED_STAGE_VALUES_V2.index,
+        )
+        if (
+            row.get("invalidated_from_stage") != earliest
+            or row.get("resume_from_stage") != earliest
+        ):
+            return True
+    try:
+        config_authority = resolve_local_authority_file(
+            layout.config_path,
+            layout.tenants_root,
+            access="read",
+        )
+        if config_authority.data is None:
+            return True
+        raw_config = parse_strict_json_object(config_authority.data)
+        current = EvaluationAssetConfig.from_dict(raw_config)
+    except (OSError, TypeError, UnicodeError, ValueError):
+        return True
+    if current.to_dict() != raw_config or current.to_dict() != replayed:
+        return True
+    return False
+
+
+def _has_native_event_authority(layout: Any) -> bool:
+    """Return whether event authority is malformed or not exactly pre-v2."""
+    try:
+        events = read_strict_jsonl_objects(
+            layout.events_path,
+            trusted_root=layout.tenants_root,
+        )
+    except (OSError, TypeError, UnicodeError, ValueError):
+        return True
+    return any(
+        not is_exact_legacy_event_row_v1(
+            row,
+            tenant_id=layout.tenant_id,
+            asset_id=layout.asset_id,
+        )
+        for row in events
+    )
+
+
+def _capture_release_authority(
+    layout: Any,
+) -> tuple[
+    dict[Path, bytes],
+    tuple[tuple[tuple[str, str, int, int], ...], ...],
+]:
+    """Capture all asset and publication authority for one verification pass."""
+    asset_files, asset_records = capture_local_authority_tree(
+        layout.root,
+        layout.tenants_root,
+    )
+    publication_files, publication_records = capture_local_authority_tree(
+        layout.published_datasets,
+        layout.tenant_root,
+    )
+    overlap = set(asset_files) & set(publication_files)
+    if overlap:
+        raise ValueError("release authority roots overlap")
+    return (
+        {**asset_files, **publication_files},
+        (asset_records, publication_records),
+    )
 
 
 def _verify_release_evidence(
@@ -1207,61 +1788,87 @@ def _verify_release_evidence(
     candidate_release_pointer: Mapping[str, Any] | None = None,
 ) -> None:
     try:
-        config = _validate_released_control_state(
-            layout,
-            state,
-            require_persisted_state=require_persisted_state,
-        )
-        journal_entries = (
-            read_strict_jsonl_objects(layout.recovery_journal_path)
-            if layout.recovery_journal_path.is_file()
-            else []
-        )
-        journal = validate_recovery_journal(layout, journal_entries)
-        verified_receipts = (
-            _verify_candidate_receipts(layout, state, candidate_receipts)
-            if candidate_receipts is not None
-            else verify_receipt_chain(layout, state)
-        )
-        legacy_adoption = _legacy_receipt_authority(
-            journal,
-            verified_receipts,
-        )
-        config_hashes = _replay_config_history(
-            layout,
-            config,
-            state,
-            allow_pre_wal_history=legacy_adoption is not None,
-        )
-        _verify_receipt_config_history(
-            layout,
-            verified_receipts,
-            config_hashes,
-            config,
-        )
-        _verify_release_publication_links(
-            layout,
-            state,
-            verified_receipts,
-            journal,
-            config,
-            candidate_release_pointer=candidate_release_pointer,
-        )
-    except EvaluationAssetIntegrityError:
-        raise
-    except (
-        EvaluationAssetLegacyError,
-        KeyError,
-        OSError,
-        TypeError,
-        UnicodeError,
-        ValueError,
-    ) as exc:
+        authority_snapshot, authority_records = _capture_release_authority(layout)
+    except (OSError, TypeError, ValueError) as exc:
         raise EvaluationAssetIntegrityError(
             layout.tenant_id,
             layout.asset_id,
             "released control evidence is invalid",
         ) from exc
+    snapshot_token = _RELEASE_AUTHORITY_SNAPSHOT.set(authority_snapshot)
+    try:
+        try:
+            _validate_local_authority_layout(layout)
+            config = _validate_released_control_state(
+                layout,
+                state,
+                require_persisted_state=require_persisted_state,
+            )
+            journal_entries = _read_jsonl_objects(
+                layout,
+                layout.recovery_journal_path,
+            )
+            journal = validate_recovery_journal(
+                layout,
+                journal_entries,
+                artifact_overrides=authority_snapshot,
+            )
+            verified_receipts = (
+                _verify_candidate_receipts(layout, state, candidate_receipts)
+                if candidate_receipts is not None
+                else verify_receipt_chain(layout, state)
+            )
+            legacy_adoption = _legacy_receipt_authority(
+                journal,
+                verified_receipts,
+            )
+            config_hashes = _replay_config_history(
+                layout,
+                config,
+                state,
+                allow_pre_wal_history=legacy_adoption is not None,
+            )
+            _verify_receipt_config_history(
+                layout,
+                verified_receipts,
+                config_hashes,
+                config,
+            )
+            _verify_release_publication_links(
+                layout,
+                state,
+                verified_receipts,
+                journal,
+                config,
+                candidate_release_pointer=candidate_release_pointer,
+            )
+            current_snapshot, current_records = _capture_release_authority(layout)
+            if (
+                current_snapshot != authority_snapshot
+                or current_records != authority_records
+            ):
+                raise EvaluationAssetIntegrityError(
+                    layout.tenant_id,
+                    layout.asset_id,
+                    "release authority changed during verification",
+                )
+        except EvaluationAssetIntegrityError:
+            raise
+        except (
+            EvaluationAssetLegacyError,
+            KeyError,
+            OSError,
+            TypeError,
+            UnicodeError,
+            ValueError,
+        ) as exc:
+            raise EvaluationAssetIntegrityError(
+                layout.tenant_id,
+                layout.asset_id,
+                "released control evidence is invalid",
+            ) from exc
+    finally:
+        _RELEASE_AUTHORITY_SNAPSHOT.reset(snapshot_token)
 
 
 def _verify_prospective_legacy_adoption_candidate(
@@ -1271,15 +1878,43 @@ def _verify_prospective_legacy_adoption_candidate(
     *,
     legacy_state: PipelineState | None = None,
     artifact_overrides: Mapping[Path, bytes] | None = None,
+    artifact_path_overrides: Mapping[tuple[str, str], Path] | None = None,
+) -> None:
+    """Verify prospective adoption against its one closed authority mapping."""
+    token = _RELEASE_AUTHORITY_SNAPSHOT.set(artifact_overrides)
+    try:
+        _verify_prospective_legacy_adoption_candidate_from_snapshot(
+            layout,
+            state,
+            receipts,
+            legacy_state=legacy_state,
+            artifact_overrides=artifact_overrides,
+            artifact_path_overrides=artifact_path_overrides,
+        )
+    finally:
+        _RELEASE_AUTHORITY_SNAPSHOT.reset(token)
+
+
+def _verify_prospective_legacy_adoption_candidate_from_snapshot(
+    layout: Any,
+    state: PipelineState,
+    receipts: Mapping[PipelineStage, Mapping[str, Any]],
+    *,
+    legacy_state: PipelineState | None = None,
+    artifact_overrides: Mapping[Path, bytes] | None = None,
+    artifact_path_overrides: Mapping[tuple[str, str], Path] | None = None,
 ) -> None:
     """Verify one internal pre-WAL adoption target without public compatibility."""
+    _validate_local_authority_layout(layout)
     source_state = legacy_state or layout.load_state()
-    config = layout.load_config()
+    config = _exact_evaluation_asset_config(
+        parse_strict_json_object(_local_authority_bytes(layout, layout.config_path))
+    )
     if not source_state.legacy_completed:
         raise ValueError("prospective adoption source is not a legacy completion")
     counts = {
         key: value
-        for stage in PipelineStage
+        for stage in _HISTORICAL_PIPELINE_STAGES_V1
         for key, value in dict(receipts[stage].get("counts") or {}).items()
     }
     if state.counts != counts:
@@ -1294,6 +1929,7 @@ def _verify_prospective_legacy_adoption_candidate(
         state,
         receipts,
         artifact_overrides=artifact_overrides,
+        artifact_path_overrides=artifact_path_overrides,
     )
     if any(
         receipt.get("origin") != "legacy_adoption"
@@ -1305,6 +1941,7 @@ def _verify_prospective_legacy_adoption_candidate(
         config,
         state,
         allow_pre_wal_history=True,
+        artifact_overrides=artifact_overrides,
     )
     _verify_receipt_config_history(layout, verified_receipts, config_hashes, config)
 
@@ -1319,7 +1956,8 @@ def _legacy_receipt_authority(
     if origins != {"legacy_adoption"}:
         raise ValueError("release receipt origins are inconsistent")
     receipt_hashes = {
-        stage.value: persisted_json_sha256(receipts[stage]) for stage in PipelineStage
+        stage.value: persisted_json_sha256(receipts[stage])
+        for stage in _HISTORICAL_PIPELINE_STAGES_V1
     }
     if not journal.prepared:
         raise ValueError("legacy receipt authority lacks a matching adoption")
@@ -1362,8 +2000,9 @@ def _verify_release_publication_links(
         or terminal.get("kind") not in {"release_publication", "legacy_adoption"}
     ):
         raise ValueError("released state does not match terminal publication authority")
-    stage_eight_path = layout.receipt_path(PipelineStage.DATASET_SPLITS)
-    stage_eight_sha256 = file_sha256(stage_eight_path)
+    final_stage = _HISTORICAL_PIPELINE_STAGES_V1[-1]
+    stage_eight_path = layout.receipt_path(final_stage)
+    stage_eight_sha256 = _local_authority_sha256(layout, stage_eight_path)
     resolver = (
         validate_evaluation_asset_release_candidate
         if candidate_release_pointer is not None
@@ -1381,23 +2020,27 @@ def _verify_release_publication_links(
         expected_stage_8_receipt_sha256=stage_eight_sha256,
         trusted_root=layout.tenant_root,
     )
-    if persisted_json_sha256(receipts[PipelineStage.DATASET_SPLITS]) != (
+    if persisted_json_sha256(receipts[final_stage]) != (
         snapshot.stage_8_receipt_sha256
     ):
         raise ValueError("release pointer does not match Stage 8 receipt authority")
-    if file_sha256(layout.build_provenance_path) != snapshot.build_provenance_sha256:
+    if _local_authority_sha256(
+        layout,
+        layout.build_provenance_path,
+    ) != snapshot.build_provenance_sha256:
         raise ValueError("release pointer does not match build provenance")
-    provenance = _read_json_object(layout.build_provenance_path)
+    provenance = _read_json_object(layout, layout.build_provenance_path)
     build_profile = historical_build_provenance_profile(provenance)
     if {receipt.get("origin") for receipt in receipts.values()} == {"native"}:
         validate_build_provenance_call_ledgers(
             provenance,
             {
-                stage_value: read_strict_jsonl_objects(
+                stage_value: _read_jsonl_objects(
+                    layout,
                     layout.artifact_path(
-                        PipelineStage(stage_value),
+                        _HISTORICAL_STAGE_BY_VALUE_V1[stage_value],
                         "provider_calls.jsonl",
-                    )
+                    ),
                 )
                 for stage_value in historical_provider_call_stages(build_profile)
             },
@@ -1411,7 +2054,7 @@ def _verify_release_publication_links(
         receipts,
         config,
     )
-    for stage in PipelineStage:
+    for stage in _HISTORICAL_PIPELINE_STAGES_V1:
         _validate_stage_provenance_evidence(
             layout,
             stage,
@@ -1423,11 +2066,17 @@ def _verify_release_publication_links(
     _verify_generation_content_links(layout, provenance, snapshot)
 
 
-def _validated_input_row_count(path: Path, *, labeled: bool) -> int:
-    """Count strict input objects while preserving contract blank-line semantics."""
+def _validated_input_row_count(
+    layout: Any,
+    path: Path,
+    *,
+    labeled: bool,
+) -> tuple[int, bytes]:
+    """Validate/count one input from the same bound authority bytes."""
     rows: list[dict[str, Any]] = []
     row_numbers: list[int] = []
-    for line_number, raw_line in enumerate(path.read_bytes().splitlines(), start=1):
+    raw = _local_authority_bytes(layout, path)
+    for line_number, raw_line in enumerate(raw.splitlines(), start=1):
         if not raw_line.strip():
             continue
         rows.append(parse_strict_json_object(raw_line))
@@ -1438,7 +2087,7 @@ def _validated_input_row_count(path: Path, *, labeled: bool) -> int:
         path=path,
         row_numbers=row_numbers,
     )
-    return len(rows)
+    return len(rows), raw
 
 
 def _verify_build_provenance_authority_links(
@@ -1455,7 +2104,7 @@ def _verify_build_provenance_authority_links(
     expected_config = config.to_dict()
     expected_config_sha256 = canonical_sha256(expected_config)
     resolved = identity.get("resolved_configuration")
-    stage_eight = receipts.get(PipelineStage.DATASET_SPLITS)
+    stage_eight = receipts.get(_HISTORICAL_PIPELINE_STAGES_V1[-1])
     if (
         not isinstance(resolved, Mapping)
         or canonical_json_bytes(resolved.get("values"))
@@ -1468,7 +2117,11 @@ def _verify_build_provenance_authority_links(
         raise ValueError("build provenance configuration differs from authority")
 
     input_manifest = _read_json_object(
-        layout.artifact_path(PipelineStage.RAW_INPUTS, "input_manifest.json")
+        layout,
+        layout.artifact_path(
+            _HISTORICAL_PIPELINE_STAGES_V1[0],
+            "input_manifest.json",
+        )
     )
     manifest_inputs = input_manifest.get("inputs")
     expected_inputs: dict[str, dict[str, Any]] = {}
@@ -1478,8 +2131,8 @@ def _verify_build_provenance_authority_links(
     }:
         raise ValueError("build provenance inputs differ from authority")
     for name, path in (
-        ("labeled_feedback", layout.feedback_path),
-        ("unlabeled", layout.unlabeled_path),
+        ("labeled_feedback", layout.historical_feedback_path),
+        ("unlabeled", layout.historical_unlabeled_path),
     ):
         details = manifest_inputs.get(name)
         if not isinstance(details, Mapping) or set(details) != {
@@ -1488,15 +2141,16 @@ def _verify_build_provenance_authority_links(
             "sha256",
         }:
             raise ValueError("build provenance inputs differ from authority")
-        actual_rows = _validated_input_row_count(
+        actual_rows, input_bytes = _validated_input_row_count(
+            layout,
             path,
             labeled=name == "labeled_feedback",
         )
         expected_inputs[name] = {
             "path": path.relative_to(layout.root).as_posix(),
-            "bytes": path.stat().st_size,
+            "bytes": len(input_bytes),
             "rows": actual_rows,
-            "sha256": file_sha256(path),
+            "sha256": hashlib.sha256(input_bytes).hexdigest(),
         }
         if details.get("file") != path.name or details.get(
             "sha256"
@@ -1504,7 +2158,7 @@ def _verify_build_provenance_authority_links(
             details.get("rows")
         ) != canonical_json_bytes(actual_rows):
             raise ValueError("build provenance inputs differ from authority")
-    raw_receipt = receipts.get(PipelineStage.RAW_INPUTS)
+    raw_receipt = receipts.get(_HISTORICAL_PIPELINE_STAGES_V1[0])
     expected_stage_counts = {
         "feedback_records": expected_inputs["labeled_feedback"]["rows"],
         "unlabeled_records": expected_inputs["unlabeled"]["rows"],
@@ -1518,17 +2172,31 @@ def _verify_build_provenance_authority_links(
     ):
         raise ValueError("build provenance inputs differ from authority")
 
-    if layout.lineage_path.is_symlink() or layout.reuse_manifest_path.is_symlink():
-        raise ValueError("build provenance lineage differs from authority")
-    has_lineage = layout.lineage_path.is_file()
+    release_snapshot = _RELEASE_AUTHORITY_SNAPSHOT.get()
+    if release_snapshot is not None:
+        has_lineage = layout.lineage_path.absolute() in release_snapshot
+        has_reuse = layout.reuse_manifest_path.absolute() in release_snapshot
+    else:
+        if layout.lineage_path.is_symlink() or layout.reuse_manifest_path.is_symlink():
+            raise ValueError("build provenance lineage differs from authority")
+        has_lineage = layout.lineage_path.is_file()
+        has_reuse = layout.reuse_manifest_path.is_file()
     if not has_lineage:
-        if any(
-            path.exists() or path.is_symlink()
-            for path in (layout.lineage_path, layout.reuse_manifest_path)
+        if has_reuse or (
+            release_snapshot is None
+            and any(
+                path.exists() or path.is_symlink()
+                for path in (layout.lineage_path, layout.reuse_manifest_path)
+            )
         ):
             raise ValueError("build provenance lineage differs from authority")
         return
-    evidence = validate_extension_evidence(layout, require_asset_manifest=True)
+    evidence = validate_extension_evidence(
+        layout,
+        require_asset_manifest=True,
+        historical=True,
+        artifact_overrides=release_snapshot,
+    )
     lineage = evidence.lineage
     expected_lineage = {
         key: lineage[key]
@@ -1547,8 +2215,14 @@ def _verify_build_provenance_authority_links(
     legacy = identity.get("source") == LEGACY_UNAVAILABLE_PROVENANCE
     if not legacy:
         dependencies = {
-            "lineage_sha256": file_sha256(layout.lineage_path),
-            "reuse_manifest_sha256": file_sha256(layout.reuse_manifest_path),
+            "lineage_sha256": _local_authority_sha256(
+                layout,
+                layout.lineage_path,
+            ),
+            "reuse_manifest_sha256": _local_authority_sha256(
+                layout,
+                layout.reuse_manifest_path,
+            ),
             "parent_release": lineage["parent_release"],
         }
         expected_lineage["file_dependencies"] = dependencies
@@ -1571,25 +2245,32 @@ def _verify_generation_content_links(
     if provenance["identity_sha256"] != generation.descriptor["build_fingerprint"]:
         raise ValueError("release build fingerprint is inconsistent")
     workspace_generation_manifest = layout.artifact_path(
-        PipelineStage.DATASET_SPLITS,
+        _HISTORICAL_PIPELINE_STAGES_V1[-1],
         "generation_manifest.json",
     )
     if (
-        file_sha256(workspace_generation_manifest)
+        _local_authority_sha256(layout, workspace_generation_manifest)
         != generation.generation_manifest_sha256
     ):
         raise ValueError("workspace generation manifest is inconsistent")
     for split in LOGICAL_SPLITS:
         workspace_split = layout.artifact_path(
-            PipelineStage.DATASET_SPLITS,
+            _HISTORICAL_PIPELINE_STAGES_V1[-1],
             f"{split}.jsonl",
         )
-        if file_sha256(workspace_split) != file_sha256(generation.files[split]):
+        if _local_authority_sha256(
+            layout,
+            workspace_split,
+        ) != _local_authority_sha256(layout, generation.files[split]):
             raise ValueError("workspace and immutable generation splits differ")
     dataset_manifest = _read_json_object(
-        layout.artifact_path(PipelineStage.DATASET_SPLITS, "dataset_manifest.json")
+        layout,
+        layout.artifact_path(
+            _HISTORICAL_PIPELINE_STAGES_V1[-1],
+            "dataset_manifest.json",
+        )
     )
-    asset_manifest = _read_json_object(layout.manifest_path)
+    asset_manifest = _read_json_object(layout, layout.manifest_path)
     if dataset_manifest != asset_manifest:
         raise ValueError("asset manifests differ")
     generation_directory = generation.generation_dir.relative_to(
@@ -1604,7 +2285,10 @@ def _verify_generation_content_links(
         ).as_posix(),
         "generation_id": generation.generation_id,
         "generation_manifest_sha256": generation.generation_manifest_sha256,
-        "build_provenance_sha256": file_sha256(layout.build_provenance_path),
+        "build_provenance_sha256": _local_authority_sha256(
+            layout,
+            layout.build_provenance_path,
+        ),
         "build_fingerprint": generation.descriptor["build_fingerprint"],
         "files": {
             split: f"{generation_directory}/{split}.jsonl"
@@ -1622,11 +2306,16 @@ def released_parent_evidence(
     """Verify a parent release and return portable source-lineage identities."""
     verify_released_asset(layout, state)
     lineage_payload: dict[str, Any] = {
-        "input_manifest_sha256": file_sha256(
-            layout.artifact_path(PipelineStage.RAW_INPUTS, "input_manifest.json")
+        "input_manifest_sha256": _local_authority_sha256(
+            layout,
+            layout.artifact_path(
+                _HISTORICAL_PIPELINE_STAGES_V1[0],
+                "input_manifest.json",
+            )
         ),
-        "raw_receipt_sha256": file_sha256(
-            layout.receipt_path(PipelineStage.RAW_INPUTS)
+        "raw_receipt_sha256": _local_authority_sha256(
+            layout,
+            layout.receipt_path(_HISTORICAL_PIPELINE_STAGES_V1[0])
         ),
         "lineage_sha256": None,
         "reuse_manifest_sha256": None,
@@ -1648,10 +2337,14 @@ def released_parent_evidence(
         trusted_root=layout.tenant_root,
     )
     return {
-        "stage_8_receipt_sha256": file_sha256(
-            layout.receipt_path(PipelineStage.DATASET_SPLITS)
+        "stage_8_receipt_sha256": _local_authority_sha256(
+            layout,
+            layout.receipt_path(_HISTORICAL_PIPELINE_STAGES_V1[-1])
         ),
-        "released_state_sha256": file_sha256(layout.state_path),
+        "released_state_sha256": _local_authority_sha256(
+            layout,
+            layout.state_path,
+        ),
         "source_lineage_sha256": canonical_sha256(lineage_payload),
         "release_pointer_sha256": snapshot.pointer_sha256,
         "generation_id": snapshot.generation_id,
@@ -1668,7 +2361,7 @@ def verify_receipt_chain(
     """Verify all historical receipts without comparing the current checkout."""
     config = layout.load_config()
     receipts: dict[PipelineStage, dict[str, Any]] = {}
-    for stage in PipelineStage:
+    for stage in _HISTORICAL_PIPELINE_STAGES_V1:
         receipts[stage] = verify_stage_receipt(
             layout,
             state,
@@ -1718,7 +2411,7 @@ def _stage_seed_evidence(
     call_count: int,
     provider_backed: bool | None = None,
 ) -> dict[str, Any]:
-    if stage == PipelineStage.DATASET_SPLITS:
+    if stage.value == "dataset_splits":
         return {"split": config.split_seed}
     if (
         bool(STAGE_SPECIFICATIONS[stage].provider_roles)
@@ -1771,7 +2464,7 @@ def _read_stage_provenance(
     path = layout.stage_provenance_path(stage)
     raw = (artifact_overrides or {}).get(path)
     if raw is None:
-        raw = path.read_bytes()
+        raw = _local_authority_bytes(layout, path)
     return parse_strict_json_object(raw)
 
 
@@ -1854,15 +2547,15 @@ def _validate_stage_provenance_evidence(
         if actual_stage_profile != expected_stage_profile:
             raise ValueError("stage and build provenance profiles differ")
 
-    specification = STAGE_SPECIFICATIONS[stage]
     has_provider_role = (
         isinstance(payload.get("calls"), list)
         if profile != "native"
-        else bool(specification.provider_roles)
+        else bool(STAGE_SPECIFICATIONS[stage].provider_roles)
     )
     calls = (
-        read_strict_jsonl_objects(
-            layout.artifact_path(stage, "provider_calls.jsonl")
+        _read_jsonl_objects(
+            layout,
+            layout.artifact_path(stage, "provider_calls.jsonl"),
         )
         if has_provider_role
         else None
@@ -1975,12 +2668,13 @@ def verify_stage_receipt(
     historical = not compare_current_dependencies
     stage_state = _stage_state(state, stage)
     receipt_path = layout.receipt_path(stage)
-    if not stage_state.receipt_sha256 or not receipt_path.is_file():
+    if not stage_state.receipt_sha256:
         raise _integrity(layout, stage, "receipt is missing")
-    if file_sha256(receipt_path) != stage_state.receipt_sha256:
-        raise _integrity(layout, stage, "receipt hash does not match state")
     try:
-        receipt = parse_strict_json_object(receipt_path.read_bytes())
+        receipt_bytes = _local_authority_bytes(layout, receipt_path)
+        if hashlib.sha256(receipt_bytes).hexdigest() != stage_state.receipt_sha256:
+            raise _integrity(layout, stage, "receipt hash does not match state")
+        receipt = parse_strict_json_object(receipt_bytes)
     except (OSError, UnicodeError, ValueError) as exc:
         raise _integrity(layout, stage, "receipt is not valid JSON") from exc
     persisted_receipt_schema = receipt.get("schema_version")
@@ -1999,7 +2693,7 @@ def verify_stage_receipt(
     else:
         raise _integrity(layout, stage, "receipt schema is unsupported")
     expected_fields = set(expected_receipt_fields)
-    if stage == PipelineStage.DATASET_SPLITS:
+    if stage.value == "dataset_splits":
         expected_fields.update(
             {
                 "config_history_sha256",
@@ -2008,7 +2702,10 @@ def verify_stage_receipt(
             }
         )
         try:
-            history_sha256 = file_sha256(layout.config_history_path)
+            history_sha256 = _local_authority_sha256(
+                layout,
+                layout.config_history_path,
+            )
         except OSError as exc:
             raise _integrity(
                 layout,
@@ -2021,12 +2718,16 @@ def verify_stage_receipt(
                 stage,
                 "configuration history evidence changed",
             )
-        if receipt.get("build_provenance_sha256") != file_sha256(
-            layout.build_provenance_path
-        ) or receipt.get("generation_manifest_sha256") != file_sha256(
-            layout.artifact_path(
-                PipelineStage.DATASET_SPLITS,
-                "generation_manifest.json",
+        if receipt.get("build_provenance_sha256") != _local_authority_sha256(
+            layout,
+            layout.build_provenance_path,
+        ) or receipt.get("generation_manifest_sha256") != (
+            _local_authority_sha256(
+                layout,
+                layout.artifact_path(
+                    stage,
+                    "generation_manifest.json",
+                ),
             )
         ):
             raise _integrity(
@@ -2041,7 +2742,12 @@ def verify_stage_receipt(
         receipt.get("stage") != stage.value
         or not isinstance(stage_index, int)
         or isinstance(stage_index, bool)
-        or stage_index != list(PipelineStage).index(stage) + 1
+        or stage_index
+        != (
+            _HISTORICAL_STAGE_INDEX_V1[stage]
+            if historical
+            else list(PipelineStage).index(stage) + 1
+        )
     ):
         raise _integrity(layout, stage, "receipt stage identity is inconsistent")
     if not _canonical_utc_timestamp(receipt.get("completed_at")):
@@ -2054,7 +2760,7 @@ def verify_stage_receipt(
         "provider_calls_sha256",
         "code_sha256",
     }
-    if stage == PipelineStage.DATASET_SPLITS:
+    if stage.value == "dataset_splits":
         hash_fields.update(
             {
                 "config_history_sha256",
@@ -2111,6 +2817,7 @@ def verify_stage_receipt(
         required_outputs,
         include_native_evidence=True,
         include_provider_calls=receipt.get("origin") != "legacy_adoption",
+        historical=historical,
     )
     outputs = receipt.get("outputs")
     if not isinstance(outputs, list) or any(
@@ -2129,7 +2836,10 @@ def verify_stage_receipt(
     for item in outputs:
         _verify_file_record(layout, stage, item)
     expected_provider_calls_sha256 = (
-        file_sha256(layout.artifact_path(stage, "provider_calls.jsonl"))
+        _local_authority_sha256(
+            layout,
+            layout.artifact_path(stage, "provider_calls.jsonl"),
+        )
         if specification.provider_roles
         and receipt.get("origin") != "legacy_adoption"
         else canonical_sha256(
@@ -2174,7 +2884,16 @@ def verify_stage_receipt(
                 "asset",
                 path.relative_to(layout.root).as_posix(),
             )
-            for path in extension_receipt_input_paths(layout, stage)
+            for path in extension_receipt_input_paths(
+                layout,
+                stage,
+                historical=historical,
+                artifact_overrides=(
+                    _RELEASE_AUTHORITY_SNAPSHOT.get()
+                    if historical
+                    else None
+                ),
+            )
         )
     except (KeyError, OSError, TypeError, UnicodeError, ValueError) as exc:
         raise _integrity(layout, stage, "extension input evidence is inconsistent") from exc
@@ -2195,7 +2914,10 @@ def verify_stage_receipt(
     ):
         raise _integrity(layout, stage, "upstream receipt inventory is invalid")
     expected_upstream = {
-        dependency.value: file_sha256(layout.receipt_path(dependency))
+        dependency.value: _local_authority_sha256(
+            layout,
+            layout.receipt_path(dependency),
+        )
         for dependency in specification.upstream_stages
         if layout.receipt_path(dependency).is_file()
     }
@@ -2258,7 +2980,9 @@ def _validate_released_control_state(
         )
     raw_state = state.to_dict()
     if require_persisted_state:
-        raw_state = parse_strict_json_object(layout.state_path.read_bytes())
+        raw_state = parse_strict_json_object(
+            _local_authority_bytes(layout, layout.state_path)
+        )
         if canonical_json_bytes(raw_state) != canonical_json_bytes(state.to_dict()):
             raise EvaluationAssetIntegrityError(
                 layout.tenant_id,
@@ -2327,7 +3051,9 @@ def _validate_released_control_state(
             layout.asset_id,
             "released mutation identity is invalid",
         )
-    raw_config = parse_strict_json_object(layout.config_path.read_bytes())
+    raw_config = parse_strict_json_object(
+        _local_authority_bytes(layout, layout.config_path)
+    )
     config = _exact_evaluation_asset_config(raw_config)
     if (
         config.tenant_id != layout.tenant_id
@@ -2347,8 +3073,13 @@ def _replay_config_history(
     state: PipelineState,
     *,
     allow_pre_wal_history: bool,
+    artifact_overrides: Mapping[Path, bytes] | None = None,
 ) -> list[str]:
-    rows = read_strict_jsonl_objects(layout.config_history_path)
+    rows = _read_jsonl_objects(
+        layout,
+        layout.config_history_path,
+        artifact_overrides,
+    )
     if not rows:
         raise EvaluationAssetIntegrityError(
             layout.tenant_id,
@@ -2386,16 +3117,25 @@ def _replay_config_history(
         parent_asset_id = first.get("parent_asset_id")
         if not isinstance(parent_asset_id, str) or not parent_asset_id.strip():
             raise ValueError("configuration history parent identity is invalid")
-        lineage = _read_json_object(layout.lineage_path)
+        lineage = _read_json_object(
+            layout,
+            layout.lineage_path,
+            artifact_overrides,
+        )
         if lineage.get("parent_asset_id") != parent_asset_id:
             raise ValueError("configuration history parent identity is inconsistent")
-    elif layout.lineage_path.is_file():
+    elif (
+        layout.lineage_path in artifact_overrides
+        if artifact_overrides is not None
+        else layout.lineage_path.is_file()
+    ):
         raise ValueError("extension configuration history origin is invalid")
 
-    journal_rows = (
-        read_strict_jsonl_objects(layout.recovery_journal_path)
-        if layout.recovery_journal_path.is_file()
-        else []
+    journal_rows = _read_jsonl_objects(
+        layout,
+        layout.recovery_journal_path,
+        artifact_overrides,
+        optional=True,
     )
     revision_journal_rows = [
         row
@@ -2440,15 +3180,23 @@ def _replay_config_history(
                 raise ValueError("configuration history change is empty")
             updated[field] = change["new"]
         replayed = EvaluationAssetConfig.from_dict(updated).to_dict()
-        earliest = min(
-            (CONFIG_STAGE_DEPENDENCIES[field] for field in changes),
-            key=list(PipelineStage).index,
-        )
-        if row.get("invalidated_from_stage") != earliest.value:
+        try:
+            earliest = min(
+                (
+                    PERSISTED_CONFIG_STAGE_DEPENDENCIES_V2[field]
+                    for field in changes
+                ),
+                key=PERSISTED_STAGE_VALUES_V2.index,
+            )
+        except KeyError as exc:
+            raise ValueError(
+                "configuration history change is invalid"
+            ) from exc
+        if row.get("invalidated_from_stage") != earliest:
             raise ValueError("configuration history boundary is invalid")
         try:
-            PipelineStage(str(row.get("resume_from_stage")))
-        except ValueError as exc:
+            _HISTORICAL_STAGE_BY_VALUE_V1[str(row.get("resume_from_stage"))]
+        except KeyError as exc:
             raise ValueError("configuration history resume stage is invalid") from exc
         update_rows.append(row)
         snapshots.append(canonical_sha256(replayed))
@@ -2485,7 +3233,7 @@ def _verify_receipt_config_history(
     current_config: EvaluationAssetConfig,
 ) -> None:
     history_index = 0
-    for stage in PipelineStage:
+    for stage in _HISTORICAL_PIPELINE_STAGES_V1:
         receipt_hash = receipts[stage].get("resolved_config_sha256")
         match = next(
             (
@@ -2502,7 +3250,7 @@ def _verify_receipt_config_history(
                 "a receipt configuration lacks revision-history authority",
             )
         history_index = match
-    final_hash = receipts[PipelineStage.DATASET_SPLITS].get(
+    final_hash = receipts[_HISTORICAL_PIPELINE_STAGES_V1[-1]].get(
         "resolved_config_sha256"
     )
     if final_hash != canonical_sha256(current_config.to_dict()):
@@ -2519,18 +3267,19 @@ def _verify_candidate_receipts(
     receipts: Mapping[PipelineStage, Mapping[str, Any]],
     *,
     artifact_overrides: Mapping[Path, bytes] | None = None,
+    artifact_path_overrides: Mapping[tuple[str, str], Path] | None = None,
 ) -> dict[PipelineStage, dict[str, Any]]:
     """Authenticate an in-memory adoption chain before installing authority."""
-    if set(receipts) != set(PipelineStage):
+    if set(receipts) != set(_HISTORICAL_PIPELINE_STAGES_V1):
         raise ValueError("candidate receipt inventory is incomplete")
     config = layout.load_config()
     resolved_config = config.to_dict()
     verified: dict[PipelineStage, dict[str, Any]] = {}
-    for stage in PipelineStage:
+    for stage in _HISTORICAL_PIPELINE_STAGES_V1:
         receipt = dict(receipts[stage])
         specification = _HISTORICAL_STAGE_SPECIFICATIONS_V1[stage]
         expected_fields = set(_STAGE_RECEIPT_FIELDS)
-        if stage == PipelineStage.DATASET_SPLITS:
+        if stage.value == "dataset_splits":
             expected_fields.update(
                 {
                     "config_history_sha256",
@@ -2544,7 +3293,7 @@ def _verify_candidate_receipts(
             or receipt.get("stage") != stage.value
             or not isinstance(receipt.get("stage_index"), int)
             or isinstance(receipt.get("stage_index"), bool)
-            or receipt.get("stage_index") != list(PipelineStage).index(stage) + 1
+            or receipt.get("stage_index") != _HISTORICAL_STAGE_INDEX_V1[stage]
             or receipt.get("origin") != "legacy_adoption"
             or not _canonical_utc_timestamp(receipt.get("completed_at"))
         ):
@@ -2567,6 +3316,9 @@ def _verify_candidate_receipts(
             required_outputs,
             include_native_evidence=True,
             include_provider_calls=False,
+            historical=True,
+            artifact_overrides=artifact_overrides,
+            artifact_path_overrides=artifact_path_overrides,
         )
         if not isinstance(outputs, list) or len(outputs) != len(expected_outputs):
             raise ValueError("candidate receipt output inventory is invalid")
@@ -2586,6 +3338,7 @@ def _verify_candidate_receipts(
                 stage,
                 item,
                 artifact_overrides=artifact_overrides,
+                closed_overrides=artifact_overrides is not None,
             )
         if recorded_outputs != expected_outputs:
             raise ValueError("candidate receipt output inventory is incomplete")
@@ -2594,7 +3347,12 @@ def _verify_candidate_receipts(
         expected_inputs = {
             (
                 "asset",
-                layout.artifact_path(input_stage, name)
+                _selected_legacy_artifact_path(
+                    layout,
+                    input_stage,
+                    name,
+                    artifact_path_overrides,
+                )
                 .relative_to(layout.root)
                 .as_posix(),
             )
@@ -2605,7 +3363,12 @@ def _verify_candidate_receipts(
                 "asset",
                 path.relative_to(layout.root).as_posix(),
             )
-            for path in extension_receipt_input_paths(layout, stage)
+            for path in extension_receipt_input_paths(
+                layout,
+                stage,
+                historical=True,
+                artifact_overrides=artifact_overrides,
+            )
         )
         if not isinstance(inputs, list) or len(inputs) != len(expected_inputs):
             raise ValueError("candidate receipt input inventory is invalid")
@@ -2624,6 +3387,7 @@ def _verify_candidate_receipts(
                 stage,
                 item,
                 artifact_overrides=artifact_overrides,
+                closed_overrides=artifact_overrides is not None,
             )
         if recorded_inputs != expected_inputs:
             raise ValueError("candidate receipt input inventory is incomplete")
@@ -2633,7 +3397,7 @@ def _verify_candidate_receipts(
                 "stage": dependency.value,
                 "sha256": persisted_json_sha256(receipts[dependency]),
             }
-            for dependency in STAGE_SPECIFICATIONS[stage].upstream_stages
+            for dependency in specification.upstream_stages
         ]
         if receipt.get("upstream_receipts") != expected_upstream:
             raise ValueError("candidate receipt chain is invalid")
@@ -2681,17 +3445,18 @@ def _verify_candidate_receipts(
                 receipt[field]
             ):
                 raise ValueError("candidate receipt hash is invalid")
-        if stage == PipelineStage.DATASET_SPLITS and receipt.get(
+        if stage.value == "dataset_splits" and receipt.get(
             "config_history_sha256"
-        ) != file_sha256(layout.config_history_path):
+        ) != _local_authority_sha256(layout, layout.config_history_path):
             raise ValueError("candidate configuration history evidence changed")
-        if stage == PipelineStage.DATASET_SPLITS and (
+        if stage.value == "dataset_splits" and (
             receipt.get("build_provenance_sha256")
-            != file_sha256(layout.build_provenance_path)
+            != _local_authority_sha256(layout, layout.build_provenance_path)
             or receipt.get("generation_manifest_sha256")
             != _file_or_override_sha256(
+                layout,
                 layout.artifact_path(
-                    PipelineStage.DATASET_SPLITS,
+                    _HISTORICAL_PIPELINE_STAGES_V1[-1],
                     "generation_manifest.json",
                 ),
                 artifact_overrides,
@@ -2733,10 +3498,14 @@ def verify_raw_snapshot_floor(layout: Any, state: PipelineState) -> None:
             layout.asset_id,
             "an immutable raw input snapshot is missing",
         )
-    stage_state = _stage_state(state, PipelineStage.RAW_INPUTS)
-    receipt_path = layout.receipt_path(PipelineStage.RAW_INPUTS)
+    raw_stage = _HISTORICAL_PIPELINE_STAGES_V1[0]
+    stage_state = _stage_state(state, raw_stage)
+    receipt_path = layout.receipt_path(raw_stage)
     try:
-        events = read_strict_jsonl_objects(layout.events_path)
+        events = read_strict_jsonl_objects(
+            layout.events_path,
+            trusted_root=layout.tenants_root,
+        )
     except (OSError, UnicodeError, ValueError) as exc:
         raise EvaluationAssetIntegrityError(
             layout.tenant_id,
@@ -2752,7 +3521,7 @@ def verify_raw_snapshot_floor(layout: Any, state: PipelineState) -> None:
     ) or (
         stage_state.status in {"running", "failed"}
         and state.status == stage_state.status
-        and state.current_stage == PipelineStage.RAW_INPUTS.value
+        and state.current_stage == raw_stage.value
     )
     never_receipted = (
         stage_state.status != "completed"
@@ -2763,12 +3532,18 @@ def verify_raw_snapshot_floor(layout: Any, state: PipelineState) -> None:
     )
     if never_receipted:
         return
+    receipt_bytes = (
+        _local_authority_bytes(layout, receipt_path)
+        if receipt_path.is_file()
+        else None
+    )
     if (
         stage_state.status != "completed"
         or not isinstance(stage_state.receipt_sha256, str)
         or not _SHA256.fullmatch(stage_state.receipt_sha256)
-        or not receipt_path.is_file()
-        or file_sha256(receipt_path) != stage_state.receipt_sha256
+        or receipt_bytes is None
+        or hashlib.sha256(receipt_bytes).hexdigest()
+        != stage_state.receipt_sha256
     ):
         raise EvaluationAssetIntegrityError(
             layout.tenant_id,
@@ -2776,7 +3551,7 @@ def verify_raw_snapshot_floor(layout: Any, state: PipelineState) -> None:
             "immutable raw input snapshot receipt authority is inconsistent",
         )
     try:
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt = json.loads(receipt_bytes)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise EvaluationAssetIntegrityError(
             layout.tenant_id,
@@ -2787,7 +3562,7 @@ def verify_raw_snapshot_floor(layout: Any, state: PipelineState) -> None:
         not isinstance(receipt, Mapping)
         or set(receipt) != _STAGE_RECEIPT_FIELDS
         or receipt.get("schema_version") != STAGE_RECEIPT_SCHEMA_VERSION
-        or receipt.get("stage") != PipelineStage.RAW_INPUTS.value
+        or receipt.get("stage") != raw_stage.value
         or receipt.get("stage_index") != 1
     ):
         raise EvaluationAssetIntegrityError(
@@ -2821,7 +3596,7 @@ def verify_raw_snapshot_floor(layout: Any, state: PipelineState) -> None:
         )
     for item in records.values():
         try:
-            _verify_file_record(layout, PipelineStage.RAW_INPUTS, item)
+            _verify_file_record(layout, raw_stage, item)
         except EvaluationAssetIntegrityError as exc:
             raise EvaluationAssetIntegrityError(
                 layout.tenant_id,
@@ -2838,11 +3613,21 @@ def _expected_output_locations(
     *,
     include_native_evidence: bool,
     include_provider_calls: bool,
+    historical: bool,
+    artifact_overrides: Mapping[Path, bytes] | None = None,
+    artifact_path_overrides: Mapping[tuple[str, str], Path] | None = None,
 ) -> set[tuple[str, str]]:
     expected = {
         (
             "asset",
-            layout.artifact_path(stage, name).relative_to(layout.root).as_posix(),
+            _selected_legacy_artifact_path(
+                layout,
+                stage,
+                name,
+                artifact_path_overrides,
+            )
+            .relative_to(layout.root)
+            .as_posix(),
         )
         for name in required_outputs
     }
@@ -2865,11 +3650,21 @@ def _expected_output_locations(
                     .as_posix(),
                 )
             )
-    if stage == PipelineStage.INTENT_CLUSTERING and layout.lineage_path.is_file():
+    lineage_present = (
+        layout.lineage_path in artifact_overrides
+        if artifact_overrides is not None
+        else layout.lineage_path.is_file()
+    )
+    if stage.value == "intent_clustering" and lineage_present:
         expected.add(
             (
                 "asset",
-                layout.artifact_path(stage, "cluster_lineage.jsonl")
+                _selected_legacy_artifact_path(
+                    layout,
+                    stage,
+                    "cluster_lineage.jsonl",
+                    artifact_path_overrides,
+                )
                 .relative_to(layout.root)
                 .as_posix(),
             )
@@ -2890,17 +3685,117 @@ def _expected_output_locations(
                 "asset",
                 path.relative_to(layout.root).as_posix(),
             )
-            for path in extension_receipt_output_paths(layout, stage)
+            for path in extension_receipt_output_paths(
+                layout,
+                stage,
+                historical=historical,
+                artifact_overrides=artifact_overrides,
+            )
         )
     except (KeyError, OSError, TypeError, UnicodeError, ValueError) as exc:
         raise _integrity(layout, stage, "extension output evidence is inconsistent") from exc
     return expected
 
 
+def _selected_legacy_artifact_path(
+    layout: Any,
+    stage: PipelineStage,
+    name: str,
+    artifact_path_overrides: Mapping[tuple[str, str], Path] | None,
+) -> Path:
+    """Resolve one already-selected legacy artifact path without rebinding it."""
+    if artifact_path_overrides is not None:
+        try:
+            return artifact_path_overrides[(stage.value, name)]
+        except KeyError as exc:
+            raise ValueError("legacy artifact path snapshot is incomplete") from exc
+    return layout.artifact_path(stage, name)
+
+
 def _stage_evidence_path(layout: Any, stage: PipelineStage, name: str) -> Path:
     if name == "provenance.json":
         return layout.stage_provenance_path(stage)
     return layout.artifact_path(stage, name)
+
+
+def _capture_optional_legacy_artifact(
+    layout: Any,
+    stage: PipelineStage,
+    path: Path,
+    artifact_snapshot: dict[Path, bytes],
+    artifact_presence: dict[Path, bool],
+) -> bool:
+    """Capture one exact optional-node presence result and its bound bytes."""
+    if path in artifact_presence:
+        return artifact_presence[path]
+    prospective = resolve_local_authority_file(
+        path,
+        layout.tenants_root,
+        access="write",
+    )
+    artifact_presence[path] = prospective.exists
+    if prospective.exists:
+        artifact_snapshot[path] = _validate_artifact_syntax(
+            layout,
+            stage,
+            path,
+        )
+    return prospective.exists
+
+
+def _capture_legacy_extension_authority(
+    layout: Any,
+    artifact_snapshot: dict[Path, bytes],
+    artifact_presence: dict[Path, bool],
+) -> None:
+    """Capture extension control and declared snapshot members before semantics."""
+    stage = _HISTORICAL_PIPELINE_STAGES_V1[0]
+    lineage_exists = _capture_optional_legacy_artifact(
+        layout,
+        stage,
+        layout.lineage_path,
+        artifact_snapshot,
+        artifact_presence,
+    )
+    reuse_exists = _capture_optional_legacy_artifact(
+        layout,
+        stage,
+        layout.reuse_manifest_path,
+        artifact_snapshot,
+        artifact_presence,
+    )
+    if not lineage_exists and not reuse_exists:
+        return
+    if not lineage_exists or not reuse_exists:
+        raise ValueError("extension authority inventory is incomplete")
+    reuse = parse_strict_json_object(artifact_snapshot[layout.reuse_manifest_path])
+    snapshot = reuse.get("parent_snapshot")
+    if not isinstance(snapshot, Mapping) or not isinstance(
+        snapshot.get("artifacts"),
+        list,
+    ):
+        raise ValueError("extension parent snapshot inventory is invalid")
+    names: set[str] = set()
+    for row in snapshot["artifacts"]:
+        if not isinstance(row, Mapping):
+            raise ValueError("extension parent snapshot row is invalid")
+        name = row.get("file")
+        if (
+            not isinstance(name, str)
+            or Path(name).name != name
+            or name in names
+        ):
+            raise ValueError("extension parent snapshot name is invalid")
+        names.add(name)
+        path = layout.historical_parent_snapshot / name
+        if not _capture_optional_legacy_artifact(
+            layout,
+            stage,
+            path,
+            artifact_snapshot,
+            artifact_presence,
+        ):
+            raise ValueError("extension parent snapshot member is missing")
 
 
 def validate_legacy_release_candidate(
@@ -2910,8 +3805,13 @@ def validate_legacy_release_candidate(
     *,
     prepared_release: Mapping[str, Any] | None = None,
     manifest_payload: Mapping[str, Any] | None = None,
+    artifact_snapshot_out: dict[Path, bytes] | None = None,
+    artifact_presence_out: dict[Path, bool] | None = None,
+    artifact_paths_out: dict[tuple[str, str], Path] | None = None,
+    artifact_profiles_out: dict[str, str] | None = None,
 ) -> dict[str, int]:
     """Validate a pre-v2 completion and return independently derived counts."""
+    _validate_local_authority_layout(layout)
     if not state.legacy_completed:
         raise EvaluationAssetLegacyError(
             layout.tenant_id,
@@ -2924,55 +3824,122 @@ def validate_legacy_release_candidate(
         raise _legacy_invalid(layout)
     try:
         artifact_profiles: dict[PipelineStage, str] = {}
-        for stage in PipelineStage:
+        artifact_paths: dict[tuple[str, str], Path] = {}
+        artifact_snapshot: dict[Path, bytes] = {}
+        artifact_presence: dict[Path, bool] = {}
+        _capture_legacy_extension_authority(
+            layout,
+            artifact_snapshot,
+            artifact_presence,
+        )
+        for stage in _HISTORICAL_PIPELINE_STAGES_V1:
             if _stage_state(state, stage).status != "completed":
                 raise ValueError("legacy stage is incomplete")
-            specification = STAGE_SPECIFICATIONS[stage]
+            specification = _HISTORICAL_STAGE_SPECIFICATIONS_V1[stage]
             required_outputs, direct_inputs, artifact_profile = _stage_artifact_profile(
                 layout,
                 stage,
                 allow_legacy=True,
+                specification=specification,
+                artifact_snapshot=artifact_snapshot,
+                artifact_presence=artifact_presence,
             )
             artifact_profiles[stage] = artifact_profile
-            paths = [
+            output_paths = [
                 layout.artifact_path(stage, name) for name in required_outputs
             ]
-            paths.extend(
+            input_paths = [
                 layout.artifact_path(input_stage, name)
                 for input_stage, name in direct_inputs
-            )
+            ]
+            for name, path in zip(required_outputs, output_paths, strict=True):
+                artifact_paths[(stage.value, name)] = path
+            for (input_stage, name), path in zip(
+                direct_inputs,
+                input_paths,
+                strict=True,
+            ):
+                key = (input_stage.value, name)
+                if key in artifact_paths and artifact_paths[key] != path:
+                    raise ValueError("legacy artifact path selection is inconsistent")
+                artifact_paths[key] = path
+            paths = [*output_paths, *input_paths]
             paths.extend(
                 layout.root / name
                 for name in (
                     ("asset_manifest.json",)
-                    if stage == PipelineStage.DATASET_SPLITS
+                    if stage.value == "dataset_splits"
                     else specification.required_asset_outputs
                 )
             )
-            if stage == PipelineStage.DATASET_SPLITS:
+            if stage.value == "dataset_splits":
                 paths.extend(
                     layout.published_datasets / name
                     for name in _LEGACY_CATALOG_OUTPUTS
                 )
-            if stage == PipelineStage.INTENT_CLUSTERING and layout.lineage_path.is_file():
-                paths.append(
-                    layout.artifact_path(stage, "cluster_lineage.jsonl")
+            if (
+                stage.value == "intent_clustering"
+                and artifact_presence.get(layout.lineage_path, False)
+            ):
+                cluster_lineage_path = layout.artifact_path(
+                    stage,
+                    "cluster_lineage.jsonl",
                 )
+                artifact_paths[(stage.value, "cluster_lineage.jsonl")] = (
+                    cluster_lineage_path
+                )
+                paths.append(cluster_lineage_path)
             for path in paths:
-                if not path.is_file():
+                if not _capture_optional_legacy_artifact(
+                    layout,
+                    stage,
+                    path,
+                    artifact_snapshot,
+                    artifact_presence,
+                ):
                     raise ValueError("required artifact is missing")
-                _validate_artifact_syntax(layout, stage, path)
+            extension_paths = extension_receipt_input_paths(
+                layout,
+                stage,
+                historical=True,
+                artifact_overrides=artifact_snapshot,
+            )
+            if any(path not in artifact_snapshot for path in extension_paths):
+                raise ValueError("extension authority snapshot is incomplete")
 
-        validate_legacy_stage_semantics(layout, artifact_profiles)
+        validate_legacy_stage_semantics(
+            layout,
+            artifact_profiles,
+            artifact_snapshot=artifact_snapshot,
+        )
 
         input_manifest = _read_json_object(
-            layout.artifact_path(PipelineStage.RAW_INPUTS, "input_manifest.json")
+            layout,
+            layout.artifact_path(
+                _HISTORICAL_PIPELINE_STAGES_V1[0],
+                "input_manifest.json",
+            ),
+            artifact_snapshot,
         )
-        feedback_rows = _read_jsonl_objects(layout.feedback_path)
-        unlabeled_rows = _read_jsonl_objects(layout.unlabeled_path)
+        feedback_rows = _read_jsonl_objects(
+            layout,
+            layout.historical_feedback_path,
+            artifact_snapshot,
+        )
+        unlabeled_rows = _read_jsonl_objects(
+            layout,
+            layout.historical_unlabeled_path,
+            artifact_snapshot,
+        )
         expected_inputs = {
-            "labeled_feedback": (layout.feedback_path, len(feedback_rows)),
-            "unlabeled": (layout.unlabeled_path, len(unlabeled_rows)),
+            "labeled_feedback": (
+                layout.historical_feedback_path,
+                len(feedback_rows),
+            ),
+            "unlabeled": (
+                layout.historical_unlabeled_path,
+                len(unlabeled_rows),
+            ),
         }
         manifest_inputs = input_manifest.get("inputs")
         if not isinstance(manifest_inputs, Mapping):
@@ -2982,7 +3949,8 @@ def validate_legacy_release_candidate(
             if not isinstance(details, Mapping) or (
                 details.get("file") != path.name
                 or details.get("rows") != row_count
-                or details.get("sha256") != file_sha256(path)
+                or details.get("sha256")
+                != hashlib.sha256(artifact_snapshot[path]).hexdigest()
             ):
                 raise ValueError("input manifest is inconsistent")
 
@@ -2990,16 +3958,22 @@ def validate_legacy_release_candidate(
             dict(manifest_payload)
             if manifest_payload is not None
             else _read_json_object(
+                layout,
                 layout.artifact_path(
-                    PipelineStage.DATASET_SPLITS,
+                    _HISTORICAL_PIPELINE_STAGES_V1[-1],
                     "dataset_manifest.json",
-                )
+                ),
+                artifact_snapshot,
             )
         )
         asset_manifest = (
             dict(manifest_payload)
             if manifest_payload is not None
-            else _read_json_object(layout.manifest_path)
+            else _read_json_object(
+                layout,
+                layout.manifest_path,
+                artifact_snapshot,
+            )
         )
         if dataset_manifest != asset_manifest:
             raise ValueError("asset manifests differ")
@@ -3018,7 +3992,12 @@ def validate_legacy_release_candidate(
         for name in _SPLIT_OUTPUTS:
             split_counts[Path(name).stem] = len(
                 _read_jsonl_objects(
-                    layout.artifact_path(PipelineStage.DATASET_SPLITS, name)
+                    layout,
+                    layout.artifact_path(
+                        _HISTORICAL_PIPELINE_STAGES_V1[-1],
+                        name,
+                    ),
+                    artifact_snapshot,
                 )
             )
         manifest_split_counts = dataset_manifest.get("split_counts")
@@ -3076,17 +4055,45 @@ def validate_legacy_release_candidate(
         ):
             raise ValueError("published dataset manifest is inconsistent")
         for name in _LEGACY_CATALOG_OUTPUTS:
-            stage_path = layout.artifact_path(PipelineStage.DATASET_SPLITS, name)
+            stage_path = layout.artifact_path(
+                _HISTORICAL_PIPELINE_STAGES_V1[-1],
+                name,
+            )
             catalog_path = layout.published_datasets / name
-            if file_sha256(stage_path) != file_sha256(catalog_path):
+            if hashlib.sha256(artifact_snapshot[stage_path]).digest() != (
+                hashlib.sha256(artifact_snapshot[catalog_path]).digest()
+            ):
                 raise ValueError("published dataset copy is inconsistent")
 
-        if layout.lineage_path.is_file():
-            lineage = _read_json_object(layout.lineage_path)
-            reuse = _read_json_object(layout.reuse_manifest_path)
+        if layout.lineage_path in artifact_snapshot:
+            lineage = _read_json_object(
+                layout,
+                layout.lineage_path,
+                artifact_snapshot,
+            )
+            reuse = _read_json_object(
+                layout,
+                layout.reuse_manifest_path,
+                artifact_snapshot,
+            )
             if dataset_manifest.get("lineage") != lineage or not reuse:
                 raise ValueError("extension lineage is inconsistent")
-        return _derive_legacy_counts(layout, split_counts)
+        counts = _derive_legacy_counts(
+            layout,
+            split_counts,
+            artifact_snapshot,
+        )
+        if artifact_snapshot_out is not None:
+            artifact_snapshot_out.update(artifact_snapshot)
+        if artifact_presence_out is not None:
+            artifact_presence_out.update(artifact_presence)
+        if artifact_paths_out is not None:
+            artifact_paths_out.update(artifact_paths)
+        if artifact_profiles_out is not None:
+            artifact_profiles_out.update(
+                {stage.value: profile for stage, profile in artifact_profiles.items()}
+            )
+        return counts
     except EvaluationAssetLegacyError:
         raise
     except (KeyError, OSError, TypeError, UnicodeError, ValueError) as exc:
@@ -3098,23 +4105,58 @@ def _stage_artifact_profile(
     stage: PipelineStage,
     *,
     allow_legacy: bool,
+    specification: StageSpecification | None = None,
+    artifact_snapshot: dict[Path, bytes] | None = None,
+    artifact_presence: dict[Path, bool] | None = None,
 ) -> tuple[
     tuple[str, ...],
     tuple[tuple[PipelineStage, str], ...],
     str,
 ]:
-    specification = STAGE_SPECIFICATIONS[stage]
+    specification = specification or STAGE_SPECIFICATIONS[stage]
     if not allow_legacy:
         return specification.required_outputs, specification.direct_inputs, "native"
-    if specification.legacy_required_outputs:
-        native_complete = all(
-            layout.artifact_path(stage, name).is_file()
+    capture_inventory = artifact_snapshot is not None
+
+    def present(path: Path) -> bool:
+        if capture_inventory:
+            if artifact_presence is None:
+                return path in artifact_snapshot
+            return _capture_optional_legacy_artifact(
+                layout,
+                stage,
+                path,
+                artifact_snapshot,
+                artifact_presence,
+            )
+        return path.is_file()
+
+    if stage.value == "rubric_extraction":
+        canonical_root = layout.stages_root / "03_evaluation_guidelines"
+        legacy_root = layout.stages_root / "03_rubric_extraction"
+        native_presence = tuple(
+            present(canonical_root / name)
             for name in specification.required_outputs
         )
-        legacy_complete = all(
-            layout.artifact_path(stage, name).is_file()
+        legacy_presence = tuple(
+            present(legacy_root / name)
             for name in specification.legacy_required_outputs
         )
+        native_complete = all(native_presence)
+        legacy_complete = all(legacy_presence)
+        if native_complete and legacy_complete:
+            raise ValueError("stage three has competing complete artifact profiles")
+    if specification.legacy_required_outputs:
+        native_presence = tuple(
+            present(layout.artifact_path(stage, name))
+            for name in specification.required_outputs
+        )
+        legacy_presence = tuple(
+            present(layout.artifact_path(stage, name))
+            for name in specification.legacy_required_outputs
+        )
+        native_complete = all(native_presence)
+        legacy_complete = all(legacy_presence)
         if not native_complete and legacy_complete:
             return (
                 specification.legacy_required_outputs,
@@ -3122,14 +4164,16 @@ def _stage_artifact_profile(
                 "legacy",
             )
     if specification.legacy_direct_inputs:
-        native_complete = all(
-            layout.artifact_path(input_stage, name).is_file()
+        native_presence = tuple(
+            present(layout.artifact_path(input_stage, name))
             for input_stage, name in specification.direct_inputs
         )
-        legacy_complete = all(
-            layout.artifact_path(input_stage, name).is_file()
+        legacy_presence = tuple(
+            present(layout.artifact_path(input_stage, name))
             for input_stage, name in specification.legacy_direct_inputs
         )
+        native_complete = all(native_presence)
+        legacy_complete = all(legacy_presence)
         if not native_complete and legacy_complete:
             return (
                 specification.required_outputs,
@@ -3152,60 +4196,112 @@ def _declared_artifacts_for_profile(
     return specification.required_outputs, specification.direct_inputs
 
 
-def _read_json_object(path: Path) -> dict[str, Any]:
-    return parse_strict_json_object(path.read_bytes())
+def _authority_bytes(
+    layout: Any,
+    path: Path,
+    artifact_snapshot: Mapping[Path, bytes] | None,
+) -> bytes:
+    if artifact_snapshot is not None:
+        try:
+            return artifact_snapshot[path]
+        except KeyError as exc:
+            raise ValueError("legacy authority snapshot is incomplete") from exc
+    return _local_authority_bytes(layout, path)
 
 
-def _read_jsonl_objects(path: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        value = json.loads(line)
-        if not isinstance(value, dict):
-            raise ValueError("JSONL row is not an object")
-        rows.append(value)
-    return rows
+def _read_json_object(
+    layout: Any,
+    path: Path,
+    artifact_snapshot: Mapping[Path, bytes] | None = None,
+) -> dict[str, Any]:
+    return parse_strict_json_object(
+        _authority_bytes(layout, path, artifact_snapshot)
+    )
+
+
+def _read_jsonl_objects(
+    layout: Any,
+    path: Path,
+    artifact_snapshot: Mapping[Path, bytes] | None = None,
+    *,
+    optional: bool = False,
+) -> list[dict[str, Any]]:
+    if optional and artifact_snapshot is not None and path not in artifact_snapshot:
+        return []
+    if optional and artifact_snapshot is None:
+        release_snapshot = _RELEASE_AUTHORITY_SNAPSHOT.get()
+        lexical_path = Path(path).absolute()
+        if release_snapshot is not None and lexical_path not in release_snapshot:
+            return []
+        if release_snapshot is None:
+            authority = resolve_local_authority_file(
+                path,
+                layout.tenants_root,
+                access="read_optional",
+            )
+            if not authority.exists:
+                return []
+            if authority.data is None:
+                raise ValueError("optional authority read did not return bytes")
+            artifact_snapshot = {path: authority.data}
+    return parse_strict_jsonl_objects(
+        _authority_bytes(
+            layout,
+            path,
+            artifact_snapshot,
+        )
+    )
 
 
 def _derive_legacy_counts(
     layout: Any,
     split_counts: Mapping[str, int],
+    artifact_snapshot: Mapping[Path, bytes] | None = None,
 ) -> dict[str, int]:
     def rows(stage: PipelineStage, name: str) -> list[dict[str, Any]]:
-        return _read_jsonl_objects(layout.artifact_path(stage, name))
+        return _read_jsonl_objects(
+            layout,
+            layout.artifact_path(stage, name),
+            artifact_snapshot,
+        )
 
-    feedback = rows(PipelineStage.RAW_INPUTS, "labeled_feedback.jsonl")
-    unlabeled = rows(PipelineStage.RAW_INPUTS, "unlabeled.jsonl")
-    normalized = rows(PipelineStage.PREPARED_INPUTS, "normalized_feedback.jsonl")
-    intents = rows(PipelineStage.PREPARED_INPUTS, "intent_records.jsonl")
+    def captured(stage: PipelineStage, name: str) -> bool:
+        path = layout.artifact_path(stage, name)
+        if artifact_snapshot is not None:
+            return path in artifact_snapshot
+        return path.is_file()
+
+    feedback = rows(_HISTORICAL_PIPELINE_STAGES_V1[0], "labeled_feedback.jsonl")
+    unlabeled = rows(_HISTORICAL_PIPELINE_STAGES_V1[0], "unlabeled.jsonl")
+    normalized = rows(
+        _HISTORICAL_PIPELINE_STAGES_V1[1],
+        "normalized_feedback.jsonl",
+    )
+    intents = rows(_HISTORICAL_PIPELINE_STAGES_V1[1], "intent_records.jsonl")
     guidelines = (
-        rows(PipelineStage.RUBRIC_EXTRACTION, "evaluation_guidelines.jsonl")
-        if layout.artifact_path(
-            PipelineStage.RUBRIC_EXTRACTION,
-            "evaluation_guidelines.jsonl",
-        ).is_file()
+        rows(_HISTORICAL_PIPELINE_STAGES_V1[2], "evaluation_guidelines.jsonl")
+        if captured(
+            _HISTORICAL_PIPELINE_STAGES_V1[2], "evaluation_guidelines.jsonl"
+        )
         else []
     )
     evidence = (
-        rows(PipelineStage.RUBRIC_EXTRACTION, "feedback_evidence.jsonl")
-        if layout.artifact_path(
-            PipelineStage.RUBRIC_EXTRACTION,
-            "feedback_evidence.jsonl",
-        ).is_file()
+        rows(_HISTORICAL_PIPELINE_STAGES_V1[2], "feedback_evidence.jsonl")
+        if captured(
+            _HISTORICAL_PIPELINE_STAGES_V1[2], "feedback_evidence.jsonl"
+        )
         else []
     )
     candidates = (
-        rows(PipelineStage.RUBRIC_EXTRACTION, "candidate_guidelines.jsonl")
-        if layout.artifact_path(
-            PipelineStage.RUBRIC_EXTRACTION,
-            "candidate_guidelines.jsonl",
-        ).is_file()
+        rows(_HISTORICAL_PIPELINE_STAGES_V1[2], "candidate_guidelines.jsonl")
+        if captured(
+            _HISTORICAL_PIPELINE_STAGES_V1[2], "candidate_guidelines.jsonl"
+        )
         else []
     )
-    trusted = rows(PipelineStage.RUBRIC_EXTRACTION, "trusted_cases.jsonl")
-    clusters = rows(PipelineStage.INTENT_CLUSTERING, "intent_inventory.jsonl")
-    matches = rows(PipelineStage.COVERAGE_DECISIONS, "intent_matches.jsonl")
+    trusted = rows(_HISTORICAL_PIPELINE_STAGES_V1[2], "trusted_cases.jsonl")
+    clusters = rows(_HISTORICAL_PIPELINE_STAGES_V1[3], "intent_inventory.jsonl")
+    matches = rows(_HISTORICAL_PIPELINE_STAGES_V1[4], "intent_matches.jsonl")
     allowed_statuses = {
         "matched_trusted_intent",
         "needs_more_trusted_examples",
@@ -3214,17 +4310,17 @@ def _derive_legacy_counts(
     if any(row.get("status") not in allowed_statuses for row in matches):
         raise ValueError("coverage status is unsupported")
     queue = rows(
-        PipelineStage.COVERAGE_DECISIONS,
+        _HISTORICAL_PIPELINE_STAGES_V1[4],
         "review_queue/labeling_queue.jsonl",
     )
-    inferred = rows(PipelineStage.LABEL_INFERENCE, "inferred_cases.jsonl")
+    inferred = rows(_HISTORICAL_PIPELINE_STAGES_V1[5], "inferred_cases.jsonl")
     missing = rows(
-        PipelineStage.LABEL_INFERENCE,
+        _HISTORICAL_PIPELINE_STAGES_V1[5],
         "missing_labeled_feedback_clusters.jsonl",
     )
-    synthetic = rows(PipelineStage.SYNTHETIC_COVERAGE, "synthetic_cases.jsonl")
+    synthetic = rows(_HISTORICAL_PIPELINE_STAGES_V1[6], "synthetic_cases.jsonl")
     rejected = rows(
-        PipelineStage.SYNTHETIC_COVERAGE,
+        _HISTORICAL_PIPELINE_STAGES_V1[6],
         "rejected_synthetic.jsonl",
     )
     return {
@@ -3276,6 +4372,8 @@ def _verify_extension_lineage(
         evidence = validate_extension_evidence(
             layout,
             require_asset_manifest=True,
+            historical=True,
+            artifact_overrides=_RELEASE_AUTHORITY_SNAPSHOT.get(),
         )
         return evidence.lineage, evidence.reuse
     except EvaluationAssetIntegrityError:
@@ -3294,6 +4392,7 @@ def _verify_file_record(
     item: Any,
     *,
     artifact_overrides: Mapping[Path, bytes] | None = None,
+    closed_overrides: bool = False,
 ) -> None:
     if not isinstance(item, Mapping):
         raise _integrity(layout, stage, "artifact inventory row is invalid")
@@ -3318,7 +4417,12 @@ def _verify_file_record(
         raise _integrity(layout, stage, "artifact path is unsafe")
     base = layout.root if scope == "asset" else layout.tenant_root
     path = base / relative
-    override = (artifact_overrides or {}).get(path)
+    release_snapshot = _RELEASE_AUTHORITY_SNAPSHOT.get()
+    effective_overrides = (
+        release_snapshot if artifact_overrides is None and release_snapshot is not None
+        else artifact_overrides
+    )
+    override = (effective_overrides or {}).get(path)
     if override is not None:
         if len(override) != recorded_bytes or hashlib.sha256(
             override
@@ -3330,37 +4434,40 @@ def _verify_file_record(
             )
         _validate_artifact_bytes(layout, stage, path, override)
         return
+    if closed_overrides or release_snapshot is not None:
+        raise _integrity(layout, stage, "authority snapshot is incomplete")
     try:
-        resolved = path.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
+        authority = resolve_local_authority_file(
+            path,
+            layout.tenants_root,
+            access="read",
+        )
+    except (OSError, ValueError) as exc:
         raise _integrity(layout, stage, "a required artifact is missing") from exc
-    resolved_base = base.resolve()
-    if resolved_base not in resolved.parents:
-        raise _integrity(layout, stage, "artifact path escapes its allowed scope")
-    if not resolved.is_file():
+    data = authority.data
+    if data is None:
         raise _integrity(layout, stage, "a required artifact is missing")
-    if (
-        resolved.stat().st_size != recorded_bytes
-        or file_sha256(resolved) != recorded_sha256
-    ):
+    if len(data) != recorded_bytes or hashlib.sha256(data).hexdigest() != recorded_sha256:
         raise _integrity(layout, stage, "a required artifact hash is inconsistent")
-    _validate_artifact_syntax(layout, stage, resolved)
+    _validate_artifact_bytes(layout, stage, path, data)
 
 
-def _validate_artifact_syntax(layout: Any, stage: PipelineStage, path: Path) -> None:
+def _validate_artifact_syntax(
+    layout: Any,
+    stage: PipelineStage,
+    path: Path,
+) -> bytes:
     try:
-        if path.suffix == ".json":
-            value = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(value, Mapping):
-                raise ValueError("not an object")
-        elif path.suffix == ".jsonl":
-            for line in path.read_text(encoding="utf-8").splitlines():
-                if line.strip() and not isinstance(json.loads(line), Mapping):
-                    raise ValueError("row is not an object")
-        elif path.suffix == ".md" and not path.read_text(encoding="utf-8").strip():
-            raise ValueError("empty markdown")
+        payload = _local_authority_bytes(layout, path)
+        _validate_artifact_bytes(
+            layout,
+            stage,
+            path,
+            payload,
+        )
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
         raise _integrity(layout, stage, "a required artifact is malformed") from exc
+    return payload
 
 
 def _validate_artifact_bytes(
@@ -3386,6 +4493,7 @@ def _validate_artifact_bytes(
 
 
 def _file_or_override_sha256(
+    layout: Any,
     path: Path,
     overrides: Mapping[Path, bytes] | None,
 ) -> str:
@@ -3393,7 +4501,7 @@ def _file_or_override_sha256(
     return (
         hashlib.sha256(override).hexdigest()
         if override is not None
-        else file_sha256(path)
+        else _local_authority_sha256(layout, path)
     )
 
 
@@ -3423,24 +4531,32 @@ def _file_record(
     scope: str,
     required: bool = False,
     artifact_overrides: Mapping[Path, bytes] | None = None,
+    closed_overrides: bool = False,
 ) -> dict[str, Any]:
     override = (artifact_overrides or {}).get(path)
-    if override is None and not path.is_file():
-        raise EvaluationAssetIntegrityError(
-            layout.tenant_id,
-            layout.asset_id,
-            "a required stage artifact is missing",
-        )
+    if override is None:
+        if closed_overrides:
+            raise EvaluationAssetIntegrityError(
+                layout.tenant_id,
+                layout.asset_id,
+                "legacy authority snapshot is incomplete",
+            )
+        try:
+            payload = _local_authority_bytes(layout, path)
+        except (OSError, ValueError) as exc:
+            raise EvaluationAssetIntegrityError(
+                layout.tenant_id,
+                layout.asset_id,
+                "a required stage artifact is missing",
+            ) from exc
+    else:
+        payload = override
     base = layout.root if scope == "asset" else layout.tenant_root
     record = {
         "path": path.relative_to(base).as_posix(),
         "scope": scope,
-        "sha256": (
-            hashlib.sha256(override).hexdigest()
-            if override is not None
-            else file_sha256(path)
-        ),
-        "bytes": len(override) if override is not None else path.stat().st_size,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "bytes": len(payload),
     }
     if required:
         record["required"] = True

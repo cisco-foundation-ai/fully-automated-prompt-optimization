@@ -10,27 +10,34 @@ import hashlib
 import json
 import math
 import re
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from src.hephaestus.evaluation_assets.control_jsonl import (
+    parse_strict_json_object,
     parse_strict_jsonl_objects,
     read_strict_jsonl_objects,
+    resolve_local_authority_file,
 )
 from src.hephaestus.evaluation_assets.journal_transitions import (
     JOURNAL_SCHEMA_VERSION,
-    _normalized_legacy_completed_state,
+    PERSISTED_CONFIG_STAGE_DEPENDENCIES_V2,
+    PERSISTED_STAGE_VALUES_V2,
     append_jsonl_bytes,
     audit_descriptor,
     derive_adoption_plan,
     derive_rebuild_plan,
     derive_release_publication_plan,
     derive_revision_plan,
+    normalized_legacy_completed_state_v1,
 )
 from src.hephaestus.evaluation_assets.models import (
     CONFIG_STAGE_DEPENDENCIES,
+    STAGE_COUNT_KEYS,
+    STAGE_LABELS,
     STATE_SCHEMA_VERSION,
     EvaluationAssetConfig,
     PipelineStage,
@@ -40,6 +47,10 @@ from src.hephaestus.evaluation_assets.models import (
 
 _OPERATION_ID = re.compile(r"^[0-9a-f]{32}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_JOURNAL_AUTHORITY_SNAPSHOT: ContextVar[Mapping[Path, bytes] | None] = ContextVar(
+    "evaluation_asset_journal_authority_snapshot",
+    default=None,
+)
 _STATE_FIELDS = {
     "tenant_id",
     "asset_id",
@@ -65,25 +76,50 @@ _STAGE_STATE_FIELDS = {
 }
 _STAGE_STATUSES = {"pending", "running", "completed", "failed"}
 _CONFIG_FIELDS = set(EvaluationAssetConfig.__dataclass_fields__)
-_STATE_V2_STAGE_ORDER = tuple(PipelineStage)
+_STATE_V2_STAGE_ORDER = PERSISTED_STAGE_VALUES_V2
+
+
+def _local_authority_file(layout: Any, path: Path) -> tuple[bool, bytes]:
+    """Return presence and no-follow bytes for one journal authority node."""
+    snapshot = _JOURNAL_AUTHORITY_SNAPSHOT.get()
+    if snapshot is not None:
+        lexical_path = Path(path).absolute()
+        if lexical_path not in snapshot:
+            return False, b""
+        return True, snapshot[lexical_path]
+    prospective = resolve_local_authority_file(
+        path,
+        layout.tenants_root,
+        access="write",
+    )
+    if not prospective.exists:
+        return False, b""
+    authority = resolve_local_authority_file(
+        path,
+        layout.tenants_root,
+        access="read",
+    )
+    if authority.data is None:
+        raise ValueError("local authority read did not return bytes")
+    return True, authority.data
 _STATE_V2_STAGE_LABELS = {
-    PipelineStage.RAW_INPUTS: "Validate raw inputs",
-    PipelineStage.PREPARED_INPUTS: "Prepare canonical inputs",
-    PipelineStage.RUBRIC_EXTRACTION: "Create evaluation guidelines",
-    PipelineStage.INTENT_CLUSTERING: "Mine intent clusters",
-    PipelineStage.COVERAGE_DECISIONS: "Apply coverage decisions",
-    PipelineStage.LABEL_INFERENCE: "Infer reviewable labels",
-    PipelineStage.SYNTHETIC_COVERAGE: "Optional synthetic coverage",
-    PipelineStage.DATASET_SPLITS: "Build dataset splits",
+    "raw_inputs": "Validate raw inputs",
+    "prepared_inputs": "Prepare canonical inputs",
+    "rubric_extraction": "Create evaluation guidelines",
+    "intent_clustering": "Mine intent clusters",
+    "coverage_decisions": "Apply coverage decisions",
+    "label_inference": "Infer reviewable labels",
+    "synthetic_coverage": "Optional synthetic coverage",
+    "dataset_splits": "Build dataset splits",
 }
 _STATE_V2_STAGE_COUNT_KEYS = {
-    PipelineStage.RAW_INPUTS: frozenset(
+    "raw_inputs": frozenset(
         {"feedback_records", "unlabeled_records"}
     ),
-    PipelineStage.PREPARED_INPUTS: frozenset(
+    "prepared_inputs": frozenset(
         {"prepared_feedback", "prepared_intents"}
     ),
-    PipelineStage.RUBRIC_EXTRACTION: frozenset(
+    "rubric_extraction": frozenset(
         {
             "feedback_evidence",
             "candidate_guidelines",
@@ -91,8 +127,8 @@ _STATE_V2_STAGE_COUNT_KEYS = {
             "trusted_cases",
         }
     ),
-    PipelineStage.INTENT_CLUSTERING: frozenset({"intent_clusters"}),
-    PipelineStage.COVERAGE_DECISIONS: frozenset(
+    "intent_clustering": frozenset({"intent_clusters"}),
+    "coverage_decisions": frozenset(
         {
             "matched_clusters",
             "needs_more_feedback_clusters",
@@ -101,13 +137,13 @@ _STATE_V2_STAGE_COUNT_KEYS = {
             "labeling_queue_traces",
         }
     ),
-    PipelineStage.LABEL_INFERENCE: frozenset(
+    "label_inference": frozenset(
         {"inferred_cases", "review_clusters"}
     ),
-    PipelineStage.SYNTHETIC_COVERAGE: frozenset(
+    "synthetic_coverage": frozenset(
         {"synthetic_cases", "rejected_synthetic_cases"}
     ),
-    PipelineStage.DATASET_SPLITS: frozenset(
+    "dataset_splits": frozenset(
         {
             "dataset_cases",
             "train_cases",
@@ -221,6 +257,20 @@ class ValidatedRecoveryJournal:
 def validate_recovery_journal(
     layout: Any,
     entries: Sequence[Mapping[str, Any]],
+    *,
+    artifact_overrides: Mapping[Path, bytes] | None = None,
+) -> ValidatedRecoveryJournal:
+    """Validate a journal against one optional closed authority snapshot."""
+    token = _JOURNAL_AUTHORITY_SNAPSHOT.set(artifact_overrides)
+    try:
+        return _validate_recovery_journal(layout, entries)
+    finally:
+        _JOURNAL_AUTHORITY_SNAPSHOT.reset(token)
+
+
+def _validate_recovery_journal(
+    layout: Any,
+    entries: Sequence[Mapping[str, Any]],
 ) -> ValidatedRecoveryJournal:
     """Validate the complete log and every uncommitted intermediate state."""
     prepared: dict[str, dict[str, Any]] = {}
@@ -262,6 +312,11 @@ def validate_recovery_journal(
     if len(outstanding) > 1 or (bool(outstanding) != (active is not None)):
         raise ValueError("journal has competing uncommitted operations")
     prepared_rows = tuple(prepared.values())
+    historical_profile = _frozen_journal_endpoint(layout) or bool(
+        prepared_rows
+        and prepared_rows[-1].get("kind")
+        in {"legacy_adoption", "release_publication"}
+    )
     for index, row in enumerate(prepared_rows):
         operation_id = str(row["operation_id"])
         _validate_prepared(
@@ -269,6 +324,7 @@ def validate_recovery_journal(
             row,
             uncommitted=operation_id in outstanding,
             final_operation=index == len(prepared_rows) - 1,
+            historical_profile=historical_profile,
         )
         if index:
             previous = prepared_rows[index - 1]
@@ -291,12 +347,47 @@ def validate_recovery_journal(
     )
 
 
+def _frozen_journal_endpoint(layout: Any) -> bool:
+    """Return whether persisted state is a complete v2 handoff or release."""
+    present, state_bytes = _local_authority_file(layout, layout.state_path)
+    if not present:
+        return False
+    raw = parse_strict_json_object(state_bytes)
+    stages = raw.get("stages")
+    return bool(
+        raw.get("schema_version") == STATE_SCHEMA_VERSION
+        and raw.get("status") in {"running", "released"}
+        and (
+            raw.get("status") == "released"
+            or (
+                raw.get("status") == "running"
+                and raw.get("error") is None
+            )
+        )
+        and raw.get("current_stage") in {None, PERSISTED_STAGE_VALUES_V2[-1]}
+        and isinstance(stages, list)
+        and [
+            item.get("stage") if isinstance(item, Mapping) else None
+            for item in stages
+        ]
+        == list(PERSISTED_STAGE_VALUES_V2)
+        and all(
+            isinstance(item, Mapping)
+            and item.get("status") == "completed"
+            and isinstance(item.get("receipt_sha256"), str)
+            and _SHA256.fullmatch(item["receipt_sha256"])
+            for item in stages
+        )
+    )
+
+
 def _validate_prepared(
     layout: Any,
     row: Mapping[str, Any],
     *,
     uncommitted: bool,
     final_operation: bool,
+    historical_profile: bool,
 ) -> None:
     operation_id = str(row["operation_id"])
     kind = str(row["kind"])
@@ -334,7 +425,14 @@ def _validate_prepared(
     _validate_config_shape(before_config)
     canonical_before_config = EvaluationAssetConfig.from_dict(before_config).to_dict()
     before_state = _mapping(row["before_state"])
-    _validate_before_state_shape(before_state)
+    historical_state = historical_profile or kind in {
+        "legacy_adoption",
+        "release_publication",
+    }
+    _validate_before_state_shape(
+        before_state,
+        historical=historical_state,
+    )
     if (
         canonical_before_config != before_config
         or canonical_before_config.get("tenant_id") != layout.tenant_id
@@ -347,7 +445,7 @@ def _validate_prepared(
         raise ValueError("journal before snapshots are inconsistent")
 
     state_raw = _mapping(row["target_state"])
-    _validate_state_shape(state_raw)
+    _validate_state_shape(state_raw, historical=historical_state)
     state = _state_v2_from_validated_raw(state_raw)
     if (
         state.to_dict() != state_raw
@@ -384,6 +482,7 @@ def _validate_prepared(
             operation_id=operation_id,
             prepared_at=str(row["prepared_at"]),
             revision=revision,
+            historical_profile=historical_profile,
         )
         _require_exact_plan(row, plan)
         _validate_revision(
@@ -393,6 +492,7 @@ def _validate_prepared(
             config_raw,
             before,
             operation_id,
+            historical_profile=historical_profile,
         )
     else:
         if target["config_sha256"] != before["config_sha256"]:
@@ -401,7 +501,12 @@ def _validate_prepared(
             request = _mapping(row["request"])
             _exact_keys(request, {"boundary"})
             try:
-                boundary = PipelineStage(request["boundary"])
+                boundary = str(request["boundary"])
+                if historical_profile:
+                    if boundary not in PERSISTED_STAGE_VALUES_V2:
+                        raise ValueError
+                else:
+                    boundary = PipelineStage(boundary)
             except (TypeError, ValueError) as exc:
                 raise ValueError("checkpoint boundary request is invalid") from exc
             plan = derive_rebuild_plan(
@@ -410,9 +515,15 @@ def _validate_prepared(
                 boundary,
                 operation_id=operation_id,
                 prepared_at=str(row["prepared_at"]),
+                historical_profile=historical_profile,
             )
             _require_exact_plan(row, plan)
-            _validate_rebuild(row, state, operation_id)
+            _validate_rebuild(
+                row,
+                state,
+                operation_id,
+                historical_profile=historical_profile,
+            )
         elif kind == "legacy_adoption":
             request = _mapping(row["request"])
             _exact_keys(request, {"release_pointer"})
@@ -472,16 +583,20 @@ def _validate_prepared(
             committed=not uncommitted,
         )
         receipt_hashes = _mapping(target["receipt_sha256"])
-        for stage in PipelineStage:
+        for stage in _STATE_V2_STAGE_ORDER:
             path = layout.receipt_path(stage)
-            installed_receipts.append(path.is_file())
-            if path.is_file() and _file_sha256(path) != receipt_hashes[stage.value]:
+            present, receipt_bytes = _local_authority_file(layout, path)
+            installed_receipts.append(present)
+            if present and (
+                hashlib.sha256(receipt_bytes).hexdigest()
+                != receipt_hashes[stage]
+            ):
                 raise ValueError(
                     "installed adoption receipt is not a target intermediate"
                 )
         prefix_length = sum(installed_receipts)
         if installed_receipts != [
-            index < prefix_length for index in range(len(PipelineStage))
+            index < prefix_length for index in range(len(_STATE_V2_STAGE_ORDER))
         ]:
             raise ValueError("installed adoption receipts are not an ordered prefix")
         if any(installed_receipts) and not manifests_installed:
@@ -510,11 +625,17 @@ def _validate_prepared(
         before_release=before_release,
     )
     if kind == "legacy_adoption":
-        if _file_sha256(layout.state_path) == target["state_sha256"] and not all(
+        if _file_sha256(
+            layout,
+            layout.state_path,
+        ) == target["state_sha256"] and not all(
             installed_receipts
         ):
             raise ValueError("adoption state precedes its receipt authority")
-        current_release = _current_release_descriptor(layout.release_pointer_path)
+        current_release = _current_release_descriptor(
+            layout,
+            layout.release_pointer_path,
+        )
         pointer = _mapping(_mapping(row["request"])["release_pointer"])
         target_release = {
             "present": True,
@@ -526,7 +647,7 @@ def _validate_prepared(
         if current_release == target_release and not all(installed_receipts):
             raise ValueError("adoption pointer precedes its receipt authority")
         if (
-            _file_sha256(layout.state_path) == target["state_sha256"]
+            _file_sha256(layout, layout.state_path) == target["state_sha256"]
             and current_release != target_release
         ):
             raise ValueError("adoption state precedes its pointer authority")
@@ -539,8 +660,13 @@ def _validate_revision(
     target_config: Mapping[str, Any],
     before: Mapping[str, Any],
     operation_id: str,
+    *,
+    historical_profile: bool,
 ) -> None:
-    invalidated = _stage_suffix(row["invalidated_stages"])
+    invalidated = _stage_suffix(
+        row["invalidated_stages"],
+        historical=historical_profile,
+    )
     result = _mapping(row["result"])
     history = _mapping(row["history_entry"])
     _exact_keys(
@@ -567,9 +693,17 @@ def _validate_revision(
     changed_fields = _mapping(result.get("changed_fields"))
     if history.get("changed_fields") != changed_fields or not changed_fields:
         raise ValueError("configuration revision changes are inconsistent")
+    dependencies = (
+        PERSISTED_CONFIG_STAGE_DEPENDENCIES_V2
+        if historical_profile
+        else {
+            name: stage.value
+            for name, stage in CONFIG_STAGE_DEPENDENCIES.items()
+        }
+    )
     before_config = dict(target_config)
     for field, raw_change in changed_fields.items():
-        if field not in CONFIG_STAGE_DEPENDENCIES:
+        if field not in dependencies:
             raise ValueError("configuration revision field is unsupported")
         change = _mapping(raw_change)
         _exact_keys(change, {"previous", "new"})
@@ -582,12 +716,20 @@ def _validate_revision(
     EvaluationAssetConfig.from_dict(before_config)
     if _persisted_sha256(before_config) != before["config_sha256"]:
         raise ValueError("configuration revision prior config is inconsistent")
-    ordered = tuple(PipelineStage)
+    ordered = (
+        PERSISTED_STAGE_VALUES_V2
+        if historical_profile
+        else tuple(stage.value for stage in PipelineStage)
+    )
     earliest = min(
-        (CONFIG_STAGE_DEPENDENCIES[field] for field in changed_fields),
+        (dependencies[field] for field in changed_fields),
         key=ordered.index,
     )
-    resume = _validate_mutable_target_state(state, invalidated)
+    resume = _validate_mutable_target_state(
+        state,
+        invalidated,
+        historical=historical_profile,
+    )
     if (
         history.get("operation_id") != operation_id
         or history.get("event") != "configuration_updated"
@@ -596,12 +738,12 @@ def _validate_revision(
         or history.get("revision", 0) < 2
         or result.get("revision") != history.get("revision")
         or history.get("timestamp") != row.get("prepared_at")
-        or result.get("invalidated_from_stage") != earliest.value
-        or history.get("invalidated_from_stage") != earliest.value
+        or result.get("invalidated_from_stage") != earliest
+        or history.get("invalidated_from_stage") != earliest
         or invalidated[0] != earliest
-        or result.get("resume_from_stage") != resume.value
-        or history.get("resume_from_stage") != resume.value
-        or state.current_stage != resume.value
+        or result.get("resume_from_stage") != resume
+        or history.get("resume_from_stage") != resume
+        or state.current_stage != resume
         or state.updated_at != row.get("prepared_at")
     ):
         raise ValueError("configuration revision journal payload is inconsistent")
@@ -612,16 +754,25 @@ def _validate_rebuild(
     row: Mapping[str, Any],
     state: PipelineState,
     operation_id: str,
+    *,
+    historical_profile: bool,
 ) -> None:
     del operation_id
-    invalidated = _stage_suffix(row["invalidated_stages"])
+    invalidated = _stage_suffix(
+        row["invalidated_stages"],
+        historical=historical_profile,
+    )
     result = _mapping(row["result"])
     _exact_keys(result, {"resume_from_stage"})
-    resume = _validate_mutable_target_state(state, invalidated)
+    resume = _validate_mutable_target_state(
+        state,
+        invalidated,
+        historical=historical_profile,
+    )
     if (
-        result["resume_from_stage"] != invalidated[0].value
+        result["resume_from_stage"] != invalidated[0]
         or resume != invalidated[0]
-        or state.current_stage != invalidated[0].value
+        or state.current_stage != invalidated[0]
         or state.updated_at != row.get("prepared_at")
     ):
         raise ValueError("checkpoint rebuild journal payload is inconsistent")
@@ -664,14 +815,14 @@ def _validate_adoption(
         raise ValueError("adoption manifest targets are inconsistent")
     receipts = _mapping(row["target_receipts"])
     receipt_hashes = _mapping(target["receipt_sha256"])
-    expected = {stage.value for stage in PipelineStage}
+    expected = set(_STATE_V2_STAGE_ORDER)
     if set(receipts) != expected or set(receipt_hashes) != expected:
         raise ValueError("adoption receipt inventory is incomplete")
-    for stage in PipelineStage:
-        receipt = _mapping(receipts[stage.value])
+    for stage in _STATE_V2_STAGE_ORDER:
+        receipt = _mapping(receipts[stage])
         counts = _mapping(receipt.get("counts"))
         if (
-            receipt.get("stage") != stage.value
+            receipt.get("stage") != stage
             or receipt.get("origin") != "legacy_adoption"
             or set(counts) != _STATE_V2_STAGE_COUNT_KEYS[stage]
             or any(
@@ -680,13 +831,13 @@ def _validate_adoption(
                 or value < 0
                 for value in counts.values()
             )
-            or _persisted_sha256(receipt) != receipt_hashes[stage.value]
+            or _persisted_sha256(receipt) != receipt_hashes[stage]
         ):
             raise ValueError("adoption receipt target is inconsistent")
-        stage_state = next(item for item in state.stages if item.stage == stage.value)
+        stage_state = next(item for item in state.stages if item.stage == stage)
         if (
             stage_state.status != "completed"
-            or stage_state.receipt_sha256 != receipt_hashes[stage.value]
+            or stage_state.receipt_sha256 != receipt_hashes[stage]
             or any(state.counts.get(key) != value for key, value in counts.items())
         ):
             raise ValueError("adoption state receipt authority is inconsistent")
@@ -736,7 +887,7 @@ def _validate_release_publication(
         },
     )
     stage_eight = next(
-        item for item in state.stages if item.stage == PipelineStage.DATASET_SPLITS.value
+        item for item in state.stages if item.stage == "dataset_splits"
     )
     if (
         state.schema_version != STATE_SCHEMA_VERSION
@@ -773,12 +924,12 @@ def _validate_committed_release_terminal(
     target: Mapping[str, Any],
 ) -> None:
     if (
-        _file_sha256(layout.config_path) != target["config_sha256"]
-        or _file_sha256(layout.state_path) != target["state_sha256"]
-        or _current_release_descriptor(layout.release_pointer_path)
+        _file_sha256(layout, layout.config_path) != target["config_sha256"]
+        or _file_sha256(layout, layout.state_path) != target["state_sha256"]
+        or _current_release_descriptor(layout, layout.release_pointer_path)
         != {
             "present": True,
-            "bytes": layout.release_pointer_path.stat().st_size,
+            "bytes": len(_local_authority_file(layout, layout.release_pointer_path)[1]),
             "sha256": target["release_sha256"],
         }
     ):
@@ -791,8 +942,7 @@ def _validate_committed_release_terminal(
         target_descriptor = _audit_descriptor_mapping(
             _mapping(audit[name])["target"]
         )
-        present = path.is_file()
-        current = path.read_bytes() if present else b""
+        present, current = _local_authority_file(layout, path)
         if audit_descriptor(current, present=present) != target_descriptor:
             raise ValueError("committed release audit is not at the target")
 
@@ -849,9 +999,7 @@ def _validate_operation_chronology(
         or previous_events["row_count"] > current_events["row_count"]
     ):
         raise ValueError("journal event chronology is inconsistent")
-    current_bytes = (
-        layout.events_path.read_bytes() if layout.events_path.is_file() else b""
-    )
+    _, current_bytes = _local_authority_file(layout, layout.events_path)
     previous_prefix = current_bytes[: previous_events["byte_length"]]
     later_prefix = current_bytes[: current_events["byte_length"]]
     if (
@@ -869,9 +1017,12 @@ def _validate_committed_adoption_terminal(
     target: Mapping[str, Any],
 ) -> None:
     if (
-        _file_sha256(layout.config_path) != target["config_sha256"]
-        or _file_sha256(layout.state_path) != target["state_sha256"]
-        or _current_release_descriptor(layout.release_pointer_path).get("sha256")
+        _file_sha256(layout, layout.config_path) != target["config_sha256"]
+        or _file_sha256(layout, layout.state_path) != target["state_sha256"]
+        or _current_release_descriptor(
+            layout,
+            layout.release_pointer_path,
+        ).get("sha256")
         != target["release_sha256"]
     ):
         raise ValueError("committed adoption controls are not at the target")
@@ -883,8 +1034,7 @@ def _validate_committed_adoption_terminal(
         target_descriptor = _audit_descriptor_mapping(
             _mapping(audit[name])["target"]
         )
-        present = path.is_file()
-        current = path.read_bytes() if present else b""
+        present, current = _local_authority_file(layout, path)
         if audit_descriptor(current, present=present) != target_descriptor:
             raise ValueError("committed adoption audit is not at the target")
 
@@ -894,14 +1044,16 @@ def _validate_committed_mutation_terminal(
     row: Mapping[str, Any],
     target: Mapping[str, Any],
 ) -> None:
-    if _file_sha256(layout.config_path) != target["config_sha256"]:
+    if _file_sha256(layout, layout.config_path) != target["config_sha256"]:
         raise ValueError("committed mutation config is not at the target")
     audit = _mapping(row["audit"])
     target_descriptor = _audit_descriptor_mapping(
         _mapping(audit["config_history"])["target"]
     )
-    present = layout.config_history_path.is_file()
-    current = layout.config_history_path.read_bytes() if present else b""
+    present, current = _local_authority_file(
+        layout,
+        layout.config_history_path,
+    )
     if audit_descriptor(current, present=present) != target_descriptor:
         raise ValueError("committed mutation config history is not at the target")
 
@@ -943,11 +1095,19 @@ def _validate_event(
 
 def _validate_mutable_target_state(
     state: PipelineState,
-    invalidated: tuple[PipelineStage, ...],
-) -> PipelineStage:
-    invalidated_names = {stage.value for stage in invalidated}
+    invalidated: tuple[str, ...],
+    *,
+    historical: bool,
+) -> str:
+    invalidated_names = set(invalidated)
     invalidated_count_keys = {
-        key for stage in invalidated for key in _STATE_V2_STAGE_COUNT_KEYS[stage]
+        key
+        for stage in invalidated
+        for key in (
+            _STATE_V2_STAGE_COUNT_KEYS[stage]
+            if historical
+            else STAGE_COUNT_KEYS[PipelineStage(stage)]
+        )
     }
     for item in state.stages:
         if item.stage in invalidated_names and (
@@ -960,7 +1120,7 @@ def _validate_mutable_target_state(
             raise ValueError("journal target state retains invalidated authority")
     first_incomplete = next(
         (
-            PipelineStage(item.stage)
+            item.stage
             for item in state.stages
             if item.status != "completed"
         ),
@@ -971,11 +1131,16 @@ def _validate_mutable_target_state(
         or state.status != "queued"
         or state.error is not None
         or first_incomplete is None
-        or state.current_stage != first_incomplete.value
+        or state.current_stage != first_incomplete
         or any(key in state.counts for key in invalidated_count_keys)
     ):
         raise ValueError("journal target lifecycle is inconsistent")
-    first_index = tuple(PipelineStage).index(first_incomplete)
+    ordered = (
+        PERSISTED_STAGE_VALUES_V2
+        if historical
+        else tuple(stage.value for stage in PipelineStage)
+    )
+    first_index = ordered.index(first_incomplete)
     if any(
         item.status == "completed" for item in state.stages[first_index + 1 :]
     ):
@@ -996,9 +1161,13 @@ def _require_exact_plan(
             raise ValueError("journal target is not writer-derived")
 
 
-def _validate_before_state_shape(raw: Mapping[str, Any]) -> None:
+def _validate_before_state_shape(
+    raw: Mapping[str, Any],
+    *,
+    historical: bool,
+) -> None:
     if raw.get("status") == "completed":
-        raw = _normalized_legacy_completed_state(raw)
+        raw = normalized_legacy_completed_state_v1(raw)
     else:
         _exact_keys(raw, _STATE_FIELDS)
     if (
@@ -1034,26 +1203,39 @@ def _validate_before_state_shape(raw: Mapping[str, Any]) -> None:
         raise ValueError("journal before error is invalid")
     current_stage = raw.get("current_stage")
     if current_stage is not None:
-        try:
-            PipelineStage(current_stage)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("journal before current stage is invalid") from exc
+        if historical:
+            if current_stage not in PERSISTED_STAGE_VALUES_V2:
+                raise ValueError("journal before current stage is invalid")
+        else:
+            try:
+                PipelineStage(current_stage)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("journal before current stage is invalid") from exc
+    ordered = _STATE_V2_STAGE_ORDER if historical else tuple(PipelineStage)
+    count_keys = (
+        _ALL_COUNT_KEYS
+        if historical
+        else frozenset().union(
+            *(frozenset(STAGE_COUNT_KEYS[stage]) for stage in ordered)
+        )
+    )
+    labels = _STATE_V2_STAGE_LABELS if historical else STAGE_LABELS
     counts = _mapping(raw["counts"])
-    if set(counts) - _ALL_COUNT_KEYS or any(
+    if set(counts) - count_keys or any(
         isinstance(value, bool) or not isinstance(value, int) or value < 0
         for value in counts.values()
     ):
         raise ValueError("journal before counts are invalid")
     stages = list(raw["stages"])
-    ordered = _STATE_V2_STAGE_ORDER
     if len(stages) != len(ordered):
         raise ValueError("journal before stage inventory is invalid")
     for stage, value in zip(ordered, stages):
+        stage_value = stage if historical else stage.value
         item = _mapping(value)
         _exact_keys(item, _STAGE_STATE_FIELDS)
         if (
-            item.get("stage") != stage.value
-            or item.get("label") != _STATE_V2_STAGE_LABELS[stage]
+            item.get("stage") != stage_value
+            or item.get("label") != labels[stage]
             or item.get("status") not in _STAGE_STATUSES
             or not isinstance(item.get("message"), str)
         ):
@@ -1086,7 +1268,11 @@ def _validate_before_state_shape(raw: Mapping[str, Any]) -> None:
             raise ValueError("journal before active stage state is invalid")
 
 
-def _validate_state_shape(raw: Mapping[str, Any]) -> None:
+def _validate_state_shape(
+    raw: Mapping[str, Any],
+    *,
+    historical: bool,
+) -> None:
     _exact_keys(raw, _STATE_FIELDS)
     if (
         raw.get("schema_version") != STATE_SCHEMA_VERSION
@@ -1107,26 +1293,39 @@ def _validate_state_shape(raw: Mapping[str, Any]) -> None:
         raise ValueError("journal target error is invalid")
     current_stage = raw.get("current_stage")
     if current_stage is not None:
-        try:
-            PipelineStage(current_stage)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("journal target current stage is invalid") from exc
+        if historical:
+            if current_stage not in PERSISTED_STAGE_VALUES_V2:
+                raise ValueError("journal target current stage is invalid")
+        else:
+            try:
+                PipelineStage(current_stage)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("journal target current stage is invalid") from exc
+    ordered = _STATE_V2_STAGE_ORDER if historical else tuple(PipelineStage)
+    count_keys = (
+        _ALL_COUNT_KEYS
+        if historical
+        else frozenset().union(
+            *(frozenset(STAGE_COUNT_KEYS[stage]) for stage in ordered)
+        )
+    )
+    labels = _STATE_V2_STAGE_LABELS if historical else STAGE_LABELS
     counts = _mapping(raw["counts"])
-    if set(counts) - _ALL_COUNT_KEYS or any(
+    if set(counts) - count_keys or any(
         isinstance(value, bool) or not isinstance(value, int) or value < 0
         for value in counts.values()
     ):
         raise ValueError("journal target counts are invalid")
     stages = list(raw["stages"])
-    ordered = _STATE_V2_STAGE_ORDER
     if len(stages) != len(ordered):
         raise ValueError("journal target stage inventory is invalid")
     for stage, value in zip(ordered, stages):
+        stage_value = stage if historical else stage.value
         item = _mapping(value)
         _exact_keys(item, _STAGE_STATE_FIELDS)
         if (
-            item.get("stage") != stage.value
-            or item.get("label") != _STATE_V2_STAGE_LABELS[stage]
+            item.get("stage") != stage_value
+            or item.get("label") != labels[stage]
             or item.get("status") not in _STAGE_STATUSES
             or not isinstance(item.get("message"), str)
         ):
@@ -1229,15 +1428,18 @@ def _validate_intermediate_authority(
     event_installed: bool,
     before_release: Mapping[str, Any] | None,
 ) -> None:
-    config_hash = _file_sha256(layout.config_path)
-    state_hash = _file_sha256(layout.state_path)
+    config_hash = _file_sha256(layout, layout.config_path)
+    state_hash = _file_sha256(layout, layout.state_path)
     before_pair = (before["config_sha256"], before["state_sha256"])
     target_pair = (target["config_sha256"], target["state_sha256"])
     if row["kind"] == "release_publication":
         if before_release is None:
             raise ValueError("release publication lacks prior pointer evidence")
         pointer = _mapping(_mapping(row["request"])["release_pointer"])
-        current_release = _current_release_descriptor(layout.release_pointer_path)
+        current_release = _current_release_descriptor(
+            layout,
+            layout.release_pointer_path,
+        )
         target_release = {
             "present": True,
             "bytes": len(_persisted_json_bytes(pointer)),
@@ -1307,12 +1509,14 @@ def _validate_audit_authority(
         else None
     )
     history_installed = _validate_audit_file(
+        layout,
         layout.config_history_path,
         _mapping(audit["config_history"]),
         appended_row=history_row,
         uncommitted=uncommitted,
     )
     event_installed = _validate_audit_file(
+        layout,
         layout.events_path,
         _mapping(audit["events"]),
         appended_row=_mapping(row["event_entry"]),
@@ -1322,6 +1526,7 @@ def _validate_audit_authority(
 
 
 def _validate_audit_file(
+    layout: Any,
     path: Path,
     transition: Mapping[str, Any],
     *,
@@ -1331,8 +1536,7 @@ def _validate_audit_file(
     _exact_keys(transition, {"before", "target"})
     before = _audit_descriptor_mapping(transition["before"])
     target = _audit_descriptor_mapping(transition["target"])
-    current_present = path.is_file()
-    current = path.read_bytes() if current_present else b""
+    current_present, current = _local_authority_file(layout, path)
     before_length = before["byte_length"]
     if len(current) < before_length:
         raise ValueError("journal audit prefix was truncated")
@@ -1389,7 +1593,7 @@ def _validate_existing_revision_sequence(
     history: Mapping[str, Any],
     operation_id: str,
 ) -> None:
-    rows = _audit_rows(layout.config_history_path)
+    rows = _audit_rows(layout, layout.config_history_path)
     matching_indexes = [
         index
         for index, item in enumerate(rows)
@@ -1404,21 +1608,28 @@ def _validate_existing_revision_sequence(
         raise ValueError("configuration revision sequence is inconsistent")
 
 
-def _stage_suffix(value: Any) -> tuple[PipelineStage, ...]:
+def _stage_suffix(value: Any, *, historical: bool) -> tuple[str, ...]:
     if not isinstance(value, list) or not value:
         raise ValueError("journal cleanup boundary is invalid")
     try:
-        stages = tuple(PipelineStage(item) for item in value)
+        stages = tuple(str(item) for item in value)
+        ordered = PERSISTED_STAGE_VALUES_V2 if historical else tuple(
+            stage.value for stage in PipelineStage
+        )
+        if any(stage not in ordered for stage in stages):
+            raise ValueError
     except (TypeError, ValueError) as exc:
         raise ValueError("journal cleanup boundary is invalid") from exc
-    ordered = tuple(PipelineStage)
     if stages != ordered[ordered.index(stages[0]) :]:
         raise ValueError("journal cleanup stages are not an ordered suffix")
     return stages
 
 
-def _audit_rows(path: Path) -> list[dict[str, Any]]:
-    return read_strict_jsonl_objects(path)
+def _audit_rows(layout: Any, path: Path) -> list[dict[str, Any]]:
+    return read_strict_jsonl_objects(
+        path,
+        trusted_root=layout.tenants_root,
+    )
 
 
 def _strict_jsonl_bytes(raw: bytes) -> None:
@@ -1457,14 +1668,13 @@ def _release_descriptor(value: Any) -> dict[str, Any]:
     return descriptor
 
 
-def _current_release_descriptor(path: Path) -> dict[str, Any]:
-    if path.is_symlink():
-        raise ValueError("journal release pointer is a symlink")
-    if not path.exists():
+def _current_release_descriptor(
+    layout: Any,
+    path: Path,
+) -> dict[str, Any]:
+    present, data = _local_authority_file(layout, path)
+    if not present:
         return {"present": False, "bytes": 0, "sha256": None}
-    if not path.is_file():
-        raise ValueError("journal release pointer is not a regular file")
-    data = path.read_bytes()
     return {
         "present": True,
         "bytes": len(data),
@@ -1485,20 +1695,20 @@ def _validate_adoption_manifest_prefix(
         (
             "dataset_manifest",
             layout.artifact_path(
-                PipelineStage.DATASET_SPLITS,
+                _STATE_V2_STAGE_ORDER[-1],
                 "dataset_manifest.json",
             ),
         ),
         (
             "generation_manifest",
             layout.artifact_path(
-                PipelineStage.DATASET_SPLITS,
+                _STATE_V2_STAGE_ORDER[-1],
                 "generation_manifest.json",
             ),
         ),
     )
     current = tuple(
-        _release_descriptor_key(_current_release_descriptor(path))
+        _release_descriptor_key(_current_release_descriptor(layout, path))
         for _, path in names_and_paths
     )
     before_keys = tuple(
@@ -1572,9 +1782,8 @@ def _persisted_json_bytes(payload: Mapping[str, Any]) -> bytes:
     return serialized.encode("utf-8")
 
 
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _file_sha256(layout: Any, path: Path) -> str:
+    present, data = _local_authority_file(layout, path)
+    if not present:
+        raise ValueError("journal authority file is missing")
+    return hashlib.sha256(data).hexdigest()

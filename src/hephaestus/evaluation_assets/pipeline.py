@@ -26,7 +26,7 @@ from typing import (
     TypeVar,
 )
 
-from src.hephaestus.artifact_io import atomic_copy_file, atomic_write_text
+from src.hephaestus.artifact_io import atomic_write_text
 from src.hephaestus.datasets.embedding_providers import (
     OpenAIEmbeddingProvider,
     validate_embedding_vectors,
@@ -56,7 +56,9 @@ from src.hephaestus.datasets.intent_assets import (
 from src.hephaestus.datasets.rubric_providers import OpenAIRubricProvider
 from src.hephaestus.evaluation_assets import workspace as workspace_module
 from src.hephaestus.evaluation_assets.control_jsonl import (
+    parse_strict_json_object,
     read_strict_jsonl_objects,
+    resolve_local_authority_file,
 )
 from src.hephaestus.evaluation_assets.durability import (
     STAGE_SPECIFICATIONS,
@@ -64,9 +66,9 @@ from src.hephaestus.evaluation_assets.durability import (
     EvaluationAssetIntegrityError,
     EvaluationAssetLegacyError,
     build_stage_receipt,
-    file_sha256,
     load_completed_release_handoff_control,
     mutable_rebuild_boundary,
+    persisted_json_sha256,
     verify_completed_release_candidate,
     verify_raw_snapshot_floor,
     verify_released_asset,
@@ -127,7 +129,6 @@ from src.hephaestus.evaluation_assets.stage_three_contract import (
 )
 from src.hephaestus.evaluation_assets.workspace import (
     EvaluationAssetLayout,
-    atomic_write_json,
     utc_now,
 )
 
@@ -139,6 +140,54 @@ PUBLISHED_DATASET_SPLITS = (
     "test",
     "regression_trusted",
 )
+
+
+def _local_authority_bytes(
+    layout: EvaluationAssetLayout,
+    path: Path,
+) -> bytes:
+    """Read one exact pipeline authority file through its bound local handle."""
+    authority = resolve_local_authority_file(
+        path,
+        layout.tenants_root,
+        access="read",
+    )
+    if authority.data is None:
+        raise ValueError("pipeline authority read did not return bytes")
+    return authority.data
+
+
+def _optional_local_authority_json(
+    layout: EvaluationAssetLayout,
+    path: Path,
+) -> dict[str, Any]:
+    """Read one optional strict control object without split presence probes."""
+    authority = resolve_local_authority_file(
+        path,
+        layout.tenants_root,
+        access="read_optional",
+    )
+    if not authority.exists:
+        return {}
+    if authority.data is None:
+        raise ValueError("optional pipeline authority read did not return bytes")
+    return parse_strict_json_object(authority.data)
+
+
+def _local_authority_json(
+    layout: EvaluationAssetLayout,
+    path: Path,
+) -> dict[str, Any]:
+    """Parse one required strict pipeline control object from bound bytes."""
+    return parse_strict_json_object(_local_authority_bytes(layout, path))
+
+
+def _local_authority_sha256(
+    layout: EvaluationAssetLayout,
+    path: Path,
+) -> str:
+    """Hash the exact bytes returned by one bound pipeline authority read."""
+    return hashlib.sha256(_local_authority_bytes(layout, path)).hexdigest()
 
 EVIDENCE_EXTRACTION_PROMPT = """\
 Extract atomic evaluation evidence from explicit user feedback. Return one JSON
@@ -584,10 +633,9 @@ class EvaluationAssetPipeline:
                 verify_raw_snapshot_floor(self.layout, state)
             if handoff_control is not None and not config_updates:
                 self.config = handoff_control[1]
-                self.lineage = (
-                    json.loads(self.layout.lineage_path.read_text(encoding="utf-8"))
-                    if self.layout.lineage_path.is_file()
-                    else {}
+                self.lineage = _optional_local_authority_json(
+                    self.layout,
+                    self.layout.lineage_path,
                 )
                 return self._run_locked(
                     _preflight_accepted_callback,
@@ -605,10 +653,9 @@ class EvaluationAssetPipeline:
                 else None
             )
             self.config = self.layout.load_config()
-            self.lineage = (
-                json.loads(self.layout.lineage_path.read_text(encoding="utf-8"))
-                if self.layout.lineage_path.is_file()
-                else {}
+            self.lineage = _optional_local_authority_json(
+                self.layout,
+                self.layout.lineage_path,
             )
             self._configure_providers()
             return self._run_locked(
@@ -702,10 +749,17 @@ class EvaluationAssetPipeline:
                 prompt_values=STAGE_PROMPTS.get(stage, {}),
                 provider_identity=self._provider_identity_for_stage(stage),
             )
-            atomic_write_json(self.layout.receipt_path(stage), receipt)
-            stage_state.receipt_sha256 = file_sha256(
-                self.layout.receipt_path(stage)
+            self.layout._write_authority_json(
+                self.layout.receipt_path(stage),
+                receipt,
             )
+            receipt_sha256 = _local_authority_sha256(
+                self.layout,
+                self.layout.receipt_path(stage),
+            )
+            if receipt_sha256 != persisted_json_sha256(receipt):
+                raise ValueError("persisted stage receipt authority is inconsistent")
+            stage_state.receipt_sha256 = receipt_sha256
             stage_state.status = "completed"
             stage_state.completed_at = completed_at
             stage_state.message = _stage_message(stage, counts)
@@ -726,11 +780,12 @@ class EvaluationAssetPipeline:
         self.layout.save_state(state)
         generation = self._pending_generation
         if generation is None:
-            manifest = json.loads(
+            manifest = _local_authority_json(
+                self.layout,
                 self.layout.artifact_path(
                     PipelineStage.DATASET_SPLITS,
                     "generation_manifest.json",
-                ).read_text(encoding="utf-8")
+                ),
             )
             generation_id = str(manifest.get("generation_id") or "")
             generation = validate_historical_generation(
@@ -764,6 +819,7 @@ class EvaluationAssetPipeline:
                 self.layout.artifact_path(stage, "provider_calls.jsonl"),
                 calls,
                 stage=stage.value,
+                trusted_root=self.layout.tenants_root,
             )
         stage_provenance = build_stage_provenance(
             stage=stage.value,
@@ -782,7 +838,7 @@ class EvaluationAssetPipeline:
                 extension=bool(self.lineage),
             ),
         )
-        atomic_write_json(
+        self.layout._write_authority_json(
             self.layout.stage_provenance_path(stage),
             stage_provenance,
         )
@@ -795,14 +851,16 @@ class EvaluationAssetPipeline:
         for stage in tuple(PipelineStage)[2:7]:
             calls.extend(
                 read_strict_jsonl_objects(
-                    self.layout.artifact_path(stage, "provider_calls.jsonl")
+                    self.layout.artifact_path(stage, "provider_calls.jsonl"),
+                    trusted_root=self.layout.tenants_root,
                 )
             )
-        input_manifest = json.loads(
+        input_manifest = _local_authority_json(
+            self.layout,
             self.layout.artifact_path(
                 PipelineStage.RAW_INPUTS,
                 "input_manifest.json",
-            ).read_text(encoding="utf-8")
+            ),
         )
         copied_inputs = {}
         for name, path in (
@@ -810,17 +868,24 @@ class EvaluationAssetPipeline:
             ("unlabeled", self.layout.unlabeled_path),
         ):
             details = input_manifest["inputs"][name]
+            source_bytes = _local_authority_bytes(self.layout, path)
+            if hashlib.sha256(source_bytes).hexdigest() != details["sha256"]:
+                raise ValueError("copied input authority changed after validation")
             copied_inputs[name] = {
                 "path": path.relative_to(self.layout.root).as_posix(),
-                "bytes": path.stat().st_size,
+                "bytes": len(source_bytes),
                 "rows": details["rows"],
                 "sha256": details["sha256"],
             }
         lineage_files = None
         if self.lineage:
             lineage_files = {
-                "lineage_sha256": file_sha256(self.layout.lineage_path),
-                "reuse_manifest_sha256": file_sha256(
+                "lineage_sha256": _local_authority_sha256(
+                    self.layout,
+                    self.layout.lineage_path,
+                ),
+                "reuse_manifest_sha256": _local_authority_sha256(
+                    self.layout,
                     self.layout.reuse_manifest_path
                 ),
                 "parent_release": dict(self.lineage.get("parent_release") or {}),
@@ -854,7 +919,16 @@ class EvaluationAssetPipeline:
             created_at=utc_now(),
         )
         validate_build_provenance(provenance)
-        atomic_write_json(self.layout.build_provenance_path, provenance)
+        self.layout._write_authority_json(
+            self.layout.build_provenance_path,
+            provenance,
+        )
+        build_provenance_sha256 = _local_authority_sha256(
+            self.layout,
+            self.layout.build_provenance_path,
+        )
+        if build_provenance_sha256 != persisted_json_sha256(provenance):
+            raise ValueError("persisted build provenance authority is inconsistent")
         split_paths = {
             split: self.layout.artifact_path(
                 PipelineStage.DATASET_SPLITS,
@@ -872,12 +946,29 @@ class EvaluationAssetPipeline:
             trusted_root=self.layout.tenant_root,
         )
         self._pending_generation = generation
-        atomic_copy_file(
+        generation_manifest = resolve_local_authority_file(
             generation.generation_dir / "generation_manifest.json",
-            self.layout.artifact_path(
-                PipelineStage.DATASET_SPLITS,
-                "generation_manifest.json",
-            ),
+            self.layout.tenants_root,
+            access="read",
+        )
+        if generation_manifest.data is None:
+            raise ValueError("generation manifest authority bytes are missing")
+        workspace_generation_manifest = self.layout.artifact_path(
+            PipelineStage.DATASET_SPLITS,
+            "generation_manifest.json",
+        )
+        expected_workspace_manifest = resolve_local_authority_file(
+            workspace_generation_manifest,
+            self.layout.tenants_root,
+            access="read_optional",
+        )
+        resolve_local_authority_file(
+            workspace_generation_manifest,
+            self.layout.tenants_root,
+            access="write",
+            write_data=generation_manifest.data,
+            expected_write_data=expected_workspace_manifest.data,
+            check_expected_write_data=True,
         )
         manifest = dict(self._stage_eight_manifest)
         generation_directory = generation.generation_dir.relative_to(
@@ -892,23 +983,21 @@ class EvaluationAssetPipeline:
             ).as_posix(),
             "generation_id": generation.generation_id,
             "generation_manifest_sha256": generation.generation_manifest_sha256,
-            "build_provenance_sha256": file_sha256(
-                self.layout.build_provenance_path
-            ),
+            "build_provenance_sha256": build_provenance_sha256,
             "build_fingerprint": provenance["identity_sha256"],
             "files": {
                 split: f"{generation_directory}/{split}.jsonl"
                 for split in PUBLISHED_DATASET_SPLITS
             },
         }
-        atomic_write_json(
+        self.layout._write_authority_json(
             self.layout.artifact_path(
                 PipelineStage.DATASET_SPLITS,
                 "dataset_manifest.json",
             ),
             manifest,
         )
-        atomic_write_json(self.layout.manifest_path, manifest)
+        self.layout._write_authority_json(self.layout.manifest_path, manifest)
         _publication_fault_point("after_stage_8_outputs_validated")
 
     def _validate_raw_inputs(self) -> Dict[str, int]:
@@ -951,7 +1040,7 @@ class EvaluationAssetPipeline:
                 },
             }
         }
-        atomic_write_json(
+        self.layout._write_authority_json(
             self.layout.artifact_path(PipelineStage.RAW_INPUTS, "input_manifest.json"),
             manifest,
         )
@@ -1167,7 +1256,26 @@ class EvaluationAssetPipeline:
         )
         if self.lineage.get("clustering_mode") == "keep":
             snapshot = self.layout.parent_snapshot / "parent_intent_inventory.jsonl"
-            atomic_copy_file(snapshot, inventory_path)
+            snapshot_authority = resolve_local_authority_file(
+                snapshot,
+                self.layout.tenants_root,
+                access="read",
+            )
+            if snapshot_authority.data is None:
+                raise ValueError("parent snapshot authority bytes are missing")
+            expected_inventory = resolve_local_authority_file(
+                inventory_path,
+                self.layout.tenants_root,
+                access="read_optional",
+            )
+            resolve_local_authority_file(
+                inventory_path,
+                self.layout.tenants_root,
+                access="write",
+                write_data=snapshot_authority.data,
+                expected_write_data=expected_inventory.data,
+                check_expected_write_data=True,
+            )
             clusters = [_intent_cluster(row) for row in _load_jsonl(inventory_path)]
             assert_unique_cluster_ids(clusters)
             write_jsonl(
@@ -1600,11 +1708,12 @@ class EvaluationAssetPipeline:
                 ),
                 rows,
             )
-        input_manifest = json.loads(
+        input_manifest = _local_authority_json(
+            self.layout,
             self.layout.artifact_path(
                 PipelineStage.RAW_INPUTS,
                 "input_manifest.json",
-            ).read_text(encoding="utf-8")
+            ),
         )
         guideline_path = self.layout.artifact_path(
             PipelineStage.RUBRIC_EXTRACTION,

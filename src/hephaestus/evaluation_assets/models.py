@@ -272,21 +272,23 @@ class PipelineState:
             schema_version = raw_schema
         status = str(raw.get("status") or "queued")
         _validate_pipeline_status(schema_version, status)
-        stages = [
-            StageState(**dict(item))
+        persisted_stages = {
+            stage_state.stage: stage_state
             for item in list(raw.get("stages") or [])
             if isinstance(item, Mapping)
-        ]
-        labels_by_value = {stage.value: label for stage, label in STAGE_LABELS.items()}
-        for stage_state in stages:
-            if stage_state.stage in labels_by_value:
-                stage_state.label = labels_by_value[stage_state.stage]
-        existing_stages = {item.stage for item in stages}
-        stages.extend(
-            StageState(stage=stage.value, label=STAGE_LABELS[stage])
-            for stage in PipelineStage
-            if stage.value not in existing_stages
-        )
+            for stage_state in (StageState(**dict(item)),)
+        }
+        stages: list[StageState] = []
+        for stage in PipelineStage:
+            stage_state = persisted_stages.get(stage.value)
+            if stage_state is None:
+                stage_state = StageState(
+                    stage=stage.value,
+                    label=STAGE_LABELS[stage],
+                )
+            else:
+                stage_state.label = STAGE_LABELS[stage]
+            stages.append(stage_state)
         return cls(
             tenant_id=str(raw["tenant_id"]),
             asset_id=str(raw["asset_id"]),

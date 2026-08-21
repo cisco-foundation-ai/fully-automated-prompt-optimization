@@ -13,7 +13,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from src.hephaestus.evaluation_assets.control_jsonl import parse_strict_json_object
+from src.hephaestus.evaluation_assets.control_jsonl import (
+    parse_strict_json_object,
+    resolve_local_authority_file,
+)
+from src.hephaestus.evaluation_assets.journal_transitions import (
+    PERSISTED_STAGE_VALUES_V2,
+)
 from src.hephaestus.evaluation_assets.models import PipelineStage
 
 LINEAGE_SCHEMA_VERSION = "fapo-evaluation-asset-lineage-v1"
@@ -43,17 +49,17 @@ COMMON_PARENT_SNAPSHOT_FILES = (
     "parent_regression_trusted.jsonl",
 )
 _STATIC_SNAPSHOT_INPUTS = {
-    PipelineStage.INTENT_CLUSTERING: ("parent_intent_inventory.jsonl",),
-    PipelineStage.COVERAGE_DECISIONS: ("parent_intent_matches.jsonl",),
-    PipelineStage.LABEL_INFERENCE: (
+    "intent_clustering": ("parent_intent_inventory.jsonl",),
+    "coverage_decisions": ("parent_intent_matches.jsonl",),
+    "label_inference": (
         "parent_intent_matches.jsonl",
         "parent_inferred_cluster_rubrics.jsonl",
     ),
-    PipelineStage.SYNTHETIC_COVERAGE: (
+    "synthetic_coverage": (
         "parent_intent_matches.jsonl",
         "parent_synthetic_cases.jsonl",
     ),
-    PipelineStage.DATASET_SPLITS: (
+    "dataset_splits": (
         "parent_train.jsonl",
         "parent_validation.jsonl",
         "parent_test.jsonl",
@@ -140,10 +146,12 @@ def validate_extension_evidence(
     layout: Any,
     *,
     require_asset_manifest: bool,
+    historical: bool = False,
+    artifact_overrides: Mapping[Path, bytes] | None = None,
 ) -> ExtensionEvidence:
     """Validate complete lineage/reuse schemas and all self-contained snapshots."""
-    lineage = _json_object(layout.lineage_path)
-    reuse = _json_object(layout.reuse_manifest_path)
+    lineage = _json_object(layout, layout.lineage_path, artifact_overrides)
+    reuse = _json_object(layout, layout.reuse_manifest_path, artifact_overrides)
     _exact_keys(
         lineage,
         {
@@ -187,6 +195,8 @@ def validate_extension_evidence(
         added_labeled,
         added_unlabeled,
         extended_counts,
+        historical=historical,
+        artifact_overrides=artifact_overrides,
     )
 
     _exact_keys(
@@ -213,7 +223,7 @@ def validate_extension_evidence(
     _exact_keys(seeded, {"stage", "artifacts", "operation"})
     stage_three_seeds = tuple(_identifier_list(seeded["artifacts"]))
     if (
-        seeded["stage"] != PipelineStage.RUBRIC_EXTRACTION.value
+        seeded["stage"] != "rubric_extraction"
         or seeded["operation"] != "append_evidence_and_rebuild_guidelines"
         or stage_three_seeds
         not in {NATIVE_STAGE_THREE_SEEDS, LEGACY_STAGE_THREE_SEEDS}
@@ -229,7 +239,7 @@ def validate_extension_evidence(
         row = dict(reused[0])
         _exact_keys(row, {"stage", "artifacts", "reason"})
         if (
-            row["stage"] != PipelineStage.INTENT_CLUSTERING.value
+            row["stage"] != "intent_clustering"
             or tuple(_identifier_list(row["artifacts"]))
             != ("intent_inventory.jsonl", "cluster_lineage.jsonl")
             or row["reason"]
@@ -239,11 +249,16 @@ def validate_extension_evidence(
     elif reused:
         raise ValueError("refresh lineage cannot claim reused stages")
 
+    snapshot_root = (
+        layout.historical_parent_snapshot
+        if historical
+        else layout.parent_snapshot
+    )
     snapshot = _mapping(reuse["parent_snapshot"])
     _exact_keys(snapshot, {"schema_version", "path", "artifacts"})
     if (
         snapshot["schema_version"] != SNAPSHOT_SCHEMA_VERSION
-        or snapshot["path"] != layout.parent_snapshot.relative_to(layout.root).as_posix()
+        or snapshot["path"] != snapshot_root.relative_to(layout.root).as_posix()
         or not isinstance(snapshot["artifacts"], list)
     ):
         raise ValueError("parent snapshot descriptor is invalid")
@@ -268,18 +283,22 @@ def validate_extension_evidence(
         ):
             raise ValueError("parent snapshot row is invalid")
         recorded_names.add(name)
-        path = layout.parent_snapshot / name
+        path = snapshot_root / name
+        payload = _authority_bytes(layout, path, artifact_overrides)
         if (
-            not path.is_file()
-            or path.stat().st_size != row["bytes"]
-            or _sha256(path) != row["sha256"]
+            len(payload) != row["bytes"]
+            or hashlib.sha256(payload).hexdigest() != row["sha256"]
         ):
             raise ValueError("parent snapshot bytes are inconsistent")
     if recorded_names != expected_names:
         raise ValueError("parent snapshot inventory is incomplete")
 
     if require_asset_manifest:
-        manifest = _json_object(layout.manifest_path)
+        manifest = _json_object(
+            layout,
+            layout.manifest_path,
+            artifact_overrides,
+        )
         if manifest.get("lineage") != lineage:
             raise ValueError("asset manifest lineage is inconsistent")
     return ExtensionEvidence(
@@ -289,30 +308,86 @@ def validate_extension_evidence(
     )
 
 
-def extension_receipt_input_paths(layout: Any, stage: PipelineStage) -> tuple[Path, ...]:
+def extension_receipt_input_paths(
+    layout: Any,
+    stage: PipelineStage,
+    *,
+    historical: bool = False,
+    artifact_overrides: Mapping[Path, bytes] | None = None,
+) -> tuple[Path, ...]:
     """Return validated conditional extension inputs for one receipt."""
-    if not layout.lineage_path.is_file() and not layout.reuse_manifest_path.exists():
+    lineage_present = (
+        layout.lineage_path in artifact_overrides
+        if artifact_overrides is not None
+        else layout.lineage_path.is_file()
+    )
+    reuse_present = (
+        layout.reuse_manifest_path in artifact_overrides
+        if artifact_overrides is not None
+        else layout.reuse_manifest_path.exists()
+    )
+    if not lineage_present and not reuse_present:
         return ()
-    evidence = validate_extension_evidence(layout, require_asset_manifest=False)
-    if stage not in tuple(PipelineStage)[2:]:
+    evidence = validate_extension_evidence(
+        layout,
+        require_asset_manifest=False,
+        historical=historical,
+        artifact_overrides=artifact_overrides,
+    )
+    stage_value = stage.value
+    ordered = (
+        PERSISTED_STAGE_VALUES_V2
+        if historical
+        else tuple(item.value for item in PipelineStage)
+    )
+    if stage_value not in ordered[2:]:
         return ()
     snapshot_names = (
         tuple(f"parent_{name}" for name in evidence.stage_three_seeds)
-        if stage == PipelineStage.RUBRIC_EXTRACTION
-        else _STATIC_SNAPSHOT_INPUTS.get(stage, ())
+        if stage_value == "rubric_extraction"
+        else _STATIC_SNAPSHOT_INPUTS.get(stage_value, ())
     )
     return (
         layout.lineage_path,
         layout.reuse_manifest_path,
-        *(layout.parent_snapshot / name for name in snapshot_names),
+        *(
+            (
+                layout.historical_parent_snapshot
+                if historical
+                else layout.parent_snapshot
+            )
+            / name
+            for name in snapshot_names
+        ),
     )
 
 
-def extension_receipt_output_paths(layout: Any, stage: PipelineStage) -> tuple[Path, ...]:
+def extension_receipt_output_paths(
+    layout: Any,
+    stage: PipelineStage,
+    *,
+    historical: bool = False,
+    artifact_overrides: Mapping[Path, bytes] | None = None,
+) -> tuple[Path, ...]:
     """Return extension control files anchored by the final stage receipt."""
-    if stage != PipelineStage.DATASET_SPLITS or not layout.lineage_path.is_file():
+    final_stage = (
+        PERSISTED_STAGE_VALUES_V2[-1]
+        if historical
+        else tuple(PipelineStage)[-1].value
+    )
+    lineage_present = (
+        layout.lineage_path in artifact_overrides
+        if artifact_overrides is not None
+        else layout.lineage_path.is_file()
+    )
+    if stage.value != final_stage or not lineage_present:
         return ()
-    validate_extension_evidence(layout, require_asset_manifest=True)
+    validate_extension_evidence(
+        layout,
+        require_asset_manifest=True,
+        historical=historical,
+        artifact_overrides=artifact_overrides,
+    )
     return (layout.lineage_path, layout.reuse_manifest_path)
 
 
@@ -321,9 +396,18 @@ def _validate_child_sources(
     added_labeled: tuple[str, ...],
     added_unlabeled: tuple[str, ...],
     counts: Mapping[str, int],
+    *,
+    historical: bool,
+    artifact_overrides: Mapping[Path, bytes] | None,
 ) -> None:
-    feedback_ids = _jsonl_ids(layout.feedback_path)
-    unlabeled_ids = _jsonl_ids(layout.unlabeled_path)
+    feedback_path = (
+        layout.historical_feedback_path if historical else layout.feedback_path
+    )
+    unlabeled_path = (
+        layout.historical_unlabeled_path if historical else layout.unlabeled_path
+    )
+    feedback_ids = _jsonl_ids(layout, feedback_path, artifact_overrides)
+    unlabeled_ids = _jsonl_ids(layout, unlabeled_path, artifact_overrides)
     if (
         len(feedback_ids) != counts["labeled"]
         or len(unlabeled_ids) != counts["unlabeled"]
@@ -333,10 +417,18 @@ def _validate_child_sources(
         raise ValueError("lineage source inventory is inconsistent")
 
 
-def _jsonl_ids(path: Path) -> set[str]:
+def _jsonl_ids(
+    layout: Any,
+    path: Path,
+    artifact_overrides: Mapping[Path, bytes] | None,
+) -> set[str]:
     identities: set[str] = set()
     count = 0
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in _authority_bytes(
+        layout,
+        path,
+        artifact_overrides,
+    ).decode("utf-8").splitlines():
         if not line.strip():
             continue
         count += 1
@@ -406,13 +498,31 @@ def _nonempty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def _json_object(path: Path) -> dict[str, Any]:
-    return parse_strict_json_object(path.read_bytes())
+def _authority_bytes(
+    layout: Any,
+    path: Path,
+    artifact_overrides: Mapping[Path, bytes] | None,
+) -> bytes:
+    if artifact_overrides is not None:
+        try:
+            return artifact_overrides[path]
+        except KeyError as exc:
+            raise ValueError("lineage authority snapshot is incomplete") from exc
+    authority = resolve_local_authority_file(
+        path,
+        layout.tenants_root,
+        access="read",
+    )
+    if authority.data is None:
+        raise ValueError("lineage authority read did not return bytes")
+    return authority.data
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _json_object(
+    layout: Any,
+    path: Path,
+    artifact_overrides: Mapping[Path, bytes] | None,
+) -> dict[str, Any]:
+    return parse_strict_json_object(
+        _authority_bytes(layout, path, artifact_overrides)
+    )

@@ -21,7 +21,6 @@ from src.hephaestus.evaluation_assets.input_contract import (
     effective_route,
     validate_input_records,
 )
-from src.hephaestus.evaluation_assets.models import PipelineStage
 from src.hephaestus.evaluation_assets.stage_three_contract import (
     replay_legacy_stage_three,
     replay_native_stage_three,
@@ -47,88 +46,118 @@ _SOURCE_NAMES = {
 }
 
 
+def _artifact_profile(
+    artifact_profiles: Mapping[Any, str],
+    stage_value: str,
+) -> str:
+    for stage, profile in artifact_profiles.items():
+        if getattr(stage, "value", stage) == stage_value:
+            return profile
+    raise ValueError("legacy artifact profile is incomplete")
+
+
 def validate_legacy_stage_semantics(
     layout: Any,
-    artifact_profiles: Mapping[PipelineStage, str],
+    artifact_profiles: Mapping[Any, str],
+    *,
+    artifact_snapshot: Mapping[Path, bytes],
 ) -> None:
     """Cross-validate the full historical stage graph before adoption writes."""
-    _reject_ambiguous_stage_three(layout)
-
-    feedback = _rows(layout.feedback_path)
-    unlabeled = _rows(layout.unlabeled_path)
-    validate_input_records(feedback, labeled=True, path=layout.feedback_path)
-    validate_input_records(unlabeled, labeled=False, path=layout.unlabeled_path)
+    feedback = _rows(
+        layout,
+        layout.historical_feedback_path,
+        artifact_snapshot,
+    )
+    unlabeled = _rows(
+        layout,
+        layout.historical_unlabeled_path,
+        artifact_snapshot,
+    )
+    validate_input_records(
+        feedback,
+        labeled=True,
+        path=layout.historical_feedback_path,
+    )
+    validate_input_records(
+        unlabeled,
+        labeled=False,
+        path=layout.historical_unlabeled_path,
+    )
     feedback_by_id = _unique_by(feedback, "record_id")
     unlabeled_by_id = _unique_by(unlabeled, "record_id")
     normalized = _rows(
-        layout.artifact_path(PipelineStage.PREPARED_INPUTS, "normalized_feedback.jsonl")
+        layout,
+        layout.artifact_path("prepared_inputs", "normalized_feedback.jsonl"),
+        artifact_snapshot,
     )
     intents = _rows(
-        layout.artifact_path(PipelineStage.PREPARED_INPUTS, "intent_records.jsonl")
+        layout,
+        layout.artifact_path("prepared_inputs", "intent_records.jsonl"),
+        artifact_snapshot,
     )
     validate_input_records(
         normalized,
         labeled=True,
         path=layout.artifact_path(
-            PipelineStage.PREPARED_INPUTS, "normalized_feedback.jsonl"
+            "prepared_inputs", "normalized_feedback.jsonl"
         ),
     )
     validate_input_records(
         intents,
         labeled=False,
-        path=layout.artifact_path(PipelineStage.PREPARED_INPUTS, "intent_records.jsonl"),
+        path=layout.artifact_path("prepared_inputs", "intent_records.jsonl"),
     )
     normalized_by_id = _unique_by(normalized, "record_id")
     intents_by_id = _unique_by(intents, "record_id")
     _validate_prepared_identity(feedback_by_id, normalized_by_id, labeled=True)
     _validate_prepared_identity(unlabeled_by_id, intents_by_id, labeled=False)
 
-    stage_three_profile = artifact_profiles[PipelineStage.RUBRIC_EXTRACTION]
+    stage_three_profile = _artifact_profile(
+        artifact_profiles,
+        "rubric_extraction",
+    )
     trusted_intents, trusted_cases = _validate_stage_three(
         layout,
         stage_three_profile,
         normalized_by_id,
+        artifact_snapshot,
     )
-    clusters = _validate_clusters(layout, intents_by_id)
-    matches = _validate_matches(layout, clusters, trusted_intents)
-    _validate_queue(layout, clusters, matches, intents_by_id)
+    clusters = _validate_clusters(layout, intents_by_id, artifact_snapshot)
+    matches = _validate_matches(
+        layout,
+        clusters,
+        trusted_intents,
+        artifact_snapshot,
+    )
+    _validate_queue(
+        layout,
+        clusters,
+        matches,
+        intents_by_id,
+        artifact_snapshot,
+    )
     inferred_cases = _validate_inference(
         layout,
         clusters,
         matches,
         trusted_intents,
         intents_by_id,
+        artifact_snapshot,
     )
     synthetic_cases = _validate_synthetic(
         layout,
         clusters,
         matches,
         [*trusted_cases, *inferred_cases],
+        artifact_snapshot,
     )
-    _validate_splits(layout, trusted_cases, inferred_cases, synthetic_cases)
-
-
-def _reject_ambiguous_stage_three(layout: Any) -> None:
-    if not layout.stages_root.is_dir():
-        return
-    canonical = layout.stages_root / "03_evaluation_guidelines"
-    historical = layout.stages_root / "03_rubric_extraction"
-    native_names = (
-        "feedback_evidence.jsonl",
-        "candidate_guidelines.jsonl",
-        "evaluation_guidelines.jsonl",
-        "trusted_intents.jsonl",
-        "trusted_cases.jsonl",
+    _validate_splits(
+        layout,
+        trusted_cases,
+        inferred_cases,
+        synthetic_cases,
+        artifact_snapshot,
     )
-    legacy_names = (
-        "feedback_rubrics.jsonl",
-        "trusted_intents.jsonl",
-        "trusted_cases.jsonl",
-    )
-    canonical_complete = all((canonical / name).is_file() for name in native_names)
-    historical_complete = all((historical / name).is_file() for name in legacy_names)
-    if canonical_complete and historical_complete:
-        raise ValueError("stage three has competing complete artifact profiles")
 
 
 def _validate_prepared_identity(
@@ -176,13 +205,26 @@ def _validate_stage_three(
     layout: Any,
     profile: str,
     feedback_by_id: Mapping[str, Mapping[str, Any]],
+    artifact_snapshot: Mapping[Path, bytes],
 ) -> tuple[dict[str, Mapping[str, Any]], list[dict[str, Any]]]:
-    stage = PipelineStage.RUBRIC_EXTRACTION
-    trusted_intent_rows = _rows(layout.artifact_path(stage, "trusted_intents.jsonl"))
+    stage = "rubric_extraction"
+    trusted_intent_rows = _rows(
+        layout,
+        layout.artifact_path(stage, "trusted_intents.jsonl"),
+        artifact_snapshot,
+    )
     trusted_intents = _unique_by(trusted_intent_rows, "intent_id")
-    trusted_cases = _case_rows(layout.artifact_path(stage, "trusted_cases.jsonl"))
+    trusted_cases = _case_rows(
+        layout,
+        layout.artifact_path(stage, "trusted_cases.jsonl"),
+        artifact_snapshot,
+    )
     if profile == "legacy":
-        rubric_rows = _rows(layout.artifact_path(stage, "feedback_rubrics.jsonl"))
+        rubric_rows = _rows(
+            layout,
+            layout.artifact_path(stage, "feedback_rubrics.jsonl"),
+            artifact_snapshot,
+        )
         replayed = replay_legacy_stage_three(
             list(feedback_by_id.values()),
             rubric_rows,
@@ -226,7 +268,11 @@ def _validate_stage_three(
             raise ValueError("trusted case provenance is inconsistent")
         _validate_expected(case["expected"])
 
-    evidence_rows = _rows(layout.artifact_path(stage, "feedback_evidence.jsonl"))
+    evidence_rows = _rows(
+        layout,
+        layout.artifact_path(stage, "feedback_evidence.jsonl"),
+        artifact_snapshot,
+    )
     evidence = _unique_by(evidence_rows, "record_id")
     if set(evidence) != set(feedback_by_id):
         raise ValueError("feedback evidence does not exactly cover feedback")
@@ -255,7 +301,11 @@ def _validate_stage_three(
         _nonempty_string(row, "guideline_provider")
         _nonempty_string(row, "guideline_model")
 
-    candidate_rows = _rows(layout.artifact_path(stage, "candidate_guidelines.jsonl"))
+    candidate_rows = _rows(
+        layout,
+        layout.artifact_path(stage, "candidate_guidelines.jsonl"),
+        artifact_snapshot,
+    )
     for row in candidate_rows:
         _nonempty_string(row, "intent_label")
         _nonempty_string(row, "description")
@@ -274,7 +324,11 @@ def _validate_stage_three(
             if field in row:
                 _string_list(row, field)
 
-    guideline_rows = _rows(layout.artifact_path(stage, "evaluation_guidelines.jsonl"))
+    guideline_rows = _rows(
+        layout,
+        layout.artifact_path(stage, "evaluation_guidelines.jsonl"),
+        artifact_snapshot,
+    )
     guidelines = _unique_by(guideline_rows, "guideline_id")
     represented: set[str] = set()
     for row in guideline_rows:
@@ -369,7 +423,7 @@ def _validate_stage_three(
         ):
             raise ValueError("trusted case evidence lineage is inconsistent")
     validate_native_guideline_rows(guideline_rows)
-    manifest = _json_object(layout.manifest_path)
+    manifest = _json_object(layout, layout.manifest_path, artifact_snapshot)
     providers = _object(manifest, "providers")
     evidence_provider_pairs = {
         (row["guideline_provider"], row["guideline_model"])
@@ -398,9 +452,12 @@ def _validate_stage_three(
 def _validate_clusters(
     layout: Any,
     intents_by_id: Mapping[str, Mapping[str, Any]],
+    artifact_snapshot: Mapping[Path, bytes],
 ) -> dict[str, Mapping[str, Any]]:
     rows = _rows(
-        layout.artifact_path(PipelineStage.INTENT_CLUSTERING, "intent_inventory.jsonl")
+        layout,
+        layout.artifact_path("intent_clustering", "intent_inventory.jsonl"),
+        artifact_snapshot,
     )
     clusters = _unique_by(rows, "cluster_id")
     members: list[str] = []
@@ -430,9 +487,12 @@ def _validate_matches(
     layout: Any,
     clusters: Mapping[str, Mapping[str, Any]],
     trusted_intents: Mapping[str, Mapping[str, Any]],
+    artifact_snapshot: Mapping[Path, bytes],
 ) -> dict[str, Mapping[str, Any]]:
     rows = _rows(
-        layout.artifact_path(PipelineStage.COVERAGE_DECISIONS, "intent_matches.jsonl")
+        layout,
+        layout.artifact_path("coverage_decisions", "intent_matches.jsonl"),
+        artifact_snapshot,
     )
     matches = _unique_by(rows, "cluster_id")
     if set(matches) != set(clusters):
@@ -470,12 +530,15 @@ def _validate_queue(
     clusters: Mapping[str, Mapping[str, Any]],
     matches: Mapping[str, Mapping[str, Any]],
     intents: Mapping[str, Mapping[str, Any]],
+    artifact_snapshot: Mapping[Path, bytes],
 ) -> None:
     rows = _rows(
+        layout,
         layout.artifact_path(
-            PipelineStage.COVERAGE_DECISIONS,
+            "coverage_decisions",
             "review_queue/labeling_queue.jsonl",
-        )
+        ),
+        artifact_snapshot,
     )
     seen: set[tuple[str, str]] = set()
     for row in rows:
@@ -512,15 +575,18 @@ def _validate_inference(
     matches: Mapping[str, Mapping[str, Any]],
     trusted_intents: Mapping[str, Mapping[str, Any]],
     intents: Mapping[str, Mapping[str, Any]],
+    artifact_snapshot: Mapping[Path, bytes],
 ) -> list[dict[str, Any]]:
-    stage = PipelineStage.LABEL_INFERENCE
+    stage = "label_inference"
     matched_clusters = {
         cluster_id
         for cluster_id, row in matches.items()
         if row["status"] == "matched_trusted_intent"
     }
     rubric_rows = _rows(
-        layout.artifact_path(stage, "inferred_unlabeled_cluster_rubrics.jsonl")
+        layout,
+        layout.artifact_path(stage, "inferred_unlabeled_cluster_rubrics.jsonl"),
+        artifact_snapshot,
     )
     rubrics = _unique_by(rubric_rows, "cluster_id")
     if set(rubrics) != matched_clusters:
@@ -543,7 +609,11 @@ def _validate_inference(
         ):
             _nonempty_string(row, field)
 
-    label_rows = _rows(layout.artifact_path(stage, "inferred_unlabeled_labels.jsonl"))
+    label_rows = _rows(
+        layout,
+        layout.artifact_path(stage, "inferred_unlabeled_labels.jsonl"),
+        artifact_snapshot,
+    )
     labels = _unique_by(label_rows, "record_id")
     expected_records = {
         record_id
@@ -569,7 +639,11 @@ def _validate_inference(
             raise ValueError("inferred label score is inconsistent")
         _validate_expected(_object(row, "expected"))
 
-    cases = _case_rows(layout.artifact_path(stage, "inferred_cases.jsonl"))
+    cases = _case_rows(
+        layout,
+        layout.artifact_path(stage, "inferred_cases.jsonl"),
+        artifact_snapshot,
+    )
     cases_by_id = _unique_by(cases, "case_id")
     if set(cases_by_id) != {f"inferred-{record_id}" for record_id in expected_records}:
         raise ValueError("inferred cases do not exactly cover inferred labels")
@@ -595,7 +669,9 @@ def _validate_inference(
         _validate_expected(case["expected"])
 
     missing_rows = _rows(
-        layout.artifact_path(stage, "missing_labeled_feedback_clusters.jsonl")
+        layout,
+        layout.artifact_path(stage, "missing_labeled_feedback_clusters.jsonl"),
+        artifact_snapshot,
     )
     missing = _unique_by(missing_rows, "cluster_id")
     if set(missing) != set(clusters) - matched_clusters:
@@ -616,11 +692,24 @@ def _validate_synthetic(
     clusters: Mapping[str, Mapping[str, Any]],
     matches: Mapping[str, Mapping[str, Any]],
     existing_cases: Sequence[dict[str, Any]],
+    artifact_snapshot: Mapping[Path, bytes],
 ) -> list[dict[str, Any]]:
-    stage = PipelineStage.SYNTHETIC_COVERAGE
-    candidates = _case_rows(layout.artifact_path(stage, "synthetic_candidates.jsonl"))
-    rejected = _case_rows(layout.artifact_path(stage, "rejected_synthetic.jsonl"))
-    accepted = _case_rows(layout.artifact_path(stage, "synthetic_cases.jsonl"))
+    stage = "synthetic_coverage"
+    candidates = _case_rows(
+        layout,
+        layout.artifact_path(stage, "synthetic_candidates.jsonl"),
+        artifact_snapshot,
+    )
+    rejected = _case_rows(
+        layout,
+        layout.artifact_path(stage, "rejected_synthetic.jsonl"),
+        artifact_snapshot,
+    )
+    accepted = _case_rows(
+        layout,
+        layout.artifact_path(stage, "synthetic_cases.jsonl"),
+        artifact_snapshot,
+    )
     _unique_by(candidates, "case_id")
     rejected_by_id = _unique_by(rejected, "case_id")
     accepted_by_id = _unique_by(accepted, "case_id")
@@ -644,14 +733,22 @@ def _validate_synthetic(
         ):
             raise ValueError("synthetic case provenance is inconsistent")
         _validate_expected(case["expected"])
-    issues = _rows(layout.artifact_path(stage, "synthetic_filter_issues.jsonl"))
+    issues = _rows(
+        layout,
+        layout.artifact_path(stage, "synthetic_filter_issues.jsonl"),
+        artifact_snapshot,
+    )
     for row in issues:
         case_id = _nonempty_string(row, "case_id")
         if case_id not in rejected_by_id:
             raise ValueError("synthetic filter issue references a non-rejected case")
         _nonempty_string(row, "code")
         _nonempty_string(row, "message")
-    inherited = _inherited_synthetic_cases(layout, matches)
+    inherited = _inherited_synthetic_cases(
+        layout,
+        matches,
+        artifact_snapshot,
+    )
     filtered = filter_synthetic_cases(
         candidates,
         existing_cases=[*existing_cases, *inherited],
@@ -685,18 +782,23 @@ def _validate_synthetic(
 def _inherited_synthetic_cases(
     layout: Any,
     matches: Mapping[str, Mapping[str, Any]],
+    artifact_snapshot: Mapping[Path, bytes],
 ) -> list[dict[str, Any]]:
     """Reconstruct the exact keep-mode parent cases Stage 7 would retain."""
-    if not layout.lineage_path.is_file():
+    if layout.lineage_path not in artifact_snapshot:
         return []
-    lineage = _json_object(layout.lineage_path)
+    lineage = _json_object(layout, layout.lineage_path, artifact_snapshot)
     if lineage.get("clustering_mode") != "keep":
         return []
-    matches_path = layout.parent_snapshot / "parent_intent_matches.jsonl"
-    synthetic_path = layout.parent_snapshot / "parent_synthetic_cases.jsonl"
-    if not matches_path.is_file() or not synthetic_path.is_file():
+    matches_path = (
+        layout.historical_parent_snapshot / "parent_intent_matches.jsonl"
+    )
+    synthetic_path = (
+        layout.historical_parent_snapshot / "parent_synthetic_cases.jsonl"
+    )
+    if matches_path not in artifact_snapshot or synthetic_path not in artifact_snapshot:
         raise ValueError("keep-mode synthetic snapshot is incomplete")
-    previous_rows = _rows(matches_path)
+    previous_rows = _rows(layout, matches_path, artifact_snapshot)
     previous = _unique_by(previous_rows, "cluster_id")
     changed = {
         cluster_id
@@ -707,7 +809,7 @@ def _inherited_synthetic_cases(
         != match.get("matched_intent_id")
     }
     retained: list[dict[str, Any]] = []
-    for case in _case_rows(synthetic_path):
+    for case in _case_rows(layout, synthetic_path, artifact_snapshot):
         metadata = _case_metadata(case)
         cluster_id = metadata.get("source_cluster")
         if (
@@ -729,8 +831,9 @@ def _validate_splits(
     trusted_cases: Sequence[Mapping[str, Any]],
     inferred_cases: Sequence[Mapping[str, Any]],
     synthetic_cases: Sequence[Mapping[str, Any]],
+    artifact_snapshot: Mapping[Path, bytes],
 ) -> None:
-    stage = PipelineStage.DATASET_SPLITS
+    stage = "dataset_splits"
     source_by_tier = {
         "trusted": _unique_by(trusted_cases, "case_id"),
         "inferred": _unique_by(inferred_cases, "case_id"),
@@ -740,7 +843,11 @@ def _validate_splits(
     for split in ("train", "validation", "test"):
         components: list[dict[str, Any]] = []
         for tier in ("trusted", "inferred", "synthetic"):
-            rows = _case_rows(layout.artifact_path(stage, f"{split}_{tier}.jsonl"))
+            rows = _case_rows(
+                layout,
+                layout.artifact_path(stage, f"{split}_{tier}.jsonl"),
+                artifact_snapshot,
+            )
             _unique_by(rows, "case_id")
             for case in rows:
                 case_id = case["case_id"]
@@ -758,7 +865,11 @@ def _validate_splits(
                     raise ValueError("split component provenance is inconsistent")
             split_rows[f"{split}_{tier}"] = rows
             components.extend(rows)
-        combined = _case_rows(layout.artifact_path(stage, f"{split}.jsonl"))
+        combined = _case_rows(
+            layout,
+            layout.artifact_path(stage, f"{split}.jsonl"),
+            artifact_snapshot,
+        )
         _unique_by(combined, "case_id")
         if Counter(_canonical(row) for row in combined) != Counter(
             _canonical(row) for row in components
@@ -783,8 +894,16 @@ def _validate_splits(
     if len(standard_ids) != len(set(standard_ids)):
         raise ValueError("case identity crosses standard splits")
 
-    regression = _case_rows(layout.artifact_path(stage, "regression_trusted.jsonl"))
-    triage = _case_rows(layout.artifact_path(stage, "triage_hold.jsonl"))
+    regression = _case_rows(
+        layout,
+        layout.artifact_path(stage, "regression_trusted.jsonl"),
+        artifact_snapshot,
+    )
+    triage = _case_rows(
+        layout,
+        layout.artifact_path(stage, "triage_hold.jsonl"),
+        artifact_snapshot,
+    )
     regression_by_id = _unique_by(regression, "case_id")
     triage_by_id = _unique_by(triage, "case_id")
     trusted_source = source_by_tier["trusted"]
@@ -827,9 +946,25 @@ def _validate_splits(
         raise ValueError("dataset splits do not exactly partition source cases")
 
 
-def _rows(path: Path) -> list[dict[str, Any]]:
+def _artifact_bytes(
+    layout: Any,
+    path: Path,
+    artifact_snapshot: Mapping[Path, bytes],
+) -> bytes:
+    try:
+        return artifact_snapshot[path]
+    except KeyError as exc:
+        raise ValueError("legacy semantic authority snapshot is incomplete") from exc
+
+
+def _rows(
+    layout: Any,
+    path: Path,
+    artifact_snapshot: Mapping[Path, bytes],
+) -> list[dict[str, Any]]:
+    data = _artifact_bytes(layout, path, artifact_snapshot)
     rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in data.decode("utf-8").splitlines():
         if not line.strip():
             continue
         value = json.loads(line, parse_constant=_reject_json_constant)
@@ -840,9 +975,14 @@ def _rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _json_object(path: Path) -> dict[str, Any]:
+def _json_object(
+    layout: Any,
+    path: Path,
+    artifact_snapshot: Mapping[Path, bytes],
+) -> dict[str, Any]:
+    data = _artifact_bytes(layout, path, artifact_snapshot)
     value = json.loads(
-        path.read_text(encoding="utf-8"),
+        data.decode("utf-8"),
         parse_constant=_reject_json_constant,
     )
     _validate_json_numbers(value)
@@ -866,8 +1006,12 @@ def _validate_json_numbers(value: Any) -> None:
             _validate_json_numbers(nested)
 
 
-def _case_rows(path: Path) -> list[dict[str, Any]]:
-    rows = _rows(path)
+def _case_rows(
+    layout: Any,
+    path: Path,
+    artifact_snapshot: Mapping[Path, bytes],
+) -> list[dict[str, Any]]:
+    rows = _rows(layout, path, artifact_snapshot)
     for row in rows:
         validate_fapo_case(row)
         _nonempty_string(row, "task_type")

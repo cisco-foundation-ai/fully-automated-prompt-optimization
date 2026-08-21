@@ -7,22 +7,30 @@ from __future__ import annotations
 import ast
 import json
 import multiprocessing
+import re
 import shutil
+import subprocess
 import sys
 import threading
 from dataclasses import replace
+from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import pytest
 
 from src.hephaestus import artifact_io
 from src.hephaestus.datasets import embedding_providers as embedding_provider_module
 from src.hephaestus.datasets import rubric_providers as rubric_provider_module
+from src.hephaestus.evaluation_assets import control_jsonl as control_jsonl_module
 from src.hephaestus.evaluation_assets import durability as durability_module
+from src.hephaestus.evaluation_assets import journal_transitions as journal_transitions_module
+from src.hephaestus.evaluation_assets import journal_validation as journal_validation_module
+from src.hephaestus.evaluation_assets import lineage_validation as lineage_validation_module
 from src.hephaestus.evaluation_assets import models as evaluation_asset_models
 from src.hephaestus.evaluation_assets import pipeline as pipeline_module
 from src.hephaestus.evaluation_assets import provenance as provenance_module
+from src.hephaestus.evaluation_assets import publication as publication_module
 from src.hephaestus.evaluation_assets import service as service_module
 from src.hephaestus.evaluation_assets import stage_three_contract
 from src.hephaestus.evaluation_assets import workspace as workspace_module
@@ -67,6 +75,92 @@ class _NeverCalledRubricProvider:
         raise AssertionError("busy pipeline reached the rubric provider")
 
 
+class _DriftedPipelineStage(str, Enum):
+    """A simulated future registry with changed membership and order."""
+
+    FUTURE_STAGE = "future_stage"
+    DATASET_SPLITS = "dataset_splits"
+    RAW_INPUTS = "raw_inputs"
+    PREPARED_INPUTS = "prepared_inputs"
+    RUBRIC_EXTRACTION = "rubric_extraction"
+    INTENT_CLUSTERING = "intent_clustering"
+    COVERAGE_DECISIONS = "coverage_decisions"
+    LABEL_INFERENCE = "label_inference"
+    SYNTHETIC_COVERAGE = "synthetic_coverage"
+
+
+class _RemovedHistoricalPipelineStage(str, Enum):
+    """A future authoring registry with every historical member name removed."""
+
+    FUTURE_STAGE = "future_stage"
+    RAW_INPUTS_V3 = "raw_inputs_v3"
+    PREPARED_INPUTS_V3 = "prepared_inputs_v3"
+    GUIDELINE_CREATION_V3 = "guideline_creation_v3"
+    INTENT_DISCOVERY_V3 = "intent_discovery_v3"
+    COVERAGE_REVIEW_V3 = "coverage_review_v3"
+    LABEL_CREATION_V3 = "label_creation_v3"
+    SYNTHETIC_CREATION_V3 = "synthetic_creation_v3"
+    SPLIT_CREATION_V3 = "split_creation_v3"
+
+
+def _install_drifted_authoring_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Install one coherent simulated future authoring registry."""
+    labels_by_value = {
+        stage.value: label
+        for stage, label in evaluation_asset_models.STAGE_LABELS.items()
+    }
+    counts_by_value = {
+        stage.value: frozenset(keys)
+        for stage, keys in evaluation_asset_models.STAGE_COUNT_KEYS.items()
+    }
+    drifted_labels = {
+        stage: labels_by_value.get(stage.value, "Future authoring stage")
+        for stage in _DriftedPipelineStage
+    }
+    drifted_counts = {
+        stage: counts_by_value.get(stage.value, frozenset({"future_records"}))
+        for stage in _DriftedPipelineStage
+    }
+    drifted_dependencies = {
+        field: _DriftedPipelineStage(stage.value)
+        for field, stage in evaluation_asset_models.CONFIG_STAGE_DEPENDENCIES.items()
+    }
+    for module in (
+        evaluation_asset_models,
+        durability_module,
+        journal_transitions_module,
+        journal_validation_module,
+        workspace_module,
+    ):
+        monkeypatch.setattr(module, "PipelineStage", _DriftedPipelineStage)
+    for module in (
+        evaluation_asset_models,
+        durability_module,
+        journal_transitions_module,
+        journal_validation_module,
+    ):
+        monkeypatch.setattr(module, "STAGE_COUNT_KEYS", drifted_counts)
+    for module in (
+        evaluation_asset_models,
+        durability_module,
+        journal_validation_module,
+    ):
+        monkeypatch.setattr(module, "STAGE_LABELS", drifted_labels)
+    for module in (
+        evaluation_asset_models,
+        journal_transitions_module,
+        journal_validation_module,
+        workspace_module,
+    ):
+        monkeypatch.setattr(
+            module,
+            "CONFIG_STAGE_DEPENDENCIES",
+            drifted_dependencies,
+        )
+
+
 def _studio_persistence_paths(source_root: Path) -> tuple[Path, ...]:
     """Return the complete declared Studio production persistence boundary."""
     paths = {
@@ -104,13 +198,177 @@ def _qualified_ast_name(
     node: ast.AST,
     aliases: Mapping[str, str],
     assignments: Mapping[str, ast.AST] | None = None,
+    *,
+    seen: frozenset[str] = frozenset(),
 ) -> str:
-    node = _assigned_ast_node(node, assignments or {})
+    active_assignments = assignments or {}
+    if isinstance(node, ast.NamedExpr):
+        return _qualified_ast_name(
+            node.value,
+            aliases,
+            active_assignments,
+            seen=seen,
+        )
     if isinstance(node, ast.Name):
+        if node.id in active_assignments and node.id not in seen:
+            return _qualified_ast_name(
+                active_assignments[node.id],
+                aliases,
+                active_assignments,
+                seen=seen | {node.id},
+            )
         return aliases.get(node.id, node.id)
     if isinstance(node, ast.Attribute):
-        prefix = _qualified_ast_name(node.value, aliases, assignments)
+        prefix = _qualified_ast_name(
+            node.value,
+            aliases,
+            active_assignments,
+            seen=seen,
+        )
         return f"{prefix}.{node.attr}" if prefix else node.attr
+    if isinstance(node, ast.Call):
+        call_name = _qualified_ast_name(
+            node.func,
+            aliases,
+            active_assignments,
+            seen=seen,
+        )
+        if call_name in {"globals", "builtins.globals"} and not node.args:
+            return "globals"
+        if call_name in {"locals", "builtins.locals"} and not node.args:
+            return "locals"
+        if call_name in {"vars", "builtins.vars"}:
+            if not node.args:
+                return "vars"
+            if len(node.args) == 1:
+                receiver = _qualified_ast_name(
+                    node.args[0],
+                    aliases,
+                    active_assignments,
+                    seen=seen,
+                )
+                return f"{receiver}.__dict__" if receiver else ""
+        if (
+            call_name
+            in {
+                "__import__",
+                "builtins.__import__",
+                "__builtins__.__import__",
+                "importlib.import_module",
+            }
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+            and (
+                node.args[0].value.split(".", 1)[0] in _PERSISTENCE_MODULES
+                or node.args[0].value == "importlib"
+            )
+        ):
+            return node.args[0].value
+    if (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.slice, ast.Constant)
+        and isinstance(node.slice.value, str)
+    ):
+        container = ""
+        if (
+            isinstance(node.value, ast.Call)
+            and _qualified_ast_name(
+                node.value.func,
+                aliases,
+                active_assignments,
+                seen=seen,
+            )
+            in {"vars", "builtins.vars"}
+            and len(node.value.args) == 1
+        ):
+            container = _qualified_ast_name(
+                node.value.args[0],
+                aliases,
+                active_assignments,
+                seen=seen,
+            )
+        else:
+            container = _qualified_ast_name(
+                node.value,
+                aliases,
+                active_assignments,
+                seen=seen,
+            )
+            if container.endswith(".__dict__"):
+                container = container.removesuffix(".__dict__")
+        return (
+            f"{container}.{node.slice.value}"
+            if container
+            else node.slice.value
+        )
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr
+        in {"__getattribute__", "__getitem__", "get", "pop", "setdefault"}
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, str)
+    ):
+        receiver = _qualified_ast_name(
+            node.func.value,
+            aliases,
+            active_assignments,
+            seen=seen,
+        )
+        if node.func.attr in {"get", "pop", "setdefault", "__getitem__"}:
+            literal_name = node.args[0].value
+            mapping_receiver = receiver.removesuffix(".__dict__")
+            if mapping_receiver in {
+                "globals",
+                "locals",
+                "vars",
+                "sys.modules",
+            }:
+                return (
+                    literal_name
+                    if literal_name.split(".", 1)[0] in _PERSISTENCE_MODULES
+                    else ""
+                )
+            if mapping_receiver in {"builtins", "__builtins__"}:
+                return (
+                    "builtins.__import__"
+                    if literal_name == "__import__"
+                    else ""
+                )
+            if not receiver.endswith(".__dict__"):
+                return ""
+        receiver = receiver.removesuffix(".__dict__")
+        return (
+            f"{receiver}.{node.args[0].value}"
+            if receiver
+            else node.args[0].value
+        )
+    if (
+        isinstance(node, ast.Call)
+        and _qualified_ast_name(
+            node.func,
+            aliases,
+            active_assignments,
+            seen=seen,
+        )
+        in {"getattr", "builtins.getattr"}
+        and len(node.args) >= 2
+        and isinstance(node.args[1], ast.Constant)
+        and isinstance(node.args[1].value, str)
+    ):
+        receiver = _qualified_ast_name(
+            node.args[0],
+            aliases,
+            active_assignments,
+            seen=seen,
+        )
+        return (
+            f"{receiver}.{node.args[1].value}"
+            if receiver
+            else node.args[1].value
+        )
     return ""
 
 
@@ -263,6 +521,7 @@ _PERSISTENCE_COPY_SINKS = {
     "shutil.move",
 }
 _PERSISTENCE_LOW_LEVEL_SINKS = {
+    "ctypes.CDLL",
     "os.copy_file_range",
     "os.ftruncate",
     "os.pwrite",
@@ -272,6 +531,7 @@ _PERSISTENCE_LOW_LEVEL_SINKS = {
     "os.sendfile",
     "os.splice",
     "os.truncate",
+    "os.unlink",
     "os.write",
     "os.writev",
 }
@@ -287,6 +547,7 @@ _CALLABLE_FACTORIES = {"functools.partial"}
 _PERSISTENCE_MODULES = {
     "builtins",
     "csv",
+    "ctypes",
     "io",
     "json",
     "nt",
@@ -325,6 +586,19 @@ def _canonical_sink_name(name: str) -> str:
         prefix = f"{module}."
         if name.startswith(prefix):
             return f"os.{name.removeprefix(prefix)}"
+    parts = name.split(".")
+    for index, part in enumerate(parts[1:], 1):
+        reexported_module = part.removeprefix("_")
+        if (
+            reexported_module in _PERSISTENCE_MODULES
+            and index + 1 < len(parts)
+        ):
+            canonical_module = (
+                "os"
+                if reexported_module in {"nt", "posix"}
+                else reexported_module
+            )
+            return canonical_module + "." + ".".join(parts[index + 1 :])
     return name
 
 
@@ -444,10 +718,10 @@ def _explicit_persistence_reference(
     )
 
 
-def _visible_persistence_references(tree: ast.AST) -> list[tuple[int, str]]:
+def _visible_persistence_references(tree: ast.AST) -> list[tuple[ast.AST, str]]:
     """Return declared writer references that escape direct-call inspection."""
     aliases: dict[str, str] = {}
-    imported_sinks: list[tuple[int, str]] = []
+    imported_sinks: list[tuple[ast.AST, str]] = []
     for candidate in ast.walk(tree):
         if isinstance(candidate, ast.Import):
             for item in candidate.names:
@@ -456,6 +730,15 @@ def _visible_persistence_references(tree: ast.AST) -> list[tuple[int, str]]:
                     aliases.setdefault(name, item.name)
         elif isinstance(candidate, ast.ImportFrom) and candidate.module:
             for item in candidate.names:
+                if (
+                    item.name == "*"
+                    and candidate.module.split(".", 1)[0]
+                    in _PERSISTENCE_MODULES
+                ):
+                    imported_sinks.append(
+                        (candidate, f"{candidate.module}.*")
+                    )
+                    continue
                 name = item.asname or item.name
                 qualified = _canonical_sink_name(
                     f"{candidate.module}.{item.name}"
@@ -468,7 +751,7 @@ def _visible_persistence_references(tree: ast.AST) -> list[tuple[int, str]]:
                     | _PERSISTENCE_CSV_FACTORIES
                     | _PERSISTENCE_NAMED_SINKS
                 ):
-                    imported_sinks.append((candidate.lineno, qualified))
+                    imported_sinks.append((candidate, qualified))
 
     # Escape analysis is deliberately conservative for the finite set of
     # persistence modules above.  Resolve ordinary module rebindings before
@@ -523,9 +806,8 @@ def _visible_persistence_references(tree: ast.AST) -> list[tuple[int, str]]:
         parent = parents.get(id(candidate))
         if isinstance(parent, ast.Call) and parent.func is candidate:
             continue
-        qualified = _canonical_sink_name(
-            _qualified_ast_name(candidate, aliases)
-        )
+        raw_qualified = _qualified_ast_name(candidate, aliases)
+        qualified = _canonical_sink_name(raw_qualified)
         attribute = candidate.attr if isinstance(candidate, ast.Attribute) else ""
         receiver = candidate
         while isinstance(receiver, ast.Attribute):
@@ -570,6 +852,7 @@ def _visible_persistence_references(tree: ast.AST) -> list[tuple[int, str]]:
             and len(parent.args) >= 2
             and isinstance(parent.args[1], ast.Constant)
             and isinstance(parent.args[1].value, str)
+            and not parent.args[1].value.startswith("__")
             and _canonical_sink_name(
                 f"{qualified}.{parent.args[1].value}"
             )
@@ -583,13 +866,35 @@ def _visible_persistence_references(tree: ast.AST) -> list[tuple[int, str]]:
             and parent.args[1].value
             not in _PERSISTENCE_METHOD_SINKS | {"dump", "open", "safe_dump"}
         )
+        direct_module_attribute = (
+            isinstance(parent, ast.Attribute)
+            and parent.value is candidate
+            and not parent.attr.startswith("__")
+        )
+        persistence_rooted = (
+            raw_qualified.split(".", 1)[0] in _PERSISTENCE_MODULES
+        )
+        dunder_module_traversal = persistence_rooted and (
+            isinstance(candidate, ast.Attribute)
+            and candidate.attr.startswith("__")
+            or isinstance(parent, ast.Call)
+            and parent.args
+            and parent.args[0] is candidate
+            and _qualified_ast_name(parent.func, aliases)
+            in {"getattr", "builtins.getattr"}
+            and len(parent.args) >= 2
+            and isinstance(parent.args[1], ast.Constant)
+            and isinstance(parent.args[1].value, str)
+            and parent.args[1].value.startswith("__")
+        )
         module_escape = (
             qualified in _PERSISTENCE_MODULES
             or isinstance(candidate, ast.Name)
             and candidate.id in module_alias_names
-        ) and not (
-            isinstance(parent, ast.Attribute) and parent.value is candidate
-        ) and not simple_module_alias and not safe_module_introspection
+            or dunder_module_traversal
+        ) and not direct_module_attribute and not simple_module_alias and not (
+            safe_module_introspection
+        )
         if module_escape or module_alias_sink or qualified in (
             _PERSISTENCE_DUMP_SINKS
             | _PERSISTENCE_COPY_SINKS
@@ -602,7 +907,7 @@ def _visible_persistence_references(tree: ast.AST) -> list[tuple[int, str]]:
         }:
             references.append(
                 (
-                    candidate.lineno,
+                    candidate,
                     (
                         f"{qualified}.*"
                         if module_escape
@@ -990,106 +1295,179 @@ def _call_binding_snapshots(
 
 
 class _FunctionContextCollector(ast.NodeVisitor):
-    """Record the exact class/function stack enclosing each call."""
+    """Record the exact runtime definition stack enclosing each AST node."""
 
     def __init__(self) -> None:
-        self.stack: list[str] = []
-        self.calls: dict[int, tuple[str, ...]] = {}
+        self.stack: list[tuple[str, str]] = []
+        self.calls: dict[int, tuple[tuple[str, str], ...]] = {}
+        self.contexts: dict[int, tuple[tuple[str, str], ...]] = {}
+
+    def visit(self, node: ast.AST) -> Any:
+        self.contexts[id(node)] = tuple(self.stack)
+        return super().visit(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        self.stack.append(node.name)
-        self.generic_visit(node)
+        self.stack.append(("class_header", node.name))
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for base in node.bases:
+            self.visit(base)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+        self.stack.pop()
+        self.stack.append(("class", node.name))
+        for statement in node.body:
+            self.visit(statement)
+        self.stack.pop()
+
+    def _visit_function(
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+        *,
+        kind: str,
+    ) -> None:
+        self.stack.append((f"{kind}_header", node.name))
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        self.visit(node.args)
+        if node.returns is not None:
+            self.visit(node.returns)
+        self.stack.pop()
+        self.stack.append((kind, node.name))
+        for statement in node.body:
+            self.visit(statement)
         self.stack.pop()
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self.stack.append(node.name)
+        self._visit_function(node, kind="function")
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function(node, kind="async_function")
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        self.stack.append(("lambda_header", f"{node.lineno}:{node.col_offset}"))
+        self.visit(node.args)
+        self.stack.pop()
+        self.stack.append(("lambda", f"{node.lineno}:{node.col_offset}"))
+        self.visit(node.body)
+        self.stack.pop()
+
+    def _visit_comprehension_scope(
+        self,
+        node: ast.GeneratorExp | ast.ListComp | ast.SetComp | ast.DictComp,
+    ) -> None:
+        """Keep implicit comprehension execution outside audited body seams."""
+        name = f"{type(node).__name__}:{node.lineno}:{node.col_offset}"
+        self.stack.append(("comprehension", name))
         self.generic_visit(node)
         self.stack.pop()
 
-    visit_AsyncFunctionDef = visit_FunctionDef
+    visit_GeneratorExp = _visit_comprehension_scope
+    visit_ListComp = _visit_comprehension_scope
+    visit_SetComp = _visit_comprehension_scope
+    visit_DictComp = _visit_comprehension_scope
 
     def visit_Call(self, node: ast.Call) -> None:
         self.calls[id(node)] = tuple(self.stack)
         self.generic_visit(node)
 
 
-def _call_function_contexts(tree: ast.AST) -> dict[int, tuple[str, ...]]:
+def _call_function_contexts(
+    tree: ast.AST,
+) -> tuple[
+    dict[int, tuple[tuple[str, str], ...]],
+    dict[int, tuple[tuple[str, str], ...]],
+]:
     collector = _FunctionContextCollector()
     collector.visit(tree)
-    return collector.calls
+    return collector.calls, collector.contexts
 
 
-def _definition_context_at_line(tree: ast.AST, line: int) -> tuple[str, ...]:
-    """Return the exact nested class/function identity containing one line."""
-    parents = {
-        id(child): parent
-        for parent in ast.walk(tree)
-        for child in ast.iter_child_nodes(parent)
+_AUDITED_ARTIFACT_PRODUCER_OWNERS = frozenset(
+    {
+        "atomic_append_jsonl",
+        "atomic_copy_file",
+        "atomic_write_json",
+        "atomic_write_jsonl",
+        "atomic_write_text",
     }
-    candidates = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.lineno <= line <= (node.end_lineno or line)
-    ]
-    if not candidates:
-        return ()
-    current: ast.AST | None = min(
-        candidates,
-        key=lambda node: (node.end_lineno or line) - node.lineno,
+)
+
+
+def _inside_exact_top_level_function(
+    context: tuple[tuple[str, str], ...],
+    names: set[str],
+    definition_counts: Mapping[tuple[tuple[str, str], ...], int],
+) -> bool:
+    """Require one unique audited body or its exact producer closure."""
+    if not context or context[0][0] != "function":
+        return False
+    owner = context[0][1]
+    owner_context = (("function", owner),)
+    if owner not in names or definition_counts.get(owner_context) != 1:
+        return False
+    return context == owner_context or (
+        owner in _AUDITED_ARTIFACT_PRODUCER_OWNERS
+        and context == (*owner_context, ("function", "produce"))
+        and definition_counts.get(context) == 1
     )
-    context: list[str] = []
-    while current is not None:
-        if isinstance(current, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-            context.append(current.name)
-        current = parents.get(id(current))
-    return tuple(reversed(context))
+
+
+def _inside_exact_handler_method(
+    context: tuple[tuple[str, str], ...],
+    definition_counts: Mapping[tuple[tuple[str, str], ...], int],
+) -> bool:
+    """Require one unique audited server class and method definition."""
+    if len(context) != 2:
+        return False
+    class_context = (("class", "_Handler"),)
+    return bool(
+        context[0] == class_context[0]
+        and context[1][0] == "function"
+        and context[1][1] in {"_send_file", "_send_html", "_send_json"}
+        and definition_counts.get(class_context) == 1
+        and definition_counts.get(context) == 1
+    )
 
 
 def _studio_writer_violations(path: Path, source: str) -> list[str]:
     """Find direct persistence calls, resolving qualified and imported aliases."""
     tree = ast.parse(source, filename=str(path))
     call_bindings, sink_store_lines = _call_binding_snapshots(tree)
-    function_contexts = _call_function_contexts(tree)
+    function_contexts, node_contexts = _call_function_contexts(tree)
+    parents = {
+        id(child): parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    definition_counts: dict[tuple[tuple[str, str], ...], int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            kind = "function"
+        elif isinstance(node, ast.AsyncFunctionDef):
+            kind = "async_function"
+        elif isinstance(node, ast.ClassDef):
+            kind = "class"
+        else:
+            continue
+        context = (
+            *node_contexts.get(id(node), ()),
+            (kind, node.name),
+        )
+        definition_counts[context] = definition_counts.get(context, 0) + 1
 
     path_text = path.as_posix()
     artifact_seam = path_text.endswith("src/hephaestus/artifact_io.py")
     publication_seam = path_text.endswith(
         "src/hephaestus/evaluation_assets/publication.py"
     )
-    violations: list[str] = [
-        f"{path.name}:{line}:os.write" for line in sink_store_lines
-    ]
-    for line, operation in _visible_persistence_references(tree):
-        function_context = _definition_context_at_line(tree, line)
-        if artifact_seam and function_context and function_context[0] in {
-            "atomic_append_jsonl",
-            "atomic_copy_file",
-            "atomic_write_json",
-            "atomic_write_jsonl",
-            "atomic_write_text",
-            "_atomic_write_binary",
-            "_atomic_write_text",
-            "sync_directory",
-        }:
-            continue
-        if publication_seam and function_context and (
-            function_context[0] == "install_generation"
-        ):
-            continue
-        if path_text.endswith("src/hephaestus/webui/server.py") and (
-            function_context
-            in {
-                ("_Handler", "_send_file"),
-                ("_Handler", "_send_html"),
-                ("_Handler", "_send_json"),
-            }
-        ):
-            continue
-        violations.append(f"{path.name}:{line}:{operation}")
+    control_seam = path_text.endswith(
+        "src/hephaestus/evaluation_assets/control_jsonl.py"
+    )
     artifact_contexts = {
         "atomic_append_jsonl",
         "atomic_copy_file",
+        "atomic_write_bytes_at",
         "atomic_write_json",
         "atomic_write_jsonl",
         "atomic_write_text",
@@ -1097,27 +1475,99 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
         "_atomic_write_text",
         "sync_directory",
     }
+    violations: list[str] = [
+        f"{path.name}:{line}:os.write" for line in sink_store_lines
+    ]
+    for reference, operation in _visible_persistence_references(tree):
+        line = reference.lineno
+        parent = parents.get(id(reference))
+        grandparent = parents.get(id(parent)) if parent is not None else None
+        direct_dynamic_call = (
+            operation.endswith(".*")
+            and isinstance(parent, ast.Call)
+            and parent.args
+            and parent.args[0] is reference
+            and len(parent.args) >= 2
+            and isinstance(parent.args[1], ast.Constant)
+            and isinstance(parent.args[1].value, str)
+            and isinstance(grandparent, ast.Call)
+            and grandparent.func is parent
+        )
+        function_context = node_contexts.get(id(reference), ())
+        if direct_dynamic_call and (
+            artifact_seam
+            and _inside_exact_top_level_function(
+                function_context,
+                artifact_contexts,
+                definition_counts,
+            )
+            or publication_seam
+            and _inside_exact_top_level_function(
+                function_context,
+                {"install_generation"},
+                definition_counts,
+            )
+        ):
+            continue
+        violations.append(f"{path.name}:{line}:{operation}")
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         function_context = function_contexts.get(id(node), ())
         artifact_function = (
             artifact_seam
-            and bool(function_context)
-            and function_context[0] in artifact_contexts
+            and _inside_exact_top_level_function(
+                function_context,
+                artifact_contexts,
+                definition_counts,
+            )
+        )
+        bound_descriptor_function = (
+            artifact_seam
+            and _inside_exact_top_level_function(
+                function_context,
+                {"atomic_write_bytes_at"},
+                definition_counts,
+            )
         )
         publication_function = (
             publication_seam
-            and bool(function_context)
-            and function_context[0] == "install_generation"
+            and _inside_exact_top_level_function(
+                function_context,
+                {"install_generation"},
+                definition_counts,
+            )
+        )
+        native_rename_function = (
+            artifact_seam
+            and _inside_exact_top_level_function(
+                function_context,
+                {"_rename_with_flags_at"},
+                definition_counts,
+            )
+        )
+        control_function = (
+            control_seam
+            and _inside_exact_top_level_function(
+                function_context,
+                {"remove_local_authority_file"},
+                definition_counts,
+            )
+        )
+        local_lock_function = (
+            control_seam
+            and _inside_exact_top_level_function(
+                function_context,
+                {"acquire_local_authority_lock"},
+                definition_counts,
+            )
         )
         server_function = path_text.endswith(
             "src/hephaestus/webui/server.py"
-        ) and function_context in {
-            ("_Handler", "_send_file"),
-            ("_Handler", "_send_html"),
-            ("_Handler", "_send_json"),
-        }
+        ) and _inside_exact_handler_method(
+            function_context,
+            definition_counts,
+        )
         assignments, aliases = call_bindings.get(id(node), ({}, {}))
         for argument in [
             *node.args,
@@ -1183,8 +1633,14 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
                 in _PERSISTENCE_METHOD_SINKS | {"dump", "open"}
             )
             if recognized:
+                call_parent = parents.get(id(node))
+                direct_method_invocation = (
+                    isinstance(call_parent, ast.Call)
+                    and call_parent.func is node
+                )
                 allowed = (
                     artifact_function
+                    and direct_method_invocation
                     and (
                         sink in _PERSISTENCE_DUMP_SINKS
                         or sink == "shutil.copyfileobj"
@@ -1192,8 +1648,17 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
                         or sink == "os.replace"
                         or method_node.value in {"write", "writelines", "truncate"}
                     )
-                ) or (publication_function and sink == "os.rename") or (
+                ) or (
+                    publication_function
+                    and direct_method_invocation
+                    and sink == "os.rename"
+                ) or (
+                    control_function
+                    and direct_method_invocation
+                    and sink == "os.unlink"
+                ) or (
                     server_function
+                    and direct_method_invocation
                     and receiver == "self.wfile"
                     and method_node.value == "write"
                 )
@@ -1234,6 +1699,13 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
         if qualified in _PERSISTENCE_LOW_LEVEL_SINKS:
             allowed = (artifact_function and qualified == "os.replace") or (
                 publication_function and qualified == "os.rename"
+            ) or (
+                bound_descriptor_function
+                and qualified in {"os.write", "os.replace"}
+            ) or (
+                control_function and qualified == "os.unlink"
+            ) or (
+                native_rename_function and qualified == "ctypes.CDLL"
             )
             if not allowed:
                 violations.append(f"{path.name}:{node.lineno}:{qualified}")
@@ -1293,7 +1765,9 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
                 if flags is not None
                 else None
             )
-            if status is not False:
+            if status is not False and not (
+                bound_descriptor_function or local_lock_function
+            ):
                 operation = "write" if status else "dynamic"
                 violations.append(f"{path.name}:{node.lineno}:os.open({operation})")
             continue
@@ -1904,6 +2378,14 @@ def test_studio_production_scope_has_no_direct_file_writers() -> None:
             "holder.module.NamedTemporaryFile('w')",
             "tempfile",
         ),
+        (
+            "from os import *\nwrite(fd, b'body')",
+            "os",
+        ),
+        (
+            "from os import *\nconsumer(write)",
+            "os",
+        ),
     ],
 )
 def test_studio_writer_guard_rejects_qualified_and_aliased_forms(
@@ -2055,6 +2537,476 @@ def test_studio_writer_guard_rejects_ambiguous_exact_seam_bindings(
             "    def _send_json(self):\n"
             "        self.wfile.write(body)",
         ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "class atomic_write_json:\n"
+            "    def unauthorized(self):\n"
+            "        os.replace(source, target)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/publication.py"),
+            "import os\n"
+            "class install_generation:\n"
+            "    def unauthorized(self):\n"
+            "        os.rename(source, target)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    class Rogue:\n"
+            "        def persist(self):\n"
+            "            os.replace(source, target)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/publication.py"),
+            "import os\n"
+            "def install_generation():\n"
+            "    class Rogue:\n"
+            "        def persist(self):\n"
+            "            os.rename(source, target)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    def persist():\n"
+            "        os.replace(source, target)\n"
+            "    return persist",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json(result=os.replace(source, target)):\n"
+            "    pass",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "@os.replace(source, target)\n"
+            "def atomic_write_json():\n"
+            "    pass",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/publication.py"),
+            "import os\n"
+            "def install_generation(result=os.rename(source, target)):\n"
+            "    pass",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/publication.py"),
+            "import os\n"
+            "@os.rename(source, target)\n"
+            "def install_generation():\n"
+            "    pass",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    pass\n"
+            "def atomic_write_json():\n"
+            "    os.replace(source, target)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "def atomic_write_json():\n"
+            "    return getattr(handle, 'write')",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "def atomic_write_json():\n"
+            "    consumer(getattr(handle, 'write'))",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/publication.py"),
+            "import os\n"
+            "def install_generation():\n"
+            "    pass\n"
+            "def install_generation():\n"
+            "    os.rename(source, target)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    return lambda: os.replace(source, target)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    def produce(handle):\n"
+            "        pass\n"
+            "    def produce(handle):\n"
+            "        os.replace(source, target)\n"
+            "    return produce",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    if condition:\n"
+            "        def produce(handle):\n"
+            "            pass\n"
+            "    else:\n"
+            "        def produce(handle):\n"
+            "            os.replace(source, target)\n"
+            "    return produce",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "def atomic_write_json():\n"
+            "    from os import *\n"
+            "    write(descriptor, b'body')",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "def atomic_write_json():\n"
+            "    from os import *\n"
+            "    consumer(write)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/publication.py"),
+            "def install_generation():\n"
+            "    from os import *\n"
+            "    rename(source, target)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    return os.write",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    return {'writers': [os.write]}",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    return os.write\n"
+            "sink = atomic_write_json()\n"
+            "sink(descriptor, b'body')",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import ctypes\n"
+            "def _rename_with_flags_at():\n"
+            "    pass\n"
+            "def _rename_with_flags_at():\n"
+            "    ctypes.CDLL(None)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_bytes_at():\n"
+            "    pass\n"
+            "def atomic_write_bytes_at():\n"
+            "    os.write(descriptor, b'body')",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_bytes_at():\n"
+            "    pass\n"
+            "def atomic_write_bytes_at():\n"
+            "    os.open(name, os.O_WRONLY)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_bytes_at():\n"
+            "    pass\n"
+            "def atomic_write_bytes_at():\n"
+            "    os.replace(source, target)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/control_jsonl.py"),
+            "import os\n"
+            "def remove_local_authority_file():\n"
+            "    class Rogue:\n"
+            "        def remove(self):\n"
+            "            os.unlink(target)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/control_jsonl.py"),
+            "def remove_local_authority_file():\n"
+            "    from os import *\n"
+            "    unlink(target)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    def produce(handle, result=os.replace(source, target)):\n"
+            "        pass",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    @os.replace(source, target)\n"
+            "    def produce(handle):\n"
+            "        pass",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    def unrelated(result=os.replace(source, target)):\n"
+            "        pass",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    @os.replace(source, target)\n"
+            "    class Rogue:\n"
+            "        pass",
+        ),
+        (
+            Path("src/hephaestus/webui/server.py"),
+            "class _Handler:\n"
+            "    def _send_json(self):\n"
+            "        pass\n"
+            "    def _send_json(self):\n"
+            "        self.wfile.write(body)",
+        ),
+        (
+            Path("src/hephaestus/webui/server.py"),
+            "class _Handler:\n"
+            "    def _send_json(self):\n"
+            "        pass\n"
+            "class _Handler:\n"
+            "    def _send_json(self):\n"
+            "        self.wfile.write(body)",
+        ),
+        (
+            Path("src/hephaestus/webui/server.py"),
+            "class _Handler:\n"
+            "    def _send_json(self):\n"
+            "        def nested(result=self.wfile.write(body)):\n"
+            "            pass",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_bytes_at():\n"
+            "    return (os.write(descriptor, body) for body in values)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    return (os.replace(source, target) for _ in values)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    def produce(handle):\n"
+            "        return (os.replace(source, target) for _ in values)\n"
+            "    return produce",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    return [os.replace(source, target) for _ in values]",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    return {os.replace(source, target) for _ in values}",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    return {key: os.replace(source, target) for key in values}",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    name = 'write'\n"
+            "    getattr(os, name)(descriptor, body)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    def produce(handle):\n"
+            "        name = 'replace'\n"
+            "        getattr(os, name)(source, target)\n"
+            "    return produce",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/publication.py"),
+            "import os\n"
+            "def install_generation():\n"
+            "    name = 'rename'\n"
+            "    getattr(os, name)(source, target)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os as operating_system\n"
+            "def atomic_write_json():\n"
+            "    method = 'replace'\n"
+            "    getattr(operating_system, method)(source, target)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    os.__dict__['write'](descriptor, body)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    os.__getattribute__('write')(descriptor, body)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os as operating_system\n"
+            "def atomic_write_json():\n"
+            "    operating_system.__dict__['replace'](source, target)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    getattr(os, '__dict__')['write'](descriptor, body)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    getattr(os, '__class__').__getattribute__(os, 'write')"
+            "(descriptor, body)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    os.path.os.write(descriptor, body)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import shutil\n"
+            "def atomic_write_json():\n"
+            "    shutil.os.write(descriptor, body)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/pipeline.py"),
+            "import tempfile\n"
+            "def unauthorized():\n"
+            "    tempfile._shutil.copyfile(source, target)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/pipeline.py"),
+            "import tempfile\n"
+            "def unauthorized():\n"
+            "    tempfile._os.sendfile(target_fd, source_fd, 0, count)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/pipeline.py"),
+            "import tempfile\n"
+            "def unauthorized():\n"
+            "    getattr(tempfile, '_shutil').copyfile(source, target)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/pipeline.py"),
+            "import tempfile\n"
+            "def unauthorized():\n"
+            "    getattr(tempfile, '_os').pwrite(descriptor, body, 0)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/pipeline.py"),
+            "import shutil\n"
+            "def unauthorized():\n"
+            "    getattr(shutil, 'os').pwrite(descriptor, body, 0)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/pipeline.py"),
+            "import os\n"
+            "def unauthorized():\n"
+            "    getattr(os.path, 'os').pwrite(descriptor, body, 0)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/example.py"),
+            "import os\n"
+            "os.path.__dict__['os'].__dict__['pwrite'](descriptor, body, 0)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/example.py"),
+            "import os\n"
+            "getattr(os.path, '__dict__')['os'].__dict__['pwrite']"
+            "(descriptor, body, 0)",
+        ),
+        *(
+            (
+                Path("src/hephaestus/evaluation_assets/example.py"),
+                "import os\n" + expression,
+            )
+            for expression in (
+                "os.path.__getattribute__('os').pwrite(descriptor, body, 0)",
+                "os.path.__dict__.get('os').pwrite(descriptor, body, 0)",
+                "vars(os.path)['os'].pwrite(descriptor, body, 0)",
+            )
+        ),
+        *(
+            (
+                Path("src/hephaestus/artifact_io.py"),
+                "import os\ndef atomic_write_json():\n    " + expression,
+            )
+            for expression in (
+                "os.path.__getattribute__('os').pwrite(descriptor, body, 0)",
+                "os.path.__dict__.get('os').pwrite(descriptor, body, 0)",
+                "vars(os.path)['os'].pwrite(descriptor, body, 0)",
+            )
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "async def atomic_write_bytes_at():\n"
+            "    os.write(descriptor, body)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/publication.py"),
+            "import os\n"
+            "async def install_generation():\n"
+            "    os.rename(source, target)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/control_jsonl.py"),
+            "import os\n"
+            "async def remove_local_authority_file():\n"
+            "    os.unlink(target)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    async def produce(handle):\n"
+            "        os.replace(source, target)\n"
+            "    return produce",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import os\n"
+            "def atomic_write_json():\n"
+            "    pass\n"
+            "async def atomic_write_json():\n"
+            "    os.replace(source, target)",
+        ),
     ],
 )
 def test_studio_writer_guard_rejects_writers_outside_exact_audited_functions(
@@ -2079,7 +3031,11 @@ def test_studio_writer_guard_rejects_writers_outside_exact_audited_functions(
             "def _atomic_write_binary():\n"
             "    tempfile.NamedTemporaryFile('wb')\n"
             "    os.replace(source, target)\n"
-            "    getattr(os, 'replace')(source, target)",
+            "    getattr(os, 'replace')(source, target)\n"
+            "def atomic_write_bytes_at():\n"
+            "    os.open(name, os.O_WRONLY)\n"
+            "    os.write(descriptor, b'body')\n"
+            "    os.replace(source, target)",
         ),
         (
             Path("src/hephaestus/evaluation_assets/publication.py"),
@@ -2087,6 +3043,18 @@ def test_studio_writer_guard_rejects_writers_outside_exact_audited_functions(
             "def install_generation():\n"
             "    os.rename(temporary, target)\n"
             "    getattr(os, 'rename')(temporary, target)",
+        ),
+        (
+            Path("src/hephaestus/artifact_io.py"),
+            "import ctypes\n"
+            "def _rename_with_flags_at():\n"
+            "    ctypes.CDLL(None)",
+        ),
+        (
+            Path("src/hephaestus/evaluation_assets/control_jsonl.py"),
+            "import os\n"
+            "def remove_local_authority_file():\n"
+            "    os.unlink(target)",
         ),
         (
             Path("src/hephaestus/webui/server.py"),
@@ -2115,6 +3083,39 @@ def test_studio_writer_guard_allows_only_audited_nonpersistent_seams(
 ) -> None:
     """The allowlist is path-specific and does not suppress ordinary writers."""
     assert _studio_writer_violations(path, source) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "__import__('os').pwrite(fd, body, 0)",
+        "getattr(__import__('os'), 'pwrite')(fd, body, 0)",
+        "import importlib\nimportlib.import_module('os').pwrite(fd, body, 0)",
+        "import os\nglobals().get('os').pwrite(fd, body, 0)",
+        "import sys\nsys.modules.get('os').pwrite(fd, body, 0)",
+        "import os\nglobals().__getitem__('os').pwrite(fd, body, 0)",
+        "import os\nlocals().get('os').pwrite(fd, body, 0)",
+        "import os\nvars().get('os').pwrite(fd, body, 0)",
+        "import os\nglobals().pop('os').pwrite(fd, body, 0)",
+        "import sys\nsys.modules.pop('os').pwrite(fd, body, 0)",
+        "import sys\nsys.modules.setdefault('os').pwrite(fd, body, 0)",
+        "__builtins__['__import__']('os').pwrite(fd, body, 0)",
+        "__builtins__.get('__import__')('os').pwrite(fd, body, 0)",
+        "vars(__builtins__).get('__import__')('os').pwrite(fd, body, 0)",
+        "__import__('importlib').import_module('os').pwrite(fd, body, 0)",
+        "getattr(__import__('importlib'), 'import_module')('os').pwrite(fd, body, 0)",
+    ],
+)
+def test_studio_writer_guard_rejects_literal_module_namespace_escapes(
+    source: str,
+) -> None:
+    """Literal imports and runtime module namespaces cannot hide finite sinks."""
+    violations = _studio_writer_violations(
+        Path("src/hephaestus/evaluation_assets/pipeline.py"),
+        source,
+    )
+
+    assert violations
 
 
 class _NeverCalledEmbeddingProvider:
@@ -5521,6 +6522,106 @@ def test_adoption_recovery_rejects_nonprefix_receipt_intermediates(
     assert _authority_bytes(layout) == before
 
 
+def test_adoption_recovery_rechecks_generated_provenance_before_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Generated adoption inputs share the legacy snapshot's first-write bound."""
+    layout, _ = _prepared_adoption(tmp_path, monkeypatch)
+    target = layout.stage_provenance_path(PipelineStage.RAW_INPUTS)
+    genuine = target.read_bytes()
+    before = _authority_bytes(layout)
+    original = workspace_module._assert_legacy_authority_unchanged
+    attacked = False
+
+    def mutate_after_recheck(*args: Any, **kwargs: Any) -> None:
+        nonlocal attacked
+        original(*args, **kwargs)
+        if not attacked:
+            target.write_bytes(b'{"corrupt":true}\n')
+            attacked = True
+
+    monkeypatch.setattr(
+        workspace_module,
+        "_assert_legacy_authority_unchanged",
+        mutate_after_recheck,
+    )
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+    try:
+        with pytest.raises(EvaluationAssetIntegrityError):
+            layout.recover()
+    finally:
+        target.write_bytes(genuine)
+
+    assert attacked
+    assert _authority_bytes(layout) == before
+    assert not any(layout.receipts_root.glob("*.json"))
+
+
+def test_adoption_recovery_binds_snapshot_inside_first_roll_forward_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A swap inside roll-forward cannot precede adoption manifests or receipts."""
+    layout, _ = _prepared_adoption(tmp_path, monkeypatch)
+    target = layout.historical_feedback_path
+    genuine = target.read_bytes()
+    before = _authority_bytes(layout)
+    original = workspace_module.write_local_authority_json
+    writes: list[Path] = []
+    attacked = False
+
+    def mutate_inside_first_bound_write(
+        path: Path,
+        trusted_root: Path,
+        payload: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> None:
+        nonlocal attacked
+        if not attacked:
+            target.write_bytes(genuine + b"\n")
+            attacked = True
+        original(path, trusted_root, payload, **kwargs)
+        writes.append(path)
+
+    monkeypatch.setattr(
+        workspace_module,
+        "write_local_authority_json",
+        mutate_inside_first_bound_write,
+    )
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+    try:
+        with pytest.raises(EvaluationAssetIntegrityError):
+            layout.recover()
+    finally:
+        target.write_bytes(genuine)
+
+    assert attacked
+    assert writes == []
+    assert _authority_bytes(layout) == before
+    assert not any(layout.receipts_root.glob("*.json"))
+
+
+def test_adoption_recovery_rejects_foreign_generation_without_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prepared adoption recovery retains one closed generation inventory."""
+    layout, _ = _prepared_adoption(tmp_path, monkeypatch)
+    foreign = layout.generations_root / f"sha256-{'0' * 64}"
+    foreign.mkdir()
+    (foreign / "foreign.txt").write_text("foreign", encoding="utf-8")
+    before = _authority_bytes(layout)
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        layout.recover()
+
+    assert _authority_bytes(layout) == before
+    assert not any(layout.receipts_root.glob("*.json"))
+    assert foreign.is_dir()
+
+
 def test_recovery_journal_rejects_commit_that_precedes_its_prepare(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5941,12 +7042,111 @@ def test_checkpoint_rebuild_recovery_marks_stale_suffix_nonauthoritative(
     assert rebuild_events[0]["event"] == "checkpoint_rebuild_started"
 
 
-def test_legacy_adoption_builds_honest_receipts_then_releases(tmp_path: Path) -> None:
+def test_revision_cleanup_never_follows_a_swapped_stage_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalidation cannot delete artifacts through a raced ancestor symlink."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+
+    def stop_at_completed_handoff(name: str) -> None:
+        if name == "after_stage_8_receipt_state_complete":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", stop_at_completed_handoff)
+    with pytest.raises(_InjectedFault):
+        pipeline.run()
+    layout = pipeline.layout
+    stage_directory = layout.stage_directory(PipelineStage.COVERAGE_DECISIONS)
+    parked = tmp_path / "parked-stage-five"
+    external = tmp_path / "external-stage-five"
+    external.mkdir()
+    victim = external / "intent_matches.jsonl"
+    victim.write_bytes(b"KEEP")
+    swapped = False
+
+    def swap_before_cleanup(name: str) -> None:
+        nonlocal swapped
+        if name != "before_cleanup":
+            return
+        stage_directory.rename(parked)
+        stage_directory.symlink_to(external, target_is_directory=True)
+        swapped = True
+
+    monkeypatch.setattr(workspace_module, "_fault_point", swap_before_cleanup)
+
+    with pytest.raises(ValueError, match="exact directory"):
+        layout.revise_config({"match_threshold": 0.5})
+
+    assert swapped
+    assert victim.read_bytes() == b"KEEP"
+    assert stage_directory.is_symlink()
+    assert parked.is_dir()
+
+
+def test_authority_cleanup_rejects_a_replaced_leaf_without_deleting_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cleanup quarantines by identity and restores a raced replacement leaf."""
+    trusted_root = tmp_path / "trusted"
+    trusted_root.mkdir()
+    target = trusted_root / "target.jsonl"
+    target.write_bytes(b"OLD\n")
+    parked = tmp_path / "parked-target.jsonl"
+    victim = tmp_path / "victim.jsonl"
+    victim.write_bytes(b"KEEP\n")
+    victim_identity = victim.stat()
+    original = control_jsonl_module.rename_noreplace_at
+    swapped = False
+
+    def race_cleanup(
+        directory_descriptor: int,
+        source: str,
+        destination: str,
+        **kwargs: Any,
+    ) -> bool:
+        nonlocal swapped
+        if not swapped:
+            target.rename(parked)
+            victim.rename(target)
+            swapped = True
+        return original(
+            directory_descriptor,
+            source,
+            destination,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(
+        control_jsonl_module,
+        "rename_noreplace_at",
+        race_cleanup,
+    )
+
+    with pytest.raises(ValueError, match="expected identity"):
+        control_jsonl_module.remove_local_authority_file(target, trusted_root)
+
+    assert swapped
+    assert target.read_bytes() == b"KEEP\n"
+    assert target.stat().st_ino == victim_identity.st_ino
+    assert parked.read_bytes() == b"OLD\n"
+
+
+@pytest.mark.parametrize("schema_mode", ["removed", "explicit-v1"])
+def test_legacy_adoption_builds_honest_receipts_then_releases(
+    tmp_path: Path,
+    schema_mode: str,
+) -> None:
     """Explicit adoption converts only a fully validated legacy completion."""
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
+    if schema_mode == "explicit-v1":
+        raw_state = json.loads(layout.state_path.read_text(encoding="utf-8"))
+        raw_state["schema_version"] = "fapo-evaluation-asset-state-v1"
+        artifact_io.atomic_write_json(layout.state_path, raw_state)
 
     adopted = layout.adopt_legacy()
 
@@ -6048,6 +7248,628 @@ def test_legacy_adoption_rejects_parseable_semantic_corruption_without_writes(
     assert layout.load_state().legacy_completed
     assert not layout.recovery_journal_path.exists()
     assert not any(layout.receipts_root.glob("*.json"))
+
+
+@pytest.mark.parametrize("replacement_kind", ["symlink", "regular"])
+def test_legacy_adoption_semantic_reads_reject_validation_seam_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement_kind: str,
+) -> None:
+    """Semantic adoption reads cannot follow authority swapped after syntax checks."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+    target = layout.artifact_path(
+        PipelineStage.PREPARED_INPUTS,
+        "normalized_feedback.jsonl",
+    )
+    genuine = target.read_bytes()
+    corrupted = _read_jsonl(target)
+    corrupted[0]["user_input"] = "Semantically invalid local authority."
+    artifact_io.atomic_write_jsonl(target, corrupted)
+    external = tmp_path / "external-normalized-feedback.jsonl"
+    artifact_io.atomic_write_text(external, genuine.decode("utf-8"))
+    parked = target.with_name("normalized_feedback.parked.jsonl")
+    before = _authority_bytes(layout)
+    original_semantic_validation = (
+        durability_module.validate_legacy_stage_semantics
+    )
+    swapped = False
+
+    def validate_while_swapped(
+        candidate_layout: EvaluationAssetLayout,
+        artifact_profiles: Mapping[Any, str],
+        *,
+        artifact_snapshot: Mapping[Path, bytes],
+    ) -> None:
+        nonlocal swapped
+        target.rename(parked)
+        if replacement_kind == "symlink":
+            target.symlink_to(external)
+        else:
+            artifact_io.atomic_write_text(target, genuine.decode("utf-8"))
+        swapped = True
+        try:
+            original_semantic_validation(
+                candidate_layout,
+                artifact_profiles,
+                artifact_snapshot=artifact_snapshot,
+            )
+        finally:
+            target.unlink()
+            parked.rename(target)
+
+    monkeypatch.setattr(
+        durability_module,
+        "validate_legacy_stage_semantics",
+        validate_while_swapped,
+    )
+
+    with pytest.raises(EvaluationAssetLegacyError):
+        layout.adopt_legacy()
+
+    assert swapped
+    assert _authority_bytes(layout) == before
+    assert layout.load_state().legacy_completed
+    assert not layout.recovery_journal_path.exists()
+    assert not any(layout.receipts_root.glob("*.json"))
+    assert not layout.release_pointer_path.exists()
+
+
+@pytest.mark.parametrize("replacement_kind", ["regular", "symlink", "appeared"])
+def test_legacy_adoption_rechecks_the_complete_snapshot_before_first_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement_kind: str,
+) -> None:
+    """Every captured byte and absent alternative is rechecked at write boundary."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    if replacement_kind == "appeared":
+        _convert_to_legacy_rubric_profile(layout)
+        (layout.stages_root / "03_evaluation_guidelines").rename(
+            layout.stages_root / "03_rubric_extraction"
+        )
+    _downgrade_to_legacy_completed(layout)
+    present_target = layout.artifact_path(
+        PipelineStage.PREPARED_INPUTS,
+        "normalized_feedback.jsonl",
+    )
+    absent_target = (
+        layout.stages_root
+        / "03_evaluation_guidelines"
+        / "candidate_guidelines.jsonl"
+    )
+    target = absent_target if replacement_kind == "appeared" else present_target
+    parked = present_target.with_name("normalized_feedback.pre-write.parked")
+    external = tmp_path / "external-pre-write.jsonl"
+    external.write_bytes(present_target.read_bytes())
+    before = _authority_bytes(layout)
+    original = workspace_module._validate_asset_write_targets
+    validations = 0
+    swapped = False
+
+    def swap_after_target_validation(*args: Any, **kwargs: Any) -> None:
+        nonlocal validations, swapped
+        original(*args, **kwargs)
+        validations += 1
+        if validations != 3:
+            return
+        swapped = True
+        if replacement_kind == "appeared":
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b'{"unexpected":true}\n')
+            return
+        present_target.rename(parked)
+        if replacement_kind == "symlink":
+            present_target.symlink_to(external)
+        else:
+            present_target.write_bytes(b'{"semantically":"changed"}\n')
+
+    monkeypatch.setattr(
+        workspace_module,
+        "_validate_asset_write_targets",
+        swap_after_target_validation,
+    )
+    try:
+        with pytest.raises(EvaluationAssetLegacyError):
+            layout.adopt_legacy()
+    finally:
+        if replacement_kind == "appeared":
+            target.unlink(missing_ok=True)
+            target.parent.rmdir()
+        elif swapped:
+            present_target.unlink(missing_ok=True)
+            parked.rename(present_target)
+
+    assert validations == 3
+    assert swapped
+    assert _authority_bytes(layout) == before
+    assert not layout.recovery_journal_path.exists()
+    assert not any(layout.receipts_root.glob("*.json"))
+
+
+def test_legacy_adoption_binds_snapshot_inside_first_authority_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A swap inside the first adoption writer leaves no adopted authority."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+    target = layout.historical_feedback_path
+    genuine = target.read_bytes()
+    before = _authority_bytes(layout)
+    first_provenance = layout.stage_provenance_path(PipelineStage.RAW_INPUTS)
+    original = workspace_module.write_local_authority_json
+    writes: list[Path] = []
+    attacked = False
+
+    def mutate_inside_first_write(
+        path: Path,
+        trusted_root: Path,
+        payload: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> None:
+        nonlocal attacked
+        if path == first_provenance and not attacked:
+            target.write_bytes(genuine + b"\n")
+            attacked = True
+        original(path, trusted_root, payload, **kwargs)
+        writes.append(path)
+
+    monkeypatch.setattr(
+        workspace_module,
+        "write_local_authority_json",
+        mutate_inside_first_write,
+    )
+    try:
+        with pytest.raises((EvaluationAssetIntegrityError, EvaluationAssetLegacyError)):
+            layout.adopt_legacy()
+    finally:
+        target.write_bytes(genuine)
+
+    assert attacked
+    assert writes == []
+    assert _authority_bytes(layout) == before
+    assert not any(layout.receipts_root.glob("*.json"))
+
+
+@pytest.mark.parametrize("node", ["receipt", "event"])
+@pytest.mark.parametrize("replacement_kind", ["regular", "symlink"])
+def test_legacy_adoption_rechecks_native_controls_before_first_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    node: str,
+    replacement_kind: str,
+) -> None:
+    """Late native receipt/event authority cannot be overwritten by adoption."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+    target = (
+        layout.receipt_path(PipelineStage.RAW_INPUTS)
+        if node == "receipt"
+        else layout.events_path
+    )
+    parked = target.with_name(f"{target.name}.native-control.parked")
+    external = tmp_path / f"external-{node}.jsonl"
+    native_bytes = (
+        b'{"native":"appeared"}\n'
+        if node == "receipt"
+        else (
+            json.dumps(
+                {
+                    "timestamp": "2026-08-20T00:00:00+00:00",
+                    "event": "pipeline_released",
+                    "tenant_id": layout.tenant_id,
+                    "asset_id": layout.asset_id,
+                    "details": {},
+                    "operation_id": "0" * 32,
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+            + b"\n"
+        )
+    )
+    external.write_bytes(native_bytes)
+    before = _authority_bytes(layout)
+    original = workspace_module._validate_asset_write_targets
+    validations = 0
+    swapped = False
+
+    def install_native_control(*args: Any, **kwargs: Any) -> None:
+        nonlocal validations, swapped
+        original(*args, **kwargs)
+        validations += 1
+        if validations != 3:
+            return
+        if target.exists() or target.is_symlink():
+            target.rename(parked)
+        if replacement_kind == "symlink":
+            target.symlink_to(external)
+        else:
+            target.write_bytes(native_bytes)
+        swapped = True
+
+    monkeypatch.setattr(
+        workspace_module,
+        "_validate_asset_write_targets",
+        install_native_control,
+    )
+    try:
+        with pytest.raises(EvaluationAssetLegacyError):
+            layout.adopt_legacy()
+    finally:
+        if swapped:
+            target.unlink(missing_ok=True)
+            if parked.exists():
+                parked.rename(target)
+
+    assert validations == 3
+    assert swapped
+    assert _authority_bytes(layout) == before
+    assert not layout.recovery_journal_path.exists()
+
+
+def test_legacy_adoption_rejects_foreign_stage_provenance_without_writes(
+    tmp_path: Path,
+) -> None:
+    """Only exact retry-owned pre-WAL provenance can precede adoption."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+    artifact_io.atomic_write_json(
+        layout.stage_provenance_path(PipelineStage.RAW_INPUTS),
+        {},
+    )
+    before = _authority_bytes(layout)
+
+    with pytest.raises(EvaluationAssetLegacyError):
+        layout.adopt_legacy()
+
+    assert _authority_bytes(layout) == before
+    assert not layout.recovery_journal_path.exists()
+
+
+def test_legacy_adoption_rejects_foreign_generation_without_writes(
+    tmp_path: Path,
+) -> None:
+    """A foreign generation is native authority, not a legacy retry artifact."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+    foreign = layout.generations_root / f"sha256-{'0' * 64}"
+    foreign.mkdir(parents=True)
+    (foreign / "foreign.txt").write_text("foreign", encoding="utf-8")
+    before = _authority_bytes(layout)
+
+    with pytest.raises(EvaluationAssetLegacyError):
+        layout.adopt_legacy()
+
+    assert _authority_bytes(layout) == before
+    assert foreign.is_dir()
+    assert not layout.recovery_journal_path.exists()
+
+
+@pytest.mark.parametrize("replacement_kind", ["regular", "symlink"])
+def test_legacy_adoption_rechecks_generation_inventory_before_first_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement_kind: str,
+) -> None:
+    """A generation appearing after validation cannot precede adoption writes."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+    foreign = layout.generations_root / f"sha256-{'0' * 64}"
+    external = tmp_path / "external-generation"
+    external.mkdir()
+    (external / "foreign.txt").write_text("foreign", encoding="utf-8")
+    before = _authority_bytes(layout)
+    original = workspace_module._validate_asset_write_targets
+    validations = 0
+
+    def install_foreign_generation(*args: Any, **kwargs: Any) -> None:
+        nonlocal validations
+        original(*args, **kwargs)
+        validations += 1
+        if validations != 3:
+            return
+        foreign.parent.mkdir(parents=True, exist_ok=True)
+        if replacement_kind == "symlink":
+            foreign.symlink_to(external, target_is_directory=True)
+        else:
+            foreign.mkdir()
+            (foreign / "foreign.txt").write_text("foreign", encoding="utf-8")
+
+    monkeypatch.setattr(
+        workspace_module,
+        "_validate_asset_write_targets",
+        install_foreign_generation,
+    )
+    try:
+        with pytest.raises(EvaluationAssetLegacyError):
+            layout.adopt_legacy()
+    finally:
+        if foreign.is_symlink():
+            foreign.unlink()
+        elif foreign.exists():
+            shutil.rmtree(foreign)
+
+    assert validations == 3
+    assert _authority_bytes(layout) == before
+    assert not layout.recovery_journal_path.exists()
+
+
+def test_legacy_adoption_rechecks_final_generation_bytes_before_first_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validated retry generation members remain frozen through the write boundary."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+
+    def stop_after_generation_install(name: str) -> None:
+        if name == "after_generation_install":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(
+        workspace_module,
+        "_fault_point",
+        stop_after_generation_install,
+    )
+    with pytest.raises(_InjectedFault, match="after_generation_install"):
+        layout.adopt_legacy()
+    generation = next(
+        path
+        for path in layout.generations_root.iterdir()
+        if path.name.startswith("sha256-")
+    )
+    target = generation / "train.jsonl"
+    genuine = target.read_bytes()
+    original_validation = workspace_module.validate_historical_generation
+    validation_calls = 0
+    attacked = False
+
+    def corrupt_after_final_validation(*args: Any, **kwargs: Any) -> Any:
+        nonlocal validation_calls, attacked
+        result = original_validation(*args, **kwargs)
+        validation_calls += 1
+        if validation_calls == 2:
+            target.write_bytes(b'{"corrupt":true}\n')
+            attacked = True
+        return result
+
+    writes: list[Path] = []
+    original_write = EvaluationAssetLayout._write_authority_json
+
+    def record_write(
+        self: EvaluationAssetLayout,
+        path: Path,
+        payload: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> None:
+        writes.append(path)
+        original_write(self, path, payload, **kwargs)
+
+    monkeypatch.setattr(
+        workspace_module,
+        "validate_historical_generation",
+        corrupt_after_final_validation,
+    )
+    monkeypatch.setattr(EvaluationAssetLayout, "_write_authority_json", record_write)
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+    try:
+        with pytest.raises(EvaluationAssetLegacyError):
+            layout.adopt_legacy()
+    finally:
+        target.write_bytes(genuine)
+
+    assert validation_calls == 2
+    assert attacked
+    assert writes == []
+    assert not layout.recovery_journal_path.exists()
+
+
+def test_legacy_adoption_rechecks_staged_generation_bytes_before_first_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allowed partial retry staging is unchanged at the first-write boundary."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+
+    def stop_after_train(name: str) -> None:
+        if name == "after_generation_split_train":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", stop_after_train)
+    with pytest.raises(_InjectedFault, match="after_generation_split_train"):
+        layout.adopt_legacy()
+    staging = next(layout.generations_root.glob(".*.tmp"))
+    target = staging / "train.jsonl"
+    genuine = target.read_bytes()
+    original_capture = workspace_module._capture_legacy_generation_inventory
+    capture_calls = 0
+    attacked = False
+
+    def corrupt_after_final_capture(*args: Any, **kwargs: Any) -> Any:
+        nonlocal capture_calls, attacked
+        capture_calls += 1
+        result = original_capture(*args, **kwargs)
+        if capture_calls == 2:
+            target.write_bytes(b'{"corrupt":true}\n')
+            attacked = True
+        return result
+
+    writes: list[Path] = []
+    original_write = EvaluationAssetLayout._write_authority_json
+
+    def record_write(
+        self: EvaluationAssetLayout,
+        path: Path,
+        payload: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> None:
+        writes.append(path)
+        original_write(self, path, payload, **kwargs)
+
+    monkeypatch.setattr(
+        workspace_module,
+        "_capture_legacy_generation_inventory",
+        corrupt_after_final_capture,
+    )
+    monkeypatch.setattr(EvaluationAssetLayout, "_write_authority_json", record_write)
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+    try:
+        with pytest.raises(EvaluationAssetLegacyError):
+            layout.adopt_legacy()
+    finally:
+        target.write_bytes(genuine)
+
+    assert capture_calls == 3
+    assert attacked
+    assert writes == []
+    assert not layout.recovery_journal_path.exists()
+
+
+def test_legacy_adoption_counts_use_the_validated_artifact_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Optional artifact presence cannot change between semantics and counts."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+    target = layout.artifact_path(
+        PipelineStage.RUBRIC_EXTRACTION,
+        "evaluation_guidelines.jsonl",
+    )
+    expected_count = len(_read_jsonl(target))
+    parked = target.with_name("evaluation_guidelines.parked.jsonl")
+    original = durability_module._derive_legacy_counts
+    hidden = False
+
+    def derive_while_hidden(
+        candidate_layout: EvaluationAssetLayout,
+        split_counts: Mapping[str, int],
+        artifact_snapshot: Mapping[Path, bytes] | None = None,
+    ) -> dict[str, int]:
+        nonlocal hidden
+        target.rename(parked)
+        hidden = True
+        try:
+            return original(
+                candidate_layout,
+                split_counts,
+                artifact_snapshot,
+            )
+        finally:
+            parked.rename(target)
+
+    monkeypatch.setattr(
+        durability_module,
+        "_derive_legacy_counts",
+        derive_while_hidden,
+    )
+
+    adopted = layout.adopt_legacy()
+
+    receipt = json.loads(
+        layout.receipt_path(PipelineStage.RUBRIC_EXTRACTION).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert hidden
+    assert adopted.counts["evaluation_guidelines"] == expected_count
+    assert receipt["counts"]["evaluation_guidelines"] == expected_count
+
+
+def test_legacy_extension_semantics_use_the_same_captured_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Extension semantics cannot validate bytes different from adopted bytes."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    parent = pipeline.layout
+    child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
+    child.initialize_extension(
+        parent,
+        additional_feedback=_write_additional_feedback(parent.tenants_root),
+        additional_unlabeled=None,
+        clustering_mode="keep",
+    )
+    EvaluationAssetPipeline(
+        child,
+        rubric_provider=_SuccessfulRubricProvider(),
+        embedding_provider=_SuccessfulEmbeddingProvider(),
+    ).run()
+    _downgrade_to_legacy_completed(child)
+    dataset_manifest_path = child.artifact_path(
+        PipelineStage.DATASET_SPLITS,
+        "dataset_manifest.json",
+    )
+    targets = (
+        child.lineage_path,
+        child.manifest_path,
+        dataset_manifest_path,
+    )
+    genuine = {path: path.read_bytes() for path in targets}
+    forged_lineage = json.loads(genuine[child.lineage_path])
+    forged_lineage["creation_mode"] = "forged-mode"
+    artifact_io.atomic_write_json(child.lineage_path, forged_lineage)
+    for path in targets[1:]:
+        manifest = json.loads(genuine[path])
+        manifest["lineage"] = forged_lineage
+        artifact_io.atomic_write_json(path, manifest)
+    before = _authority_bytes(child)
+    original = lineage_validation_module.validate_extension_evidence
+    swaps = 0
+
+    def validate_while_genuine(*args: Any, **kwargs: Any) -> Any:
+        nonlocal swaps
+        parked: list[tuple[Path, Path]] = []
+        for path in targets:
+            saved = path.with_name(f"{path.name}.forged")
+            path.rename(saved)
+            artifact_io.atomic_write_text(path, genuine[path].decode("utf-8"))
+            parked.append((path, saved))
+        swaps += 1
+        try:
+            return original(*args, **kwargs)
+        finally:
+            for path, saved in parked:
+                path.unlink()
+                saved.rename(path)
+
+    monkeypatch.setattr(
+        lineage_validation_module,
+        "validate_extension_evidence",
+        validate_while_genuine,
+    )
+
+    with pytest.raises(EvaluationAssetLegacyError):
+        child.adopt_legacy()
+
+    assert swaps >= 1
+    assert _authority_bytes(child) == before
+    assert not child.recovery_journal_path.exists()
+    assert not any(child.receipts_root.glob("*.json"))
 
 
 @pytest.mark.parametrize(
@@ -6732,6 +8554,67 @@ def test_legacy_adoption_recovers_installed_nonauthoritative_receipts(
     assert phases == ["prepared", "committed"]
 
 
+@pytest.mark.parametrize("replacement_kind", ["regular", "symlink"])
+def test_legacy_adoption_recovery_rechecks_snapshot_before_roll_forward(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement_kind: str,
+) -> None:
+    """Recovery cannot authenticate one snapshot and roll forward another."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+
+    def stop_after_prepare(name: str) -> None:
+        if name == "after_prepared_journal":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", stop_after_prepare)
+    with pytest.raises(_InjectedFault, match="after_prepared_journal"):
+        layout.adopt_legacy()
+    target = layout.artifact_path(
+        PipelineStage.PREPARED_INPUTS,
+        "normalized_feedback.jsonl",
+    )
+    parked = target.with_name("normalized_feedback.recovery.parked")
+    external = tmp_path / "external-recovery.jsonl"
+    external.write_bytes(target.read_bytes())
+    before = _authority_bytes(layout)
+    original = workspace_module.validate_legacy_release_candidate
+    swapped = False
+
+    def swap_after_snapshot(*args: Any, **kwargs: Any) -> dict[str, int]:
+        nonlocal swapped
+        result = original(*args, **kwargs)
+        target.rename(parked)
+        if replacement_kind == "symlink":
+            target.symlink_to(external)
+        else:
+            target.write_bytes(b'{"semantically":"changed"}\n')
+        swapped = True
+        return result
+
+    monkeypatch.setattr(
+        workspace_module,
+        "validate_legacy_release_candidate",
+        swap_after_snapshot,
+    )
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+    try:
+        with pytest.raises(EvaluationAssetIntegrityError):
+            layout.recover()
+    finally:
+        if swapped:
+            target.unlink(missing_ok=True)
+            parked.rename(target)
+
+    assert swapped
+    assert _authority_bytes(layout) == before
+    rows = _read_jsonl(layout.recovery_journal_path)
+    assert [row["phase"] for row in rows] == ["prepared"]
+
+
 @pytest.mark.parametrize(
     "fault_name",
     [
@@ -6978,6 +8861,97 @@ def test_extension_rejects_corrupt_parent_before_child_creation(
     assert not child.root.exists()
 
 
+def test_extension_rejects_parent_source_swap_after_release_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Child copies remain tied to the exact parent bytes release verification saw."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    parent = pipeline.layout
+    child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
+    additional = _write_additional_feedback(parent.tenants_root)
+    target = parent.historical_feedback_path
+    genuine = target.read_bytes()
+    raced = _read_jsonl(target)
+    raced[0]["user_input"] = "Different but contract-valid parent input."
+    original = workspace_module.released_parent_evidence
+    attacked = False
+
+    def swap_after_verification(*args: Any, **kwargs: Any) -> dict[str, str]:
+        nonlocal attacked
+        evidence = original(*args, **kwargs)
+        if not attacked:
+            artifact_io.atomic_write_jsonl(target, raced)
+            attacked = True
+        return evidence
+
+    monkeypatch.setattr(
+        workspace_module,
+        "released_parent_evidence",
+        swap_after_verification,
+    )
+    try:
+        with pytest.raises(EvaluationAssetIntegrityError):
+            child.initialize_extension(
+                parent,
+                additional_feedback=additional,
+                additional_unlabeled=None,
+                clustering_mode="keep",
+            )
+    finally:
+        target.write_bytes(genuine)
+
+    assert attacked
+    assert not child.root.exists()
+
+
+def test_extension_rechecks_full_parent_authority_at_first_write_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Child creation is bound to all authority authenticating its parent."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    parent = pipeline.layout
+    child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
+    additional = _write_additional_feedback(parent.tenants_root)
+    target = parent.build_provenance_path
+    genuine = target.read_bytes()
+    original = EvaluationAssetLayout.ensure
+    attacked = False
+
+    def mutate_at_first_write_boundary(
+        active_layout: EvaluationAssetLayout,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        nonlocal attacked
+        if active_layout is child and not attacked:
+            target.write_bytes(genuine + b"\n")
+            attacked = True
+        original(active_layout, *args, **kwargs)
+
+    monkeypatch.setattr(
+        EvaluationAssetLayout,
+        "ensure",
+        mutate_at_first_write_boundary,
+    )
+    try:
+        with pytest.raises(EvaluationAssetIntegrityError):
+            child.initialize_extension(
+                parent,
+                additional_feedback=additional,
+                additional_unlabeled=None,
+                clustering_mode="keep",
+            )
+    finally:
+        target.write_bytes(genuine)
+
+    assert attacked
+    assert not child.root.exists()
+
+
 def test_extension_points_legacy_parent_to_adoption_without_child_creation(
     tmp_path: Path,
 ) -> None:
@@ -7033,6 +9007,52 @@ def test_extension_records_verified_parent_evidence_and_is_self_contained(
 
     assert released.status == "released"
     verify_released_asset(child, released)
+
+
+@pytest.mark.parametrize("parent_kind", ["native", "adopted"])
+def test_extension_creation_uses_frozen_released_parent_stage_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    parent_kind: str,
+) -> None:
+    """Removed current member names cannot strand a released extension parent."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    parent = pipeline.layout
+    if parent_kind == "adopted":
+        _downgrade_to_legacy_completed(parent)
+        parent.adopt_legacy()
+    child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
+    for module in (lineage_validation_module, workspace_module):
+        monkeypatch.setattr(
+            module,
+            "PipelineStage",
+            _RemovedHistoricalPipelineStage,
+        )
+
+    state = child.initialize_extension(
+        parent,
+        additional_feedback=_write_additional_feedback(parent.tenants_root),
+        additional_unlabeled=None,
+        clustering_mode="keep",
+        config_updates=(
+            {
+                "rubric_provider": "chosen-rubric-provider",
+                "rubric_model": "chosen-rubric-model",
+                "embedding_provider": "chosen-embedding-provider",
+                "embedding_model": "chosen-embedding-model",
+            }
+            if parent_kind == "adopted"
+            else None
+        ),
+    )
+
+    assert state.status == "draft"
+    assert json.loads(child.lineage_path.read_text(encoding="utf-8"))[
+        "parent_asset_id"
+    ] == parent.asset_id
+    assert child.historical_feedback_path.is_file()
+    assert child.historical_parent_snapshot.is_dir()
 
 
 def test_extension_receipts_anchor_lineage_and_every_parent_snapshot_input(
@@ -7097,6 +9117,184 @@ def test_extension_receipts_anchor_lineage_and_every_parent_snapshot_input(
         for item in stage_eight["outputs"]
         if item.get("required") is True
     }
+
+
+def test_historical_extension_override_map_is_closed_and_exhaustive(
+    tmp_path: Path,
+) -> None:
+    """A partial frozen map cannot silently fall back to live authority reads."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    parent = pipeline.layout
+    child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
+    child.initialize_extension(
+        parent,
+        additional_feedback=_write_additional_feedback(parent.tenants_root),
+        additional_unlabeled=None,
+        clustering_mode="keep",
+    )
+    EvaluationAssetPipeline(
+        child,
+        rubric_provider=_SuccessfulRubricProvider(),
+        embedding_provider=_SuccessfulEmbeddingProvider(),
+    ).run()
+
+    with pytest.raises(ValueError, match="snapshot is incomplete"):
+        lineage_validation_module.validate_extension_evidence(
+            child,
+            require_asset_manifest=True,
+            historical=True,
+            artifact_overrides={
+                child.lineage_path: child.lineage_path.read_bytes(),
+                child.reuse_manifest_path: child.reuse_manifest_path.read_bytes(),
+            },
+        )
+
+
+@pytest.mark.parametrize("release_kind", ["native", "adopted"])
+def test_released_extension_uses_frozen_stage_profile_after_registry_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    release_kind: str,
+) -> None:
+    """Live stage changes cannot strand native or adopted extension history."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    parent = pipeline.layout
+    child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
+    child.initialize_extension(
+        parent,
+        additional_feedback=_write_additional_feedback(parent.tenants_root),
+        additional_unlabeled=None,
+        clustering_mode="keep",
+    )
+    EvaluationAssetPipeline(
+        child,
+        rubric_provider=_SuccessfulRubricProvider(),
+        embedding_provider=_SuccessfulEmbeddingProvider(),
+    ).run()
+    if release_kind == "adopted":
+        _downgrade_to_legacy_completed(child)
+        child.adopt_legacy()
+    for module in (
+        evaluation_asset_models,
+        durability_module,
+        journal_validation_module,
+    ):
+        monkeypatch.setattr(module, "PipelineStage", _DriftedPipelineStage)
+    for module in (lineage_validation_module, workspace_module):
+        monkeypatch.setattr(
+            module,
+            "PipelineStage",
+            _RemovedHistoricalPipelineStage,
+        )
+
+    released = child.load_state()
+
+    assert released.status == "released"
+    assert "future_stage" not in {item.stage for item in released.stages}
+    verify_released_asset(child, released)
+
+
+@pytest.mark.parametrize("phase", ["completed-handoff", "released"])
+def test_historical_provenance_ignores_removed_live_stage_specifications(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completed_handoff_template: Path,
+    released_asset_template: Path,
+    phase: str,
+) -> None:
+    """Frozen provenance validation never indexes the live authoring specs."""
+    source = (
+        completed_handoff_template
+        if phase == "completed-handoff"
+        else released_asset_template
+    )
+    tenants_root = tmp_path / "tenants"
+    shutil.copytree(source, tenants_root)
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    state = layout.load_state()
+    monkeypatch.setattr(durability_module, "STAGE_SPECIFICATIONS", {})
+
+    if phase == "completed-handoff":
+        durability_module.verify_completed_release_candidate(layout, state)
+    else:
+        verify_released_asset(layout, state)
+
+
+def test_completed_handoff_uses_one_closed_authority_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completed_handoff_template: Path,
+) -> None:
+    """A semantically identical control rewrite during handoff verification fails."""
+    tenants_root = tmp_path / "tenants"
+    shutil.copytree(completed_handoff_template, tenants_root)
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    state = layout.load_state()
+    receipt_path = layout.receipt_path(
+        journal_transitions_module.PERSISTED_STAGE_VALUES_V2[-1]
+    )
+    original = durability_module._validate_stage_provenance_evidence
+    mutated = False
+
+    def mutate_after_snapshot(*args: Any, **kwargs: Any) -> Any:
+        nonlocal mutated
+        if not mutated:
+            payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+            receipt_path.write_text(
+                json.dumps(payload, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            mutated = True
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        durability_module,
+        "_validate_stage_provenance_evidence",
+        mutate_after_snapshot,
+    )
+
+    with pytest.raises(EvaluationAssetIntegrityError, match="changed"):
+        durability_module.verify_completed_release_candidate(layout, state)
+
+    assert mutated
+
+
+def test_historical_profile_import_ignores_removed_live_stage_members() -> None:
+    """A future authoring enum cannot prevent historical verifier import."""
+    script = """
+import importlib
+from enum import Enum
+from src.hephaestus.evaluation_assets import models
+
+class FutureStage(str, Enum):
+    FUTURE = "future"
+
+models.PipelineStage = FutureStage
+from src.hephaestus.evaluation_assets import durability
+durability = importlib.reload(durability)
+
+assert tuple(stage.value for stage in durability._HISTORICAL_PIPELINE_STAGES_V1) == (
+    "raw_inputs",
+    "prepared_inputs",
+    "rubric_extraction",
+    "intent_clustering",
+    "coverage_decisions",
+    "label_inference",
+    "synthetic_coverage",
+    "dataset_splits",
+)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize(
@@ -7317,16 +9515,29 @@ def test_extension_acquires_parent_and_child_locks_in_absolute_sorted_order(
     acquired: list[str] = []
 
     class RecordingLock:
-        def __init__(self, path: str, timeout: float) -> None:
+        def __init__(self, path: Path) -> None:
             self.path = path
 
-        def acquire(self) -> None:
-            acquired.append(self.path)
+        def __enter__(self) -> None:
+            acquired.append(str(self.path.absolute()))
 
-        def release(self) -> None:
+        def __exit__(self, *args: Any) -> None:
             pass
 
-    monkeypatch.setattr(workspace_module, "FileLock", RecordingLock)
+    def recording_lock(
+        path: Path,
+        trusted_root: Path,
+        *,
+        timeout: float,
+    ) -> RecordingLock:
+        del trusted_root, timeout
+        return RecordingLock(path)
+
+    monkeypatch.setattr(
+        workspace_module,
+        "acquire_local_authority_lock",
+        recording_lock,
+    )
 
     child.initialize_extension(
         parent,
@@ -7339,6 +9550,70 @@ def test_extension_acquires_parent_and_child_locks_in_absolute_sorted_order(
         [str(parent.lock_path.absolute()), str(child.lock_path.absolute())]
     )
     assert acquired == expected
+
+
+@pytest.mark.parametrize("linked_node", ["directory", "leaf"])
+def test_asset_lock_rejects_symlinks_without_external_writes(
+    tmp_path: Path,
+    linked_node: str,
+) -> None:
+    """Lock acquisition never follows a collection or leaf symlink."""
+    tenants_root = tmp_path / "tenants"
+    feedback, unlabeled = _write_input_pair(tenants_root)
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    external = tmp_path / "external-locks"
+    external.mkdir()
+    victim = external / "v1.lock"
+    victim.write_bytes(b"KEEP")
+    if linked_node == "directory":
+        layout.assets_root.mkdir(parents=True)
+        layout.lock_path.parent.symlink_to(external, target_is_directory=True)
+    else:
+        layout.lock_path.parent.mkdir(parents=True)
+        layout.lock_path.symlink_to(victim)
+
+    with pytest.raises(EvaluationAssetIntegrityError, match="unsafe"):
+        layout.initialize(
+            EvaluationAssetConfig(tenant_id="tenant_a"),
+            feedback,
+            unlabeled,
+        )
+
+    assert victim.read_bytes() == b"KEEP"
+    assert not layout.root.exists()
+
+
+def test_ensure_rejects_asset_root_swap_before_directory_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Canonical directory creation cannot escape through a raced asset root."""
+    tenants_root = tmp_path / "tenants"
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    layout.assets_root.mkdir(parents=True)
+    external = tmp_path / "external-asset"
+    external.mkdir()
+    original = workspace_module.open_local_authority_directory
+    swapped = False
+
+    def swap_before_bound_creation(*args: Any, **kwargs: Any) -> Any:
+        nonlocal swapped
+        if not swapped:
+            layout.root.symlink_to(external, target_is_directory=True)
+            swapped = True
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        workspace_module,
+        "open_local_authority_directory",
+        swap_before_bound_creation,
+    )
+
+    with pytest.raises(ValueError, match="exact directory"):
+        layout.ensure()
+
+    assert swapped
+    assert list(external.iterdir()) == []
 
 
 class _InjectedFault(RuntimeError):
@@ -8245,6 +10520,606 @@ def test_native_release_rejects_dangling_lineage_authority_symlinks(
         verify_released_asset(pipeline.layout, released)
 
 
+@pytest.fixture(scope="module")
+def released_asset_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Create one released tree copied by no-follow authority probes."""
+    template_root = tmp_path_factory.mktemp("released-authority")
+    pipeline, _, _ = _create_pipeline(template_root)
+    pipeline.run()
+    return pipeline.layout.tenants_root
+
+
+_LOCAL_AUTHORITY_TARGETS = (
+    "state",
+    "config",
+    "config-history",
+    "events",
+    "journal",
+    "receipt",
+    "stage-provenance",
+    "provider-ledger",
+    "build-provenance",
+    "asset-manifest",
+    "dataset-manifest",
+    "generation-manifest",
+    "catalog-generation-manifest",
+    "catalog-split",
+    "release-pointer",
+)
+
+
+def _local_authority_target(
+    layout: EvaluationAssetLayout,
+    name: str,
+) -> Path:
+    stage = PipelineStage.RUBRIC_EXTRACTION
+    generation_id = json.loads(
+        layout.artifact_path(
+            PipelineStage.DATASET_SPLITS,
+            "generation_manifest.json",
+        ).read_text(encoding="utf-8")
+    )["generation_id"]
+    generation_root = layout.generations_root / generation_id
+    targets = {
+        "state": layout.state_path,
+        "config": layout.config_path,
+        "config-history": layout.config_history_path,
+        "events": layout.events_path,
+        "journal": layout.recovery_journal_path,
+        "receipt": layout.receipt_path(stage),
+        "stage-provenance": layout.stage_provenance_path(stage),
+        "provider-ledger": layout.artifact_path(stage, "provider_calls.jsonl"),
+        "build-provenance": layout.build_provenance_path,
+        "asset-manifest": layout.manifest_path,
+        "dataset-manifest": layout.artifact_path(
+            PipelineStage.DATASET_SPLITS,
+            "dataset_manifest.json",
+        ),
+        "generation-manifest": layout.artifact_path(
+            PipelineStage.DATASET_SPLITS,
+            "generation_manifest.json",
+        ),
+        "catalog-generation-manifest": generation_root
+        / "generation_manifest.json",
+        "catalog-split": generation_root / "train.jsonl",
+        "release-pointer": layout.release_pointer_path,
+    }
+    return targets[name]
+
+
+def _install_authority_symlink(
+    layout: EvaluationAssetLayout,
+    path: Path,
+    *,
+    mode: str,
+    tmp_path: Path,
+) -> None:
+    payload = path.read_bytes() if path.is_file() else b""
+    path.unlink(missing_ok=True)
+    if mode == "external":
+        target = tmp_path / "outside" / path.name
+    elif mode == "cross-tenant":
+        target = layout.tenants_root / "tenant_b" / "authority" / path.name
+    elif mode == "in-root":
+        target = layout.root / "authority-alias-targets" / path.name
+    elif mode == "dangling":
+        target = tmp_path / "absent" / path.name
+    else:
+        assert mode == "wrong-type"
+        target = tmp_path / "directory-target" / path.name
+        target.mkdir(parents=True)
+        path.symlink_to(target, target_is_directory=True)
+        return
+    if mode != "dangling":
+        target.parent.mkdir(parents=True, exist_ok=True)
+        artifact_io.atomic_write_text(target, payload.decode("utf-8"))
+    path.symlink_to(target)
+
+
+@pytest.mark.parametrize("phase", ["candidate", "released"])
+@pytest.mark.parametrize("authority_name", _LOCAL_AUTHORITY_TARGETS)
+def test_all_local_authority_files_reject_external_symlinks_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completed_handoff_template: Path,
+    released_asset_template: Path,
+    phase: str,
+    authority_name: str,
+) -> None:
+    """Every candidate/final control family is exact local file authority."""
+    tenants_root = tmp_path / "tenants"
+    source = (
+        completed_handoff_template
+        if phase == "candidate"
+        else released_asset_template
+    )
+    shutil.copytree(source, tenants_root)
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    released_state = layout.load_state() if phase == "released" else None
+    target = _local_authority_target(layout, authority_name)
+    _install_authority_symlink(layout, target, mode="external", tmp_path=tmp_path)
+    linked_to = target.readlink()
+    rubric = _SuccessfulRubricProvider()
+    embedding = _SuccessfulEmbeddingProvider()
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("unsafe authority reached a stage or provider")
+
+    monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", forbidden)
+    rubric.generate_json = forbidden  # type: ignore[method-assign]
+    embedding.embed_texts = forbidden  # type: ignore[method-assign]
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        if phase == "candidate":
+            EvaluationAssetPipeline(
+                layout,
+                rubric_provider=rubric,
+                embedding_provider=embedding,
+            ).run()
+        else:
+            assert released_state is not None
+            verify_released_asset(layout, released_state)
+
+    assert target.is_symlink()
+    assert target.readlink() == linked_to
+    assert rubric.calls == 0
+    assert embedding.calls == 0
+
+
+@pytest.mark.parametrize("swap_point", ["stage-8-receipt", "workspace-split"])
+def test_release_verification_rejects_authority_swap_after_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    released_asset_template: Path,
+    swap_point: str,
+) -> None:
+    """Every later authority hash is bound to a fresh no-follow handle."""
+    tenants_root = tmp_path / "tenants"
+    shutil.copytree(released_asset_template, tenants_root)
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    released = layout.load_state()
+    target = (
+        layout.receipt_path(PipelineStage.DATASET_SPLITS)
+        if swap_point == "stage-8-receipt"
+        else layout.artifact_path(PipelineStage.DATASET_SPLITS, "train.jsonl")
+    )
+    before = _authority_bytes(layout)
+
+    def install_identical_external_link() -> None:
+        _install_authority_symlink(
+            layout,
+            target,
+            mode="external",
+            tmp_path=tmp_path,
+        )
+
+    if swap_point == "stage-8-receipt":
+        original_receipt_chain = durability_module.verify_receipt_chain
+
+        def swap_after_receipts(*args: Any, **kwargs: Any) -> Any:
+            receipts = original_receipt_chain(*args, **kwargs)
+            install_identical_external_link()
+            return receipts
+
+        monkeypatch.setattr(
+            durability_module,
+            "verify_receipt_chain",
+            swap_after_receipts,
+        )
+    else:
+        original_generation_links = (
+            durability_module._verify_generation_content_links
+        )
+
+        def swap_before_generation_links(*args: Any, **kwargs: Any) -> Any:
+            install_identical_external_link()
+            return original_generation_links(*args, **kwargs)
+
+        monkeypatch.setattr(
+            durability_module,
+            "_verify_generation_content_links",
+            swap_before_generation_links,
+        )
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        verify_released_asset(layout, released)
+
+    assert target.is_symlink()
+    assert _authority_bytes(layout) == before
+
+
+@pytest.mark.parametrize("access", ["read", "write"])
+def test_local_authority_resolver_rejects_checked_ancestor_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    access: str,
+) -> None:
+    """A checked ancestor stays descriptor-bound through the leaf operation."""
+    trusted_root = tmp_path / "trusted"
+    authority_directory = trusted_root / "authority"
+    external_directory = tmp_path / "external-authority"
+    parked_directory = tmp_path / "parked-authority"
+    authority_directory.mkdir(parents=True)
+    external_directory.mkdir()
+    artifact_io.atomic_write_text(
+        authority_directory / "control.json",
+        "LOCAL",
+    )
+    artifact_io.atomic_write_text(
+        external_directory / "control.json",
+        "EXTERNAL",
+    )
+    original_stat = control_jsonl_module.os.stat
+    swapped = False
+
+    def swap_after_ancestor_stat(
+        path: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        nonlocal swapped
+        result = original_stat(path, *args, **kwargs)
+        if path == "authority" and kwargs.get("dir_fd") is not None and not swapped:
+            swapped = True
+            control_jsonl_module.os.rename(
+                authority_directory,
+                parked_directory,
+            )
+            control_jsonl_module.os.symlink(
+                external_directory,
+                authority_directory,
+                target_is_directory=True,
+            )
+        return result
+
+    monkeypatch.setattr(control_jsonl_module.os, "stat", swap_after_ancestor_stat)
+
+    with pytest.raises(ValueError):
+        control_jsonl_module.resolve_local_authority_file(
+            authority_directory / "control.json",
+            trusted_root,
+            access=access,
+        )
+
+    assert swapped
+    assert authority_directory.is_symlink()
+
+
+def test_local_authority_write_resolver_binds_checked_leaf(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Write validation cannot accept a leaf replaced after its lstat."""
+    trusted_root = tmp_path / "trusted"
+    trusted_root.mkdir()
+    authority_path = trusted_root / "control.json"
+    external_path = tmp_path / "external-control.json"
+    artifact_io.atomic_write_text(authority_path, "LOCAL")
+    artifact_io.atomic_write_text(external_path, "EXTERNAL")
+    original_stat = control_jsonl_module.os.stat
+    swapped = False
+
+    def swap_after_leaf_stat(
+        path: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        nonlocal swapped
+        result = original_stat(path, *args, **kwargs)
+        if path == "control.json" and kwargs.get("dir_fd") is not None and not swapped:
+            swapped = True
+            authority_path.unlink()
+            authority_path.symlink_to(external_path)
+        return result
+
+    monkeypatch.setattr(control_jsonl_module.os, "stat", swap_after_leaf_stat)
+
+    with pytest.raises(ValueError, match="changed while opening"):
+        control_jsonl_module.resolve_local_authority_file(
+            authority_path,
+            trusted_root,
+            access="write",
+        )
+
+    assert swapped
+    assert authority_path.is_symlink()
+
+
+def test_local_authority_write_rechecks_expected_bytes_after_precondition(
+    tmp_path: Path,
+) -> None:
+    """A same-inode mutation at the writer boundary cannot be overwritten."""
+    trusted_root = tmp_path / "trusted"
+    trusted_root.mkdir()
+    authority_path = trusted_root / "control.json"
+    authority_path.write_bytes(b"OLD")
+
+    def mutate_checked_inode() -> None:
+        with authority_path.open("r+b") as handle:
+            handle.seek(0)
+            handle.write(b"FOREIGN")
+            handle.truncate()
+
+    with pytest.raises(ValueError, match="bytes changed"):
+        control_jsonl_module.resolve_local_authority_file(
+            authority_path,
+            trusted_root,
+            access="write",
+            write_data=b"NEW",
+            expected_write_data=b"OLD",
+            check_expected_write_data=True,
+            write_precondition=mutate_checked_inode,
+        )
+
+    assert authority_path.read_bytes() == b"FOREIGN"
+
+
+@pytest.mark.parametrize("appearance", ["regular", "symlink"])
+def test_optional_event_read_has_no_existence_probe_gap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    appearance: str,
+) -> None:
+    """A native event appearing at optional-read entry is read or rejected."""
+    tenants_root = tmp_path / "tenants"
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    layout.root.mkdir(parents=True)
+    external = tmp_path / "external-events.jsonl"
+    native_row = {
+        "timestamp": "2026-08-20T00:00:00+00:00",
+        "event": "pipeline_released",
+        "tenant_id": layout.tenant_id,
+        "asset_id": layout.asset_id,
+        "details": {},
+        "operation_id": "0" * 32,
+    }
+    artifact_io.atomic_write_jsonl(external, [native_row])
+    original = durability_module.read_strict_jsonl_objects
+    appeared = False
+
+    def appear_before_bound_optional_read(
+        path: Path,
+        *,
+        trusted_root: Path | None = None,
+    ) -> list[dict[str, Any]]:
+        nonlocal appeared
+        if path == layout.events_path and not appeared:
+            appeared = True
+            if appearance == "symlink":
+                path.symlink_to(external)
+            else:
+                path.write_bytes(external.read_bytes())
+        return original(path, trusted_root=trusted_root)
+
+    monkeypatch.setattr(
+        durability_module,
+        "read_strict_jsonl_objects",
+        appear_before_bound_optional_read,
+    )
+
+    assert durability_module._has_native_event_authority(layout)
+    assert appeared
+
+
+@pytest.mark.parametrize("initially_present", [False, True])
+def test_local_authority_write_rejects_target_swap_before_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    initially_present: bool,
+) -> None:
+    """Bound writes neither overwrite new names nor replaced checked leaves."""
+    trusted_root = tmp_path / "trusted"
+    trusted_root.mkdir()
+    authority_path = trusted_root / "control.json"
+    parked = tmp_path / "parked-control.json"
+    if initially_present:
+        authority_path.write_bytes(b"LOCAL")
+    victim = tmp_path / "victim.json"
+    victim.write_bytes(b"KEEP")
+    victim_identity = victim.stat()
+    original = control_jsonl_module.atomic_write_bytes_at
+    swapped = False
+
+    def swap_before_install(
+        descriptor: int,
+        filename: str,
+        content: bytes,
+        **kwargs: Any,
+    ) -> None:
+        nonlocal swapped
+        if initially_present:
+            authority_path.rename(parked)
+        victim.rename(authority_path)
+        swapped = True
+        original(descriptor, filename, content, **kwargs)
+
+    monkeypatch.setattr(
+        control_jsonl_module,
+        "atomic_write_bytes_at",
+        swap_before_install,
+    )
+
+    with pytest.raises(ValueError, match="target"):
+        control_jsonl_module.resolve_local_authority_file(
+            authority_path,
+            trusted_root,
+            access="write",
+            write_data=b"NEW",
+        )
+
+    assert swapped
+    assert authority_path.read_bytes() == b"KEEP"
+    assert authority_path.stat().st_ino == victim_identity.st_ino
+    if initially_present:
+        assert parked.read_bytes() == b"LOCAL"
+
+
+@pytest.mark.parametrize(
+    "publication_node",
+    ["release-pointer", "generation-manifest", "generation-split"],
+)
+def test_publication_reads_use_shared_bound_authority_resolver(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    released_asset_template: Path,
+    publication_node: str,
+) -> None:
+    """Pointer, manifest, and split reads cannot reopen a swapped path."""
+    tenants_root = tmp_path / "tenants"
+    shutil.copytree(released_asset_template, tenants_root)
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    released = layout.load_state()
+    generation_id = json.loads(
+        layout.release_pointer_path.read_text(encoding="utf-8")
+    )["generation_id"]
+    generation_root = layout.generations_root / generation_id
+    target = {
+        "release-pointer": layout.release_pointer_path,
+        "generation-manifest": generation_root / "generation_manifest.json",
+        "generation-split": generation_root / "train.jsonl",
+    }[publication_node]
+    before = _authority_bytes(layout)
+    original_resolver = publication_module.resolve_local_authority_file
+    original_bound_read = (
+        publication_module.read_local_authority_file_with_identity_at
+    )
+    swapped = False
+
+    def swap_before_publication_read(
+        path: Path,
+        trusted_root: Path,
+        *,
+        access: str,
+    ) -> Any:
+        nonlocal swapped
+        if Path(path) == target and access == "read" and not swapped:
+            swapped = True
+            _install_authority_symlink(
+                layout,
+                target,
+                mode="external",
+                tmp_path=tmp_path,
+            )
+        return original_resolver(path, trusted_root, access=access)
+
+    monkeypatch.setattr(
+        publication_module,
+        "resolve_local_authority_file",
+        swap_before_publication_read,
+    )
+
+    def swap_before_bound_generation_read(
+        directory_descriptor: int,
+        filename: str,
+    ) -> tuple[bytes, tuple[int, int, int]]:
+        nonlocal swapped
+        if publication_node != "release-pointer" and filename == target.name and not swapped:
+            swapped = True
+            _install_authority_symlink(
+                layout,
+                target,
+                mode="external",
+                tmp_path=tmp_path,
+            )
+        return original_bound_read(directory_descriptor, filename)
+
+    monkeypatch.setattr(
+        publication_module,
+        "read_local_authority_file_with_identity_at",
+        swap_before_bound_generation_read,
+    )
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        verify_released_asset(layout, released)
+
+    assert swapped
+    assert target.is_symlink()
+    assert _authority_bytes(layout) == before
+
+
+@pytest.mark.parametrize("phase", ["candidate", "released"])
+@pytest.mark.parametrize(
+    "symlink_mode",
+    ["cross-tenant", "in-root", "dangling", "wrong-type"],
+)
+def test_receipt_authority_rejects_every_symlink_target_shape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completed_handoff_template: Path,
+    released_asset_template: Path,
+    phase: str,
+    symlink_mode: str,
+) -> None:
+    """Receipt authority cannot remain linked across any target topology."""
+    tenants_root = tmp_path / "tenants"
+    source = (
+        completed_handoff_template
+        if phase == "candidate"
+        else released_asset_template
+    )
+    shutil.copytree(source, tenants_root)
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    receipt = layout.receipt_path(PipelineStage.RUBRIC_EXTRACTION)
+    _install_authority_symlink(
+        layout,
+        receipt,
+        mode=symlink_mode,
+        tmp_path=tmp_path,
+    )
+    linked_to = receipt.readlink()
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("unsafe receipt authority reran pipeline work")
+
+    monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", forbidden)
+    with pytest.raises(EvaluationAssetIntegrityError):
+        if phase == "candidate":
+            EvaluationAssetPipeline(layout).run()
+        else:
+            verify_released_asset(layout, layout.load_state())
+
+    assert receipt.is_symlink()
+    assert receipt.readlink() == linked_to
+
+
+@pytest.mark.parametrize("phase", ["candidate", "released"])
+@pytest.mark.parametrize("linked_root", ["tenant", "asset"])
+def test_authority_rejects_linked_tenant_or_asset_root_before_use(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completed_handoff_template: Path,
+    released_asset_template: Path,
+    phase: str,
+    linked_root: str,
+) -> None:
+    """Explicit authority roots are checked lexically before lock or data access."""
+    tenants_root = tmp_path / "tenants"
+    source = (
+        completed_handoff_template
+        if phase == "candidate"
+        else released_asset_template
+    )
+    shutil.copytree(source, tenants_root)
+    layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
+    linked = layout.tenant_root if linked_root == "tenant" else layout.root
+    relocated = tmp_path / "relocated" / linked_root
+    relocated.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(linked), str(relocated))
+    linked.symlink_to(relocated, target_is_directory=True)
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("linked authority root reached pipeline work")
+
+    monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", forbidden)
+    with pytest.raises((EvaluationAssetIntegrityError, ValueError)):
+        if phase == "candidate":
+            EvaluationAssetPipeline(layout).run()
+        else:
+            verify_released_asset(layout, layout.load_state())
+
+    assert linked.is_symlink()
+
+
 _COMPLETED_STATE_INTEGER_FIELDS = (
     "mutation_sequence",
     "candidate_guidelines",
@@ -8648,6 +11523,62 @@ def test_native_handoff_schema_downgrade_fails_without_writes_or_calls(
     assert embedding.calls == 0
 
 
+def _legacy_event_row(
+    layout: EvaluationAssetLayout,
+    event: str,
+) -> dict[str, Any]:
+    """Build one exact row emitted by the genuine pre-v2 event writer."""
+    details: dict[str, Any]
+    if event == "pipeline_created":
+        details = {"status": "draft"}
+    elif event == "pipeline_extended":
+        details = {
+            "parent_asset_id": "v0",
+            "clustering_mode": "keep",
+            "added_labeled_records": 1,
+            "added_unlabeled_records": 0,
+        }
+    elif event == "pipeline_started":
+        details = {}
+    elif event == "stage_started":
+        details = {"stage": PipelineStage.RAW_INPUTS.value}
+    elif event == "stage_failed":
+        details = {
+            "stage": PipelineStage.RAW_INPUTS.value,
+            "error": "legacy failure",
+        }
+    elif event == "stage_completed":
+        details = {
+            "stage": PipelineStage.RAW_INPUTS.value,
+            "counts": {"feedback_records": 1, "unlabeled_records": 1},
+        }
+    elif event == "pipeline_completed":
+        details = {
+            "counts": {
+                key: 0
+                for keys in durability_module._HISTORICAL_STAGE_COUNT_KEYS_V1.values()
+                for key in keys
+            }
+        }
+    else:
+        assert event == "configuration_updated"
+        details = {
+            "revision": 2,
+            "changed_fields": {
+                "match_threshold": {"previous": 0.5, "new": 0.4}
+            },
+            "invalidated_from_stage": PipelineStage.COVERAGE_DECISIONS.value,
+            "resume_from_stage": PipelineStage.COVERAGE_DECISIONS.value,
+        }
+    return {
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "event": event,
+        "tenant_id": layout.tenant_id,
+        "asset_id": layout.asset_id,
+        "details": details,
+    }
+
+
 @pytest.mark.parametrize("schema_mode", ["removed", "explicit-v1"])
 @pytest.mark.parametrize(
     "legacy_event",
@@ -8676,7 +11607,7 @@ def test_receipt_free_legacy_status_checkpoint_remains_mutable(
     if legacy_event is not None:
         artifact_io.atomic_append_jsonl(
             layout.events_path,
-            {"event": legacy_event},
+            _legacy_event_row(layout, legacy_event),
         )
 
     released = EvaluationAssetPipeline(
@@ -8687,6 +11618,322 @@ def test_receipt_free_legacy_status_checkpoint_remains_mutable(
 
     assert released.status == "released"
     assert released.schema_version == STATE_SCHEMA_VERSION
+
+
+@pytest.mark.parametrize(
+    "legacy_event",
+    [
+        "pipeline_created",
+        "pipeline_extended",
+        "pipeline_started",
+        "stage_started",
+        "stage_failed",
+        "stage_completed",
+        "pipeline_completed",
+        "configuration_updated",
+    ],
+)
+def test_exact_pre_v2_event_profile_remains_receipt_free_compatible(
+    tmp_path: Path,
+    legacy_event: str,
+) -> None:
+    """Only genuine pre-v2 event rows remain compatible with legacy fallback."""
+    layout = EvaluationAssetLayout(tmp_path / "tenants", "tenant_a", "v1")
+    layout.root.mkdir(parents=True)
+    artifact_io.atomic_write_jsonl(
+        layout.events_path,
+        [_legacy_event_row(layout, legacy_event)],
+    )
+
+    assert not durability_module._has_native_authority_evidence(
+        layout,
+        {"stages": []},
+    )
+
+
+@pytest.mark.parametrize(
+    "event_row",
+    [
+        {
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "event": "configuration_updated",
+            "tenant_id": "tenant_a",
+            "asset_id": "v1",
+            "operation_id": "0" * 32,
+            "details": {
+                "revision": 2,
+                "changed_fields": {},
+                "invalidated_from_stage": "coverage_decisions",
+                "resume_from_stage": "coverage_decisions",
+            },
+        },
+        {
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "event": "checkpoint_rebuild_started",
+            "tenant_id": "tenant_a",
+            "asset_id": "v1",
+            "operation_id": "0" * 32,
+            "details": {"stage": "raw_inputs"},
+        },
+        {
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "event": "legacy_asset_adopted",
+            "tenant_id": "tenant_a",
+            "asset_id": "v1",
+            "operation_id": "0" * 32,
+            "details": {"previous_status": "completed"},
+        },
+        {
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "event": "pipeline_released",
+            "tenant_id": "tenant_a",
+            "asset_id": "v1",
+            "operation_id": "0" * 32,
+            "details": {
+                "generation_id": "generation",
+                "release_sha256": "0" * 64,
+                "stage_8_receipt_sha256": "1" * 64,
+            },
+        },
+        {
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "event": "pipeline_extended",
+            "tenant_id": "tenant_a",
+            "asset_id": "v1",
+            "operation_id": "0" * 32,
+            "details": {},
+        },
+        {
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "event": "pipeline_resume_requested",
+            "tenant_id": "tenant_a",
+            "asset_id": "v1",
+            "details": {
+                "changed_fields": {},
+                "invalidated_from_stage": None,
+                "resume_from_stage": None,
+            },
+        },
+        {
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "event": "future_native_event",
+            "tenant_id": "tenant_a",
+            "asset_id": "v1",
+            "details": {},
+        },
+        {
+            "event": "pipeline_started",
+        },
+    ],
+    ids=[
+        "v2-configuration",
+        "v2-rebuild",
+        "v2-adoption",
+        "v2-release",
+        "v2-extension-shape",
+        "unwritten-resume-shape",
+        "unknown",
+        "malformed-known-event",
+    ],
+)
+def test_non_v2_event_authority_fails_closed_for_every_nonlegacy_row(
+    tmp_path: Path,
+    event_row: dict[str, Any],
+) -> None:
+    """Known-native, unknown, and malformed rows are all native evidence."""
+    layout = EvaluationAssetLayout(tmp_path / "tenants", "tenant_a", "v1")
+    layout.root.mkdir(parents=True)
+    artifact_io.atomic_write_jsonl(layout.events_path, [event_row])
+    before = _tree_bytes(layout.tenant_root)
+
+    assert durability_module._has_native_authority_evidence(
+        layout,
+        {"stages": []},
+    )
+    assert _tree_bytes(layout.tenant_root) == before
+
+
+@pytest.mark.parametrize("schema_mode", ["removed", "explicit-v1"])
+@pytest.mark.parametrize(
+    "malformed_event",
+    [
+        {
+            "timestamp": "2026-01-01T01:00:00+01:00",
+            "event": "stage_completed",
+            "tenant_id": "tenant_a",
+            "asset_id": "v1",
+            "details": {
+                "stage": "raw_inputs",
+                "counts": {"future_native_count": 1},
+            },
+        },
+        {
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "event": "configuration_updated",
+            "tenant_id": "tenant_a",
+            "asset_id": "v1",
+            "details": {
+                "revision": 2,
+                "changed_fields": {},
+                "invalidated_from_stage": "raw_inputs",
+                "resume_from_stage": "dataset_splits",
+            },
+        },
+        {
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "event": "pipeline_extended",
+            "tenant_id": "tenant_a",
+            "asset_id": "v1",
+            "details": {
+                "parent_asset_id": "v0",
+                "clustering_mode": "keep",
+                "added_labeled_records": 0,
+                "added_unlabeled_records": 1,
+            },
+        },
+        {
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "event": "pipeline_extended",
+            "tenant_id": "tenant_a",
+            "asset_id": "v1",
+            "details": {
+                "parent_asset_id": "v0",
+                "clustering_mode": "refresh",
+                "added_labeled_records": 0,
+                "added_unlabeled_records": 0,
+            },
+        },
+        {
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "event": "pipeline_extended",
+            "tenant_id": "tenant_a",
+            "asset_id": "v1",
+            "details": {
+                "parent_asset_id": "v1",
+                "clustering_mode": "refresh",
+                "added_labeled_records": 1,
+                "added_unlabeled_records": 0,
+            },
+        },
+        {
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "event": "pipeline_extended",
+            "tenant_id": "tenant_a",
+            "asset_id": "v1",
+            "details": {
+                "parent_asset_id": "../v0",
+                "clustering_mode": "refresh",
+                "added_labeled_records": 1,
+                "added_unlabeled_records": 0,
+            },
+        },
+    ],
+    ids=[
+        "noncanonical-stage-count-hybrid",
+        "impossible-empty-revision",
+        "keep-with-unlabeled",
+        "empty-extension",
+        "self-parent",
+        "unsafe-parent-id",
+    ],
+)
+def test_semantically_impossible_legacy_event_fails_before_writes_or_calls(
+    tmp_path: Path,
+    schema_mode: str,
+    malformed_event: Mapping[str, Any],
+) -> None:
+    """A known event name cannot make an impossible row legacy-compatible."""
+    pipeline, rubric, embedding = _create_pipeline(tmp_path)
+    layout = pipeline.layout
+    raw_state = json.loads(layout.state_path.read_text(encoding="utf-8"))
+    if schema_mode == "removed":
+        del raw_state["schema_version"]
+    else:
+        raw_state["schema_version"] = "fapo-evaluation-asset-state-v1"
+    artifact_io.atomic_write_json(layout.state_path, raw_state)
+    artifact_io.atomic_append_jsonl(layout.events_path, malformed_event)
+    before = _authority_bytes(layout)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        EvaluationAssetPipeline(
+            layout,
+            rubric_provider=rubric,
+            embedding_provider=embedding,
+        ).run()
+
+    assert _authority_bytes(layout) == before
+    assert rubric.calls == 0
+    assert embedding.calls == 0
+
+
+@pytest.mark.parametrize("schema_mode", ["removed", "explicit-v1"])
+@pytest.mark.parametrize("entrypoint", ["run", "adopt"])
+def test_current_extension_event_is_native_before_any_authority_write_or_call(
+    tmp_path: Path,
+    schema_mode: str,
+    entrypoint: str,
+) -> None:
+    """Current extension authoring emits explicit native event authority."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    parent = pipeline.layout
+    child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
+    child.initialize_extension(
+        parent,
+        additional_feedback=_write_additional_feedback(parent.tenants_root),
+        additional_unlabeled=None,
+        clustering_mode="keep",
+    )
+    extension_event = next(
+        row
+        for row in _read_jsonl(child.events_path)
+        if row.get("event") == "pipeline_extended"
+    )
+    assert set(extension_event) == {
+        "timestamp",
+        "event",
+        "tenant_id",
+        "asset_id",
+        "operation_id",
+        "details",
+    }
+    assert re.fullmatch(r"[0-9a-f]{32}", extension_event["operation_id"])
+    raw_state = json.loads(child.state_path.read_text(encoding="utf-8"))
+    if schema_mode == "removed":
+        del raw_state["schema_version"]
+    else:
+        raw_state["schema_version"] = "fapo-evaluation-asset-state-v1"
+    if entrypoint == "adopt":
+        raw_state["status"] = "completed"
+        raw_state["current_stage"] = None
+        raw_state.pop("mutation_sequence")
+        raw_state.pop("last_operation_id")
+        for stage_state in raw_state["stages"]:
+            stage_state["status"] = "completed"
+            stage_state.pop("receipt_sha256")
+    artifact_io.atomic_write_json(child.state_path, raw_state)
+    before = _authority_bytes(child)
+    rubric = _SuccessfulRubricProvider()
+    embedding = _SuccessfulEmbeddingProvider()
+
+    expected_error = (
+        EvaluationAssetIntegrityError
+        if entrypoint == "run"
+        else EvaluationAssetLegacyError
+    )
+    with pytest.raises(expected_error):
+        if entrypoint == "run":
+            EvaluationAssetPipeline(
+                child,
+                rubric_provider=rubric,
+                embedding_provider=embedding,
+            ).run()
+        else:
+            child.adopt_legacy()
+
+    assert _authority_bytes(child) == before
+    assert rubric.calls == 0
+    assert embedding.calls == 0
 
 
 @pytest.mark.parametrize(
@@ -8843,6 +12090,7 @@ def test_non_v2_provider_ledger_detection_uses_frozen_stage_profile(
             for stage, specification in STAGE_SPECIFICATIONS.items()
         },
     )
+    monkeypatch.setattr(durability_module, "CONFIG_STAGE_DEPENDENCIES", {})
 
     assert durability_module._has_native_authority_evidence(
         layout,
@@ -9186,6 +12434,16 @@ def test_completed_handoff_publishes_captured_generation_after_dependency_drift(
     rubric.generate_json = forbidden  # type: ignore[method-assign]
     embedding.embed_texts = forbidden  # type: ignore[method-assign]
     monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", forbidden)
+    monkeypatch.setattr(
+        workspace_module,
+        "PipelineStage",
+        _RemovedHistoricalPipelineStage,
+    )
+    monkeypatch.setattr(
+        lineage_validation_module,
+        "PipelineStage",
+        _RemovedHistoricalPipelineStage,
+    )
 
     released = EvaluationAssetPipeline(
         layout,
@@ -9231,6 +12489,26 @@ def test_released_restart_uses_only_frozen_state_profiles(
     labels = dict(evaluation_asset_models.STAGE_LABELS)
     labels[PipelineStage.RAW_INPUTS] = "Current deployment label"
     monkeypatch.setattr(evaluation_asset_models, "STAGE_LABELS", labels)
+    monkeypatch.setattr(
+        durability_module,
+        "PipelineStage",
+        _DriftedPipelineStage,
+    )
+    monkeypatch.setattr(
+        journal_validation_module,
+        "PipelineStage",
+        _DriftedPipelineStage,
+    )
+    monkeypatch.setattr(
+        workspace_module,
+        "PipelineStage",
+        _RemovedHistoricalPipelineStage,
+    )
+    monkeypatch.setattr(
+        lineage_validation_module,
+        "PipelineStage",
+        _RemovedHistoricalPipelineStage,
+    )
     fresh_layout = EvaluationAssetLayout(
         layout.tenants_root,
         layout.tenant_id,
@@ -9247,6 +12525,288 @@ def test_released_restart_uses_only_frozen_state_profiles(
     verify_released_asset(fresh_layout, released)
     with pytest.raises(EvaluationAssetImmutableError):
         EvaluationAssetPipeline(fresh_layout).run()
+
+
+def test_released_revision_journal_uses_only_frozen_stage_profiles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finalized nonempty revision remains valid after registry replacement."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+
+    def stop_at_completed_handoff(name: str) -> None:
+        if name == "after_stage_8_receipt_state_complete":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", stop_at_completed_handoff)
+    with pytest.raises(_InjectedFault):
+        pipeline.run()
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+    released = pipeline.run(config_updates={"match_threshold": 0.5})
+    assert released.status == "released"
+    assert any(
+        row.get("kind") == "configuration_revision"
+        for row in _read_jsonl(pipeline.layout.recovery_journal_path)
+    )
+    for module in (journal_transitions_module, journal_validation_module):
+        monkeypatch.setattr(module, "PipelineStage", _RemovedHistoricalPipelineStage)
+        monkeypatch.setattr(module, "STAGE_COUNT_KEYS", {})
+        monkeypatch.setattr(module, "CONFIG_STAGE_DEPENDENCIES", {})
+    monkeypatch.setattr(
+        durability_module,
+        "PipelineStage",
+        _RemovedHistoricalPipelineStage,
+    )
+    monkeypatch.setattr(durability_module, "STAGE_COUNT_KEYS", {})
+    monkeypatch.setattr(durability_module, "CONFIG_STAGE_DEPENDENCIES", {})
+    monkeypatch.setattr(journal_validation_module, "STAGE_LABELS", {})
+
+    restarted = pipeline.layout.load_state()
+
+    assert restarted.status == "released"
+    verify_released_asset(pipeline.layout, restarted)
+
+
+def test_completed_revised_handoff_uses_only_frozen_journal_profiles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed pre-publication revision survives removed live registries."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+
+    def stop_at_completed_handoff(name: str) -> None:
+        if name == "after_stage_8_receipt_state_complete":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", stop_at_completed_handoff)
+    with pytest.raises(_InjectedFault):
+        pipeline.run()
+    with pytest.raises(_InjectedFault):
+        pipeline.run(config_updates={"match_threshold": 0.5})
+    handoff = pipeline.layout.load_state()
+    assert handoff.status == "running"
+    assert all(stage.status == "completed" for stage in handoff.stages)
+    assert any(
+        row.get("kind") == "configuration_revision"
+        for row in _read_jsonl(pipeline.layout.recovery_journal_path)
+    )
+    for module in (journal_transitions_module, journal_validation_module):
+        monkeypatch.setattr(module, "PipelineStage", _RemovedHistoricalPipelineStage)
+        monkeypatch.setattr(module, "STAGE_COUNT_KEYS", {})
+        monkeypatch.setattr(module, "CONFIG_STAGE_DEPENDENCIES", {})
+    monkeypatch.setattr(
+        durability_module,
+        "PipelineStage",
+        _RemovedHistoricalPipelineStage,
+    )
+    monkeypatch.setattr(durability_module, "STAGE_COUNT_KEYS", {})
+    monkeypatch.setattr(durability_module, "CONFIG_STAGE_DEPENDENCIES", {})
+    monkeypatch.setattr(journal_validation_module, "STAGE_LABELS", {})
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+
+    released = EvaluationAssetPipeline(pipeline.layout).run()
+
+    assert released.status == "released"
+    verify_released_asset(pipeline.layout, released)
+
+
+@pytest.mark.parametrize("schema_version", ["v1", "v2"])
+def test_incomplete_checkpoint_normalizes_to_current_authoring_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    schema_version: str,
+) -> None:
+    """Mutable v1/v2 checkpoints adopt current membership and ordering."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    layout = pipeline.layout
+    raw = json.loads(layout.state_path.read_text(encoding="utf-8"))
+    if schema_version == "v1":
+        raw["schema_version"] = "fapo-evaluation-asset-state-v1"
+    artifact_io.atomic_write_json(layout.state_path, raw)
+    _install_drifted_authoring_registry(monkeypatch)
+
+    loaded = layout.load_state()
+
+    assert tuple(item.stage for item in loaded.stages) == tuple(
+        stage.value for stage in _DriftedPipelineStage
+    )
+    future = loaded.stages[0]
+    assert future.stage == _DriftedPipelineStage.FUTURE_STAGE.value
+    assert future.status == "pending"
+    assert future.receipt_sha256 is None
+
+
+def test_nonempty_revision_uses_current_authoring_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mutable v2 revision retains a newly added/reordered live stage."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    layout = pipeline.layout
+    _install_drifted_authoring_registry(monkeypatch)
+
+    result = layout.revise_config({"match_threshold": 0.5})
+    revised = layout.load_state()
+
+    assert result["changed_fields"] == {
+        "match_threshold": {"previous": 0.6, "new": 0.5}
+    }
+    assert tuple(item.stage for item in revised.stages) == tuple(
+        stage.value for stage in _DriftedPipelineStage
+    )
+    assert revised.stages[0].stage == _DriftedPipelineStage.FUTURE_STAGE.value
+    assert revised.current_stage == _DriftedPipelineStage.FUTURE_STAGE.value
+    assert revised.mutation_sequence == 1
+    assert durability_module.load_completed_release_handoff_control(layout) is None
+    restarted = EvaluationAssetLayout(
+        layout.tenants_root,
+        layout.tenant_id,
+        layout.asset_id,
+    ).load_state()
+    assert tuple(item.stage for item in restarted.stages) == tuple(
+        stage.value for stage in _DriftedPipelineStage
+    )
+
+
+def test_failed_full_count_checkpoint_restarts_with_current_authoring_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed receipted checkpoint remains mutable after live stage expansion."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+
+    def stop_at_completed_handoff(name: str) -> None:
+        if name == "after_stage_8_receipt_state_complete":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", stop_at_completed_handoff)
+    with pytest.raises(_InjectedFault):
+        pipeline.run()
+    layout = pipeline.layout
+    raw = json.loads(layout.state_path.read_text(encoding="utf-8"))
+    raw["status"] = "failed"
+    raw["error"] = "retry with the current authoring registry"
+    artifact_io.atomic_write_json(layout.state_path, raw)
+    _install_drifted_authoring_registry(monkeypatch)
+    current = layout.load_state()
+    layout.save_state(current)
+
+    assert current.status == "failed"
+    assert current.stages[0].stage == _DriftedPipelineStage.FUTURE_STAGE.value
+    assert durability_module.load_completed_release_handoff_control(layout) is None
+    restarted = EvaluationAssetLayout(
+        layout.tenants_root,
+        layout.tenant_id,
+        layout.asset_id,
+    ).load_state()
+    assert tuple(item.stage for item in restarted.stages) == tuple(
+        stage.value for stage in _DriftedPipelineStage
+    )
+
+
+def test_failed_full_receipt_checkpoint_uses_live_same_membership_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed checkpoint prepares and recovers with the evolved live profile."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+
+    def stop_at_completed_handoff(name: str) -> None:
+        if name == "after_stage_8_receipt_state_complete":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", stop_at_completed_handoff)
+    with pytest.raises(_InjectedFault):
+        pipeline.run()
+    layout = pipeline.layout
+    raw = json.loads(layout.state_path.read_text(encoding="utf-8"))
+    raw["status"] = "failed"
+    raw["error"] = "retry with the evolved authoring profile"
+    raw["stages"][0]["label"] = "Future raw-input authoring"
+    raw["counts"]["future_authoring_count"] = 0
+    artifact_io.atomic_write_json(layout.state_path, raw)
+    labels = dict(evaluation_asset_models.STAGE_LABELS)
+    labels[PipelineStage.RAW_INPUTS] = "Future raw-input authoring"
+    count_keys = dict(evaluation_asset_models.STAGE_COUNT_KEYS)
+    count_keys[PipelineStage.RAW_INPUTS] = (
+        *count_keys[PipelineStage.RAW_INPUTS],
+        "future_authoring_count",
+    )
+    for module in (
+        evaluation_asset_models,
+        durability_module,
+        journal_validation_module,
+    ):
+        monkeypatch.setattr(module, "STAGE_LABELS", labels)
+        monkeypatch.setattr(module, "STAGE_COUNT_KEYS", count_keys)
+
+    assert durability_module.load_completed_release_handoff_control(layout) is None
+    restarted = layout.load_state()
+    assert restarted.status == "failed"
+    assert restarted.stages[0].label == "Future raw-input authoring"
+    assert restarted.counts["future_authoring_count"] == 0
+
+    def stop_after_revision_prepare(name: str) -> None:
+        if name == "after_prepared_journal":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", stop_after_revision_prepare)
+    with pytest.raises(_InjectedFault):
+        layout.revise_config({"match_threshold": 0.5})
+
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+    recovered = layout.recover()
+
+    assert len(recovered) == 1
+    assert layout.load_config().match_threshold == 0.5
+    assert layout.load_state().counts["future_authoring_count"] == 0
+
+
+def test_pre_v2_adoption_uses_only_frozen_stage_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A current enum addition or reorder cannot alter historical adoption."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+    for module in (
+        evaluation_asset_models,
+        durability_module,
+        journal_validation_module,
+    ):
+        monkeypatch.setattr(module, "PipelineStage", _DriftedPipelineStage)
+    for module in (lineage_validation_module, workspace_module):
+        monkeypatch.setattr(
+            module,
+            "PipelineStage",
+            _RemovedHistoricalPipelineStage,
+        )
+    monkeypatch.setattr(
+        durability_module,
+        "STAGE_SPECIFICATIONS",
+        {
+            stage: replace(
+                specification,
+                required_outputs=("future-only.json",),
+                direct_inputs=(),
+                upstream_stages=(),
+                config_fields=(),
+                provider_roles=(),
+            )
+            for stage, specification in STAGE_SPECIFICATIONS.items()
+        },
+    )
+
+    adopted = layout.adopt_legacy()
+
+    assert adopted.status == "released"
+    assert tuple(item.stage for item in adopted.stages) == tuple(
+        stage.value for stage in PipelineStage
+    )
+    assert "future_stage" not in {item.stage for item in adopted.stages}
+    verify_released_asset(layout, adopted)
 
 
 @pytest.mark.parametrize(
@@ -9266,6 +12826,7 @@ def test_released_restart_uses_only_frozen_state_profiles(
         "state-registry",
         "receipt-schema",
         "provenance-schema",
+        "stage-membership-order",
     ],
 )
 @pytest.mark.parametrize(
@@ -9420,6 +12981,17 @@ def test_default_provider_handoff_uses_only_versioned_historical_provenance(
             "BUILD_IDENTITY_SCHEMA_VERSION",
             "fapo-evaluation-build-identity-v3",
         )
+    elif registry_drift == "stage-membership-order":
+        monkeypatch.setattr(
+            durability_module,
+            "PipelineStage",
+            _DriftedPipelineStage,
+        )
+        monkeypatch.setattr(
+            journal_validation_module,
+            "PipelineStage",
+            _DriftedPipelineStage,
+        )
 
     def forbidden_stage(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("historical handoff reran a completed stage")
@@ -9493,11 +13065,11 @@ def test_completed_custom_provider_handoff_publishes_without_current_provider(
     verify_released_asset(layout, released)
 
 
-def test_generation_temp_created_fault_removes_owned_temporary_directory(
+def test_generation_temp_created_fault_retains_only_empty_owned_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The earliest generation fault cannot strand a hidden temporary tree."""
+    """The earliest generation fault retains no temporary authority bytes."""
     pipeline, _, _ = _create_pipeline(tmp_path)
 
     def inject(name: str) -> None:
@@ -9509,7 +13081,9 @@ def test_generation_temp_created_fault_removes_owned_temporary_directory(
         pipeline.run()
 
     generations_root = pipeline.layout.generations_root
-    assert not list(generations_root.glob(".*.tmp"))
+    retained = list(generations_root.glob(".*.tmp"))
+    assert len(retained) == 1
+    assert not any(retained[0].iterdir())
 
 
 def test_recovery_rejects_corrupt_prepared_release_before_pointer_install(
@@ -9528,6 +13102,51 @@ def test_recovery_rejects_corrupt_prepared_release_before_pointer_install(
         pipeline.run()
     layout = pipeline.layout
     assert not layout.release_pointer_path.exists()
+
+
+def test_release_recovery_rechecks_candidate_before_pointer_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A candidate swap after verification cannot leave pointer authority."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+
+    def inject(name: str) -> None:
+        if name == "after_release_publication_prepared":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", inject)
+    with pytest.raises(_InjectedFault, match="after_release_publication_prepared"):
+        pipeline.run()
+    layout = pipeline.layout
+    target = layout.build_provenance_path
+    genuine = target.read_bytes()
+    before = _authority_bytes(layout)
+    original = workspace_module.verify_release_candidate
+    attacked = False
+
+    def mutate_after_verification(*args: Any, **kwargs: Any) -> None:
+        nonlocal attacked
+        original(*args, **kwargs)
+        if not attacked:
+            target.write_bytes(b'{"corrupt":true}\n')
+            attacked = True
+
+    monkeypatch.setattr(
+        workspace_module,
+        "verify_release_candidate",
+        mutate_after_verification,
+    )
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+    try:
+        with pytest.raises(EvaluationAssetIntegrityError):
+            layout.recover()
+    finally:
+        target.write_bytes(genuine)
+
+    assert attacked
+    assert not layout.release_pointer_path.exists()
+    assert _authority_bytes(layout) == before
     provenance = json.loads(layout.build_provenance_path.read_text(encoding="utf-8"))
     provenance["created_at"] = "2026-08-20T00:00:00+00:00"
     artifact_io.atomic_write_json(layout.build_provenance_path, provenance)
@@ -9537,6 +13156,790 @@ def test_recovery_rejects_corrupt_prepared_release_before_pointer_install(
         layout.recover()
 
     assert not layout.release_pointer_path.exists()
+
+
+def test_direct_release_rechecks_candidate_after_pointer_fault_seam(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A post-verification authority swap cannot publish a direct pointer."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    target = pipeline.layout.build_provenance_path
+    genuine = b""
+    attacked = False
+
+    def mutate_at_pointer_seam(name: str) -> None:
+        nonlocal attacked, genuine
+        if name == "before_release_pointer_replace":
+            genuine = target.read_bytes()
+            target.write_bytes(b'{"corrupt":true}\n')
+            attacked = True
+
+    monkeypatch.setattr(workspace_module, "_fault_point", mutate_at_pointer_seam)
+    try:
+        with pytest.raises(EvaluationAssetIntegrityError):
+            pipeline.run()
+    finally:
+        if attacked:
+            target.write_bytes(genuine)
+
+    assert attacked
+    assert not pipeline.layout.release_pointer_path.exists()
+
+
+def test_direct_release_rolls_back_pointer_after_writer_boundary_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A candidate mutation inside pointer installation leaves no live pointer."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    target = pipeline.layout.build_provenance_path
+    original = workspace_module.write_release_pointer
+    genuine = b""
+    attacked = False
+
+    def mutate_inside_pointer_write(*args: Any, **kwargs: Any) -> Any:
+        nonlocal attacked, genuine
+        genuine = target.read_bytes()
+        target.write_bytes(genuine + b"\n")
+        attacked = True
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        workspace_module,
+        "write_release_pointer",
+        mutate_inside_pointer_write,
+    )
+    try:
+        with pytest.raises(EvaluationAssetIntegrityError):
+            pipeline.run()
+    finally:
+        if attacked:
+            target.write_bytes(genuine)
+
+    assert attacked
+    assert not pipeline.layout.release_pointer_path.exists()
+
+
+def test_release_pointer_rollback_preserves_same_bytes_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rollback quarantines only the exact pointer inode installed by the writer."""
+    layout = EvaluationAssetLayout(tmp_path / "tenants", "tenant_a", "v1")
+    layout.published_datasets.mkdir(parents=True)
+    payload = b'{"pointer":"owned"}\n'
+    layout.release_pointer_path.write_bytes(payload)
+    installed = control_jsonl_module.resolve_local_authority_file(
+        layout.release_pointer_path,
+        layout.tenant_root,
+        access="read",
+    )
+    assert installed.identity is not None
+    parked = tmp_path / "parked-owned-pointer.json"
+    replacement_identity: int | None = None
+    original = workspace_module.remove_local_authority_file
+
+    def replace_before_cleanup(*args: Any, **kwargs: Any) -> bool:
+        nonlocal replacement_identity
+        layout.release_pointer_path.rename(parked)
+        layout.release_pointer_path.write_bytes(payload)
+        replacement_identity = layout.release_pointer_path.stat().st_ino
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        workspace_module,
+        "remove_local_authority_file",
+        replace_before_cleanup,
+    )
+
+    workspace_module._rollback_new_release_pointer(
+        layout,
+        preexisting=False,
+        pointer={},
+        installed_identity=installed.identity,
+    )
+
+    assert layout.release_pointer_path.read_bytes() == payload
+    assert layout.release_pointer_path.stat().st_ino == replacement_identity
+    assert parked.read_bytes() == payload
+
+
+def test_direct_release_rejects_pointer_appearing_at_writer_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An expected-absent pointer cannot overwrite a newly appeared authority."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    layout = pipeline.layout
+    original = workspace_module.write_release_pointer
+    foreign = b"FOREIGN\n"
+    appeared = False
+
+    def appear_inside_pointer_write(*args: Any, **kwargs: Any) -> Any:
+        nonlocal appeared
+        layout.release_pointer_path.write_bytes(foreign)
+        appeared = True
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        workspace_module,
+        "write_release_pointer",
+        appear_inside_pointer_write,
+    )
+
+    with pytest.raises((EvaluationAssetIntegrityError, ValueError)):
+        pipeline.run()
+
+    assert appeared
+    assert layout.release_pointer_path.read_bytes() == foreign
+    assert layout.load_state().status == "running"
+
+
+def test_direct_release_rejects_pointer_appearing_before_expected_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The WAL expectation cannot be replaced by a late pointer observation."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    layout = pipeline.layout
+    original = workspace_module._optional_local_authority_bytes
+    foreign = b"FOREIGN\n"
+    appeared = False
+
+    def appear_before_late_snapshot(
+        active_layout: EvaluationAssetLayout,
+        path: Path,
+    ) -> tuple[bool, bytes]:
+        nonlocal appeared
+        if active_layout is layout and path == layout.release_pointer_path and not appeared:
+            path.write_bytes(foreign)
+            appeared = True
+        return original(active_layout, path)
+
+    monkeypatch.setattr(
+        workspace_module,
+        "_optional_local_authority_bytes",
+        appear_before_late_snapshot,
+    )
+
+    with pytest.raises((EvaluationAssetIntegrityError, ValueError)):
+        pipeline.run()
+
+    assert appeared
+    assert layout.release_pointer_path.read_bytes() == foreign
+    assert layout.load_state().status == "running"
+
+
+def test_append_only_event_rejects_regular_replacement_at_writer_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An append cannot erase a control row raced in after its bound read."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    layout = pipeline.layout
+    original = workspace_module.write_local_authority_text
+    native_row = {
+        "timestamp": "2026-08-20T00:00:00+00:00",
+        "event": "legacy_asset_adopted",
+        "tenant_id": layout.tenant_id,
+        "asset_id": layout.asset_id,
+        "operation_id": "0" * 32,
+        "details": {},
+    }
+    foreign = layout.events_path.read_bytes() + (
+        json.dumps(native_row, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    replaced = False
+
+    def replace_before_append(
+        path: Path,
+        trusted_root: Path,
+        content: str,
+        **kwargs: Any,
+    ) -> None:
+        nonlocal replaced
+        if path == layout.events_path and not replaced:
+            path.write_bytes(foreign)
+            replaced = True
+        original(path, trusted_root, content, **kwargs)
+
+    monkeypatch.setattr(
+        workspace_module,
+        "write_local_authority_text",
+        replace_before_append,
+    )
+
+    with pytest.raises((EvaluationAssetIntegrityError, ValueError)):
+        pipeline.run()
+
+    assert replaced
+    assert layout.events_path.read_bytes() == foreign
+    assert layout.load_state().status == "running"
+
+
+@pytest.mark.parametrize("mode", ["direct", "recovery"])
+@pytest.mark.parametrize("control_name", ["config", "state"])
+def test_revision_rejects_control_replacement_at_writer_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    control_name: str,
+) -> None:
+    """A revision cannot replace control authority raced in after its WAL."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _make_released_checkpoint_mutable(layout)
+    original = workspace_module.write_local_authority_json
+    foreign = b'{"foreign":true}\n'
+    replaced = False
+    target = layout.config_path if control_name == "config" else layout.state_path
+
+    if mode == "recovery":
+        def stop_after_prepare(name: str) -> None:
+            if name == "after_prepared_journal":
+                raise _InjectedFault(name)
+
+        monkeypatch.setattr(workspace_module, "_fault_point", stop_after_prepare)
+        with pytest.raises(_InjectedFault):
+            layout.revise_config({"match_threshold": 0.2})
+        monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+
+    def replace_before_control_write(
+        path: Path,
+        trusted_root: Path,
+        payload: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> None:
+        nonlocal replaced
+        if path == target and not replaced:
+            path.write_bytes(foreign)
+            replaced = True
+        original(path, trusted_root, payload, **kwargs)
+
+    monkeypatch.setattr(
+        workspace_module,
+        "write_local_authority_json",
+        replace_before_control_write,
+    )
+
+    with pytest.raises((EvaluationAssetIntegrityError, ValueError)):
+        if mode == "direct":
+            layout.revise_config({"match_threshold": 0.2})
+        else:
+            layout.recover()
+
+    assert replaced
+    assert target.read_bytes() == foreign
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["direct_release", "recovery_release", "direct_adoption", "recovery_adoption"],
+)
+def test_terminal_state_replacement_at_writer_boundary_rolls_back_pointer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    """A terminal WAL cannot publish over state raced in at its writer."""
+    if operation == "recovery_adoption":
+        layout, _ = _prepared_adoption(tmp_path, monkeypatch)
+        monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+        invoke = layout.recover
+    else:
+        pipeline, _, _ = _create_pipeline(tmp_path)
+        layout = pipeline.layout
+        if operation == "direct_adoption":
+            pipeline.run()
+            _downgrade_to_legacy_completed(layout)
+            invoke = layout.adopt_legacy
+        elif operation == "recovery_release":
+            def stop_after_prepare(name: str) -> None:
+                if name == "after_release_publication_prepared":
+                    raise _InjectedFault(name)
+
+            monkeypatch.setattr(workspace_module, "_fault_point", stop_after_prepare)
+            with pytest.raises(_InjectedFault):
+                pipeline.run()
+            monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+            invoke = layout.recover
+        else:
+            invoke = pipeline.run
+
+    original = workspace_module.write_local_authority_json
+    foreign = b'{"foreign":true}\n'
+    replaced = False
+
+    def replace_before_terminal_state_write(
+        path: Path,
+        trusted_root: Path,
+        payload: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> None:
+        nonlocal replaced
+        if (
+            path == layout.state_path
+            and payload.get("status") == "released"
+            and not replaced
+        ):
+            path.write_bytes(foreign)
+            replaced = True
+        original(path, trusted_root, payload, **kwargs)
+
+    monkeypatch.setattr(
+        workspace_module,
+        "write_local_authority_json",
+        replace_before_terminal_state_write,
+    )
+
+    with pytest.raises((EvaluationAssetIntegrityError, ValueError)):
+        invoke()
+
+    assert replaced
+    assert layout.state_path.read_bytes() == foreign
+    assert not layout.release_pointer_path.exists()
+
+
+@pytest.mark.parametrize("mode", ["direct", "recovery"])
+@pytest.mark.parametrize("control_name", ["manifest", "receipt"])
+def test_adoption_rejects_generated_control_replacement_at_writer_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    control_name: str,
+) -> None:
+    """Adoption cannot overwrite a manifest or receipt raced in after its WAL."""
+    if mode == "recovery":
+        layout, _ = _prepared_adoption(tmp_path, monkeypatch)
+        monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+        invoke = layout.recover
+    else:
+        pipeline, _, _ = _create_pipeline(tmp_path)
+        pipeline.run()
+        layout = pipeline.layout
+        _downgrade_to_legacy_completed(layout)
+        invoke = layout.adopt_legacy
+    target = (
+        layout.manifest_path
+        if control_name == "manifest"
+        else layout.receipt_path(PipelineStage.RAW_INPUTS)
+    )
+    original = workspace_module.write_local_authority_json
+    foreign = b'{"foreign":true}\n'
+    replaced = False
+
+    def replace_before_control_write(
+        path: Path,
+        trusted_root: Path,
+        payload: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> None:
+        nonlocal replaced
+        if path == target and not replaced:
+            path.write_bytes(foreign)
+            replaced = True
+        original(path, trusted_root, payload, **kwargs)
+
+    monkeypatch.setattr(
+        workspace_module,
+        "write_local_authority_json",
+        replace_before_control_write,
+    )
+
+    with pytest.raises((EvaluationAssetIntegrityError, ValueError)):
+        invoke()
+
+    assert replaced
+    assert target.read_bytes() == foreign
+    assert not layout.release_pointer_path.exists()
+
+
+def test_run_rejects_state_replacement_at_save_writer_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A normal checkpoint save binds the exact state that was loaded."""
+    pipeline, rubric, embedding = _create_pipeline(tmp_path)
+    layout = pipeline.layout
+    original = workspace_module.write_local_authority_json
+    foreign = b'{"foreign":true}\n'
+    replaced = False
+
+    def replace_before_state_write(
+        path: Path,
+        trusted_root: Path,
+        payload: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> None:
+        nonlocal replaced
+        if path == layout.state_path and payload.get("status") == "running" and not replaced:
+            path.write_bytes(foreign)
+            replaced = True
+        original(path, trusted_root, payload, **kwargs)
+
+    monkeypatch.setattr(
+        workspace_module,
+        "write_local_authority_json",
+        replace_before_state_write,
+    )
+
+    with pytest.raises((EvaluationAssetIntegrityError, ValueError)):
+        pipeline.run()
+
+    assert replaced
+    assert layout.state_path.read_bytes() == foreign
+    assert rubric.calls == 0
+    assert embedding.calls == 0
+
+
+def test_provider_ledger_rejects_appearance_at_writer_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stage ledger expected absent cannot overwrite a raced control node."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    layout = pipeline.layout
+    target = layout.artifact_path(PipelineStage.RUBRIC_EXTRACTION, "provider_calls.jsonl")
+    original = provenance_module.write_local_authority_jsonl
+    foreign = b"FOREIGN\n"
+    appeared = False
+
+    def appear_before_ledger_write(
+        path: Path,
+        trusted_root: Path,
+        rows: Iterable[Mapping[str, Any]],
+        **kwargs: Any,
+    ) -> None:
+        nonlocal appeared
+        if path == target and not appeared:
+            path.write_bytes(foreign)
+            appeared = True
+        original(path, trusted_root, rows, **kwargs)
+
+    monkeypatch.setattr(
+        provenance_module,
+        "write_local_authority_jsonl",
+        appear_before_ledger_write,
+    )
+
+    with pytest.raises((EvaluationAssetIntegrityError, ValueError)):
+        pipeline.run()
+
+    assert appeared
+    assert target.read_bytes() == foreign
+
+
+def test_initial_input_copy_rejects_appearance_at_writer_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An initial input copy cannot overwrite a raced local authority node."""
+    target = (
+        tmp_path
+        / "tenants"
+        / "tenant_a"
+        / "evaluation_assets"
+        / "v1"
+        / "stages"
+        / "01_raw_inputs"
+        / "labeled_feedback.jsonl"
+    )
+    original = workspace_module.write_local_authority_text
+    foreign = b"FOREIGN\n"
+    appeared = False
+
+    def appear_before_input_copy(
+        path: Path,
+        trusted_root: Path,
+        content: str,
+        **kwargs: Any,
+    ) -> None:
+        nonlocal appeared
+        if path == target and not appeared:
+            path.write_bytes(foreign)
+            appeared = True
+        original(path, trusted_root, content, **kwargs)
+
+    monkeypatch.setattr(
+        workspace_module,
+        "write_local_authority_text",
+        appear_before_input_copy,
+    )
+
+    with pytest.raises(ValueError):
+        _create_pipeline(tmp_path)
+
+    assert appeared
+    assert target.read_bytes() == foreign
+
+
+@pytest.mark.parametrize(
+    "authority_name",
+    [
+        "state",
+        "config",
+        "events",
+        "journal",
+        "history",
+        "receipt",
+        "stage_provenance",
+        "provider_ledger",
+        "build_provenance",
+    ],
+)
+def test_released_verification_uses_one_closed_authority_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    authority_name: str,
+) -> None:
+    """Semantic reopens cannot validate bytes different from authenticated bytes."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    released = pipeline.run()
+    layout = pipeline.layout
+    targets = {
+        "state": layout.state_path,
+        "config": layout.config_path,
+        "events": layout.events_path,
+        "journal": layout.recovery_journal_path,
+        "history": layout.config_history_path,
+        "receipt": layout.receipt_path(PipelineStage.DATASET_SPLITS),
+        "stage_provenance": layout.stage_provenance_path(PipelineStage.RAW_INPUTS),
+        "provider_ledger": layout.artifact_path(
+            PipelineStage.RUBRIC_EXTRACTION,
+            "provider_calls.jsonl",
+        ),
+        "build_provenance": layout.build_provenance_path,
+    }
+    target = targets[authority_name]
+    original = durability_module.verify_receipt_chain
+    changed = False
+
+    def compact_reserialize(path: Path) -> None:
+        if path.suffix == ".jsonl":
+            rows = _read_jsonl(path)
+            payload = "".join(
+                json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+                for row in rows
+            ).encode("utf-8")
+        else:
+            payload = (
+                json.dumps(
+                    json.loads(path.read_text(encoding="utf-8")),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("utf-8")
+        assert payload != path.read_bytes()
+        path.write_bytes(payload)
+
+    def mutate_after_journal(*args: Any, **kwargs: Any) -> Any:
+        nonlocal changed
+        compact_reserialize(target)
+        changed = True
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        durability_module,
+        "verify_receipt_chain",
+        mutate_after_journal,
+    )
+
+    with pytest.raises(EvaluationAssetIntegrityError, match="changed during verification"):
+        verify_released_asset(layout, released)
+
+    assert changed
+
+
+def test_pipeline_receipt_hash_rejects_post_write_authority_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Receipt state hashes come from a bound local authority read."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    layout = pipeline.layout
+    target = layout.receipt_path(PipelineStage.RAW_INPUTS)
+    external = tmp_path / "external-receipt.json"
+    original = EvaluationAssetLayout._write_authority_json
+    genuine = b""
+    attacked = False
+    restore_before_next_write = False
+
+    def race_after_receipt_write(
+        active_layout: EvaluationAssetLayout,
+        path: Path,
+        payload: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> None:
+        nonlocal attacked, genuine, restore_before_next_write
+        if active_layout is layout and restore_before_next_write:
+            target.unlink()
+            target.write_bytes(genuine)
+            restore_before_next_write = False
+        original(active_layout, path, payload, **kwargs)
+        if active_layout is layout and Path(path) == target and not attacked:
+            genuine = target.read_bytes()
+            external.write_bytes(genuine)
+            target.unlink()
+            target.symlink_to(external)
+            attacked = True
+            restore_before_next_write = True
+
+    monkeypatch.setattr(
+        EvaluationAssetLayout,
+        "_write_authority_json",
+        race_after_receipt_write,
+    )
+    try:
+        with pytest.raises(ValueError):
+            pipeline.run()
+    finally:
+        if target.is_symlink():
+            target.unlink()
+            target.write_bytes(genuine)
+
+    assert attacked
+
+
+@pytest.mark.parametrize("authority_name", ["provider-ledger", "input-manifest"])
+def test_stage_eight_control_reads_reject_post_preflight_symlinks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    authority_name: str,
+) -> None:
+    """Stage 8 consumes ledgers and manifests only through bound authority."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    layout = pipeline.layout
+    target = (
+        layout.artifact_path(
+            PipelineStage.RUBRIC_EXTRACTION,
+            "provider_calls.jsonl",
+        )
+        if authority_name == "provider-ledger"
+        else layout.artifact_path(PipelineStage.RAW_INPUTS, "input_manifest.json")
+    )
+    external = tmp_path / f"external-{authority_name}.json"
+    original = pipeline._finalize_stage_eight_artifacts
+    attacked = False
+
+    def race_before_control_read() -> None:
+        nonlocal attacked
+        genuine = target.read_bytes()
+        external.write_bytes(genuine)
+        target.unlink()
+        target.symlink_to(external)
+        attacked = True
+        try:
+            original()
+        finally:
+            target.unlink()
+            target.write_bytes(genuine)
+
+    monkeypatch.setattr(
+        pipeline,
+        "_finalize_stage_eight_artifacts",
+        race_before_control_read,
+    )
+
+    with pytest.raises(ValueError):
+        pipeline.run()
+
+    assert attacked
+    assert not layout.build_provenance_path.exists()
+    assert not layout.generations_root.exists()
+
+
+def test_pipeline_lineage_load_rejects_post_preflight_symlink_without_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The optional lineage read is one bound observation before authoring."""
+    parent_pipeline, _, _ = _create_pipeline(tmp_path)
+    parent_pipeline.run()
+    parent = parent_pipeline.layout
+    child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
+    child.initialize_extension(
+        parent,
+        additional_feedback=_write_additional_feedback(parent.tenants_root),
+        additional_unlabeled=None,
+        clustering_mode="keep",
+    )
+    rubric = _SuccessfulRubricProvider()
+    embedding = _SuccessfulEmbeddingProvider()
+    pipeline = EvaluationAssetPipeline(
+        child,
+        rubric_provider=rubric,
+        embedding_provider=embedding,
+    )
+    target = child.lineage_path
+    genuine = target.read_bytes()
+    external = tmp_path / "external-lineage.json"
+    external.write_bytes(genuine)
+    before = _authority_bytes(child)
+    original = pipeline._validate_injected_provider_identities
+    attacked = False
+
+    def swap_after_preflight() -> None:
+        nonlocal attacked
+        original()
+        target.unlink()
+        target.symlink_to(external)
+        attacked = True
+
+    monkeypatch.setattr(
+        pipeline,
+        "_validate_injected_provider_identities",
+        swap_after_preflight,
+    )
+    try:
+        with pytest.raises(ValueError):
+            pipeline.run()
+    finally:
+        if target.is_symlink():
+            target.unlink()
+            target.write_bytes(genuine)
+
+    assert attacked
+    assert rubric.calls == 0
+    assert embedding.calls == 0
+    assert _authority_bytes(child) == before
+
+
+def test_adoption_recovery_rechecks_candidate_before_pointer_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raced adoption candidate cannot leave public pointer authority."""
+    layout, prepared = _prepared_adoption(tmp_path, monkeypatch)
+    target = layout.stage_provenance_path(PipelineStage.RAW_INPUTS)
+    genuine = target.read_bytes()
+    original = workspace_module.verify_release_candidate
+    attacked = False
+
+    def mutate_after_verification(*args: Any, **kwargs: Any) -> None:
+        nonlocal attacked
+        original(*args, **kwargs)
+        if not attacked:
+            target.write_bytes(b'{"corrupt":true}\n')
+            attacked = True
+
+    monkeypatch.setattr(
+        workspace_module,
+        "verify_release_candidate",
+        mutate_after_verification,
+    )
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+    try:
+        with pytest.raises(EvaluationAssetIntegrityError):
+            layout.recover()
+    finally:
+        target.write_bytes(genuine)
+
+    assert attacked
+    assert not layout.release_pointer_path.exists()
+    assert prepared["target_state"]["status"] == "released"
 
 
 @pytest.mark.parametrize(
@@ -10738,7 +15141,16 @@ def _downgrade_to_legacy_completed(layout: EvaluationAssetLayout) -> None:
     artifact_io.atomic_write_jsonl(
         layout.events_path,
         [
-            event
+            (
+                {
+                    key: value
+                    for key, value in event.items()
+                    if not (
+                        event.get("event") == "pipeline_extended"
+                        and key == "operation_id"
+                    )
+                }
+            )
             for event in _read_jsonl(layout.events_path)
             if event.get("event") != "pipeline_released"
         ],
@@ -10810,3 +15222,622 @@ def _make_released_checkpoint_mutable(
     state.error = "interrupted test checkpoint"
     layout.save_state(state)
     return state
+
+
+def test_tree_capture_binds_payload_to_inventoried_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient same-name file cannot supply bytes for another inode."""
+    trusted_root = tmp_path / "trusted"
+    authority_root = trusted_root / "authority"
+    authority_root.mkdir(parents=True)
+    target = authority_root / "control.json"
+    target.write_bytes(b"ORIGINAL")
+    parked = tmp_path / "parked-control.json"
+    transient = tmp_path / "transient-control.json"
+    transient.write_bytes(b"FORGED")
+    original = control_jsonl_module.read_local_authority_file_with_identity_at
+    attacked = False
+
+    def swap_only_while_bound_read(
+        directory_descriptor: int,
+        filename: str,
+    ) -> tuple[bytes, tuple[int, int, int]]:
+        nonlocal attacked
+        target.rename(parked)
+        transient.rename(target)
+        try:
+            result = original(directory_descriptor, filename)
+        finally:
+            target.rename(transient)
+            parked.rename(target)
+        attacked = True
+        return result
+
+    monkeypatch.setattr(
+        control_jsonl_module,
+        "read_local_authority_file_with_identity_at",
+        swap_only_while_bound_read,
+    )
+
+    with pytest.raises(ValueError, match="changed while"):
+        control_jsonl_module.capture_local_authority_tree(
+            authority_root,
+            trusted_root,
+        )
+
+    assert attacked
+    assert target.read_bytes() == b"ORIGINAL"
+    assert transient.read_bytes() == b"FORGED"
+
+
+def test_local_authority_write_binds_returned_inode_to_owned_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A same-bytes replacement cannot be reported as the installed file."""
+    trusted_root = tmp_path / "trusted"
+    trusted_root.mkdir()
+    target = trusted_root / "control.json"
+    parked = tmp_path / "parked-owned-control.json"
+    original = control_jsonl_module.atomic_write_bytes_at
+    replacement_inode: int | None = None
+
+    def replace_after_install(
+        directory_descriptor: int,
+        filename: str,
+        content: bytes,
+        **kwargs: Any,
+    ) -> tuple[int, int, int]:
+        nonlocal replacement_inode
+        installed_identity = original(
+            directory_descriptor,
+            filename,
+            content,
+            **kwargs,
+        )
+        target.rename(parked)
+        target.write_bytes(content)
+        replacement_inode = target.stat().st_ino
+        return installed_identity
+
+    monkeypatch.setattr(
+        control_jsonl_module,
+        "atomic_write_bytes_at",
+        replace_after_install,
+    )
+
+    with pytest.raises(ValueError, match="changed after writing"):
+        control_jsonl_module.resolve_local_authority_file(
+            target,
+            trusted_root,
+            access="write",
+            write_data=b"NEW",
+            expected_write_data=None,
+            check_expected_write_data=True,
+        )
+
+    assert target.read_bytes() == b"NEW"
+    assert target.stat().st_ino == replacement_inode
+    assert parked.read_bytes() == b"NEW"
+    assert parked.stat().st_ino != replacement_inode
+
+
+def test_asset_lock_rebinds_name_after_flock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The acquired inode must remain the inode named by the lock path."""
+    trusted_root = tmp_path / "trusted"
+    lock_path = trusted_root / ".locks" / "v1.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_bytes(b"")
+    parked = tmp_path / "parked-lock"
+    original = control_jsonl_module.fcntl.flock
+    replaced = False
+
+    def replace_after_flock(descriptor: int, operation: int) -> None:
+        nonlocal replaced
+        original(descriptor, operation)
+        if operation & control_jsonl_module.fcntl.LOCK_EX and not replaced:
+            lock_path.rename(parked)
+            lock_path.write_bytes(b"")
+            replaced = True
+
+    monkeypatch.setattr(control_jsonl_module.fcntl, "flock", replace_after_flock)
+
+    with pytest.raises(ValueError, match="changed after acquisition"):
+        with control_jsonl_module.acquire_local_authority_lock(
+            lock_path,
+            trusted_root,
+            timeout=0,
+        ):
+            raise AssertionError("raced lock was yielded")
+
+    assert replaced
+    assert lock_path.is_file()
+    assert parked.is_file()
+    assert lock_path.stat().st_ino != parked.stat().st_ino
+
+
+def test_created_authority_ancestor_rejects_foreign_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directory replacing a just-created ancestor is never populated."""
+    trusted_root = tmp_path / "trusted"
+    trusted_root.mkdir()
+    target = trusted_root / "v1" / "stages"
+    parked = tmp_path / "parked-owned-v1"
+    foreign = tmp_path / "foreign-v1"
+    foreign.mkdir()
+    (foreign / "KEEP").write_bytes(b"KEEP")
+    original = control_jsonl_module.os.mkdir
+    replaced = False
+
+    def replace_created_directory(
+        path: str | bytes | Path,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        nonlocal replaced
+        original(path, mode, dir_fd=dir_fd)
+        if path == "v1" and dir_fd is not None and not replaced:
+            (trusted_root / "v1").rename(parked)
+            foreign.rename(trusted_root / "v1")
+            replaced = True
+
+    monkeypatch.setattr(control_jsonl_module.os, "mkdir", replace_created_directory)
+
+    with pytest.raises(ValueError, match="replaced before opening"):
+        with control_jsonl_module.open_local_authority_directory(
+            target,
+            trusted_root,
+            create=True,
+        ):
+            raise AssertionError("foreign directory was accepted")
+
+    assert replaced
+    assert (trusted_root / "v1" / "KEEP").read_bytes() == b"KEEP"
+    assert not (trusted_root / "v1" / "stages").exists()
+    assert not any(parked.iterdir())
+
+
+def test_authority_directory_bootstraps_absent_trusted_root(
+    tmp_path: Path,
+) -> None:
+    """First-time initialization safely creates its trusted tenants root."""
+    trusted_root = tmp_path / "tenants"
+    target = trusted_root / "tenant_a" / "evaluation_assets" / "v1"
+
+    with control_jsonl_module.open_local_authority_directory(
+        target,
+        trusted_root,
+        create=True,
+    ) as descriptor:
+        assert control_jsonl_module.stat.S_ISDIR(
+            control_jsonl_module.os.fstat(descriptor).st_mode
+        )
+
+    assert target.is_dir()
+
+
+def test_absent_authority_root_rejects_foreign_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A foreign directory replacing a created tenants root is not populated."""
+    trusted_root = tmp_path / "tenants"
+    target = trusted_root / "tenant_a"
+    parked = tmp_path / "parked-owned-tenants"
+    foreign = tmp_path / "foreign-tenants"
+    foreign.mkdir()
+    (foreign / "KEEP").write_bytes(b"KEEP")
+    original = control_jsonl_module.os.mkdir
+    replaced = False
+
+    def replace_created_root(
+        path: str | bytes | Path,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        nonlocal replaced
+        original(path, mode, dir_fd=dir_fd)
+        if path == trusted_root.name and dir_fd is not None and not replaced:
+            trusted_root.rename(parked)
+            foreign.rename(trusted_root)
+            replaced = True
+
+    monkeypatch.setattr(control_jsonl_module.os, "mkdir", replace_created_root)
+
+    with pytest.raises(ValueError, match="root was replaced before opening"):
+        with control_jsonl_module.open_local_authority_directory(
+            target,
+            trusted_root,
+            create=True,
+        ):
+            raise AssertionError("foreign trusted root was accepted")
+
+    assert replaced
+    assert (trusted_root / "KEEP").read_bytes() == b"KEEP"
+    assert not (trusted_root / "tenant_a").exists()
+    assert not any(parked.iterdir())
+
+
+def test_authority_root_symlink_is_never_bootstrapped(
+    tmp_path: Path,
+) -> None:
+    """A linked tenants root is rejected rather than treated as bootstrap state."""
+    trusted_root = tmp_path / "tenants"
+    external = tmp_path / "external-tenants"
+    external.mkdir()
+    (external / "KEEP").write_bytes(b"KEEP")
+    trusted_root.symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="root is not an exact directory"):
+        with control_jsonl_module.open_local_authority_directory(
+            trusted_root / "tenant_a",
+            trusted_root,
+            create=True,
+        ):
+            raise AssertionError("linked trusted root was accepted")
+
+    assert (external / "KEEP").read_bytes() == b"KEEP"
+    assert not (external / "tenant_a").exists()
+
+
+def test_released_journal_validation_uses_one_authority_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Journal semantics cannot transiently reopen different event bytes."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    state = pipeline.run()
+    layout = pipeline.layout
+    with layout.events_path.open("ab") as handle:
+        handle.write(b'{"tampered":true}\n')
+
+    def reject_live_reopen(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("historical journal reopened live authority")
+
+    monkeypatch.setattr(
+        journal_validation_module,
+        "resolve_local_authority_file",
+        reject_live_reopen,
+    )
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        verify_released_asset(layout, state)
+
+    assert layout.events_path.read_bytes().endswith(b'{"tampered":true}\n')
+
+
+def test_v2_config_history_is_native_evidence_before_provider_calls(
+    tmp_path: Path,
+) -> None:
+    """A schema downgrade cannot hide an operation-bound configuration row."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    layout = pipeline.layout
+    layout.revise_config({"match_threshold": 0.5})
+    layout.events_path.unlink(missing_ok=True)
+    layout.recovery_journal_path.unlink(missing_ok=True)
+    raw_state = json.loads(layout.state_path.read_text(encoding="utf-8"))
+    raw_state.pop("schema_version")
+    artifact_io.atomic_write_json(layout.state_path, raw_state)
+    before = _authority_bytes(layout)
+    rubric = _SuccessfulRubricProvider()
+    embedding = _SuccessfulEmbeddingProvider()
+
+    assert durability_module._has_native_authority_evidence(layout, raw_state)
+    with pytest.raises(EvaluationAssetIntegrityError):
+        EvaluationAssetPipeline(
+            layout,
+            rubric_provider=rubric,
+            embedding_provider=embedding,
+        ).run()
+
+    assert rubric.calls == 0
+    assert embedding.calls == 0
+    assert _authority_bytes(layout) == before
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "operation-id",
+        "wrong-previous",
+        "wrong-boundary",
+        "unknown-field",
+        "noncanonical-timezone",
+    ],
+)
+def test_config_history_classifier_accepts_only_exact_pre_v2_updates(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    """Row-local hybrids cannot masquerade as legacy configuration history."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    layout = pipeline.layout
+    config = layout.load_config().to_dict()
+    rows = _read_jsonl(layout.config_history_path)
+    update: dict[str, Any] = {
+        "timestamp": rows[0]["timestamp"],
+        "revision": 2,
+        "event": "configuration_updated",
+        "changed_fields": {
+            "match_threshold": {"previous": 0.6, "new": 0.5},
+        },
+        "invalidated_from_stage": "coverage_decisions",
+        "resume_from_stage": "coverage_decisions",
+    }
+    if mutation == "operation-id":
+        update["operation_id"] = "0" * 32
+    elif mutation == "wrong-previous":
+        update["changed_fields"] = {
+            "match_threshold": {"previous": 0.4, "new": 0.5},
+        }
+    elif mutation == "wrong-boundary":
+        update["invalidated_from_stage"] = "raw_inputs"
+        update["resume_from_stage"] = "raw_inputs"
+    elif mutation == "unknown-field":
+        update["changed_fields"] = {
+            "future_threshold": {"previous": 0.6, "new": 0.5},
+        }
+    else:
+        update["timestamp"] = "2026-08-20T01:00:00+01:00"
+    config["match_threshold"] = 0.5
+    artifact_io.atomic_write_json(layout.config_path, config)
+    artifact_io.atomic_write_jsonl(layout.config_history_path, [*rows, update])
+
+    assert durability_module._has_native_config_history_authority(layout)
+
+
+def test_exact_pre_v2_config_history_update_remains_compatible(
+    tmp_path: Path,
+) -> None:
+    """The genuine receipt-free update profile remains resumable."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    layout = pipeline.layout
+    config = layout.load_config().to_dict()
+    rows = _read_jsonl(layout.config_history_path)
+    update = {
+        "timestamp": rows[0]["timestamp"],
+        "revision": 2,
+        "event": "configuration_updated",
+        "changed_fields": {
+            "match_threshold": {"previous": 0.6, "new": 0.5},
+        },
+        "invalidated_from_stage": "coverage_decisions",
+        "resume_from_stage": "coverage_decisions",
+    }
+    config["match_threshold"] = 0.5
+    artifact_io.atomic_write_json(layout.config_path, config)
+    artifact_io.atomic_write_jsonl(layout.config_history_path, [*rows, update])
+
+    assert not durability_module._has_native_config_history_authority(layout)
+
+
+def test_stage_eight_generation_manifest_rejects_writer_boundary_appearance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The workspace generation manifest binds its expected absent target."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    layout = pipeline.layout
+    target = layout.artifact_path(
+        PipelineStage.DATASET_SPLITS,
+        "generation_manifest.json",
+    )
+    foreign = b"FOREIGN\n"
+    original = pipeline_module.resolve_local_authority_file
+    attacked = False
+
+    def appear_at_writer_boundary(
+        path: Path,
+        trusted_root: Path,
+        **kwargs: Any,
+    ) -> Any:
+        nonlocal attacked
+        if (
+            path == target
+            and kwargs.get("access") == "write"
+            and kwargs.get("write_data") is not None
+            and not attacked
+        ):
+            path.write_bytes(foreign)
+            attacked = True
+        return original(path, trusted_root, **kwargs)
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "resolve_local_authority_file",
+        appear_at_writer_boundary,
+    )
+
+    with pytest.raises(ValueError, match="appeared before writing"):
+        pipeline.run()
+
+    assert attacked
+    assert target.read_bytes() == foreign
+    assert not layout.release_pointer_path.exists()
+
+
+def test_keep_inventory_rejects_writer_boundary_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep-mode inventory reuse binds its previously snapshotted target."""
+    parent_pipeline, _, _ = _create_pipeline(tmp_path)
+    parent_pipeline.run()
+    parent = parent_pipeline.layout
+    child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
+    child.initialize_extension(
+        parent,
+        additional_feedback=_write_additional_feedback(parent.tenants_root),
+        additional_unlabeled=None,
+        clustering_mode="keep",
+    )
+    pipeline = EvaluationAssetPipeline(
+        child,
+        rubric_provider=_SuccessfulRubricProvider(),
+        embedding_provider=_SuccessfulEmbeddingProvider(),
+    )
+    target = child.artifact_path(
+        PipelineStage.INTENT_CLUSTERING,
+        "intent_inventory.jsonl",
+    )
+    foreign = b"FOREIGN\n"
+    original = pipeline_module.resolve_local_authority_file
+    attacked = False
+
+    def appear_at_writer_boundary(
+        path: Path,
+        trusted_root: Path,
+        **kwargs: Any,
+    ) -> Any:
+        nonlocal attacked
+        if (
+            path == target
+            and kwargs.get("access") == "write"
+            and kwargs.get("write_data") is not None
+            and not attacked
+        ):
+            path.write_bytes(foreign)
+            attacked = True
+        return original(path, trusted_root, **kwargs)
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "resolve_local_authority_file",
+        appear_at_writer_boundary,
+    )
+
+    with pytest.raises(ValueError, match="bytes changed before writing"):
+        pipeline.run()
+
+    assert attacked
+    assert target.read_bytes() == foreign
+    assert not child.release_pointer_path.exists()
+
+
+def test_atomic_install_does_not_quarantine_late_foreign_leaf(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A post-install replacement remains live under the authority name."""
+    trusted_root = tmp_path / "trusted"
+    trusted_root.mkdir()
+    target = trusted_root / "control.json"
+    parked = tmp_path / "parked-owned-control.json"
+    original = artifact_io.rename_noreplace_at
+    foreign_inode: int | None = None
+
+    def replace_after_install(
+        directory_descriptor: int,
+        source_name: str,
+        target_name: str,
+        **kwargs: Any,
+    ) -> bool:
+        nonlocal foreign_inode
+        installed = original(
+            directory_descriptor,
+            source_name,
+            target_name,
+            **kwargs,
+        )
+        if installed and target_name == target.name:
+            target.rename(parked)
+            target.write_bytes(b"LATE-FOREIGN")
+            foreign_inode = target.stat().st_ino
+        return installed
+
+    monkeypatch.setattr(artifact_io, "rename_noreplace_at", replace_after_install)
+
+    with control_jsonl_module.open_local_authority_directory(
+        trusted_root,
+        trusted_root,
+    ) as descriptor:
+        with pytest.raises(ValueError, match="changed during installation"):
+            artifact_io.atomic_write_bytes_at(
+                descriptor,
+                target.name,
+                b"NEW",
+                expected_target=None,
+            )
+
+    assert target.read_bytes() == b"LATE-FOREIGN"
+    assert target.stat().st_ino == foreign_inode
+    assert parked.read_bytes() == b"NEW"
+
+
+def test_atomic_rollback_does_not_exchange_over_late_foreign_leaf(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Content-mismatch rollback never displaces a replacement target."""
+    trusted_root = tmp_path / "trusted"
+    trusted_root.mkdir()
+    target = trusted_root / "control.json"
+    target.write_bytes(b"OLD")
+    original_target_inode = target.stat().st_ino
+    parked_new = tmp_path / "parked-owned-new.json"
+    original = artifact_io.rename_exchange_at
+    exchanges = 0
+    late_foreign_inode: int | None = None
+
+    def race_exchange(
+        directory_descriptor: int,
+        source_name: str,
+        target_name: str,
+        **kwargs: Any,
+    ) -> None:
+        nonlocal exchanges, late_foreign_inode
+        exchanges += 1
+        if exchanges == 1:
+            original(
+                directory_descriptor,
+                source_name,
+                target_name,
+                **kwargs,
+            )
+            (trusted_root / source_name).write_bytes(b"MUTATED-OLD")
+            return
+        target.rename(parked_new)
+        target.write_bytes(b"LATE-FOREIGN")
+        late_foreign_inode = target.stat().st_ino
+        original(
+            directory_descriptor,
+            source_name,
+            target_name,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(artifact_io, "rename_exchange_at", race_exchange)
+
+    with control_jsonl_module.open_local_authority_directory(
+        trusted_root,
+        trusted_root,
+    ) as descriptor:
+        with pytest.raises(ValueError, match="expected identity"):
+            artifact_io.atomic_write_bytes_at(
+                descriptor,
+                target.name,
+                b"NEW",
+                expected_target=(
+                    target.stat().st_dev,
+                    original_target_inode,
+                    target.stat().st_mode & 0o170000,
+                ),
+                expected_target_content=b"OLD",
+            )
+
+    assert exchanges == 2
+    assert target.read_bytes() == b"LATE-FOREIGN"
+    assert target.stat().st_ino == late_foreign_inode
+    assert parked_new.read_bytes() == b"NEW"
+    hidden = [path for path in trusted_root.iterdir() if path.name.startswith(".control")]
+    assert len(hidden) == 1
+    assert hidden[0].read_bytes() == b"MUTATED-OLD"
