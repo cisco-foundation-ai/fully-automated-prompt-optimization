@@ -140,18 +140,19 @@ class _WindowsRenameInfoPrefix(ctypes.Structure):
 
 def _windows_rename_info_buffer(
     destination: str,
-    root_handle: int,
 ) -> ctypes.Array[ctypes.c_char]:
-    """Pack one aligned FILE_RENAME_INFO relative-name payload."""
+    """Pack one aligned FILE_RENAME_INFO absolute-name payload."""
     encoded = destination.encode("utf-16-le")
     filename_offset = _WindowsRenameInfoPrefix.file_name.offset
-    buffer = ctypes.create_string_buffer(filename_offset + len(encoded))
+    buffer = ctypes.create_string_buffer(
+        ctypes.sizeof(_WindowsRenameInfoPrefix) + len(encoded)
+    )
     prefix = ctypes.cast(
         buffer,
         ctypes.POINTER(_WindowsRenameInfoPrefix),
     ).contents
     prefix.replace_if_exists = 0
-    prefix.root_directory = root_handle
+    prefix.root_directory = None
     prefix.file_name_length = len(encoded)
     ctypes.memmove(
         ctypes.addressof(buffer) + filename_offset,
@@ -1748,7 +1749,9 @@ def _win_rename_noreplace(
     source_info = stat_child(directory, source)
     if source_info.identity != expected:
         raise ValueError("rename source changed before Windows rename")
-    source_path = _directory_path(directory) / source
+    parent_path = _directory_path(directory)
+    source_path = parent_path / source
+    destination_path = parent_path / destination
     handle = _win_open_path(
         source_path,
         access=_DELETE | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
@@ -1759,10 +1762,7 @@ def _win_rename_noreplace(
     try:
         if _win_identity(handle)[0] != expected:
             raise ValueError("rename source changed before Windows rename")
-        buffer = _windows_rename_info_buffer(
-            destination,
-            _directory_native(directory),
-        )
+        buffer = _windows_rename_info_buffer(str(destination_path))
         if not _SetFileInformationByHandle(
             handle,
             _FILE_RENAME_INFO_CLASS,

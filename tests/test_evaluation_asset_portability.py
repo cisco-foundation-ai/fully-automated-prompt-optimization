@@ -12,7 +12,7 @@ import subprocess
 import sys
 import threading
 from contextlib import nullcontext
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 import pytest
@@ -161,6 +161,43 @@ def test_native_noreplace_never_overwrites_file_or_directory(
         )
         assert (tmp_path / "source-dir").is_dir()
         assert (tmp_path / "target-dir").is_dir()
+    finally:
+        directory.close()
+
+
+def test_native_noreplace_supports_non_bmp_names_and_preserves_collision(
+    tmp_path: Path,
+) -> None:
+    """One-component non-BMP names retain native no-replace semantics."""
+    directory = authority_io.open_bound_directory(tmp_path)
+    try:
+        source = "source-😀.json"
+        destination = "destination-🧪.json"
+        source_identity = _create_bound_file(directory, source, b"SOURCE")
+
+        assert authority_io.rename_noreplace(
+            directory,
+            source,
+            destination,
+            expected_source=source_identity,
+        )
+        assert not (tmp_path / source).exists()
+        assert (tmp_path / destination).read_bytes() == b"SOURCE"
+
+        competing_source = "competing-🚀.json"
+        competing_identity = _create_bound_file(
+            directory,
+            competing_source,
+            b"COMPETING",
+        )
+        assert not authority_io.rename_noreplace(
+            directory,
+            competing_source,
+            destination,
+            expected_source=competing_identity,
+        )
+        assert (tmp_path / competing_source).read_bytes() == b"COMPETING"
+        assert (tmp_path / destination).read_bytes() == b"SOURCE"
     finally:
         directory.close()
 
@@ -1352,10 +1389,11 @@ def test_posix_open_child_directory_closes_descriptor_when_path_rebind_fails(
         directory.close()
 
 
-def test_windows_rename_payload_has_aligned_relative_name_contract() -> None:
-    """FILE_RENAME_INFO packing is fixed-width and pointer-aligned off Windows."""
-    destination = "target.json"
-    buffer = authority_io._windows_rename_info_buffer(destination, 0x1234)
+def test_windows_rename_payload_has_absolute_unicode_null_root_contract() -> None:
+    """FILE_RENAME_INFO carries a terminated absolute Unicode DOS target."""
+    destination = "C:\\verified\\资产\\target-😀.json"
+    encoded = destination.encode("utf-16-le")
+    buffer = authority_io._windows_rename_info_buffer(destination)
     prefix = ctypes.cast(
         buffer,
         ctypes.POINTER(authority_io._WindowsRenameInfoPrefix),
@@ -1363,10 +1401,16 @@ def test_windows_rename_payload_has_aligned_relative_name_contract() -> None:
     offset = authority_io._WindowsRenameInfoPrefix.file_name.offset
 
     assert offset % ctypes.alignment(ctypes.c_void_p) in {0, 4}
+    assert ctypes.c_uint32.from_buffer(buffer).value == 0
     assert prefix.replace_if_exists == 0
-    assert prefix.root_directory == 0x1234
-    assert prefix.file_name_length == len(destination.encode("utf-16-le"))
-    assert bytes(buffer[offset:]).decode("utf-16-le") == destination
+    assert prefix.root_directory is None
+    assert prefix.file_name_length == len(encoded)
+    assert bytes(buffer[offset : offset + len(encoded)]) == encoded
+    assert bytes(buffer[offset : offset + len(encoded)]).decode("utf-16-le") == destination
+    assert bytes(buffer[offset + len(encoded) : offset + len(encoded) + 2]) == b"\0\0"
+    assert ctypes.sizeof(buffer) >= (
+        ctypes.sizeof(authority_io._WindowsRenameInfoPrefix) + len(encoded)
+    )
 
 
 def test_mocked_windows_bound_directory_retains_ancestor_handle_chain(
@@ -2163,12 +2207,17 @@ def test_mocked_darwin_rejects_unicode_casefold_authority_alias(
         directory.close()
 
 
-def test_mocked_windows_noreplace_uses_exact_handle_and_relative_root(
+def test_mocked_windows_noreplace_uses_exact_handle_and_absolute_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The Win32 rename seam passes the bound source and parent handles."""
+    """The Win32 rename seam binds one parent path and one exact source handle."""
     expected = (7, 11, stat.S_IFREG)
-    calls: list[tuple[int, int, str]] = []
+    directory = authority_io.BoundDirectory(Path("ignored"), 91, (7, 9, stat.S_IFDIR))
+    parent = PureWindowsPath("C:/verified/authority")
+    path_calls: list[authority_io.DirectoryLike] = []
+    open_calls: list[tuple[PureWindowsPath, int, int, bool | None, bool]] = []
+    set_calls: list[tuple[int, int, int | None, str, int]] = []
+    closed: list[int] = []
     monkeypatch.setattr(
         authority_io,
         "stat_child",
@@ -2178,11 +2227,36 @@ def test_mocked_windows_noreplace_uses_exact_handle_and_relative_root(
             stat.S_IFREG,
         ),
     )
-    monkeypatch.setattr(authority_io, "_directory_path", lambda _directory: Path("C:/root"))
-    monkeypatch.setattr(authority_io, "_directory_native", lambda _directory: 91)
-    monkeypatch.setattr(authority_io, "_win_open_path", lambda *args, **kwargs: 77)
+
+    def verified_path(
+        bound: authority_io.DirectoryLike,
+    ) -> PureWindowsPath:
+        path_calls.append(bound)
+        return parent
+
+    def open_path(
+        path: PureWindowsPath,
+        *,
+        access: int,
+        creation: int,
+        directory: bool | None,
+        share_delete: bool,
+        **_kwargs: Any,
+    ) -> int:
+        open_calls.append((path, access, creation, directory, share_delete))
+        return 77
+
+    monkeypatch.setattr(authority_io, "_directory_path", verified_path)
+    monkeypatch.setattr(
+        authority_io,
+        "_directory_native",
+        lambda _directory: (_ for _ in ()).throw(
+            AssertionError("rename must not reuse a directory HANDLE as RootDirectory")
+        ),
+    )
+    monkeypatch.setattr(authority_io, "_win_open_path", open_path)
     monkeypatch.setattr(authority_io, "_win_identity", lambda _handle: (expected, "file"))
-    monkeypatch.setattr(authority_io, "_win_close", lambda _handle: None)
+    monkeypatch.setattr(authority_io, "_win_close", closed.append)
     for name, value in {
         "_DELETE": 1,
         "_FILE_READ_ATTRIBUTES": 2,
@@ -2198,16 +2272,23 @@ def test_mocked_windows_noreplace_uses_exact_handle_and_relative_root(
         handle: int,
         info_class: int,
         buffer: ctypes.Array[Any],
-        _size: int,
+        size: int,
     ) -> bool:
         prefix = ctypes.cast(
             buffer,
             ctypes.POINTER(authority_io._WindowsRenameInfoPrefix),
         ).contents
         offset = authority_io._WindowsRenameInfoPrefix.file_name.offset
-        destination = bytes(buffer[offset:]).decode("utf-16-le")
-        calls.append((handle, prefix.root_directory, destination))
-        assert info_class == 3
+        encoded = bytes(buffer[offset : offset + prefix.file_name_length])
+        set_calls.append(
+            (
+                handle,
+                info_class,
+                prefix.root_directory,
+                encoded.decode("utf-16-le"),
+                size,
+            )
+        )
         return True
 
     monkeypatch.setattr(
@@ -2218,12 +2299,104 @@ def test_mocked_windows_noreplace_uses_exact_handle_and_relative_root(
     )
 
     assert authority_io._win_rename_noreplace(
-        91,
+        directory,
         "source.json",
-        "target.json",
+        "target-😀.json",
         expected,
     )
-    assert calls == [(77, 91, "target.json")]
+    assert path_calls == [directory]
+    assert open_calls == [
+        (
+            parent / "source.json",
+            1 | 2 | 4,
+            3,
+            False,
+            True,
+        )
+    ]
+    assert set_calls == [
+        (
+            77,
+            3,
+            None,
+            str(parent / "target-😀.json"),
+            ctypes.sizeof(authority_io._WindowsRenameInfoPrefix)
+            + len(str(parent / "target-😀.json").encode("utf-16-le")),
+        )
+    ]
+    assert closed == [77]
+
+
+@pytest.mark.parametrize(
+    ("error", "is_collision"),
+    [(80, True), (183, True), (5, False), (87, False)],
+)
+def test_mocked_windows_noreplace_only_suppresses_collision_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    error: int,
+    is_collision: bool,
+) -> None:
+    """Only documented destination collisions return false after exact close."""
+    expected = (7, 11, stat.S_IFREG)
+    closed: list[int] = []
+    monkeypatch.setattr(
+        authority_io,
+        "stat_child",
+        lambda _directory, _name: authority_io.NodeInfo(
+            expected,
+            "file",
+            stat.S_IFREG,
+        ),
+    )
+    monkeypatch.setattr(
+        authority_io,
+        "_directory_path",
+        lambda _directory: PureWindowsPath("C:/verified/authority"),
+    )
+    monkeypatch.setattr(authority_io, "_win_open_path", lambda *_args, **_kwargs: 77)
+    monkeypatch.setattr(authority_io, "_win_identity", lambda _handle: (expected, "file"))
+    monkeypatch.setattr(authority_io, "_win_close", closed.append)
+    monkeypatch.setattr(
+        authority_io,
+        "_SetFileInformationByHandle",
+        lambda *_args: False,
+        raising=False,
+    )
+    monkeypatch.setattr(authority_io.ctypes, "get_last_error", lambda: error, raising=False)
+    monkeypatch.setattr(
+        authority_io.ctypes,
+        "WinError",
+        lambda code: OSError(code, f"injected Windows error {code}"),
+        raising=False,
+    )
+    for name, value in {
+        "_DELETE": 1,
+        "_FILE_READ_ATTRIBUTES": 2,
+        "_SYNCHRONIZE": 4,
+        "_OPEN_EXISTING": 3,
+        "_FILE_RENAME_INFO_CLASS": 3,
+        "_ERROR_FILE_EXISTS": 80,
+        "_ERROR_ALREADY_EXISTS": 183,
+    }.items():
+        monkeypatch.setattr(authority_io, name, value, raising=False)
+
+    if is_collision:
+        assert not authority_io._win_rename_noreplace(
+            91,
+            "source.json",
+            "target.json",
+            expected,
+        )
+    else:
+        with pytest.raises(OSError) as raised:
+            authority_io._win_rename_noreplace(
+                91,
+                "source.json",
+                "target.json",
+                expected,
+            )
+        assert raised.value.errno == error
+    assert closed == [77]
 
 
 def test_mocked_windows_lock_and_disposition_use_the_bound_handle(
