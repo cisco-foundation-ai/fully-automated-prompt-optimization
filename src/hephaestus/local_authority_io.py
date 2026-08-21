@@ -575,6 +575,45 @@ def bind_renamed_directory(
     return previous
 
 
+def prepare_file_source_replace(file: BoundFile) -> None:
+    """Release a Windows source handle before path-based file replacement."""
+    _bound_file_identity(file)
+    if os.name == "nt":  # pragma: no cover - exercised by Windows CI
+        file.close()
+
+
+def bind_replaced_file(
+    parent: DirectoryLike,
+    name: str,
+    *,
+    expected: NodeIdentity,
+    previous: BoundFile,
+) -> BoundFile:
+    """Bind the installed file after an identity-checked path replacement."""
+    name = _one_component(name)
+    if os.name == "nt":  # pragma: no cover - exercised by Windows CI
+        if not previous.closed:
+            raise ValueError("Windows replacement source handle is still open")
+        rebound = open_child_file(
+            parent,
+            name,
+            writable=True,
+            delete_access=True,
+        )
+        if rebound.identity != expected:
+            rebound.close()
+            raise ValueError("installed file changed while binding replacement")
+        return rebound
+    if _bound_file_identity(previous) != expected:
+        raise ValueError("installed file changed while binding replacement")
+    previous.path = (
+        _directory_path(parent) / name
+        if isinstance(parent, BoundDirectory)
+        else previous.path
+    )
+    return previous
+
+
 def open_child_file(
     parent: DirectoryLike,
     name: str,

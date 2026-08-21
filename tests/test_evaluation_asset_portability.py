@@ -226,6 +226,143 @@ def test_native_atomic_replacement_leaves_no_owned_hidden_nodes(
         directory.close()
 
 
+def test_native_atomic_replacement_rollback_restores_original(
+    tmp_path: Path,
+) -> None:
+    """A content mismatch reverses CAS and reclaims the rejected replacement."""
+    directory = authority_io.open_bound_directory(tmp_path)
+    try:
+        first = atomic_write_bytes_at(directory, "authority.json", b"ONE")
+
+        with pytest.raises(ValueError, match="target bytes changed"):
+            atomic_write_bytes_at(
+                directory,
+                "authority.json",
+                b"TWO",
+                expected_target=first,
+                expected_target_content=b"WRONG",
+            )
+
+        assert (tmp_path / "authority.json").read_bytes() == b"ONE"
+        assert authority_io.stat_child(directory, "authority.json").identity == first
+        assert not any(
+            path.name.endswith((".tmp", ".removed", ".rejected"))
+            for path in tmp_path.iterdir()
+        )
+    finally:
+        directory.close()
+
+
+def test_atomic_replacement_prepares_replaces_rebinds_and_syncs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Path replacement releases its source before CAS and rebinds afterward."""
+    directory = authority_io.open_bound_directory(tmp_path)
+    captured: dict[str, authority_io.BoundFile] = {}
+    events: list[str] = []
+    real_open = authority_io.open_child_file
+    real_replace = authority_io.replace_with_backup
+    real_sync = authority_io.sync_bound_file
+    try:
+        first = atomic_write_bytes_at(directory, "authority.json", b"ONE")
+
+        def capture_open(
+            parent: authority_io.DirectoryLike,
+            name: str,
+            **kwargs: Any,
+        ) -> authority_io.BoundFile:
+            opened = real_open(parent, name, **kwargs)
+            if kwargs.get("create_exclusive"):
+                captured["source"] = opened
+            return opened
+
+        def prepare(source: authority_io.BoundFile) -> None:
+            assert source is captured["source"]
+            events.append("prepare")
+            source.close()
+
+        def replace(
+            parent: authority_io.DirectoryLike,
+            source: str,
+            destination: str,
+            *,
+            expected_source: authority_io.NodeIdentity,
+            expected_destination: authority_io.NodeIdentity,
+        ) -> authority_io.OwnedNode:
+            events.append("replace")
+            if not captured["source"].closed:
+                failure = OSError("injected Windows source sharing violation")
+                failure.winerror = 32  # type: ignore[attr-defined]
+                raise failure
+            return real_replace(
+                parent,
+                source,
+                destination,
+                expected_source=expected_source,
+                expected_destination=expected_destination,
+            )
+
+        def bind(
+            parent: authority_io.DirectoryLike,
+            name: str,
+            *,
+            expected: authority_io.NodeIdentity,
+            previous: authority_io.BoundFile,
+        ) -> authority_io.BoundFile:
+            assert previous is captured["source"]
+            assert previous.closed
+            events.append("bind")
+            rebound = real_open(
+                parent,
+                name,
+                writable=True,
+                delete_access=True,
+            )
+            assert rebound.identity == expected
+            captured["rebound"] = rebound
+            return rebound
+
+        def sync(file: authority_io.BoundFile) -> None:
+            if file is captured.get("rebound"):
+                events.append("sync")
+            real_sync(file)
+
+        monkeypatch.setattr(authority_io, "open_child_file", capture_open)
+        monkeypatch.setattr(
+            authority_io,
+            "prepare_file_source_replace",
+            prepare,
+            raising=False,
+        )
+        monkeypatch.setattr(authority_io, "replace_with_backup", replace)
+        monkeypatch.setattr(
+            authority_io,
+            "bind_replaced_file",
+            bind,
+            raising=False,
+        )
+        monkeypatch.setattr(authority_io, "sync_bound_file", sync)
+
+        second = atomic_write_bytes_at(
+            directory,
+            "authority.json",
+            b"TWO",
+            expected_target=first,
+            expected_target_content=b"ONE",
+        )
+
+        assert second != first
+        assert events == ["prepare", "replace", "bind", "sync"]
+        assert (tmp_path / "authority.json").read_bytes() == b"TWO"
+        assert not any(
+            path.name.endswith((".tmp", ".removed", ".rejected"))
+            for path in tmp_path.iterdir()
+        )
+    finally:
+        directory.close()
+
+
 def test_native_reclamation_retains_a_foreign_name_replacement(
     tmp_path: Path,
 ) -> None:
@@ -2139,6 +2276,81 @@ def test_mocked_windows_renamed_directory_closes_then_reopens_exact_identity(
     assert rebound is stable
     assert temporary.closed
     assert events == ["close:72", f"open:installed:{identity}"]
+
+
+def test_mocked_windows_replaced_file_closes_then_reopens_exact_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Windows replacement source closes, then rebinds with delete sharing."""
+    root = Path("C:/authority")
+    identity = (7, 11, stat.S_IFREG)
+    parent = authority_io.BoundDirectory(root, 71, (7, 9, stat.S_IFDIR))
+    temporary = authority_io.BoundFile(root / ".temporary", 72, identity)
+    stable = authority_io.BoundFile(root / "installed", 73, identity)
+    events: list[str] = []
+    monkeypatch.setattr(authority_io.os, "name", "nt")
+    monkeypatch.setattr(authority_io, "_one_component", lambda name: name)
+    monkeypatch.setattr(
+        authority_io,
+        "_win_identity",
+        lambda _handle: (identity, "file"),
+    )
+    monkeypatch.setattr(
+        authority_io,
+        "_win_close",
+        lambda handle: events.append(f"close:{handle}"),
+    )
+
+    def reopen(
+        _parent: authority_io.DirectoryLike,
+        name: str,
+        *,
+        writable: bool = False,
+        delete_access: bool = False,
+        **_kwargs: Any,
+    ) -> authority_io.BoundFile:
+        events.append(f"open:{name}:{writable}:{delete_access}")
+        return stable
+
+    monkeypatch.setattr(authority_io, "open_child_file", reopen)
+
+    authority_io.prepare_file_source_replace(temporary)
+    rebound = authority_io.bind_replaced_file(
+        parent,
+        "installed",
+        expected=identity,
+        previous=temporary,
+    )
+
+    assert rebound is stable
+    assert temporary.closed
+    assert events == ["close:72", "open:installed:True:True"]
+
+
+def test_mocked_windows_replaced_file_rejects_foreign_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A foreign installed identity is closed and never gains file authority."""
+    root = Path("C:/authority")
+    expected = (7, 11, stat.S_IFREG)
+    foreign = authority_io.BoundFile(root / "installed", 73, (7, 12, stat.S_IFREG))
+    previous = authority_io.BoundFile(root / ".temporary", 72, expected, closed=True)
+    closed: list[int] = []
+    monkeypatch.setattr(authority_io.os, "name", "nt")
+    monkeypatch.setattr(authority_io, "_one_component", lambda name: name)
+    monkeypatch.setattr(authority_io, "_win_close", closed.append)
+    monkeypatch.setattr(authority_io, "open_child_file", lambda *_args, **_kwargs: foreign)
+
+    with pytest.raises(ValueError, match="installed file changed"):
+        authority_io.bind_replaced_file(
+            authority_io.BoundDirectory(root, 71, (7, 9, stat.S_IFDIR)),
+            "installed",
+            expected=expected,
+            previous=previous,
+        )
+
+    assert foreign.closed
+    assert closed == [73]
 
 
 def test_directory_creation_workflow_prepares_and_rebinds_installed_leaf(

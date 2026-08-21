@@ -421,6 +421,7 @@ def atomic_write_bytes_at(
             current_identity = current.identity
             if current_identity != expected_target:
                 raise ValueError("authority target changed before replacement")
+            authority_io.prepare_file_source_replace(temporary_file)
             owned = authority_io.replace_with_backup(
                 directory_descriptor,
                 temporary_name,
@@ -429,6 +430,13 @@ def atomic_write_bytes_at(
                 expected_destination=expected_target,
             )
             reclaim_owned_during_error = False
+            temporary_file = authority_io.bind_replaced_file(
+                directory_descriptor,
+                filename,
+                expected=temporary_identity,
+                previous=temporary_file,
+            )
+            authority_io.sync_bound_file(temporary_file)
             installed = authority_io.stat_child(
                 directory_descriptor,
                 filename,
