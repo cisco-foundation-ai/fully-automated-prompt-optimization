@@ -558,6 +558,10 @@ _OPERATOR_ATTRIBUTE_FACTORIES = {
     "operator.attrgetter",
     "operator.methodcaller",
 }
+_OPERATOR_ATTRIBUTE_FACTORY_IMPORTS = {
+    qualified.rsplit(".", 1)[-1]: qualified
+    for qualified in _OPERATOR_ATTRIBUTE_FACTORIES
+}
 _PERSISTENCE_OPERATOR_ATTRIBUTES = frozenset(
     _PERSISTENCE_METHOD_SINKS
     | {
@@ -783,6 +787,12 @@ def _visible_persistence_references(tree: ast.AST) -> list[tuple[ast.AST, str]]:
                     aliases.setdefault(name, item.name)
         elif isinstance(candidate, ast.ImportFrom) and candidate.module:
             for item in candidate.names:
+                if item.name == "*" and candidate.module == "operator":
+                    for name, qualified in (
+                        _OPERATOR_ATTRIBUTE_FACTORY_IMPORTS.items()
+                    ):
+                        aliases.setdefault(name, qualified)
+                    continue
                 if (
                     item.name == "*"
                     and candidate.module.split(".", 1)[0]
@@ -1225,6 +1235,13 @@ class _CallBindingCollector(ast.NodeVisitor):
         if node.module is None:
             return
         for item in node.names:
+            if item.name == "*" and node.module == "operator":
+                for name, qualified in (
+                    _OPERATOR_ATTRIBUTE_FACTORY_IMPORTS.items()
+                ):
+                    self.bindings.pop(name, None)
+                    self.aliases[name] = qualified
+                continue
             name = item.asname or item.name
             self.bindings.pop(name, None)
             self.aliases[name] = f"{node.module}.{item.name}"
@@ -1627,14 +1644,6 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
                 definition_counts,
             )
         )
-        control_function = (
-            control_seam
-            and _inside_exact_top_level_function(
-                function_context,
-                {"remove_local_authority_file"},
-                definition_counts,
-            )
-        )
         local_lock_function = (
             control_seam
             and _inside_exact_top_level_function(
@@ -1803,10 +1812,6 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
                     and direct_method_invocation
                     and sink == "os.rename"
                 ) or (
-                    control_function
-                    and direct_method_invocation
-                    and sink == "os.unlink"
-                ) or (
                     server_function
                     and direct_method_invocation
                     and receiver == "self.wfile"
@@ -1852,8 +1857,6 @@ def _studio_writer_violations(path: Path, source: str) -> list[str]:
             ) or (
                 bound_descriptor_function
                 and qualified in {"os.write", "os.replace"}
-            ) or (
-                control_function and qualified == "os.unlink"
             ) or (
                 native_rename_function and qualified == "ctypes.CDLL"
             ) or (
@@ -3219,12 +3222,6 @@ def test_studio_writer_guard_rejects_writers_outside_exact_audited_functions(
             "import ctypes\n"
             "def _rename_with_flags_at():\n"
             "    ctypes.CDLL(None)",
-        ),
-        (
-            Path("src/hephaestus/evaluation_assets/control_jsonl.py"),
-            "import os\n"
-            "def remove_local_authority_file():\n"
-            "    os.unlink(target)",
         ),
         (
             Path("src/hephaestus/webui/server.py"),
@@ -16668,6 +16665,34 @@ def test_studio_writer_guard_rejects_finite_deletion_aliases(source: str) -> Non
     )
 
 
+def test_studio_writer_guard_rejects_direct_unlink_in_control_cleanup() -> None:
+    """Control cleanup cannot broadly allow a direct authority deletion."""
+    source = (
+        "import os\n"
+        "def remove_local_authority_file():\n"
+        "    os.unlink('release.json')\n"
+    )
+
+    assert _studio_writer_violations(
+        Path("src/hephaestus/evaluation_assets/control_jsonl.py"),
+        source,
+    )
+
+
+def test_studio_writer_guard_rejects_getattr_unlink_in_control_cleanup() -> None:
+    """Control cleanup cannot broadly allow literal-getattr authority deletion."""
+    source = (
+        "from shutil import os\n"
+        "def remove_local_authority_file():\n"
+        "    getattr(os, 'unlink')('release.json')\n"
+    )
+
+    assert _studio_writer_violations(
+        Path("src/hephaestus/evaluation_assets/control_jsonl.py"),
+        source,
+    )
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -16715,6 +16740,34 @@ def test_studio_writer_guard_rejects_literal_operator_sink_factories(
     source: str,
 ) -> None:
     """Finite literal operator factories cannot hide persistence methods."""
+    assert _studio_writer_violations(
+        Path("src/hephaestus/evaluation_assets/example.py"),
+        source,
+    )
+
+
+def test_studio_writer_guard_rejects_wildcard_methodcaller_unlink() -> None:
+    """A wildcard-imported literal methodcaller cannot hide deletion."""
+    source = (
+        "from operator import *\n"
+        "from pathlib import Path\n"
+        "methodcaller('unlink')(Path('x'))\n"
+    )
+
+    assert _studio_writer_violations(
+        Path("src/hephaestus/evaluation_assets/example.py"),
+        source,
+    )
+
+
+def test_studio_writer_guard_rejects_wildcard_attrgetter_mkdir() -> None:
+    """A wildcard-imported literal attrgetter cannot hide directory creation."""
+    source = (
+        "from operator import *\n"
+        "from pathlib import Path\n"
+        "attrgetter('mkdir')(Path('x'))()\n"
+    )
+
     assert _studio_writer_violations(
         Path("src/hephaestus/evaluation_assets/example.py"),
         source,
