@@ -43,6 +43,16 @@ from src.hephaestus.evaluation_assets.models import (
     PipelineState,
     StageState,
 )
+from src.hephaestus.evaluation_assets.provenance import (
+    build_legacy_stage_provenance,
+    validate_build_provenance,
+    validate_stage_provenance,
+)
+from src.hephaestus.evaluation_assets.publication import (
+    LOGICAL_SPLITS,
+    generation_id_for_descriptor,
+    validate_historical_generation,
+)
 
 _OPERATION_ID = re.compile(r"^[0-9a-f]{32}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -220,6 +230,7 @@ _PREPARED_FIELDS = {
         "target_receipts",
         "before_manifests",
         "target_manifests",
+        "target_provenance",
         "target_state",
         "event_entry",
         "result",
@@ -576,11 +587,19 @@ def _validate_prepared(
     )
     installed_receipts: list[bool] = []
     if kind == "legacy_adoption":
-        manifests_installed = _validate_adoption_manifest_prefix(
+        provenance_prefix = _validate_adoption_provenance_prefix(layout, row)
+        provenance_complete = provenance_prefix == len(_STATE_V2_STAGE_ORDER) + 1
+        generation_installed = _validate_adoption_generation_target(layout, row)
+        manifest_prefix = _validate_adoption_manifest_prefix(
             layout,
             row,
             committed=not uncommitted,
         )
+        manifests_installed = manifest_prefix == 3
+        if generation_installed and not provenance_complete:
+            raise ValueError("adoption generation precedes provenance authority")
+        if manifest_prefix and not generation_installed:
+            raise ValueError("adoption manifests precede generation authority")
         receipt_hashes = _mapping(target["receipt_sha256"])
         for stage in _STATE_V2_STAGE_ORDER:
             path = layout.receipt_path(stage)
@@ -601,9 +620,14 @@ def _validate_prepared(
         if any(installed_receipts) and not manifests_installed:
             raise ValueError("adoption receipts precede manifest authority")
     if not uncommitted:
-        if kind == "legacy_adoption" and not all(installed_receipts):
-            raise ValueError("committed adoption receipt authority is incomplete")
         if kind == "legacy_adoption":
+            if (
+                not provenance_complete
+                or not generation_installed
+                or not manifests_installed
+                or not all(installed_receipts)
+            ):
+                raise ValueError("committed adoption authority is incomplete")
             if not final_operation:
                 raise ValueError("committed adoption is not terminal")
             _validate_committed_adoption_terminal(layout, row, target)
@@ -612,7 +636,12 @@ def _validate_prepared(
                 raise ValueError("committed release publication is not terminal")
             _validate_committed_release_terminal(layout, row, target)
         elif final_operation:
-            _validate_committed_mutation_terminal(layout, row, target)
+            _validate_committed_mutation_terminal(
+                layout,
+                row,
+                target,
+                historical_profile=historical_profile,
+            )
         return
     _validate_intermediate_authority(
         layout,
@@ -785,6 +814,28 @@ def _validate_adoption(
     target: Mapping[str, Any],
     pointer: Mapping[str, Any],
 ) -> None:
+    provenance = _mapping(row["target_provenance"])
+    _exact_keys(provenance, {"stages", "build"})
+    stage_provenance = _mapping(provenance["stages"])
+    _exact_keys(stage_provenance, set(_STATE_V2_STAGE_ORDER))
+    for stage in _STATE_V2_STAGE_ORDER:
+        payload = _mapping(stage_provenance[stage])
+        if payload != build_legacy_stage_provenance(stage):
+            raise ValueError("adoption stage provenance target is inconsistent")
+        validate_stage_provenance(
+            payload,
+            expected_stage=stage,
+            profile="legacy",
+        )
+    build = validate_build_provenance(_mapping(provenance["build"]))
+    identity = _mapping(build["identity"])
+    resolved_configuration = _mapping(identity["resolved_configuration"])
+    if (
+        build.get("created_at") != row.get("prepared_at")
+        or resolved_configuration.get("values") != row.get("before_config")
+        or _persisted_sha256(build) != target.get("build_provenance_sha256")
+    ):
+        raise ValueError("adoption build provenance target is inconsistent")
     before_manifests = _mapping(row["before_manifests"])
     _exact_keys(
         before_manifests,
@@ -800,10 +851,19 @@ def _validate_adoption(
     asset_manifest = _mapping(manifests["asset_manifest"])
     dataset_manifest = _mapping(manifests["dataset_manifest"])
     generation_manifest = _mapping(manifests["generation_manifest"])
+    descriptor = _mapping(generation_manifest.get("descriptor"))
     published = _mapping(asset_manifest.get("published_datasets"))
     if (
         asset_manifest != dataset_manifest
+        or set(generation_manifest)
+        != {"schema_version", "tenant_id", "asset_id", "generation_id", "descriptor"}
+        or generation_manifest.get("tenant_id") != layout.tenant_id
+        or generation_manifest.get("asset_id") != layout.asset_id
+        or generation_manifest.get("generation_id")
+        != generation_id_for_descriptor(descriptor)
+        or descriptor.get("build_fingerprint") != build.get("identity_sha256")
         or published.get("generation_id") != pointer.get("generation_id")
+        or published.get("generation_id") != generation_manifest.get("generation_id")
         or published.get("generation_manifest_sha256")
         != target.get("generation_manifest_sha256")
         or published.get("build_provenance_sha256")
@@ -1042,6 +1102,8 @@ def _validate_committed_mutation_terminal(
     layout: Any,
     row: Mapping[str, Any],
     target: Mapping[str, Any],
+    *,
+    historical_profile: bool,
 ) -> None:
     if _file_sha256(layout, layout.config_path) != target["config_sha256"]:
         raise ValueError("committed mutation config is not at the target")
@@ -1055,6 +1117,22 @@ def _validate_committed_mutation_terminal(
     )
     if audit_descriptor(current, present=present) != target_descriptor:
         raise ValueError("committed mutation config history is not at the target")
+    state_present, state_bytes = _local_authority_file(layout, layout.state_path)
+    if not state_present:
+        raise ValueError("committed mutation state authority is missing")
+    current_state = parse_strict_json_object(state_bytes)
+    _validate_state_shape(current_state, historical=historical_profile)
+    target_state = _mapping(row["target_state"])
+    stable_fields = (
+        "tenant_id",
+        "asset_id",
+        "schema_version",
+        "created_at",
+        "mutation_sequence",
+        "last_operation_id",
+    )
+    if any(current_state.get(field) != target_state.get(field) for field in stable_fields):
+        raise ValueError("committed mutation stable state identity differs")
 
 
 def _validate_event(
@@ -1681,12 +1759,112 @@ def _current_release_descriptor(
     }
 
 
+def _validate_adoption_provenance_prefix(
+    layout: Any,
+    row: Mapping[str, Any],
+) -> int:
+    """Validate and return the exact installed adoption provenance prefix."""
+    target = _mapping(row["target_provenance"])
+    stages = _mapping(target["stages"])
+    targets = [
+        (layout.stage_provenance_path(stage), _mapping(stages[stage]))
+        for stage in _STATE_V2_STAGE_ORDER
+    ]
+    targets.append((layout.build_provenance_path, _mapping(target["build"])))
+    installed: list[bool] = []
+    for path, payload in targets:
+        present, current = _local_authority_file(layout, path)
+        installed.append(present)
+        if present and current != _persisted_json_bytes(payload):
+            raise ValueError("installed adoption provenance differs from its target")
+    prefix_length = sum(installed)
+    if installed != [index < prefix_length for index in range(len(installed))]:
+        raise ValueError("installed adoption provenance is not an ordered prefix")
+    return prefix_length
+
+
+def _validate_adoption_generation_target(
+    layout: Any,
+    row: Mapping[str, Any],
+) -> bool:
+    """Validate the absent-or-exact immutable generation intermediate."""
+    manifests = _mapping(row["target_manifests"])
+    manifest = _mapping(manifests["generation_manifest"])
+    descriptor = _mapping(manifest["descriptor"])
+    generation_id = str(manifest["generation_id"])
+    generation_dir = Path(layout.generations_root) / generation_id
+    logical = _mapping(descriptor["logical_files"])
+    if set(logical) != set(LOGICAL_SPLITS):
+        raise ValueError("adoption generation logical inventory is invalid")
+    expected: dict[Path, bytes] = {
+        generation_dir / "generation_manifest.json": _persisted_json_bytes(manifest)
+    }
+    for split in LOGICAL_SPLITS:
+        details = _mapping(logical[split])
+        if set(details) != {"filename", "bytes", "sha256"} or details.get(
+            "filename"
+        ) != f"{split}.jsonl":
+            raise ValueError("adoption generation descriptor is invalid")
+        present, payload = _local_authority_file(
+            layout,
+            generation_dir / f"{split}.jsonl",
+        )
+        expected[generation_dir / f"{split}.jsonl"] = payload if present else b""
+    presence: dict[Path, bool] = {}
+    for path in expected:
+        present, payload = _local_authority_file(layout, path)
+        presence[path] = present
+        if not present:
+            continue
+        if path.name == "generation_manifest.json":
+            if payload != expected[path]:
+                raise ValueError("installed adoption generation manifest differs")
+            continue
+        details = _mapping(logical[path.stem])
+        if (
+            isinstance(details.get("bytes"), bool)
+            or not isinstance(details.get("bytes"), int)
+            or details["bytes"] != len(payload)
+            or not isinstance(details.get("sha256"), str)
+            or details["sha256"] != hashlib.sha256(payload).hexdigest()
+        ):
+            raise ValueError("installed adoption generation split differs")
+    if any(presence.values()) and not all(presence.values()):
+        raise ValueError("installed adoption generation is incomplete")
+    if not any(presence.values()):
+        return False
+    snapshot = _JOURNAL_AUTHORITY_SNAPSHOT.get()
+    if snapshot is not None:
+        generation_root = generation_dir.absolute()
+        observed = {
+            Path(path).absolute()
+            for path in snapshot
+            if Path(path).absolute().parent == generation_root
+        }
+        if observed != {path.absolute() for path in expected}:
+            raise ValueError("installed adoption generation inventory differs")
+    else:
+        installed = validate_historical_generation(
+            generation_dir,
+            expected_tenant_id=layout.tenant_id,
+            expected_asset_id=layout.asset_id,
+            trusted_root=layout.tenant_root,
+        )
+        if (
+            installed.manifest != manifest
+            or installed.descriptor != descriptor
+            or installed.generation_id != generation_id
+        ):
+            raise ValueError("installed adoption generation differs from its target")
+    return True
+
+
 def _validate_adoption_manifest_prefix(
     layout: Any,
     row: Mapping[str, Any],
     *,
     committed: bool,
-) -> bool:
+) -> int:
     before = _mapping(row["before_manifests"])
     targets = _mapping(row["target_manifests"])
     names_and_paths = (
@@ -1732,7 +1910,13 @@ def _validate_adoption_manifest_prefix(
     }
     if current not in allowed or (committed and current != target_keys):
         raise ValueError("adoption manifests are outside their ordered prefix")
-    return current == target_keys
+    if current == before_keys:
+        return 0
+    if current == (target_keys[0], before_keys[1], before_keys[2]):
+        return 1
+    if current == (target_keys[0], target_keys[1], before_keys[2]):
+        return 2
+    return 3
 
 
 def _release_descriptor_key(value: Mapping[str, Any]) -> tuple[Any, ...]:

@@ -38,6 +38,9 @@ The evaluation runtime does not resolve catalog pointers or directory aliases.
 For an Evaluation Asset Studio release, use the exact immutable file path from
 the asset manifest, for example
 `tenants/<tenant_id>/datasets/evaluation_assets/<asset_id>/generations/sha256-<hash>/test.jsonl`.
+Studio computes that literal path from the explicit repository/invocation base;
+CLI and service entry points reject a tenants root outside that base before
+creating or adopting an asset.
 `release.json` identifies the current generation for catalog readers, but it is
 not itself a dataset and must not be used as `dataset.path`. Keeping the config
 literal makes each evaluation run auditable against one immutable generation.

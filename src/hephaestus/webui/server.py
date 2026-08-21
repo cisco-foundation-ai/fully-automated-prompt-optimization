@@ -751,7 +751,13 @@ def _is_same_http_origin(origin: str, authority: str) -> bool:
     return request_authority == (_normalized_host(parsed.hostname), origin_port)
 
 
-def serve(tenants_root: Path, host: str = "127.0.0.1", port: int = 8765) -> None:
+def serve(
+    tenants_root: Path,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    *,
+    repository_base: Path | None = None,
+) -> None:
     """Start the UI server and block until interrupted."""
     if not _is_loopback_name(host):
         raise ValueError("Evaluation Asset Studio must bind to a loopback host")
@@ -765,8 +771,12 @@ def serve(tenants_root: Path, host: str = "127.0.0.1", port: int = 8765) -> None
         if isinstance(bind_address, ipaddress.IPv6Address)
         else ThreadingHTTPServer
     )
-    store = TenantStore(tenants_root)
-    asset_manager = EvaluationAssetRunManager(tenants_root)
+    effective_base = repository_base if repository_base is not None else Path.cwd()
+    store = TenantStore(tenants_root, repository_base=effective_base)
+    asset_manager = EvaluationAssetRunManager(
+        tenants_root,
+        repository_base=effective_base,
+    )
 
     handler = type(
         "_BoundHandler",

@@ -29,6 +29,7 @@ from src.hephaestus.evaluation_assets.journal_transitions import (
     _LEGACY_SAFE_ASSET_ID_V1,
     JOURNAL_SCHEMA_VERSION,
     PERSISTED_CONFIG_STAGE_DEPENDENCIES_V2,
+    PERSISTED_STAGE_COUNT_KEYS_V2,
     PERSISTED_STAGE_VALUES_V2,
     _legacy_config_value,
     is_exact_legacy_event_row_v1,
@@ -73,6 +74,8 @@ from src.hephaestus.evaluation_assets.provenance import (
     not_applicable,
     validate_build_provenance,
     validate_build_provenance_call_ledgers,
+    validate_persisted_json_value,
+    validate_provider_binding,
     validate_stage_provenance,
     working_source_identity,
 )
@@ -696,6 +699,157 @@ def _exact_pre_v2_config_mapping(
     return dict(value)
 
 
+@dataclass(frozen=True)
+class ExactPreV2ConfigHistory:
+    """One replayed configuration history from the immutable pre-v2 grammar."""
+
+    rows: tuple[Mapping[str, Any], ...]
+    configuration_sha256: tuple[str, ...]
+    final_configuration: Mapping[str, Any]
+
+
+def _parse_exact_pre_v2_config_history(
+    layout: Any,
+    *,
+    history_bytes: bytes,
+    config_bytes: bytes,
+    source_state: Mapping[str, Any],
+    lineage_bytes: bytes | None,
+) -> ExactPreV2ConfigHistory:
+    """Parse and replay the sole operation-free pre-v2 history language."""
+    rows = parse_strict_jsonl_objects(history_bytes)
+    if not rows:
+        raise ValueError("pre-v2 configuration history is empty")
+    if (
+        source_state.get("tenant_id") != layout.tenant_id
+        or source_state.get("asset_id") != layout.asset_id
+        or not _canonical_utc_timestamp(source_state.get("created_at"))
+    ):
+        raise ValueError("pre-v2 configuration history source state is invalid")
+    first = rows[0]
+    event = first.get("event")
+    expected_origin = (
+        _INHERITED_HISTORY_FIELDS
+        if event == "configuration_inherited"
+        else _CREATED_HISTORY_FIELDS
+    )
+    if (
+        event not in {"configuration_created", "configuration_inherited"}
+        or set(first) != expected_origin
+        or not _is_json_integer(first.get("revision"))
+        or first["revision"] != 1
+        or not _canonical_utc_timestamp(first.get("timestamp"))
+        or first["timestamp"] != source_state["created_at"]
+    ):
+        raise ValueError("pre-v2 configuration history origin is invalid")
+    replayed = _exact_pre_v2_config_mapping(layout, first.get("configuration"))
+    if event == "configuration_inherited":
+        parent_asset_id = first.get("parent_asset_id")
+        if (
+            not isinstance(parent_asset_id, str)
+            or _LEGACY_SAFE_ASSET_ID_V1.fullmatch(parent_asset_id) is None
+            or parent_asset_id == layout.asset_id
+            or lineage_bytes is None
+        ):
+            raise ValueError("pre-v2 configuration history parent is invalid")
+        lineage = parse_strict_json_object(lineage_bytes)
+        if lineage.get("parent_asset_id") != parent_asset_id:
+            raise ValueError("pre-v2 configuration history parent is inconsistent")
+    elif lineage_bytes is not None:
+        raise ValueError("pre-v2 created history has unexpected lineage authority")
+
+    hashes = [canonical_sha256(replayed)]
+    previous_timestamp = datetime.fromisoformat(str(first["timestamp"]))
+    update_fields = _UPDATED_HISTORY_FIELDS - {"operation_id"}
+    for revision, row in enumerate(rows[1:], start=2):
+        timestamp = row.get("timestamp")
+        changes = row.get("changed_fields")
+        if (
+            set(row) != update_fields
+            or row.get("event") != "configuration_updated"
+            or not _is_json_integer(row.get("revision"))
+            or row["revision"] != revision
+            or not _canonical_utc_timestamp(timestamp)
+            or not isinstance(changes, Mapping)
+            or not changes
+        ):
+            raise ValueError("pre-v2 configuration history sequence is invalid")
+        parsed_timestamp = datetime.fromisoformat(str(timestamp))
+        if parsed_timestamp < previous_timestamp:
+            raise ValueError("pre-v2 configuration history time is not monotonic")
+        previous_timestamp = parsed_timestamp
+        updated = dict(replayed)
+        for field, change in changes.items():
+            if (
+                field not in PERSISTED_CONFIG_STAGE_DEPENDENCIES_V2
+                or field not in updated
+                or not isinstance(change, Mapping)
+                or set(change) != {"previous", "new"}
+                or not _is_exact_pre_v2_config_value(
+                    str(field), change.get("previous")
+                )
+                or not _is_exact_pre_v2_config_value(str(field), change.get("new"))
+                or canonical_json_bytes(change.get("previous"))
+                != canonical_json_bytes(updated[field])
+                or canonical_json_bytes(change.get("new"))
+                == canonical_json_bytes(updated[field])
+            ):
+                raise ValueError("pre-v2 configuration history change is invalid")
+            updated[str(field)] = change["new"]
+        replayed = _exact_pre_v2_config_mapping(layout, updated)
+        earliest = min(
+            (PERSISTED_CONFIG_STAGE_DEPENDENCIES_V2[field] for field in changes),
+            key=PERSISTED_STAGE_VALUES_V2.index,
+        )
+        if (
+            row.get("invalidated_from_stage") != earliest
+            or row.get("resume_from_stage") != earliest
+        ):
+            raise ValueError("pre-v2 configuration history boundary is invalid")
+        hashes.append(canonical_sha256(replayed))
+
+    current = _exact_pre_v2_config_mapping(
+        layout,
+        parse_strict_json_object(config_bytes),
+    )
+    if canonical_json_bytes(current) != canonical_json_bytes(replayed):
+        raise ValueError("pre-v2 configuration history final value differs")
+    return ExactPreV2ConfigHistory(
+        rows=tuple(dict(row) for row in rows),
+        configuration_sha256=tuple(hashes),
+        final_configuration=dict(replayed),
+    )
+
+
+def _exact_pre_v2_history_from_authority(
+    layout: Any,
+    source_state: Mapping[str, Any],
+    *,
+    artifact_overrides: Mapping[Path, bytes] | None = None,
+) -> ExactPreV2ConfigHistory:
+    """Replay pre-v2 history from one caller-supplied authority snapshot."""
+    if artifact_overrides is None:
+        history_bytes = _local_authority_bytes(layout, layout.config_history_path)
+        config_bytes = _local_authority_bytes(layout, layout.config_path)
+        lineage = resolve_local_authority_file(
+            layout.lineage_path,
+            layout.tenants_root,
+            access="read_optional",
+        )
+        lineage_bytes = lineage.data if lineage.exists else None
+    else:
+        history_bytes = artifact_overrides[layout.config_history_path]
+        config_bytes = artifact_overrides[layout.config_path]
+        lineage_bytes = artifact_overrides.get(layout.lineage_path)
+    return _parse_exact_pre_v2_config_history(
+        layout,
+        history_bytes=history_bytes,
+        config_bytes=config_bytes,
+        source_state=source_state,
+        lineage_bytes=lineage_bytes,
+    )
+
+
 def _exact_v2_state(
     raw: Mapping[str, Any],
     *,
@@ -1163,13 +1317,21 @@ def build_stage_receipt(
         "counts": {str(key): int(value) for key, value in counts.items()},
     }
     if stage.value == "dataset_splits":
-        receipt["config_history_sha256"] = _local_authority_sha256(
-            layout,
+        config_history_override = (artifact_overrides or {}).get(
             layout.config_history_path
         )
-        receipt["build_provenance_sha256"] = _local_authority_sha256(
-            layout,
+        receipt["config_history_sha256"] = (
+            hashlib.sha256(config_history_override).hexdigest()
+            if config_history_override is not None
+            else _local_authority_sha256(layout, layout.config_history_path)
+        )
+        build_override = (artifact_overrides or {}).get(
             layout.build_provenance_path
+        )
+        receipt["build_provenance_sha256"] = (
+            hashlib.sha256(build_override).hexdigest()
+            if build_override is not None
+            else _local_authority_sha256(layout, layout.build_provenance_path)
         )
         generation_manifest_path = layout.artifact_path(
             stage,
@@ -1183,7 +1345,186 @@ def build_stage_receipt(
             if generation_override is not None
             else _local_authority_sha256(layout, generation_manifest_path)
         )
-    return receipt
+    return validate_stage_receipt_payload(
+        receipt,
+        expected_stage=stage.value,
+        expected_origin=origin,
+        expected_counts=counts,
+        expected_provider_identity=providers,
+    )
+
+
+def validate_stage_receipt_payload(
+    payload: Mapping[str, Any],
+    *,
+    expected_stage: PipelineStage | str,
+    expected_origin: str | None = None,
+    expected_counts: Mapping[str, int] | None = None,
+    expected_provider_identity: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate a complete current receipt in memory before authority writes."""
+    stage_value = str(getattr(expected_stage, "value", expected_stage))
+    historical = (
+        expected_origin == "legacy_adoption"
+        or payload.get("origin") == "legacy_adoption"
+    )
+    if historical:
+        if stage_value not in PERSISTED_STAGE_VALUES_V2:
+            raise ValueError("stage receipt stage is invalid")
+        stage_index = PERSISTED_STAGE_VALUES_V2.index(stage_value) + 1
+        count_keys = PERSISTED_STAGE_COUNT_KEYS_V2[stage_value]
+        stage_inventory = set(PERSISTED_STAGE_VALUES_V2)
+    else:
+        stage = PipelineStage(stage_value)
+        stage_index = list(PipelineStage).index(stage) + 1
+        count_keys = STAGE_COUNT_KEYS[stage]
+        stage_inventory = {item.value for item in PipelineStage}
+    fields = set(_STAGE_RECEIPT_FIELDS)
+    if stage_value == PERSISTED_STAGE_VALUES_V2[-1]:
+        fields.update(
+            {
+                "config_history_sha256",
+                "build_provenance_sha256",
+                "generation_manifest_sha256",
+            }
+        )
+    if (
+        not isinstance(payload, Mapping)
+        or set(payload) != fields
+        or payload.get("schema_version") != STAGE_RECEIPT_SCHEMA_VERSION
+        or payload.get("stage") != stage_value
+        or payload.get("stage_index") != stage_index
+        or isinstance(payload.get("stage_index"), bool)
+    ):
+        raise ValueError("stage receipt schema or identity is invalid")
+    validate_persisted_json_value(payload, "stage receipt")
+    if not _canonical_utc_timestamp(payload.get("completed_at")):
+        raise ValueError("stage receipt completion timestamp is invalid")
+
+    origin = payload.get("origin")
+    artifact_profile = payload.get("artifact_profile")
+    if (origin, artifact_profile) not in {
+        ("native", "native"),
+        ("legacy_adoption", "native"),
+        ("legacy_adoption", "legacy"),
+    } or (expected_origin is not None and origin != expected_origin):
+        raise ValueError("stage receipt origin or artifact profile is invalid")
+
+    hash_fields = {
+        "resolved_config_sha256",
+        "dependency_config_sha256",
+        "prompt_set_sha256",
+        "provider_identity_sha256",
+        "provider_calls_sha256",
+        "code_sha256",
+    }
+    if stage_value == PERSISTED_STAGE_VALUES_V2[-1]:
+        hash_fields.update(
+            {
+                "config_history_sha256",
+                "build_provenance_sha256",
+                "generation_manifest_sha256",
+            }
+        )
+    if any(
+        not isinstance(payload.get(field), str)
+        or not _SHA256.fullmatch(str(payload[field]))
+        for field in hash_fields
+    ):
+        raise ValueError("stage receipt hash inventory is invalid")
+
+    def valid_file_rows(value: Any, *, required_field: bool) -> bool:
+        expected = {"path", "scope", "sha256", "bytes"}
+        if required_field:
+            expected.add("required")
+        if not isinstance(value, list):
+            return False
+        for row in value:
+            if not isinstance(row, Mapping) or set(row) != expected:
+                return False
+            path = row.get("path")
+            if (
+                not isinstance(path, str)
+                or not path
+                or path.startswith("/")
+                or "\\" in path
+                or any(part in {"", ".", ".."} for part in path.split("/"))
+                or row.get("scope") not in {"asset", "tenant"}
+                or not isinstance(row.get("sha256"), str)
+                or not _SHA256.fullmatch(row["sha256"])
+                or not isinstance(row.get("bytes"), int)
+                or isinstance(row.get("bytes"), bool)
+                or row["bytes"] < 0
+                or (required_field and row.get("required") is not True)
+            ):
+                return False
+        return True
+
+    if not valid_file_rows(payload.get("inputs"), required_field=False) or not (
+        valid_file_rows(payload.get("outputs"), required_field=True)
+    ):
+        raise ValueError("stage receipt file inventory is invalid")
+    upstream = payload.get("upstream_receipts")
+    if not isinstance(upstream, list) or any(
+        not isinstance(row, Mapping)
+        or set(row) != {"stage", "sha256"}
+        or row.get("stage") not in stage_inventory
+        or not isinstance(row.get("sha256"), str)
+        or not _SHA256.fullmatch(row["sha256"])
+        for row in upstream
+    ):
+        raise ValueError("stage receipt upstream inventory is invalid")
+
+    counts = payload.get("counts")
+    if (
+        not isinstance(counts, Mapping)
+        or set(counts) != count_keys
+        or any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for value in counts.values()
+        )
+        or (
+            expected_counts is not None
+            and dict(counts) != {str(key): value for key, value in expected_counts.items()}
+        )
+    ):
+        raise ValueError("stage receipt counts are invalid")
+
+    provider_identity = payload.get("provider_identity")
+    if payload.get("provider_identity_sha256") != canonical_sha256(
+        provider_identity
+    ) or payload.get("code_sha256") != canonical_sha256(payload.get("code")):
+        raise ValueError("stage receipt identity hash is invalid")
+    if expected_provider_identity is not None and canonical_sha256(
+        provider_identity
+    ) != canonical_sha256(expected_provider_identity):
+        raise ValueError("stage receipt provider identity differs")
+    if origin == "legacy_adoption":
+        marker_hash = canonical_sha256(LEGACY_UNAVAILABLE_PROVENANCE)
+        if any(
+            (
+                provider_identity != LEGACY_UNAVAILABLE_PROVENANCE,
+                payload.get("provider_identity_sha256") != marker_hash,
+                payload.get("provider_calls_sha256") != marker_hash,
+                payload.get("code") != LEGACY_UNAVAILABLE_PROVENANCE,
+                payload.get("code_sha256") != marker_hash,
+            )
+        ):
+            raise ValueError("legacy stage receipt unavailable evidence is invalid")
+    else:
+        roles = STAGE_SPECIFICATIONS[stage].provider_roles
+    if origin != "legacy_adoption" and roles:
+        if not isinstance(provider_identity, Mapping) or set(provider_identity) != set(
+            roles
+        ):
+            raise ValueError("stage receipt provider inventory is invalid")
+        for role in roles:
+            validate_provider_binding(role, provider_identity[role])
+    elif origin != "legacy_adoption" and provider_identity != {
+        "status": "not_applicable"
+    }:
+        raise ValueError("stage receipt provider marker is invalid")
+    return dict(payload)
 
 
 def current_dependency_hashes(
@@ -1418,6 +1759,10 @@ def load_completed_release_handoff_control(
             _local_authority_bytes(layout, layout.state_path)
         )
         if _is_exact_legacy_completed_sentinel(layout, raw_state):
+            if _has_native_config_history_authority(layout):
+                raise ValueError(
+                    "legacy state retains non-legacy configuration history authority"
+                )
             return None
         if raw_state.get("schema_version") != STATE_SCHEMA_VERSION:
             if _has_native_authority_evidence(layout, raw_state):
@@ -1671,130 +2016,38 @@ def _has_native_authority_evidence(
 def _has_native_config_history_authority(layout: Any) -> bool:
     """Reject any history row outside the exact pre-v2 writer profiles."""
     try:
-        authority = resolve_local_authority_file(
+        history = resolve_local_authority_file(
             layout.config_history_path,
             layout.tenants_root,
             access="read_optional",
         )
-        if not authority.exists:
+        if not history.exists:
             return False
-        if authority.data is None:
-            return True
-        rows = parse_strict_jsonl_objects(authority.data)
-    except (OSError, TypeError, UnicodeError, ValueError):
-        return True
-    if not rows:
-        return True
-    legacy_update_fields = _UPDATED_HISTORY_FIELDS - {"operation_id"}
-    replayed: dict[str, Any] | None = None
-    previous_timestamp: datetime | None = None
-    for index, row in enumerate(rows, start=1):
-        event = row.get("event")
-        if event in {"configuration_created", "configuration_inherited"}:
-            expected = (
-                _INHERITED_HISTORY_FIELDS
-                if event == "configuration_inherited"
-                else _CREATED_HISTORY_FIELDS
-            )
-            revision = row.get("revision")
-            if (
-                index != 1
-                or set(row) != expected
-                or not _is_json_integer(revision)
-                or revision != 1
-                or not _canonical_utc_timestamp(row.get("timestamp"))
-            ):
-                return True
-            try:
-                configuration = _exact_pre_v2_config_mapping(
-                    layout,
-                    row.get("configuration"),
-                )
-            except (TypeError, ValueError):
-                return True
-            if event == "configuration_inherited":
-                parent_asset_id = row.get("parent_asset_id")
-                if (
-                    not isinstance(parent_asset_id, str)
-                    or _LEGACY_SAFE_ASSET_ID_V1.fullmatch(parent_asset_id)
-                    is None
-                    or parent_asset_id == layout.asset_id
-                ):
-                    return True
-            replayed = configuration
-            previous_timestamp = datetime.fromisoformat(str(row["timestamp"]))
-            continue
-        changes = row.get("changed_fields")
-        timestamp = row.get("timestamp")
-        revision = row.get("revision")
-        if (
-            event != "configuration_updated"
-            or set(row) != legacy_update_fields
-            or not _is_json_integer(revision)
-            or revision != index
-            or index < 2
-            or replayed is None
-            or previous_timestamp is None
-            or not _canonical_utc_timestamp(timestamp)
-            or not isinstance(changes, Mapping)
-            or not changes
-        ):
-            return True
-        parsed_timestamp = datetime.fromisoformat(str(timestamp))
-        if parsed_timestamp < previous_timestamp:
-            return True
-        previous_timestamp = parsed_timestamp
-        updated = dict(replayed)
-        for field, change in changes.items():
-            if (
-                field not in PERSISTED_CONFIG_STAGE_DEPENDENCIES_V2
-                or field not in updated
-                or not isinstance(change, Mapping)
-                or set(change) != {"previous", "new"}
-                or not _is_exact_pre_v2_config_value(
-                    str(field),
-                    change.get("previous"),
-                )
-                or not _is_exact_pre_v2_config_value(
-                    str(field),
-                    change.get("new"),
-                )
-                or canonical_json_bytes(change.get("previous"))
-                != canonical_json_bytes(updated[field])
-                or canonical_json_bytes(change.get("new"))
-                == canonical_json_bytes(updated[field])
-            ):
-                return True
-            updated[field] = change["new"]
-        try:
-            replayed = _exact_pre_v2_config_mapping(layout, updated)
-        except (TypeError, ValueError):
-            return True
-        earliest = min(
-            (
-                PERSISTED_CONFIG_STAGE_DEPENDENCIES_V2[field]
-                for field in changes
-            ),
-            key=PERSISTED_STAGE_VALUES_V2.index,
-        )
-        if (
-            row.get("invalidated_from_stage") != earliest
-            or row.get("resume_from_stage") != earliest
-        ):
-            return True
-    try:
-        config_authority = resolve_local_authority_file(
+        config = resolve_local_authority_file(
             layout.config_path,
             layout.tenants_root,
             access="read",
         )
-        if config_authority.data is None:
+        state = resolve_local_authority_file(
+            layout.state_path,
+            layout.tenants_root,
+            access="read",
+        )
+        lineage = resolve_local_authority_file(
+            layout.lineage_path,
+            layout.tenants_root,
+            access="read_optional",
+        )
+        if history.data is None or config.data is None or state.data is None:
             return True
-        raw_config = parse_strict_json_object(config_authority.data)
-        current = _exact_pre_v2_config_mapping(layout, raw_config)
+        _parse_exact_pre_v2_config_history(
+            layout,
+            history_bytes=history.data,
+            config_bytes=config.data,
+            source_state=parse_strict_json_object(state.data),
+            lineage_bytes=lineage.data if lineage.exists else None,
+        )
     except (OSError, TypeError, UnicodeError, ValueError):
-        return True
-    if canonical_json_bytes(current) != canonical_json_bytes(replayed):
         return True
     return False
 
@@ -1885,12 +2138,24 @@ def _verify_release_evidence(
                 journal,
                 verified_receipts,
             )
-            config_hashes = _replay_config_history(
-                layout,
-                config,
-                state,
-                allow_pre_wal_history=legacy_adoption is not None,
-            )
+            if legacy_adoption is None:
+                config_hashes = _replay_config_history(
+                    layout,
+                    config,
+                    state,
+                    allow_pre_wal_history=False,
+                )
+            else:
+                before_state = legacy_adoption.get("before_state")
+                if not isinstance(before_state, Mapping):
+                    raise ValueError("legacy adoption source state is missing")
+                config_hashes = list(
+                    _exact_pre_v2_history_from_authority(
+                        layout,
+                        before_state,
+                        artifact_overrides=authority_snapshot,
+                    ).configuration_sha256
+                )
             _verify_receipt_config_history(
                 layout,
                 verified_receipts,
@@ -1999,12 +2264,12 @@ def _verify_prospective_legacy_adoption_candidate_from_snapshot(
         for receipt in verified_receipts.values()
     ):
         raise ValueError("prospective adoption receipt origin is invalid")
-    config_hashes = _replay_config_history(
-        layout,
-        config,
-        state,
-        allow_pre_wal_history=True,
-        artifact_overrides=artifact_overrides,
+    config_hashes = list(
+        _exact_pre_v2_history_from_authority(
+            layout,
+            source_state.to_dict(),
+            artifact_overrides=artifact_overrides,
+        ).configuration_sha256
     )
     _verify_receipt_config_history(layout, verified_receipts, config_hashes, config)
 
@@ -2336,9 +2601,9 @@ def _verify_generation_content_links(
     asset_manifest = _read_json_object(layout, layout.manifest_path)
     if dataset_manifest != asset_manifest:
         raise ValueError("asset manifests differ")
-    generation_directory = generation.generation_dir.relative_to(
-        layout.tenants_root.parent
-    ).as_posix()
+    generation_directory = layout.repository_relative_path(
+        generation.generation_dir
+    )
     expected_published = {
         "directory": layout.published_datasets.relative_to(
             layout.tenant_root
@@ -2753,6 +3018,18 @@ def verify_stage_receipt(
         STAGE_RECEIPT_SCHEMA_VERSION
     ):
         expected_receipt_fields = _STAGE_RECEIPT_FIELDS
+        try:
+            validate_stage_receipt_payload(
+                receipt,
+                expected_stage=stage,
+                expected_provider_identity=provider_identity,
+            )
+        except (TypeError, ValueError) as exc:
+            raise _integrity(
+                layout,
+                stage,
+                "receipt payload is invalid",
+            ) from exc
     else:
         raise _integrity(layout, stage, "receipt schema is unsupported")
     expected_fields = set(expected_receipt_fields)
@@ -4088,13 +4365,12 @@ def validate_legacy_release_candidate(
             }
         else:
             generation_id = str(prepared_release.get("generation_id") or "")
+            generation_path = layout.generations_root / generation_id
             generation_directory = (
-                layout.generations_root / generation_id
-            ).relative_to(
-                layout.tenants_root.parent
+                layout.repository_relative_path(generation_path)
                 if manifest_payload is not None
-                else layout.tenant_root
-            ).as_posix()
+                else generation_path.relative_to(layout.tenant_root).as_posix()
+            )
             expected_published = {
                 "directory": expected_catalog_directory,
                 "release_pointer": layout.release_pointer_path.relative_to(

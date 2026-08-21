@@ -31,8 +31,21 @@ class _WorkerAdmission:
 class EvaluationAssetRunManager:
     """Start core pipeline runs while progress remains filesystem-backed."""
 
-    def __init__(self, tenants_root: Path) -> None:
-        self.tenants_root = tenants_root.resolve()
+    def __init__(
+        self,
+        tenants_root: Path,
+        *,
+        repository_base: Path | None = None,
+    ) -> None:
+        effective_base = repository_base if repository_base is not None else Path.cwd()
+        probe = EvaluationAssetLayout(
+            tenants_root,
+            "service",
+            "layout",
+            repository_base=effective_base,
+        )
+        self.tenants_root = probe.tenants_root
+        self.repository_base = probe.repository_base
         self._threads: Dict[Tuple[str, str], threading.Thread] = {}
         self._lock = threading.Lock()
 
@@ -54,6 +67,7 @@ class EvaluationAssetRunManager:
                 feedback_source,
                 unlabeled_source,
                 initial_status="queued",
+                repository_base=self.repository_base,
             )
             admission = _WorkerAdmission()
             thread = threading.Thread(
@@ -79,7 +93,12 @@ class EvaluationAssetRunManager:
             existing = self._threads.get(key)
             if existing is not None and existing.is_alive():
                 raise RuntimeError("evaluation asset pipeline is already running")
-            layout = EvaluationAssetLayout(self.tenants_root, tenant_id, asset_id)
+            layout = EvaluationAssetLayout(
+                self.tenants_root,
+                tenant_id,
+                asset_id,
+                repository_base=self.repository_base,
+            )
             pipeline = EvaluationAssetPipeline(layout)
             admission = _WorkerAdmission()
             thread = threading.Thread(
@@ -119,11 +138,13 @@ class EvaluationAssetRunManager:
                 self.tenants_root,
                 tenant_id,
                 parent_asset_id,
+                repository_base=self.repository_base,
             )
             layout = EvaluationAssetLayout(
                 self.tenants_root,
                 tenant_id,
                 asset_id,
+                repository_base=self.repository_base,
             )
             layout.initialize_extension(
                 parent,
@@ -148,7 +169,12 @@ class EvaluationAssetRunManager:
 
     def adopt(self, tenant_id: str, asset_id: str) -> Dict[str, Any]:
         """Verify and adopt a legacy completion through the locked core."""
-        layout = EvaluationAssetLayout(self.tenants_root, tenant_id, asset_id)
+        layout = EvaluationAssetLayout(
+            self.tenants_root,
+            tenant_id,
+            asset_id,
+            repository_base=self.repository_base,
+        )
         return layout.adopt_legacy().to_dict()
 
     def is_running(self, tenant_id: str, asset_id: str) -> bool:

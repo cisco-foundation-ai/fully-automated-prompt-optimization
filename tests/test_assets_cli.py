@@ -37,6 +37,7 @@ def test_assets_create_and_status_use_evaluation_assets_workspace(
     monkeypatch,
     capsys,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
     tenants_root = tmp_path / "tenants"
     sources = tenants_root / "bootstrap" / "source_artifacts"
     sources.mkdir(parents=True)
@@ -127,6 +128,7 @@ def test_assets_create_cli_rejects_other_tenant_source_before_writes(
     monkeypatch,
 ) -> None:
     """The CLI create path enforces the same selected-tenant source boundary."""
+    monkeypatch.chdir(tmp_path)
     tenants_root = tmp_path / "tenants"
     other_sources = tenants_root / "tenant_b" / "source_artifacts"
     selected_sources = tenants_root / "tenant_a" / "source_artifacts"
@@ -176,6 +178,7 @@ def test_assets_extend_cli_rejects_other_tenant_source_before_writes(
     from src.hephaestus.evaluation_assets.models import EvaluationAssetConfig
     from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
 
+    monkeypatch.chdir(tmp_path)
     tenants_root = tmp_path / "tenants"
     selected_sources = tenants_root / "tenant_a" / "source_artifacts"
     other_sources = tenants_root / "tenant_b" / "source_artifacts"
@@ -270,6 +273,7 @@ def test_assets_adopt_cli_exposes_explicit_legacy_transition(
     )
     from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
 
+    monkeypatch.chdir(tmp_path)
     state = PipelineState.new(
         EvaluationAssetConfig(tenant_id="tenant_a", asset_id="legacy-v1"),
         "2026-08-19T00:00:00+00:00",
@@ -302,6 +306,81 @@ def test_assets_adopt_cli_exposes_explicit_legacy_transition(
 
     assert received == [("tenant_a", "legacy-v1", 0)]
     assert '"status": "released"' in capsys.readouterr().out
+
+
+def test_assets_cli_rejects_absolute_root_outside_invocation_before_writes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """CLI repository-relative paths never infer an outside absolute base."""
+    repository_base = tmp_path / "repository"
+    repository_base.mkdir()
+    outside_root = tmp_path / "outside" / "tenants"
+    monkeypatch.chdir(repository_base)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "hephaestus",
+            "assets",
+            "create",
+            "--tenant",
+            "tenant_a",
+            "--feedback",
+            "feedback.jsonl",
+            "--unlabeled",
+            "unlabeled.jsonl",
+            "--tenants-root",
+            str(outside_root),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="repository base"):
+        main()
+
+    assert not outside_root.exists()
+
+
+def test_assets_cli_rejects_symlinked_tenants_ancestor_before_writes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """CLI startup rejects an in-base path that traverses an external symlink."""
+    repository_base = tmp_path / "repository"
+    repository_base.mkdir()
+    outside = tmp_path / "outside"
+    tenants_root = outside / "tenants"
+    tenants_root.mkdir(parents=True)
+    sentinel = outside / "KEEP"
+    sentinel.write_bytes(b"KEEP")
+    try:
+        (repository_base / "escape").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+    monkeypatch.chdir(repository_base)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "hephaestus",
+            "assets",
+            "create",
+            "--tenant",
+            "tenant_a",
+            "--feedback",
+            "feedback.jsonl",
+            "--unlabeled",
+            "unlabeled.jsonl",
+            "--tenants-root",
+            "escape/tenants",
+        ],
+    )
+
+    with pytest.raises(ValueError, match="exact repository base"):
+        main()
+
+    assert sentinel.read_bytes() == b"KEEP"
+    assert not (tenants_root / "tenant_a").exists()
 
 
 def _evaluation_input(record_id: str, *, labeled: bool) -> dict:

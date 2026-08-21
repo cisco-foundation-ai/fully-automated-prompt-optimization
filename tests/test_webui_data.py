@@ -91,7 +91,7 @@ def test_dataset_catalog_lists_only_pointer_current_studio_splits(
     temporary.mkdir()
     (temporary / "train.jsonl").write_text("partial\n", encoding="utf-8")
 
-    store = TenantStore(tenants)
+    store = TenantStore(tenants, repository_base=tmp_path)
     listed = store.list_datasets("demo")
     listed_paths = {row["path"] for row in listed}
 
@@ -138,7 +138,7 @@ def test_corrupt_studio_pointer_fails_closed_without_hiding_ordinary_data(
     pointer = tenant / "datasets" / "evaluation_assets" / "asset" / "release.json"
     pointer.write_text("{}\n", encoding="utf-8")
 
-    store = TenantStore(tenants)
+    store = TenantStore(tenants, repository_base=tmp_path)
 
     assert [row["path"] for row in store.list_datasets("demo")] == [
         "datasets/ordinary.jsonl"
@@ -162,7 +162,7 @@ def test_ordinary_symlink_alias_into_studio_is_protected_and_unreadable(
     )
     alias = tenant / "datasets" / "alias.jsonl"
     alias.symlink_to(current.files["train"])
-    store = TenantStore(tenants)
+    store = TenantStore(tenants, repository_base=tmp_path)
 
     assert "datasets/alias.jsonl" not in {
         row["path"] for row in store.list_datasets("demo")
@@ -188,7 +188,7 @@ def test_prepared_ordinary_snapshot_rejects_swap_to_studio_before_read(
         suffix="current",
         fingerprint="e" * 64,
     )
-    store = TenantStore(tenants)
+    store = TenantStore(tenants, repository_base=tmp_path)
     snapshot, studio_data = store.prepare_dataset(
         "demo",
         "datasets/ordinary.jsonl",
@@ -215,7 +215,7 @@ def test_studio_listing_defers_release_validation_until_materialization(
         suffix="current",
         fingerprint="9" * 64,
     )
-    store = TenantStore(tenants)
+    store = TenantStore(tenants, repository_base=tmp_path)
     real_resolve = webui_data_module.resolve_evaluation_asset_release
     calls: list[Path] = []
 
@@ -253,7 +253,7 @@ def test_historical_studio_read_defers_generation_hashes_until_materialization(
         fingerprint="8" * 64,
     )
     relative = generation.files["train"].relative_to(tenant).as_posix()
-    store = TenantStore(tenants)
+    store = TenantStore(tenants, repository_base=tmp_path)
     real_validate = webui_data_module.validate_historical_generation
     calls: list[Path] = []
 
@@ -302,7 +302,7 @@ def test_list_runs_recurses_under_evals_tmp(tmp_path: Path) -> None:
     (run_dir / "summary.md").write_text("# Summary\n", encoding="utf-8")
     (run_dir / "results.jsonl").write_text('{"case_id":"a","composite_score":100}\n', encoding="utf-8")
 
-    runs = TenantStore(tenants).list_runs("demo")
+    runs = TenantStore(tenants, repository_base=tmp_path).list_runs("demo")
 
     assert len(runs) == 1
     assert runs[0]["run_dir"] == "evals/tmp/chain-variant002-val"
@@ -324,7 +324,10 @@ def test_get_run_supports_nested_run_dir(tmp_path: Path) -> None:
     (run_dir / "summary.md").write_text("# Summary\n", encoding="utf-8")
     (run_dir / "results.jsonl").write_text('{"case_id":"a","composite_score":100}\n', encoding="utf-8")
 
-    run = TenantStore(tenants).get_run("demo", "evals/tmp/chain-variant002-val")
+    run = TenantStore(tenants, repository_base=tmp_path).get_run(
+        "demo",
+        "evals/tmp/chain-variant002-val",
+    )
 
     assert run is not None
     assert run["run_dir"] == "evals/tmp/chain-variant002-val"
@@ -356,7 +359,7 @@ def test_list_prompts_includes_skills_with_kind_and_group(tmp_path: Path) -> Non
     skill.parent.mkdir(parents=True)
     skill.write_text("Drill in first.\n", encoding="utf-8")
 
-    store = TenantStore(tenants)
+    store = TenantStore(tenants, repository_base=tmp_path)
     prompts = store.list_prompts("demo")
 
     # Both subtrees surface, each tagged by kind + group (parent dir name).
@@ -380,7 +383,7 @@ def test_get_prompt_serves_skill_subtree(tmp_path: Path) -> None:
     skill.parent.mkdir(parents=True)
     skill.write_text("Be decisive.\n", encoding="utf-8")
 
-    store = TenantStore(tenants)
+    store = TenantStore(tenants, repository_base=tmp_path)
     data = store.get_prompt("demo", "skills/answer-formatting/variant-002.md")
     assert data == {
         "path": "skills/answer-formatting/variant-002.md",
@@ -402,7 +405,7 @@ def test_list_and_get_configs_support_config_and_configs_dirs(tmp_path: Path) ->
     (tenant / "configs" / "nested").mkdir(parents=True)
     (tenant / "configs" / "nested" / "train.json").write_text('{"split":"train"}\n', encoding="utf-8")
 
-    store = TenantStore(tenants)
+    store = TenantStore(tenants, repository_base=tmp_path)
 
     assert store.list_configs("demo") == [
         {"path": "config/local.json", "name": "local.json", "bytes": 17},
@@ -449,7 +452,7 @@ def test_evaluation_asset_only_directory_is_a_tenant(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    store = TenantStore(tmp_path)
+    store = TenantStore(tmp_path, repository_base=tmp_path.parent)
     listed = store.list_tenants()
 
     assert [row["tenant_id"] for row in listed] == ["bootstrap_tenant"]
@@ -505,7 +508,7 @@ def test_evaluation_asset_stage_returns_bounded_artifact_previews(
         encoding="utf-8",
     )
 
-    store = TenantStore(tmp_path)
+    store = TenantStore(tmp_path, repository_base=tmp_path.parent)
     detail = store.get_evaluation_asset_stage(
         "bootstrap_tenant",
         "v1",
@@ -579,7 +582,10 @@ def test_evaluation_asset_stage_reads_stage_oriented_layout(
         encoding="utf-8",
     )
 
-    detail = TenantStore(tmp_path).get_evaluation_asset_stage(
+    detail = TenantStore(
+        tmp_path,
+        repository_base=tmp_path.parent,
+    ).get_evaluation_asset_stage(
         "bootstrap_tenant",
         "v1",
         "intent_clustering",
@@ -590,7 +596,10 @@ def test_evaluation_asset_stage_reads_stage_oriented_layout(
         "stages/04_intent_clustering/intent_inventory.jsonl"
     )
     assert detail["clusters"][0]["representatives"] == ["request alpha"]
-    guideline_detail = TenantStore(tmp_path).get_evaluation_asset_stage(
+    guideline_detail = TenantStore(
+        tmp_path,
+        repository_base=tmp_path.parent,
+    ).get_evaluation_asset_stage(
         "bootstrap_tenant",
         "v1",
         "rubric_extraction",
@@ -652,7 +661,7 @@ def test_missing_label_artifacts_belong_to_label_inference(
         / "missing_labeled_feedback_report.md"
     ).write_text("# Missing\n", encoding="utf-8")
 
-    store = TenantStore(tmp_path)
+    store = TenantStore(tmp_path, repository_base=tmp_path.parent)
     coverage = store.get_evaluation_asset_stage(
         "bootstrap_tenant",
         "v1",

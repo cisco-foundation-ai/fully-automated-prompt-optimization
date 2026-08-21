@@ -823,6 +823,7 @@ def test_prepare_inputs_rejects_normalized_duplicate_with_both_sources(
         EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=FakeRubricProvider(),
         embedding_provider=FakeEmbeddingProvider(),
     )
@@ -876,6 +877,7 @@ def test_stage_one_rejects_infeasible_clustering_before_provider_calls(
         ),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=rubric_provider,
         embedding_provider=embedding_provider,
     )
@@ -901,6 +903,7 @@ def test_stage_one_accepts_one_cluster_per_record_and_effective_route(
         EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=2),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=FakeRubricProvider(),
         embedding_provider=FakeEmbeddingProvider(),
     )
@@ -934,6 +937,7 @@ def test_stage_one_treats_present_whitespace_routes_as_exact_bytes(
         EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=rubric_provider,
         embedding_provider=embedding_provider,
     )
@@ -972,6 +976,7 @@ def test_stage_one_revalidates_each_copied_input_before_provider_calls(
         EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=rubric_provider,
         embedding_provider=embedding_provider,
     )
@@ -1026,6 +1031,7 @@ def test_pipeline_validates_injected_embedding_batches_at_every_stage(
         EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=FakeRubricProvider(),
         embedding_provider=embedding_provider,
     )
@@ -1073,6 +1079,7 @@ def test_provider_failure_persists_only_sanitized_causal_summary(
         ),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=rubric_provider,
         embedding_provider=embedding_provider,
     )
@@ -1124,6 +1131,7 @@ def test_malformed_rubric_responses_never_persist_provider_content(
         ),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=SecretMalformedRubricProvider(malformed_response),
         embedding_provider=FakeEmbeddingProvider(),
     )
@@ -1162,6 +1170,7 @@ def test_provider_failure_never_persists_dynamic_exception_class_name(
         EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=DynamicFailureProvider(),
         embedding_provider=FakeEmbeddingProvider(),
     )
@@ -1458,6 +1467,7 @@ def test_stage_one_contract_error_uses_copied_input_physical_row(
         EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=rubric_provider,
         embedding_provider=embedding_provider,
     )
@@ -1570,7 +1580,10 @@ def test_service_create_and_extend_share_tenant_source_boundary(
     )
     other_source.parent.mkdir(parents=True)
     other_source.write_text('{"record_id":"other"}\n', encoding="utf-8")
-    manager = EvaluationAssetRunManager(tenants_root)
+    manager = EvaluationAssetRunManager(
+        tenants_root,
+        repository_base=workspace,
+    )
 
     with pytest.raises(ValueError, match="selected tenant"):
         manager.start(
@@ -1857,6 +1870,7 @@ def test_extend_asset_keeps_clustering_and_extracts_only_new_rubrics(
         ),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=FakeRubricProvider(),
         embedding_provider=FakeEmbeddingProvider(),
     )
@@ -1938,6 +1952,7 @@ def test_extend_asset_refreshes_clustering_for_new_unlabeled_records(
         ),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=FakeRubricProvider(),
         embedding_provider=FakeEmbeddingProvider(),
     )
@@ -1999,6 +2014,7 @@ def test_extend_asset_rejects_unlabeled_additions_when_clustering_is_kept(
         ),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=FakeRubricProvider(),
         embedding_provider=FakeEmbeddingProvider(),
     )
@@ -2156,6 +2172,7 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
         config,
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=rubric_provider,
         embedding_provider=FakeEmbeddingProvider(),
     )

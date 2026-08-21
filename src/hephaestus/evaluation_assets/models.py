@@ -217,14 +217,14 @@ class PipelineState:
 
     tenant_id: str
     asset_id: str
-    schema_version: str = STATE_SCHEMA_VERSION
-    status: str = "draft"
+    status: str = "queued"
     current_stage: Optional[str] = None
     created_at: str = ""
     updated_at: str = ""
     error: Optional[str] = None
     counts: Dict[str, int] = field(default_factory=dict)
     stages: List[StageState] = field(default_factory=list)
+    schema_version: str = STATE_SCHEMA_VERSION
     mutation_sequence: int = 0
     last_operation_id: Optional[str] = None
 
@@ -238,6 +238,13 @@ class PipelineState:
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize run state for persistence and APIs."""
+        if self.schema_version not in {
+            LEGACY_STATE_SCHEMA_VERSION,
+            STATE_SCHEMA_VERSION,
+        }:
+            raise ValueError(
+                f"Unsupported evaluation asset state schema: {self.schema_version!r}"
+            )
         _validate_pipeline_status(self.schema_version, self.status)
         return asdict(self)
 
@@ -247,6 +254,7 @@ class PipelineState:
         return cls(
             tenant_id=config.tenant_id,
             asset_id=config.asset_id,
+            status="draft",
             created_at=timestamp,
             updated_at=timestamp,
             stages=[

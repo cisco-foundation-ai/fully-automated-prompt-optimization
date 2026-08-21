@@ -56,7 +56,13 @@ def test_start_evaluation_asset_endpoint_returns_accepted(tmp_path: Path) -> Non
     handler = type(
         "_TestHandler",
         (_Handler,),
-        {"store": TenantStore(tmp_path / "tenants"), "asset_manager": manager},
+        {
+            "store": TenantStore(
+                tmp_path / "tenants",
+                repository_base=tmp_path,
+            ),
+            "asset_manager": manager,
+        },
     )
     instance = object.__new__(handler)
     payload = {
@@ -100,7 +106,13 @@ def test_start_evaluation_asset_accepts_tfidf_fallback(tmp_path: Path) -> None:
     handler = type(
         "_TestHandler",
         (_Handler,),
-        {"store": TenantStore(tmp_path / "tenants"), "asset_manager": manager},
+        {
+            "store": TenantStore(
+                tmp_path / "tenants",
+                repository_base=tmp_path,
+            ),
+            "asset_manager": manager,
+        },
     )
     instance = object.__new__(handler)
     instance._read_json_body = lambda: {
@@ -140,7 +152,13 @@ def test_resume_evaluation_asset_accepts_decision_updates(tmp_path: Path) -> Non
     handler = type(
         "_TestHandler",
         (_Handler,),
-        {"store": TenantStore(tmp_path / "tenants"), "asset_manager": manager},
+        {
+            "store": TenantStore(
+                tmp_path / "tenants",
+                repository_base=tmp_path,
+            ),
+            "asset_manager": manager,
+        },
     )
     instance = object.__new__(handler)
     instance._read_json_body = lambda: {
@@ -199,7 +217,13 @@ def test_extend_evaluation_asset_endpoint_accepts_refresh_plan(
     handler = type(
         "_TestHandler",
         (_Handler,),
-        {"store": TenantStore(tmp_path / "tenants"), "asset_manager": manager},
+        {
+            "store": TenantStore(
+                tmp_path / "tenants",
+                repository_base=tmp_path,
+            ),
+            "asset_manager": manager,
+        },
     )
     instance = object.__new__(handler)
     instance._read_json_body = lambda: {
@@ -250,7 +274,13 @@ def test_adopt_evaluation_asset_endpoint_uses_thin_service_api(
     handler = type(
         "_TestHandler",
         (_Handler,),
-        {"store": TenantStore(tmp_path / "tenants"), "asset_manager": manager},
+        {
+            "store": TenantStore(
+                tmp_path / "tenants",
+                repository_base=tmp_path,
+            ),
+            "asset_manager": manager,
+        },
     )
     instance = object.__new__(handler)
     sent = {}
@@ -287,7 +317,12 @@ def test_serve_rejects_non_loopback_bind_before_server_start(
     monkeypatch.setattr(server_module, "ThreadingHTTPServer", NoOpServer)
 
     with pytest.raises(ValueError, match="loopback"):
-        serve(tmp_path / "tenants", host="0.0.0.0", port=8765)
+        serve(
+            tmp_path / "tenants",
+            host="0.0.0.0",
+            port=8765,
+            repository_base=tmp_path,
+        )
 
 
 def test_serve_binds_ipv6_loopback_and_prints_bracketed_url(
@@ -313,7 +348,12 @@ def test_serve_binds_ipv6_loopback_and_prints_bracketed_url(
 
     monkeypatch.setattr(ThreadingHTTPServer, "serve_forever", serve_once)
 
-    serve(tmp_path / "tenants", host="::1", port=0)
+    serve(
+        tmp_path / "tenants",
+        host="::1",
+        port=0,
+        repository_base=tmp_path,
+    )
 
     assert address_families == [socket.AF_INET6]
     assert "http://[::1]:" in capsys.readouterr().out
@@ -336,7 +376,10 @@ def test_studio_http_policy_and_cache_headers(tmp_path: Path) -> None:
         "_TestHTTPHandler",
         (_Handler,),
         {
-            "store": TenantStore(tmp_path / "tenants"),
+            "store": TenantStore(
+                tmp_path / "tenants",
+                repository_base=tmp_path,
+            ),
             "asset_manager": FakeManager(),
         },
     )
@@ -514,7 +557,10 @@ def test_published_studio_datasets_inherit_studio_http_boundary(
     handler = type(
         "_TestPublishedDatasetHTTPHandler",
         (_Handler,),
-        {"store": TenantStore(tenants_root), "asset_manager": object()},
+        {
+            "store": TenantStore(tenants_root, repository_base=tmp_path),
+            "asset_manager": object(),
+        },
     )
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -676,7 +722,10 @@ def test_ordinary_dataset_catalog_remains_available_to_explorer_hosts(
     handler = type(
         "_TestOrdinaryDatasetHTTPHandler",
         (_Handler,),
-        {"store": TenantStore(tenants_root), "asset_manager": object()},
+        {
+            "store": TenantStore(tenants_root, repository_base=tmp_path),
+            "asset_manager": object(),
+        },
     )
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)

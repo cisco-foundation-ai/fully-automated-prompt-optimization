@@ -10,7 +10,6 @@ import hashlib
 import json
 import os
 import re
-import stat
 import uuid
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
@@ -18,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, Mapping, Optional, Sequence
 
+from src.hephaestus import local_authority_io as authority_io
 from src.hephaestus.artifact_io import (
     atomic_append_jsonl as atomic_append_jsonl,
 )
@@ -51,8 +51,8 @@ from src.hephaestus.evaluation_assets.durability import (
     EvaluationAssetIntegrityError,
     EvaluationAssetLegacyError,
     _exact_completed_state,
+    _exact_pre_v2_history_from_authority,
     _exact_v2_state,
-    _replay_config_history,
     _validate_local_authority_layout,
     _verify_prospective_legacy_adoption_candidate,
     build_stage_receipt,
@@ -103,6 +103,7 @@ from src.hephaestus.evaluation_assets.publication import (
     LOGICAL_SPLITS,
     InstalledGeneration,
     build_generation_descriptor,
+    build_generation_manifest,
     build_release_pointer,
     generation_id_for_descriptor,
     install_generation,
@@ -236,6 +237,33 @@ def _rollback_new_release_pointer(
     except (OSError, ValueError):
         # A raced replacement is not owned by this operation and must survive.
         return
+
+
+def _handle_release_state_failure(
+    layout: "EvaluationAssetLayout",
+    *,
+    before_state: Mapping[str, Any],
+    target_state: Mapping[str, Any],
+    preexisting: bool,
+    pointer: Mapping[str, Any],
+    installed_identity: tuple[int, int, int] | None,
+) -> None:
+    """Rollback a pointer only while state remains the exact WAL-before bytes."""
+    try:
+        present, current = _optional_local_authority_bytes(layout, layout.state_path)
+    except (OSError, ValueError):
+        return
+    if not present or current != _persisted_json_bytes(before_state):
+        # Target and foreign/unknown states retain the pointer so recovery never
+        # compounds a possibly completed state installation.
+        del target_state
+        return
+    _rollback_new_release_pointer(
+        layout,
+        preexisting=preexisting,
+        pointer=pointer,
+        installed_identity=installed_identity,
+    )
 
 
 def _release_pointer_write_expectation(
@@ -374,61 +402,38 @@ def _capture_legacy_generation_inventory(
         layout.published_datasets,
         layout.tenant_root,
     ) as catalog_descriptor:
-        try:
-            generations_stat = os.stat(
-                "generations",
-                dir_fd=catalog_descriptor,
-                follow_symlinks=False,
-            )
-        except FileNotFoundError:
-            return ()
-        if not stat.S_ISDIR(generations_stat.st_mode):
-            raise ValueError("legacy generation catalog is not an exact directory")
-        directory_flags = (
-            os.O_RDONLY
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_DIRECTORY", 0)
-        )
-        generations_descriptor = os.open(
+        generations_stat = authority_io.optional_stat_child(
+            catalog_descriptor,
             "generations",
-            directory_flags,
-            dir_fd=catalog_descriptor,
+        )
+        if generations_stat is None:
+            return ()
+        if generations_stat.kind != "directory":
+            raise ValueError("legacy generation catalog is not an exact directory")
+        generations_descriptor = authority_io.open_child_directory(
+            catalog_descriptor,
+            "generations",
+            expected=generations_stat.identity,
         )
         try:
-            opened_generations = os.fstat(generations_descriptor)
-            if (
-                opened_generations.st_dev != generations_stat.st_dev
-                or opened_generations.st_ino != generations_stat.st_ino
-            ):
-                raise ValueError("legacy generation catalog changed while opening")
             captured = []
-            for name in sorted(os.listdir(generations_descriptor)):
-                child_stat = os.stat(
+            for name in authority_io.list_children(generations_descriptor):
+                child_stat = authority_io.stat_child(
+                    generations_descriptor,
                     name,
-                    dir_fd=generations_descriptor,
-                    follow_symlinks=False,
                 )
-                if not stat.S_ISDIR(child_stat.st_mode):
+                if child_stat.kind != "directory":
                     raise ValueError("legacy generation entry is not a directory")
                 final_generation = name == generation_id
                 if not final_generation and temporary_pattern.fullmatch(name) is None:
                     raise ValueError("legacy checkpoint contains a foreign generation")
-                temporary_descriptor = os.open(
+                temporary_descriptor = authority_io.open_child_directory(
+                    generations_descriptor,
                     name,
-                    directory_flags,
-                    dir_fd=generations_descriptor,
+                    expected=child_stat.identity,
                 )
                 try:
-                    opened_temporary = os.fstat(temporary_descriptor)
-                    if (
-                        opened_temporary.st_dev != child_stat.st_dev
-                        or opened_temporary.st_ino != child_stat.st_ino
-                    ):
-                        raise ValueError(
-                            "legacy generation entry changed while opening"
-                        )
-                    member_names = tuple(sorted(os.listdir(temporary_descriptor)))
+                    member_names = authority_io.list_children(temporary_descriptor)
                     if (
                         final_generation
                         and set(member_names) != set(expected_members)
@@ -460,22 +465,27 @@ def _capture_legacy_generation_inventory(
                         raise ValueError(
                             "legacy generation member content is invalid"
                         )
-                    if tuple(sorted(os.listdir(temporary_descriptor))) != member_names:
+                    if authority_io.list_children(temporary_descriptor) != member_names:
                         raise ValueError(
                             "legacy generation member inventory changed"
                         )
                     captured.append(
-                        (name, child_stat.st_dev, child_stat.st_ino, members)
+                        (
+                            name,
+                            child_stat.identity[0],
+                            child_stat.identity[1],
+                            members,
+                        )
                     )
                 finally:
-                    os.close(temporary_descriptor)
-            if tuple(sorted(os.listdir(generations_descriptor))) != tuple(
+                    temporary_descriptor.close()
+            if authority_io.list_children(generations_descriptor) != tuple(
                 row[0] for row in captured
             ):
                 raise ValueError("legacy generation inventory changed")
             return tuple(captured)
         finally:
-            os.close(generations_descriptor)
+            generations_descriptor.close()
 
 
 def _capture_local_authority_tree(
@@ -484,57 +494,52 @@ def _capture_local_authority_tree(
 ) -> tuple[tuple[str, str, int, int, str], ...]:
     """Capture one exact no-follow directory inventory and regular-file bytes."""
     records: list[tuple[str, str, int, int, str]] = []
-    directory_flags = (
-        os.O_RDONLY
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_DIRECTORY", 0)
-    )
-
-    def capture(directory_descriptor: int, prefix: str) -> None:
-        names = tuple(sorted(os.listdir(directory_descriptor)))
+    def capture(
+        directory_descriptor: authority_io.DirectoryLike,
+        prefix: str,
+    ) -> None:
+        names = authority_io.list_children(directory_descriptor)
         for name in names:
-            details = os.stat(
-                name,
-                dir_fd=directory_descriptor,
-                follow_symlinks=False,
-            )
+            details = authority_io.stat_child(directory_descriptor, name)
             relative = f"{prefix}/{name}" if prefix else name
-            if stat.S_ISREG(details.st_mode):
+            if details.kind == "file":
                 payload = read_local_authority_file_at(directory_descriptor, name)
                 records.append(
                     (
                         relative,
                         "file",
-                        details.st_dev,
-                        details.st_ino,
+                        details.identity[0],
+                        details.identity[1],
                         hashlib.sha256(payload).hexdigest(),
                     )
                 )
                 continue
-            if not stat.S_ISDIR(details.st_mode):
+            if details.kind != "directory":
                 raise ValueError("local authority tree contains an unsafe node")
-            child_descriptor = os.open(
+            child_descriptor = authority_io.open_child_directory(
+                directory_descriptor,
                 name,
-                directory_flags,
-                dir_fd=directory_descriptor,
+                expected=details.identity,
             )
             try:
-                opened = os.fstat(child_descriptor)
-                if opened.st_dev != details.st_dev or opened.st_ino != details.st_ino:
-                    raise ValueError("local authority directory changed while opening")
                 records.append(
-                    (relative, "directory", details.st_dev, details.st_ino, "")
+                    (
+                        relative,
+                        "directory",
+                        details.identity[0],
+                        details.identity[1],
+                        "",
+                    )
                 )
                 capture(child_descriptor, relative)
             finally:
-                os.close(child_descriptor)
-        if tuple(sorted(os.listdir(directory_descriptor))) != names:
+                child_descriptor.close()
+        if authority_io.list_children(directory_descriptor) != names:
             raise ValueError("local authority directory inventory changed")
 
     with open_local_authority_directory(root, trusted_root) as root_descriptor:
-        root_details = os.fstat(root_descriptor)
-        records.append((".", "directory", root_details.st_dev, root_details.st_ino, ""))
+        root_identity = authority_io.directory_identity(root_descriptor)
+        records.append((".", "directory", root_identity[0], root_identity[1], ""))
         capture(root_descriptor, "")
     return tuple(records)
 
@@ -691,6 +696,10 @@ def _ordered_asset_locks(
     with ExitStack() as stack:
         for _, layout in ordered:
             try:
+                authority_io.validate_existing_directory_chain(
+                    layout.repository_base,
+                    layout.tenants_root,
+                )
                 _validate_local_authority_layout(layout)
             except (OSError, ValueError) as exc:
                 raise EvaluationAssetIntegrityError(
@@ -703,7 +712,7 @@ def _ordered_asset_locks(
                 stack.enter_context(
                     acquire_local_authority_lock(
                         current.lock_path,
-                        current.tenant_root,
+                        current.repository_base,
                         timeout=timeout,
                     )
                 )
@@ -728,13 +737,61 @@ class EvaluationAssetLayout:
     tenants_root: Path
     tenant_id: str
     asset_id: str
+    repository_base: Path | None = None
 
     def __post_init__(self) -> None:
         if not SAFE_NAME.fullmatch(self.tenant_id):
             raise ValueError("tenant_id must contain only letters, digits, '-' or '_'")
         if not SAFE_NAME.fullmatch(self.asset_id):
             raise ValueError("asset_id must contain only letters, digits, '-' or '_'")
-        object.__setattr__(self, "tenants_root", self.tenants_root.absolute())
+        explicit_base = self.repository_base is not None
+        base = Path(
+            os.path.abspath(
+                os.fspath(
+                    self.repository_base
+                    if explicit_base
+                    else Path.cwd()
+                    if not self.tenants_root.is_absolute()
+                    else self.tenants_root.parent
+                )
+            )
+        )
+        tenants_root = Path(
+            os.path.abspath(
+                os.fspath(
+                    self.tenants_root
+                    if self.tenants_root.is_absolute()
+                    else base / self.tenants_root
+                )
+            )
+        )
+        if explicit_base:
+            try:
+                tenants_root.relative_to(base)
+            except ValueError as exc:
+                raise ValueError(
+                    "tenants root must remain within the repository base"
+                ) from exc
+            try:
+                authority_io.validate_existing_directory_chain(
+                    base,
+                    tenants_root,
+                )
+            except (OSError, ValueError) as exc:
+                raise ValueError(
+                    "tenants root must remain within the exact repository base"
+                ) from exc
+        object.__setattr__(self, "repository_base", base)
+        object.__setattr__(self, "tenants_root", tenants_root)
+
+    def repository_relative_path(self, path: Path) -> str:
+        """Return one lexical repository-relative immutable artifact path."""
+        candidate = Path(os.path.abspath(os.fspath(path)))
+        try:
+            relative = candidate.relative_to(self.repository_base)
+        except ValueError as exc:
+            raise ValueError("artifact path escapes the repository base") from exc
+        return relative.as_posix()
 
     @property
     def tenant_root(self) -> Path:
@@ -1648,6 +1705,7 @@ class EvaluationAssetLayout:
                     self.config_path,
                     self.config_history_path,
                     self.events_path,
+                    self.lineage_path,
                     self.build_provenance_path,
                     *forbidden_native_paths,
                     *(
@@ -1702,13 +1760,15 @@ class EvaluationAssetLayout:
                     artifact_paths_out=legacy_artifact_paths,
                     artifact_profiles_out=legacy_artifact_profiles,
                 )
-                _replay_config_history(
+                legacy_history = _exact_pre_v2_history_from_authority(
                     self,
-                    config,
-                    state,
-                    allow_pre_wal_history=True,
+                    raw_state,
                     artifact_overrides=legacy_artifact_snapshot,
                 )
+                if config.to_dict() != dict(legacy_history.final_configuration):
+                    raise ValueError(
+                        "legacy checkpoint configuration history is inconsistent"
+                    )
                 parse_strict_jsonl_objects(
                     legacy_artifact_snapshot.get(self.events_path, b"")
                 )
@@ -1719,7 +1779,14 @@ class EvaluationAssetLayout:
                     legacy_artifact_snapshot,
                     legacy_artifact_presence,
                 )
-                generation, target_manifests = self._prepare_legacy_release_artifacts(
+                (
+                    generation,
+                    target_manifests,
+                    target_provenance,
+                    generation_split_paths,
+                    generation_split_payloads,
+                    generation_inventory,
+                ) = self._prepare_legacy_release_artifacts(
                     config,
                     timestamp,
                     legacy_artifact_snapshot,
@@ -1729,15 +1796,13 @@ class EvaluationAssetLayout:
                     **legacy_artifact_snapshot,
                     **self._adoption_manifest_overrides(target_manifests),
                     **{
-                        self.stage_provenance_path(stage): _local_authority_bytes(
-                            self,
-                            self.stage_provenance_path(stage),
+                        self.stage_provenance_path(stage): _persisted_json_bytes(
+                            target_provenance["stages"][stage]
                         )
                         for stage in persisted_stages
                     },
-                    self.build_provenance_path: _local_authority_bytes(
-                        self,
-                        self.build_provenance_path,
+                    self.build_provenance_path: _persisted_json_bytes(
+                        target_provenance["build"]
                     ),
                 }
                 for stage in persisted_stages:
@@ -1795,9 +1860,8 @@ class EvaluationAssetLayout:
                 asset_id=self.asset_id,
                 generation=generation,
                 stage_8_receipt_sha256=stage_eight_receipt_sha256,
-                build_provenance_sha256=_local_authority_sha256(
-                    self,
-                    self.build_provenance_path
+                build_provenance_sha256=persisted_json_sha256(
+                    target_provenance["build"]
                 ),
                 published_at=timestamp,
             )
@@ -1864,9 +1928,8 @@ class EvaluationAssetLayout:
                     "generation_manifest_sha256": (
                         generation.generation_manifest_sha256
                     ),
-                    "build_provenance_sha256": _local_authority_sha256(
-                        self,
-                        self.build_provenance_path
+                    "build_provenance_sha256": persisted_json_sha256(
+                        target_provenance["build"]
                     ),
                 },
                 "target_receipts": target_receipts,
@@ -1888,6 +1951,7 @@ class EvaluationAssetLayout:
                     ),
                 },
                 "target_manifests": target_manifests,
+                "target_provenance": target_provenance,
                 "target_state": plan["target_state"],
                 "event_entry": plan["event_entry"],
                 "result": plan["result"],
@@ -1898,74 +1962,39 @@ class EvaluationAssetLayout:
             }
             self._append_journal_once(prepared)
             _fault_point("after_prepared_journal")
-            self._install_adoption_manifests(prepared)
-            self._install_adoption_receipts(prepared)
-            _fault_point("after_receipts_install")
-            verify_release_candidate(
+            recovery_snapshot = dict(legacy_artifact_snapshot)
+            recovery_presence = dict(legacy_artifact_presence)
+            recovery_present, recovery_bytes = _optional_local_authority_bytes(
                 self,
-                target_state,
-                release_pointer=pointer,
+                self.recovery_journal_path,
             )
-            pointer_preexisting, pointer_bytes = _release_pointer_write_expectation(
-                self,
-                prepared["before"]["release"],
-            )
-            installed_pointer_identity: tuple[int, int, int] | None = None
-            try:
-                installed_pointer = write_release_pointer(
-                    self.published_datasets,
-                    pointer,
-                    trusted_root=self.tenant_root,
-                    expected_current=pointer_bytes,
-                    check_expected_current=True,
+            if not recovery_present:
+                raise EvaluationAssetIntegrityError(
+                    self.tenant_id,
+                    self.asset_id,
+                    "prepared adoption journal authority is missing",
                 )
-                installed_pointer_identity = installed_pointer.identity
-                if installed_pointer_identity is None:
-                    raise ValueError("installed release pointer identity is unavailable")
-                _fault_point("after_adoption_pointer_replace")
-                resolved = resolve_evaluation_asset_release(
-                    self.published_datasets,
-                    expected_tenant_id=self.tenant_id,
-                    expected_asset_id=self.asset_id,
-                    expected_stage_8_receipt_sha256=stage_eight_receipt_sha256,
-                    trusted_root=self.tenant_root,
-                )
-                if resolved.pointer_sha256 != persisted_json_sha256(pointer):
-                    raise EvaluationAssetIntegrityError(
-                        self.tenant_id,
-                        self.asset_id,
-                        "adoption release pointer does not match its WAL target",
+            recovery_presence[self.recovery_journal_path] = True
+            recovery_snapshot[self.recovery_journal_path] = recovery_bytes
+
+            def check_legacy_generation_inventory() -> None:
+                if _capture_legacy_generation_inventory(
+                    self,
+                    generation_id=generation.generation_id,
+                    descriptor=generation.descriptor,
+                    split_payloads=generation_split_payloads,
+                ) != generation_inventory:
+                    raise ValueError(
+                        "legacy generation inventory changed before adoption"
                     )
-                verify_release_candidate(self, target_state)
-            except Exception:
-                _rollback_new_release_pointer(
-                    self,
-                    preexisting=pointer_preexisting,
-                    pointer=pointer,
-                    installed_identity=installed_pointer_identity,
-                )
-                raise
-            try:
-                self._write_authority_json(
-                    self.state_path,
-                    plan["target_state"],
-                    expected_current=_persisted_json_bytes(before_state),
-                    check_expected_current=True,
-                )
-                verify_released_asset(self, target_state)
-            except Exception:
-                _rollback_new_release_pointer(
-                    self,
-                    preexisting=pointer_preexisting,
-                    pointer=pointer,
-                    installed_identity=installed_pointer_identity,
-                )
-                raise
-            _fault_point("after_state_replace")
-            self._append_jsonl_once(self.events_path, plan["event_entry"])
-            _fault_point("after_event_append")
-            self._commit_journal_operation(prepared)
-            return target_state
+
+            self._roll_forward_prepared(
+                prepared,
+                legacy_artifact_snapshot=recovery_snapshot,
+                legacy_artifact_presence=recovery_presence,
+                legacy_generation_precondition=check_legacy_generation_inventory,
+            )
+            return self.load_state()
 
     def _prepare_legacy_release_artifacts(
         self,
@@ -1973,8 +2002,15 @@ class EvaluationAssetLayout:
         timestamp: str,
         artifact_snapshot: Mapping[Path, bytes],
         artifact_presence: Mapping[Path, bool],
-    ) -> tuple[InstalledGeneration, dict[str, Any]]:
-        """Convert verified pre-v2 outputs into historical provenance and a generation."""
+    ) -> tuple[
+        InstalledGeneration,
+        dict[str, Any],
+        dict[str, Any],
+        dict[str, Path],
+        dict[str, bytes],
+        tuple[tuple[str, int, int, tuple[tuple[str, str], ...]], ...],
+    ]:
+        """Plan exact adoption provenance and generation targets without writes."""
         input_manifest_path = self.artifact_path(
             PERSISTED_STAGE_VALUES_V2[0],
             "input_manifest.json",
@@ -2000,7 +2036,7 @@ class EvaluationAssetLayout:
             if self.lineage_path in artifact_snapshot
             else None
         )
-        expected_provenance = build_legacy_provenance(
+        provenance = build_legacy_provenance(
             resolved_configuration=config.to_dict(),
             copied_inputs=copied_inputs,
             lineage=lineage,
@@ -2011,40 +2047,18 @@ class EvaluationAssetLayout:
         provenance_paths = [
             self.stage_provenance_path(stage) for stage in persisted_stages
         ]
-        stage_provenance_presence = tuple(
-            artifact_presence.get(path, False) for path in provenance_paths
-        )
-        build_provenance_present = artifact_presence.get(
-            self.build_provenance_path,
-            False,
-        )
-        if any(stage_provenance_presence) or build_provenance_present:
-            if not all(stage_provenance_presence) or not build_provenance_present:
-                raise ValueError("pre-WAL adoption provenance is incomplete")
-            existing_provenance = parse_strict_json_object(
-                artifact_snapshot[self.build_provenance_path]
-            )
-            created_at = existing_provenance.get("created_at")
-            if not isinstance(created_at, str):
-                raise ValueError("pre-WAL adoption provenance timestamp is invalid")
-            expected_provenance = build_legacy_provenance(
-                resolved_configuration=config.to_dict(),
-                copied_inputs=copied_inputs,
-                lineage=lineage,
-                split_seed=config.split_seed,
-                created_at=created_at,
-            )
-            if existing_provenance != expected_provenance or any(
-                parse_strict_json_object(artifact_snapshot[path])
-                != build_legacy_stage_provenance(stage)
-                for stage, path in zip(
-                    persisted_stages,
-                    provenance_paths,
-                    strict=True,
-                )
-            ):
-                raise ValueError("pre-WAL adoption provenance is inconsistent")
-        provenance = expected_provenance
+        if any(
+            artifact_presence.get(path, False)
+            for path in (*provenance_paths, self.build_provenance_path)
+        ):
+            raise ValueError("unjournaled adoption provenance authority is ambiguous")
+        target_provenance = {
+            "stages": {
+                stage: build_legacy_stage_provenance(stage)
+                for stage in persisted_stages
+            },
+            "build": provenance,
+        }
         split_paths = {
             split: self.artifact_path(
                 PERSISTED_STAGE_VALUES_V2[-1],
@@ -2069,6 +2083,8 @@ class EvaluationAssetLayout:
             descriptor=descriptor,
             split_payloads=split_payloads,
         )
+        if generation_inventory:
+            raise ValueError("unjournaled adoption generation authority is ambiguous")
         _validate_asset_write_targets(
             self.root,
             [
@@ -2102,16 +2118,6 @@ class EvaluationAssetLayout:
             ],
             target_kind="directory",
         )
-        existing_generation = self.generations_root / generation_id
-        if any(row[0] == generation_id for row in generation_inventory):
-            installed = validate_historical_generation(
-                existing_generation,
-                expected_tenant_id=self.tenant_id,
-                expected_asset_id=self.asset_id,
-                trusted_root=self.tenant_root,
-            )
-            if dict(installed.descriptor) != descriptor:
-                raise ValueError("legacy generation collision is inconsistent")
         if _capture_legacy_generation_inventory(
             self,
             generation_id=generation_id,
@@ -2119,15 +2125,6 @@ class EvaluationAssetLayout:
             split_payloads=split_payloads,
         ) != generation_inventory:
             raise ValueError("legacy generation inventory changed before adoption")
-        if any(row[0] == generation_id for row in generation_inventory):
-            installed = validate_historical_generation(
-                existing_generation,
-                expected_tenant_id=self.tenant_id,
-                expected_asset_id=self.asset_id,
-                trusted_root=self.tenant_root,
-            )
-            if dict(installed.descriptor) != descriptor:
-                raise ValueError("legacy generation collision is inconsistent")
         _assert_legacy_authority_unchanged(
             self,
             artifact_snapshot,
@@ -2141,59 +2138,31 @@ class EvaluationAssetLayout:
         ) != generation_inventory:
             raise ValueError("legacy generation inventory changed before first write")
 
-        adoption_write_checked = False
-
-        def adoption_write_precondition() -> None:
-            nonlocal adoption_write_checked
-            if adoption_write_checked:
-                return
-            _assert_legacy_authority_unchanged(
-                self,
-                artifact_snapshot,
-                artifact_presence,
-            )
-            if _capture_legacy_generation_inventory(
-                self,
-                generation_id=generation_id,
-                descriptor=descriptor,
-                split_payloads=split_payloads,
-            ) != generation_inventory:
-                raise ValueError(
-                    "legacy generation inventory changed at adoption write boundary"
-                )
-            adoption_write_checked = True
-
-        for stage in persisted_stages:
-            self._write_authority_json(
-                self.stage_provenance_path(stage),
-                build_legacy_stage_provenance(stage),
-                precondition=adoption_write_precondition,
-            )
-        self._write_authority_json(
-            self.build_provenance_path,
-            provenance,
-            precondition=adoption_write_precondition,
-        )
-        generation = install_generation(
-            self.published_datasets,
+        generation_manifest = build_generation_manifest(
             tenant_id=self.tenant_id,
             asset_id=self.asset_id,
-            split_paths=split_paths,
-            build_fingerprint=provenance["identity_sha256"],
-            fault_hook=_fault_point,
-            trusted_root=self.tenant_root,
-            split_payloads=split_payloads,
+            descriptor=descriptor,
         )
-        generation_manifest = _local_authority_json(
-            self,
-            generation.generation_dir / "generation_manifest.json",
+        generation_dir = self.generations_root / generation_id
+        generation = InstalledGeneration(
+            generation_id=generation_id,
+            generation_dir=generation_dir,
+            generation_manifest_sha256=persisted_json_sha256(
+                generation_manifest
+            ),
+            descriptor=descriptor,
+            manifest=generation_manifest,
+            files={
+                split: generation_dir / f"{split}.jsonl"
+                for split in LOGICAL_SPLITS
+            },
         )
         manifest = parse_strict_json_object(
             artifact_snapshot[self.manifest_path]
         )
-        generation_directory = generation.generation_dir.relative_to(
-            self.tenants_root.parent
-        ).as_posix()
+        generation_directory = self.repository_relative_path(
+            generation.generation_dir
+        )
         manifest["published_datasets"] = {
             "directory": self.published_datasets.relative_to(
                 self.tenant_root
@@ -2203,21 +2172,25 @@ class EvaluationAssetLayout:
             ).as_posix(),
             "generation_id": generation.generation_id,
             "generation_manifest_sha256": generation.generation_manifest_sha256,
-            "build_provenance_sha256": _local_authority_sha256(
-                self,
-                self.build_provenance_path,
-            ),
+            "build_provenance_sha256": persisted_json_sha256(provenance),
             "build_fingerprint": provenance["identity_sha256"],
             "files": {
                 split: f"{generation_directory}/{split}.jsonl"
                 for split in ("train", "validation", "test", "regression_trusted")
             },
         }
-        return generation, {
-            "asset_manifest": manifest,
-            "dataset_manifest": manifest,
-            "generation_manifest": generation_manifest,
-        }
+        return (
+            generation,
+            {
+                "asset_manifest": manifest,
+                "dataset_manifest": manifest,
+                "generation_manifest": generation_manifest,
+            },
+            target_provenance,
+            split_paths,
+            split_payloads,
+            generation_inventory,
+        )
 
     def _adoption_manifest_overrides(
         self,
@@ -2375,7 +2348,7 @@ class EvaluationAssetLayout:
                 ),
                 "build_provenance_sha256": _local_authority_sha256(
                     self,
-                    self.build_provenance_path
+                    self.build_provenance_path,
                 ),
             },
             "target_state": plan["target_state"],
@@ -2471,8 +2444,10 @@ class EvaluationAssetLayout:
             )
             verify_released_asset(self, target_state)
         except Exception:
-            _rollback_new_release_pointer(
+            _handle_release_state_failure(
                 self,
+                before_state=before_state,
+                target_state=plan["target_state"],
                 preexisting=pointer_preexisting,
                 pointer=pointer,
                 installed_identity=installed_pointer_identity,
@@ -2497,6 +2472,24 @@ class EvaluationAssetLayout:
             self._recover_locked()
             return self._revise_config_locked(updates)
 
+    @staticmethod
+    def _resolve_config_updates(
+        current: EvaluationAssetConfig,
+        updates: Mapping[str, Any],
+    ) -> EvaluationAssetConfig:
+        """Resolve a proposed decision update without touching authority files."""
+        unknown = set(updates) - set(CONFIG_STAGE_DEPENDENCIES)
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise ValueError(f"Unsupported pipeline decision fields: {names}")
+        merged = current.to_dict()
+        merged.update(dict(updates))
+        if "embedding_model" in updates:
+            merged["embedding_provider"] = (
+                "tfidf" if updates["embedding_model"] == "tfidf" else "openai"
+            )
+        return EvaluationAssetConfig.from_dict(merged)
+
     def _revise_config_locked(self, updates: Mapping[str, Any]) -> Dict[str, Any]:
         """Revise configuration while the caller holds the asset lock."""
         state = self.load_state()
@@ -2508,21 +2501,10 @@ class EvaluationAssetLayout:
                 self.tenant_id,
                 self.asset_id,
                 "explicit verification and adoption are required before revision",
-            )
+        )
         verify_raw_snapshot_floor(self, state)
         current = self.load_config()
-        unknown = set(updates) - set(CONFIG_STAGE_DEPENDENCIES)
-        if unknown:
-            names = ", ".join(sorted(unknown))
-            raise ValueError(f"Unsupported pipeline decision fields: {names}")
-
-        merged = current.to_dict()
-        merged.update(dict(updates))
-        if "embedding_model" in updates:
-            merged["embedding_provider"] = (
-                "tfidf" if updates["embedding_model"] == "tfidf" else "openai"
-            )
-        revised = EvaluationAssetConfig.from_dict(merged)
+        revised = self._resolve_config_updates(current, updates)
         changes = {
             key: {"previous": current.to_dict()[key], "new": revised.to_dict()[key]}
             for key in CONFIG_STAGE_DEPENDENCIES
@@ -2650,6 +2632,7 @@ class EvaluationAssetLayout:
                     self.config_history_path,
                     self.events_path,
                     self.recovery_journal_path,
+                    self.lineage_path,
                 ):
                     present, payload = _optional_local_authority_bytes(self, path)
                     legacy_artifact_presence[path] = present
@@ -2674,21 +2657,46 @@ class EvaluationAssetLayout:
                     artifact_presence_out=legacy_artifact_presence,
                     artifact_paths_out=legacy_artifact_paths,
                 )
-                generated_provenance_paths = {
-                    *(self.stage_provenance_path(stage) for stage in _persisted_stages_v2()),
+                legacy_history = _exact_pre_v2_history_from_authority(
+                    self,
+                    outstanding["before_state"],
+                    artifact_overrides=legacy_artifact_snapshot,
+                )
+                if legacy_config.to_dict() != dict(
+                    legacy_history.final_configuration
+                ):
+                    raise ValueError(
+                        "adoption recovery configuration history is inconsistent"
+                    )
+                target_provenance = outstanding.get("target_provenance")
+                if not isinstance(target_provenance, Mapping) or not isinstance(
+                    target_provenance.get("stages"), Mapping
+                ) or not isinstance(target_provenance.get("build"), Mapping):
+                    raise ValueError("adoption provenance target is invalid")
+                generated_provenance_paths = (
+                    *(
+                        self.stage_provenance_path(stage)
+                        for stage in _persisted_stages_v2()
+                    ),
                     self.build_provenance_path,
-                }
+                )
                 for path in generated_provenance_paths:
                     present, payload = _optional_local_authority_bytes(self, path)
-                    if not present:
-                        raise ValueError(
-                            "adoption recovery provenance authority is incomplete"
-                        )
-                    legacy_artifact_presence[path] = True
-                    legacy_artifact_snapshot[path] = payload
+                    legacy_artifact_presence[path] = present
+                    if present:
+                        legacy_artifact_snapshot[path] = payload
                 artifact_overrides = {
                     **legacy_artifact_snapshot,
                     **self._adoption_manifest_overrides(target_manifests),
+                    **{
+                        self.stage_provenance_path(stage): _persisted_json_bytes(
+                            target_provenance["stages"][stage]
+                        )
+                        for stage in _persisted_stages_v2()
+                    },
+                    self.build_provenance_path: _persisted_json_bytes(
+                        target_provenance["build"]
+                    ),
                 }
                 _verify_prospective_legacy_adoption_candidate(
                     self,
@@ -2949,8 +2957,10 @@ class EvaluationAssetLayout:
                 )
                 verify_released_asset(self, recovered_state)
             except Exception:
-                _rollback_new_release_pointer(
+                _handle_release_state_failure(
                     self,
+                    before_state=before_state,
+                    target_state=target_state,
                     preexisting=pointer_preexisting,
                     pointer=pointer,
                     installed_identity=installed_pointer_identity,
@@ -2995,6 +3005,15 @@ class EvaluationAssetLayout:
                     ) from exc
                 adoption_write_checked = True
 
+            self._install_adoption_provenance(
+                entry,
+                precondition=adoption_write_precondition,
+            )
+            self._install_adoption_generation(
+                entry,
+                legacy_artifact_snapshot=legacy_artifact_snapshot,
+                precondition=adoption_write_precondition,
+            )
             self._install_adoption_manifests(
                 entry,
                 precondition=adoption_write_precondition,
@@ -3003,6 +3022,7 @@ class EvaluationAssetLayout:
                 entry,
                 precondition=adoption_write_precondition,
             )
+            _fault_point("after_receipts_install")
             request = entry.get("request")
             pointer = (
                 request.get("release_pointer")
@@ -3084,6 +3104,7 @@ class EvaluationAssetLayout:
                 installed_pointer_identity = installed_pointer.identity
                 if installed_pointer_identity is None:
                     raise ValueError("installed release pointer identity is unavailable")
+                _fault_point("after_adoption_pointer_replace")
                 resolve_evaluation_asset_release(
                     self.published_datasets,
                     expected_tenant_id=self.tenant_id,
@@ -3124,16 +3145,20 @@ class EvaluationAssetLayout:
                 )
                 verify_released_asset(self, recovered_state)
             except Exception:
-                _rollback_new_release_pointer(
+                _handle_release_state_failure(
                     self,
+                    before_state=before_state,
+                    target_state=target_state,
                     preexisting=pointer_preexisting,
                     pointer=pointer,
                     installed_identity=installed_pointer_identity,
                 )
                 raise
+            _fault_point("after_state_replace")
             event_entry = entry.get("event_entry")
             if isinstance(event_entry, Mapping):
                 self._append_jsonl_once(self.events_path, event_entry)
+            _fault_point("after_event_append")
             self._commit_journal_operation(entry)
             return
         if kind not in {"configuration_revision", "checkpoint_rebuild"}:
@@ -3212,6 +3237,142 @@ class EvaluationAssetLayout:
             ) from exc
         self._clear_stage_outputs(stages)
         self._commit_journal_operation(entry)
+
+    def _install_adoption_provenance(
+        self,
+        entry: Mapping[str, Any],
+        *,
+        precondition: Callable[[], None] | None = None,
+    ) -> None:
+        """Install the exact WAL-owned provenance prefix idempotently."""
+        target = entry.get("target_provenance")
+        if not isinstance(target, Mapping) or set(target) != {"stages", "build"}:
+            raise EvaluationAssetIntegrityError(
+                self.tenant_id,
+                self.asset_id,
+                "the recovery journal has an invalid provenance target",
+            )
+        stages = target.get("stages")
+        if not isinstance(stages, Mapping) or set(stages) != set(
+            _persisted_stages_v2()
+        ):
+            raise EvaluationAssetIntegrityError(
+                self.tenant_id,
+                self.asset_id,
+                "the recovery journal has an incomplete provenance target",
+            )
+        targets = [
+            (
+                self.stage_provenance_path(stage),
+                stages[stage],
+                f"after_adoption_provenance_{stage}",
+            )
+            for stage in _persisted_stages_v2()
+        ]
+        targets.append(
+            (
+                self.build_provenance_path,
+                target.get("build"),
+                "after_adoption_build_provenance",
+            )
+        )
+        for path, payload, fault_name in targets:
+            if not isinstance(payload, Mapping):
+                raise EvaluationAssetIntegrityError(
+                    self.tenant_id,
+                    self.asset_id,
+                    "the recovery journal has an invalid provenance payload",
+                )
+            target_bytes = _persisted_json_bytes(payload)
+            present, current_bytes = _optional_local_authority_bytes(self, path)
+            if present:
+                if current_bytes != target_bytes:
+                    raise EvaluationAssetIntegrityError(
+                        self.tenant_id,
+                        self.asset_id,
+                        "adoption provenance authority differs from its WAL target",
+                    )
+            else:
+                self._write_authority_json(
+                    path,
+                    payload,
+                    precondition=precondition,
+                    expected_current=None,
+                    check_expected_current=True,
+                )
+            _fault_point(fault_name)
+
+    def _install_adoption_generation(
+        self,
+        entry: Mapping[str, Any],
+        *,
+        legacy_artifact_snapshot: Mapping[Path, bytes],
+        precondition: Callable[[], None] | None = None,
+    ) -> None:
+        """Install and authenticate the immutable WAL generation target."""
+        manifests = entry.get("target_manifests")
+        provenance = entry.get("target_provenance")
+        if not isinstance(manifests, Mapping) or not isinstance(
+            provenance, Mapping
+        ):
+            raise EvaluationAssetIntegrityError(
+                self.tenant_id,
+                self.asset_id,
+                "the recovery journal is missing its generation target",
+            )
+        target_manifest = manifests.get("generation_manifest")
+        build = provenance.get("build")
+        if not isinstance(target_manifest, Mapping) or not isinstance(
+            build, Mapping
+        ):
+            raise EvaluationAssetIntegrityError(
+                self.tenant_id,
+                self.asset_id,
+                "the recovery journal has an invalid generation target",
+            )
+        split_paths = {
+            split: self.artifact_path(
+                PERSISTED_STAGE_VALUES_V2[-1],
+                f"{split}.jsonl",
+            )
+            for split in LOGICAL_SPLITS
+        }
+        try:
+            split_payloads = {
+                split: legacy_artifact_snapshot[path]
+                for split, path in split_paths.items()
+            }
+            if precondition is not None:
+                precondition()
+            installed = install_generation(
+                self.published_datasets,
+                tenant_id=self.tenant_id,
+                asset_id=self.asset_id,
+                split_paths=split_paths,
+                split_payloads=split_payloads,
+                build_fingerprint=str(build.get("identity_sha256") or ""),
+                fault_hook=_fault_point,
+                trusted_root=self.tenant_root,
+            )
+        except (KeyError, OSError, TypeError, UnicodeError, ValueError) as exc:
+            raise EvaluationAssetIntegrityError(
+                self.tenant_id,
+                self.asset_id,
+                "the adoption generation could not be installed",
+            ) from exc
+        target = entry.get("target")
+        if not isinstance(target, Mapping) or (
+            installed.generation_id != target_manifest.get("generation_id")
+            or installed.manifest != target_manifest
+            or installed.descriptor != target_manifest.get("descriptor")
+            or installed.generation_manifest_sha256
+            != target.get("generation_manifest_sha256")
+        ):
+            raise EvaluationAssetIntegrityError(
+                self.tenant_id,
+                self.asset_id,
+                "the installed generation differs from its WAL target",
+            )
 
     def _install_adoption_receipts(
         self,
@@ -3627,15 +3788,33 @@ def _legacy_artifact_path(stage: str, relative_name: str) -> Path:
     raise ValueError(f"Unknown evaluation asset stage: {stage}")
 
 
-def list_asset_layouts(tenants_root: Path, tenant_id: str) -> Iterable[EvaluationAssetLayout]:
+def list_asset_layouts(
+    tenants_root: Path,
+    tenant_id: str,
+    *,
+    repository_base: Path | None = None,
+) -> Iterable[EvaluationAssetLayout]:
     """List safe asset workspaces newest-first by directory modification time."""
     if not SAFE_NAME.fullmatch(tenant_id):
         return []
-    assets_root = tenants_root.resolve() / tenant_id / "evaluation_assets"
+    probe = EvaluationAssetLayout(
+        tenants_root,
+        tenant_id,
+        "layout_probe",
+        repository_base=(
+            repository_base if repository_base is not None else Path.cwd()
+        ),
+    )
+    assets_root = probe.assets_root
     if not assets_root.is_dir():
         return []
     layouts = [
-        EvaluationAssetLayout(tenants_root, tenant_id, child.name)
+        EvaluationAssetLayout(
+            probe.tenants_root,
+            tenant_id,
+            child.name,
+            repository_base=probe.repository_base,
+        )
         for child in assets_root.iterdir()
         if child.is_dir() and SAFE_NAME.fullmatch(child.name)
     ]

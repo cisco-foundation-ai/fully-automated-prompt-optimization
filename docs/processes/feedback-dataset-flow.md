@@ -136,18 +136,32 @@ credentials, and arbitrary payload text are never persisted.
 Injected providers remain injected. Default providers are constructed lazily
 under the asset lock only after recovery, lifecycle and immutable raw-snapshot
 integrity checks, optional revision, and configuration reload. An injected
-rubric or embedding provider must declare nonblank `provider_name` and `model`
-attributes; the configured identity is never substituted for missing observed
-identity. The actual identity is shared by errors, receipts, Stage 3/6/7
+rubric or embedding provider must pass the strict provider/model/settings
+allowlists and secret-shaped-value rejection before calls or mutable writes;
+the configured identity is never substituted for missing observed identity.
+The complete prospective call rows, stage provenance, and receipts validate in
+memory. The actual identity is shared by safe errors, receipts, Stage 3/6/7
 metadata, and the asset manifest, so a revision cannot call an old provider
 while claiming a new one.
 
 Individual Studio JSON, JSONL, Markdown/text, copied, event, and configuration
-history files use same-directory temporary files, flush and `fsync`,
-`os.replace`, and a POSIX parent-directory sync. A failed producer, serializer,
-copy, or pre-replacement write leaves the previous single file intact and
-removes its temporary file. One deterministic collection-level file lock per
-asset protects every high-level mutation across processes. Configuration
+history files use same-directory temporary files and an identity-bound native
+CAS adapter. POSIX uses no-follow descriptors, file and parent `fsync`, and
+flagged rename; Windows uses reparse-rejecting handles, `FlushFileBuffers`,
+`FileRenameInfo`/`ReplaceFileW`, and has no directory-`fsync` equivalent. A
+failed producer, serializer, copy, or pre-replacement write leaves the previous
+single file intact. Exact operation-owned temporary, displaced, and quarantined
+nodes are reclaimed after success, ordinary Python exceptions, and recoverable
+retry paths; raced foreign nodes and ambiguous failures are retained and fail
+closed. Hard process termination can leave unproven hidden debris for explicit
+inspection, and later processes do not scavenge it by name. One deterministic
+collection-level hard file
+lock per asset protects every high-level mutation across processes. `filelock`
+supplies bounded acquisition over the exact POSIX `flock` or Windows
+`LockFileEx` handle, never a soft-lock fallback. Process-global
+exact-identity ownership permits only same-thread recursion when threads share
+a native handle. Bound handles record their opening process and reject use
+after `fork`; child work must reopen and revalidate the literal path. Configuration
 revision, checkpoint rebuild, native release publication, and legacy adoption
 use an append-only recovery journal whose prepared payload rolls forward
 idempotently.
@@ -156,25 +170,40 @@ Directory creation has an explicit local concurrency boundary. Every
 Evaluation Asset Studio authority-root, authority-ancestor, stage, receipt,
 publication-catalog, generation, and generation-staging directory creator
 reached through repository, CLI, or Studio entry points uses the same
-descriptor-relative helper while holding an exclusive lock on the already-open
-parent directory. The finite production guard rejects other `Path.mkdir`,
+bound-directory adapter while holding a same-thread-reentrant exclusive POSIX
+parent lock or identity-keyed Windows mutex. That lock spans complete
+single-file observe/create/CAS/sync/reclaim and generation
+collision/stage/install/sync/reclaim transactions. POSIX opens
+descriptor-relative nodes without following symlinks; Windows retains the
+complete no-share-delete, reparse-checked ancestor handle chain until the bound
+directory closes. Darwin and Windows reject Unicode-normalized case-fold
+aliases in authority names. Movable Windows private directories close their
+leaf handle immediately before exact-identity rename, then reopen the installed
+name with stable no-share-delete guards. The finite production guard rejects other `Path.mkdir`,
 `os.mkdir`, and `os.makedirs` spellings, including literal persistence
 attributes constructed through `operator.attrgetter` or
 `operator.methodcaller`; unresolved dynamic attribute names are outside this
-finite claim. It admits only the literal internal `os.mkdir` in
-`create_and_open_local_directory_at`, the generic parent bootstraps in
+finite claim. It admits only the audited native operations in
+`local_authority_io`, the generic parent bootstraps in
 `_atomic_write_text` and `_atomic_write_binary`, and the deprecated non-Studio
 `assemble_dataset_bundle`; a live complete-release assertion proves that the
 compatibility bootstraps do not create any directory in the authority or
 generation boundary. Private names, no-follow opens, complete
 parent-inventory checks, exact inode/type rechecks, and no-replace installation
 fail closed for preexisting, linked, wrong-type, detectably substituted, or
-competing cooperating-writer entries. POSIX `mkdirat` does not atomically return
-an open descriptor, however, so these checks are not a claim of safety against
-an arbitrary noncooperating process running as the same OS user that mutates
-the parent namespace between `mkdirat` and `openat`. Deployments must keep the
+competing cooperating-writer entries. POSIX neither atomically returns a
+descriptor from `mkdirat` nor conditionally removes an inode by handle, so the
+creation and reclamation guarantees apply to cooperating Studio writers that
+honor the same parent lock. They are not a claim of safety against an arbitrary
+noncooperating process running as the same OS identity that mutates the parent
+namespace between identity check and mutation. Deployments must keep the
 Studio workspace writable only by the Studio's trusted OS identity and must not
 run unaudited same-identity filesystem writers concurrently.
+When a repository/invocation base is explicit, every existing component from
+that base through the tenants root is opened and type-checked before mutation;
+an intermediate symlink cannot turn a lexically relative root into an external
+write target. Persisted generation paths remain literal repository-relative
+paths.
 
 Before roll-forward, recovery validates the complete version 2 journal schema,
 unique operation identity, authenticated raw pre-operation config/state,
@@ -208,14 +237,18 @@ rehashed, but inconsistent journal therefore fails before any authority write.
 
 Stage 8 installs the four consumer files in one immutable content-addressed
 generation. It validates and syncs a same-filesystem hidden temporary directory
-before rename, reuses only exact existing content, and never overwrites a
+before native no-replace installation, reuses only exact existing content, and never overwrites a
 collision. `release.json` is the sole mutable catalog authority and changes by
 one atomic replacement only after the generation, manifests, build provenance,
 and Stage 8 receipt agree. The journal then installs released state, appends
 the event, and commits. Readers capture the pointer once and return a frozen,
 fully validated snapshot, so they see the complete old or complete new
-generation. Old generations and the pointer survive invalidation; this
-lifecycle has no garbage collection.
+generation. Old immutable generations and the pointer survive invalidation and
+have no garbage collection. Exact operation-owned staging/quarantine debris is
+reclaimed on success, ordinary exceptions, and recoverable retry paths. Raced
+foreign nodes, hard-termination debris without durable ownership proof, and
+other ambiguous failures remain visible so closed-tree verification fails
+rather than hiding them.
 
 Stages 3–7 always write receipt-backed `provider_calls.jsonl`, including an
 empty ledger for zero calls. Resume aggregates authenticated earlier ledgers

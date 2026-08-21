@@ -18,6 +18,8 @@ import uuid
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Iterable, Mapping, TextIO, Union
 
+from src.hephaestus import local_authority_io as authority_io
+
 TextContent = Union[str, Iterable[str]]
 _UNSPECIFIED_TARGET = object()
 _UNSPECIFIED_TARGET_CONTENT = object()
@@ -104,6 +106,14 @@ def rename_noreplace_at(
     caller's namespace contract.  Installs restore the destination to absent;
     quarantine moves restore the raced node to the authoritative source name.
     """
+    if isinstance(directory_descriptor, authority_io.BoundDirectory) or os.name == "nt":
+        return authority_io.rename_noreplace(
+            directory_descriptor,
+            source,
+            destination,
+            expected_source=expected_source,
+            restore_source_on_mismatch=restore_source_on_mismatch,
+        )
     if expected_source is not None:
         source_details = os.stat(
             source,
@@ -314,7 +324,7 @@ def rename_exchange_at(
 
 
 def atomic_write_bytes_at(
-    directory_descriptor: int,
+    directory_descriptor: authority_io.DirectoryLike,
     filename: str,
     content: bytes,
     *,
@@ -325,62 +335,47 @@ def atomic_write_bytes_at(
     if not filename or Path(filename).name != filename:
         raise ValueError("descriptor-relative filename must be one path component")
     temporary_name = f".{filename}.{uuid.uuid4().hex}.tmp"
-    flags = (
-        os.O_RDWR
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
+    temporary_file: authority_io.BoundFile | None = None
+    owned: authority_io.OwnedNode | None = None
+    reclaim_owned_during_error = True
+    installed_identity: tuple[int, int, int] | None = None
+    namespace_lock = authority_io.exclusive_parent_namespace_lock(
+        directory_descriptor
     )
-    temporary_descriptor: int | None = None
+    namespace_lock.__enter__()
     try:
         if expected_target is _UNSPECIFIED_TARGET:
-            try:
-                current = os.stat(
-                    filename,
-                    dir_fd=directory_descriptor,
-                    follow_symlinks=False,
-                )
-            except FileNotFoundError:
+            current = authority_io.optional_stat_child(
+                directory_descriptor,
+                filename,
+            )
+            if current is None:
                 expected_target = None
             else:
-                expected_target = (
-                    current.st_dev,
-                    current.st_ino,
-                    stat.S_IFMT(current.st_mode),
-                )
-        temporary_descriptor = os.open(
+                expected_target = current.identity
+        temporary_file = authority_io.open_child_file(
+            directory_descriptor,
             temporary_name,
-            flags,
-            0o600,
-            dir_fd=directory_descriptor,
+            writable=True,
+            create_exclusive=True,
+            mode=0o600,
+            delete_access=True,
         )
-        view = memoryview(content)
-        offset = 0
-        while offset < len(view):
-            written = os.write(temporary_descriptor, view[offset:])
-            if written <= 0:
-                raise OSError("descriptor-relative authority write made no progress")
-            offset += written
-        os.fsync(temporary_descriptor)
-        temporary_stat = os.fstat(temporary_descriptor)
-        temporary_identity = (
-            temporary_stat.st_dev,
-            temporary_stat.st_ino,
-            stat.S_IFMT(temporary_stat.st_mode),
-        )
-        named_temporary = os.stat(
+        temporary_identity = temporary_file.identity
+        owned = authority_io.OwnedNode(
             temporary_name,
-            dir_fd=directory_descriptor,
-            follow_symlinks=False,
+            temporary_identity,
+            "file",
         )
-        if (
-            named_temporary.st_dev,
-            named_temporary.st_ino,
-            stat.S_IFMT(named_temporary.st_mode),
-        ) != temporary_identity:
+        authority_io.write_bound_file(temporary_file, content)
+        authority_io.sync_bound_file(temporary_file)
+        named_temporary = authority_io.stat_child(
+            directory_descriptor,
+            temporary_name,
+        )
+        if named_temporary.identity != temporary_identity:
             raise ValueError("authority temporary source changed before installation")
-        if _descriptor_bytes(temporary_descriptor) != content:
+        if authority_io.read_bound_file(temporary_file) != content:
             raise ValueError("authority temporary source content changed before installation")
         if expected_target is None:
             if not rename_noreplace_at(
@@ -390,19 +385,15 @@ def atomic_write_bytes_at(
                 expected_source=temporary_identity,
             ):
                 raise ValueError("authority target appeared before installation")
-            installed = os.stat(
+            installed = authority_io.stat_child(
+                directory_descriptor,
                 filename,
-                dir_fd=directory_descriptor,
-                follow_symlinks=False,
             )
-            installed_identity = (
-                installed.st_dev,
-                installed.st_ino,
-                stat.S_IFMT(installed.st_mode),
-            )
+            installed_identity = installed.identity
             if installed_identity != temporary_identity:
                 raise ValueError("authority temporary source changed during installation")
-            if _descriptor_bytes(temporary_descriptor) != content:
+            owned = None
+            if authority_io.read_bound_file(temporary_file) != content:
                 rejected_name = f".{filename}.{uuid.uuid4().hex}.rejected"
                 if not rename_noreplace_at(
                     directory_descriptor,
@@ -414,49 +405,40 @@ def atomic_write_bytes_at(
                     raise OSError(
                         "raced authority installation could not be quarantined"
                     )
+                owned = authority_io.OwnedNode(
+                    rejected_name,
+                    temporary_identity,
+                    "file",
+                )
                 raise ValueError(
                     "authority temporary source content changed during installation"
                 )
         else:
-            current = os.stat(
+            current = authority_io.stat_child(
+                directory_descriptor,
                 filename,
-                dir_fd=directory_descriptor,
-                follow_symlinks=False,
             )
-            current_identity = (
-                current.st_dev,
-                current.st_ino,
-                stat.S_IFMT(current.st_mode),
-            )
+            current_identity = current.identity
             if current_identity != expected_target:
                 raise ValueError("authority target changed before replacement")
-            rename_exchange_at(
+            owned = authority_io.replace_with_backup(
                 directory_descriptor,
                 temporary_name,
                 filename,
                 expected_source=temporary_identity,
                 expected_destination=expected_target,
             )
-            installed = os.stat(
+            reclaim_owned_during_error = False
+            installed = authority_io.stat_child(
+                directory_descriptor,
                 filename,
-                dir_fd=directory_descriptor,
-                follow_symlinks=False,
             )
-            installed_identity = (
-                installed.st_dev,
-                installed.st_ino,
-                stat.S_IFMT(installed.st_mode),
+            installed_identity = installed.identity
+            displaced = authority_io.stat_child(
+                directory_descriptor,
+                owned.name,
             )
-            displaced = os.stat(
-                temporary_name,
-                dir_fd=directory_descriptor,
-                follow_symlinks=False,
-            )
-            displaced_identity = (
-                displaced.st_dev,
-                displaced.st_ino,
-                stat.S_IFMT(displaced.st_mode),
-            )
+            displaced_identity = displaced.identity
             if (
                 installed_identity != temporary_identity
                 or displaced_identity != expected_target
@@ -467,58 +449,67 @@ def atomic_write_bytes_at(
                     )
                 raise ValueError("authority target changed during replacement")
             if expected_target_content is not _UNSPECIFIED_TARGET_CONTENT:
-                displaced_flags = (
-                    os.O_RDONLY
-                    | getattr(os, "O_CLOEXEC", 0)
-                    | getattr(os, "O_NOFOLLOW", 0)
-                )
-                displaced_descriptor = os.open(
-                    temporary_name,
-                    displaced_flags,
-                    dir_fd=directory_descriptor,
+                displaced_file = authority_io.open_child_file(
+                    directory_descriptor,
+                    owned.name,
                 )
                 try:
-                    displaced_opened = os.fstat(displaced_descriptor)
-                    if (
-                        displaced_opened.st_dev,
-                        displaced_opened.st_ino,
-                        stat.S_IFMT(displaced_opened.st_mode),
-                    ) != expected_target:
+                    if displaced_file.identity != expected_target:
                         raise ValueError(
                             "authority target changed during replacement"
                         )
-                    if _descriptor_bytes(displaced_descriptor) != expected_target_content:
-                        rename_exchange_at(
-                            directory_descriptor,
-                            temporary_name,
-                            filename,
-                            expected_source=expected_target,
-                            expected_destination=temporary_identity,
-                        )
-                        raise ValueError(
-                            "authority target bytes changed during replacement"
-                        )
+                    displaced_content = authority_io.read_bound_file(displaced_file)
                 finally:
-                    os.close(displaced_descriptor)
-            if _descriptor_bytes(temporary_descriptor) != content:
-                rename_exchange_at(
+                    displaced_file.close()
+                if displaced_content != expected_target_content:
+                    owned = authority_io.replace_with_backup(
+                        directory_descriptor,
+                        owned.name,
+                        filename,
+                        expected_source=expected_target,
+                        expected_destination=temporary_identity,
+                    )
+                    reclaim_owned_during_error = True
+                    raise ValueError(
+                        "authority target bytes changed during replacement"
+                    )
+            if authority_io.read_bound_file(temporary_file) != content:
+                owned = authority_io.replace_with_backup(
                     directory_descriptor,
-                    temporary_name,
+                    owned.name,
                     filename,
                     expected_source=expected_target,
                     expected_destination=temporary_identity,
                 )
+                reclaim_owned_during_error = True
                 raise ValueError(
                     "authority temporary source content changed during replacement"
                 )
-        os.fsync(directory_descriptor)
-        return temporary_identity
+        authority_io.sync_bound_directory(directory_descriptor)
+        if owned is not None:
+            if not authority_io.reclaim_owned_leaf(directory_descriptor, owned):
+                raise ValueError(
+                    "owned authority node changed before reclamation"
+                )
+            owned = None
+        if installed_identity is None:
+            raise ValueError("authority installation identity is unavailable")
+        return installed_identity
     finally:
-        if temporary_descriptor is not None:
-            os.close(temporary_descriptor)
-        # A descriptor does not provide an identity-bound unlink primitive.
-        # If replacement failed, retain the uniquely named file rather than
-        # deleting a different node raced into the reusable lexical name.
+        try:
+            active_error = sys.exc_info()[0] is not None
+            if temporary_file is not None:
+                temporary_file.close()
+            if owned is not None and (
+                not active_error or reclaim_owned_during_error
+            ):
+                try:
+                    authority_io.reclaim_owned_leaf(directory_descriptor, owned)
+                except OSError:
+                    if not active_error:
+                        raise
+        finally:
+            namespace_lock.__exit__(*sys.exc_info())
 
 
 def atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:

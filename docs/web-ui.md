@@ -103,6 +103,12 @@ coverage configuration. The Studio shows which stage each setting affects;
 the core preserves earlier checkpoints and rebuilds the affected stage and all
 downstream artifacts.
 
+For a legacy asset with the exact top-level `completed` sentinel, the Studio
+shows **Adopt verified legacy asset**. Under the asset lock, adoption synchronously
+verifies every stage, source hash, manifest, catalog/config-history entry, then
+installs the immutable v2 release and refreshes the terminal view. It never
+reruns providers.
+
 Failed-stage summaries are safe to display: provider transport and semantic
 response validation failures expose the stage, configured provider/model,
 fixed exception category, and a bounded causal summary, but not raw provider
@@ -176,7 +182,7 @@ The UI has four small modules under `src/hephaestus/webui/`:
 
 - **`server.py`** — a stdlib `ThreadingHTTPServer` that serves Explorer at `/`,
   Evaluation Asset Studio at `/evaluation-assets/`, read APIs, and narrow
-  evaluation-asset start/resume endpoints.
+  evaluation-asset start/extend/resume/adopt endpoints.
 - **`data.py`** — `TenantStore`, the constrained filesystem layer that walks the
   tenants root and surfaces artifacts. All paths are resolved relative to the
   tenants root and validated to stay inside it (and inside the expected
@@ -212,10 +218,11 @@ The frontend is backed by these read-only endpoints (useful for scripting too):
 | `POST /api/evaluation-assets/start` | Copy inputs and start a core pipeline run |
 | `POST /api/evaluation-assets/extend` | Create and run an immutable child version with reused or refreshed clustering |
 | `POST /api/tenants/<t>/evaluation-assets/<a>/resume` | Optionally revise pipeline decisions, invalidate dependent stages, and resume an asset |
+| `POST /api/tenants/<t>/evaluation-assets/<a>/adopt` | Synchronously verify an exact legacy completion and return its terminal released `PipelineState`; HTTP `202` is retained compatibility semantics, stable asset/runtime rejections return `409`, and malformed input/filesystem-value errors return `400` |
 
 ## Notes
 
-- **Narrow writes:** the UI only creates/resumes evaluation assets. All other
+- **Narrow writes:** the UI only creates, extends, resumes, or adopts evaluation assets. All other
   tenant views remain read-only. Inputs must be regular `.jsonl` files beneath
   the selected tenant's `source_artifacts/` or ordinary `datasets/` directory;
   generated evaluation-asset datasets and symlink escapes are rejected before

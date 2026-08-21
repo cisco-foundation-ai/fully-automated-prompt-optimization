@@ -803,6 +803,27 @@ def test_provider_call_validator_rejects_role_on_disallowed_stage() -> None:
         validate_provider_calls([row], expected_stage="raw_inputs")
 
 
+@pytest.mark.parametrize("field", ["provider", "model"])
+def test_pr2_provider_call_validator_rejects_secret_identity_fields(
+    field: str,
+) -> None:
+    """Logical-call identity cannot persist credential-shaped values."""
+    row = build_provider_call(
+        stage="intent_clustering",
+        ordinal=1,
+        provider_role="embedding",
+        provider="provider",
+        model="model",
+        request={"request": "hashed only", "settings": {}},
+        response=[[1.0, 0.0]],
+        metadata=None,
+    )
+    row[field] = "sk-secret-canary"
+
+    with pytest.raises(ValueError, match="provider.*identity"):
+        validate_provider_calls([row], expected_stage="intent_clustering")
+
+
 @pytest.mark.parametrize(
     "corruption",
     ["logical_bool", "identity_bool", "audit_bool", "empty_transport"],

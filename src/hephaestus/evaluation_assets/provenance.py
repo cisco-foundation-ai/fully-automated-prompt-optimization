@@ -534,13 +534,99 @@ def provider_settings(
         interface = "embed_texts-v1"
     else:
         raise ValueError(f"Unsupported provider role: {role}")
-    return {
-        "provider": identity["provider"],
-        "model": identity["model"],
-        "source": identity["source"],
-        "interface": interface,
-        "settings": settings,
-    }
+    return validate_provider_binding(
+        role,
+        {
+            "provider": identity["provider"],
+            "model": identity["model"],
+            "source": identity["source"],
+            "interface": interface,
+            "settings": settings,
+        },
+        pipeline_batch_size=pipeline_batch_size,
+    )
+
+
+def validate_provider_binding(
+    role: str,
+    value: Mapping[str, Any],
+    *,
+    configured_provider: str | None = None,
+    configured_model: str | None = None,
+    pipeline_batch_size: int | None = None,
+) -> dict[str, Any]:
+    """Validate one complete current-v2 provider binding in memory."""
+    settings_fields = (
+        {
+            "timeout_seconds",
+            "max_retries",
+            "retry_backoff_seconds",
+            "pipeline_batch_size",
+            "max_output_tokens",
+            "temperature",
+            "response_format",
+            "seed",
+        }
+        if role == "rubric"
+        else {
+            "timeout_seconds",
+            "max_retries",
+            "retry_backoff_seconds",
+            "provider_batch_size",
+            "response_format",
+            "seed",
+        }
+        if role == "embedding"
+        else None
+    )
+    expected_interface = (
+        "generate_json-v1"
+        if role == "rubric"
+        else "embed_texts-v1"
+        if role == "embedding"
+        else None
+    )
+    if settings_fields is None or expected_interface is None:
+        raise ValueError(f"Unsupported provider role: {role}")
+    if not isinstance(value, Mapping) or set(value) != {
+        "provider",
+        "model",
+        "source",
+        "interface",
+        "settings",
+    }:
+        raise ValueError(f"{role} provider binding schema is invalid")
+    if any(
+        not isinstance(value.get(field), str)
+        or not value[field]
+        or _SECRET.search(value[field])
+        for field in ("provider", "model", "source")
+    ) or value.get("source") not in {"default", "injected"}:
+        raise ValueError(f"{role} provider binding identity is invalid")
+    if value.get("interface") != expected_interface:
+        raise ValueError(f"{role} provider binding interface is invalid")
+    settings = value.get("settings")
+    if (
+        not isinstance(settings, Mapping)
+        or set(settings) != settings_fields
+        or any(
+            not _valid_native_provider_setting(str(name), item)
+            for name, item in settings.items()
+        )
+    ):
+        raise ValueError(f"{role} provider binding settings are invalid")
+    if configured_provider is not None and value["provider"] != configured_provider:
+        raise ValueError(f"{role} provider binding provider differs from configuration")
+    if configured_model is not None and value["model"] != configured_model:
+        raise ValueError(f"{role} provider binding model differs from configuration")
+    if pipeline_batch_size is not None and (
+        role == "rubric"
+        and settings.get("pipeline_batch_size") != pipeline_batch_size
+    ):
+        raise ValueError(f"{role} provider binding batch size is invalid")
+    normalized = dict(value)
+    normalized["settings"] = dict(settings)
+    return normalized
 
 
 def build_algorithm_inventory(
@@ -746,8 +832,10 @@ def validate_provider_calls(
             or raw.get("provider_role") not in allowed_roles
             or not isinstance(raw.get("provider"), str)
             or not raw["provider"]
+            or _SECRET.search(raw["provider"])
             or not isinstance(raw.get("model"), str)
             or not raw["model"]
+            or _SECRET.search(raw["model"])
         ):
             raise ValueError(
                 "provider call ledger provider role, identity, or ordinal is invalid"
@@ -879,7 +967,7 @@ def build_stage_provenance(
         }
         for name, value in sorted(prompt_values.items())
     ]
-    return {
+    payload = {
         "schema_version": STAGE_PROVENANCE_SCHEMA_VERSION,
         "stage": stage,
         "provider_identity": dict(provider_identity),
@@ -893,6 +981,53 @@ def build_stage_provenance(
         "algorithms": dict(algorithms),
         "source": dict(code),
     }
+    return validate_current_stage_provenance(
+        payload,
+        stage=stage,
+        provider_identity=provider_identity,
+        prompt_values=prompt_values,
+        calls=calls,
+        code=code,
+        seeds=seeds,
+        algorithms=algorithms,
+    )
+
+
+def validate_current_stage_provenance(
+    payload: Mapping[str, Any],
+    *,
+    stage: str,
+    provider_identity: Mapping[str, Any],
+    prompt_values: Mapping[str, str],
+    calls: Sequence[Mapping[str, Any]] | None,
+    code: Mapping[str, Any],
+    seeds: Mapping[str, Any],
+    algorithms: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate a generated current stage-provenance payload before writing."""
+    prompts = [
+        {
+            "name": name,
+            "revision": PROMPT_REVISIONS[name],
+            "bytes": len(value.encode("utf-8")),
+            "sha256": hashlib.sha256(value.encode("utf-8")).hexdigest(),
+        }
+        for name, value in sorted(prompt_values.items())
+    ]
+    prompt_hashes = {str(row["name"]): row["sha256"] for row in prompts}
+    prompt_fact: Any = prompt_hashes or {"status": "not_applicable"}
+    return validate_stage_provenance(
+        payload,
+        expected_stage=stage,
+        profile="native",
+        expected_provider_identity=provider_identity,
+        expected_prompt_set_sha256=canonical_sha256(prompt_fact),
+        expected_prompts=prompts,
+        expected_calls=calls,
+        expected_source=code,
+        expected_seeds=seeds,
+        expected_algorithms=algorithms,
+    )
 
 
 def validate_stage_provenance(
@@ -1060,6 +1195,8 @@ def validate_stage_provenance(
                 )
             ):
                 raise ValueError("native stage provenance provider identity is invalid")
+            if not historical:
+                validate_provider_binding(role, identity)
     elif provider_identity != {"status": "not_applicable"}:
         raise ValueError("native stage provenance provider marker is invalid")
     if not _same_json(provider_identity, expected_provider_identity):
@@ -1722,6 +1859,11 @@ def _validate_json_value(value: Any, label: str) -> None:
             _validate_json_value(item, label)
         return
     raise ValueError(f"{label} contains an unsupported value")
+
+
+def validate_persisted_json_value(value: Any, label: str) -> None:
+    """Reject non-canonical or credential-shaped persisted JSON values."""
+    _validate_json_value(value, label)
 
 
 def _is_marker(value: Any, *, status: str | None = None) -> bool:

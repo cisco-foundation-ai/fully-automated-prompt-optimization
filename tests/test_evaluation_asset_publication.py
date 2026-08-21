@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import threading
 from pathlib import Path
@@ -15,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from src.hephaestus import artifact_io
+from src.hephaestus import artifact_io, local_authority_io
 from src.hephaestus.evaluation_assets import control_jsonl as control_jsonl_module
 from src.hephaestus.evaluation_assets import publication as publication_module
 from src.hephaestus.evaluation_assets.publication import (
@@ -103,6 +104,227 @@ def test_generation_install_reuses_exact_content_and_rejects_collision(
             build_fingerprint="a" * 64,
         )
     assert (first.generation_dir / "train.jsonl").read_text() == "collision\n"
+
+
+def test_generation_install_holds_parent_lock_for_complete_transaction(
+    tmp_path: Path,
+) -> None:
+    """A cooperating observer enters only after final generation installation."""
+    catalog = tmp_path / "catalog"
+    temporary_created = threading.Event()
+    racer_finished = threading.Event()
+    final_visible: list[bool] = []
+
+    def observe_under_namespace_lock() -> None:
+        assert temporary_created.wait(timeout=2)
+        directory = local_authority_io.open_bound_directory(
+            catalog / "generations"
+        )
+        try:
+            with local_authority_io.exclusive_parent_namespace_lock(directory):
+                final_visible.append(
+                    any(
+                        name.startswith("sha256-")
+                        for name in local_authority_io.list_children(directory)
+                    )
+                )
+            racer_finished.set()
+        finally:
+            directory.close()
+
+    def pause_after_temporary(name: str) -> None:
+        if name == "after_generation_temp_created":
+            temporary_created.set()
+            racer_finished.wait(timeout=0.2)
+
+    thread = threading.Thread(target=observe_under_namespace_lock)
+    thread.start()
+    installed = install_generation(
+        catalog,
+        tenant_id="tenant",
+        asset_id="asset",
+        split_paths=_splits(tmp_path),
+        build_fingerprint="a" * 64,
+        fault_hook=pause_after_temporary,
+    )
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert final_visible == [True]
+    assert installed.generation_dir.is_dir()
+
+
+@pytest.mark.parametrize("fault_name", ["write_bound_file", "sync_bound_file"])
+def test_generation_reclaims_staging_when_first_child_write_or_sync_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault_name: str,
+) -> None:
+    """A child-file mutation fault leaves no untracked generation staging tree."""
+    catalog = tmp_path / "catalog"
+
+    def fail(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError(f"injected {fault_name} failure")
+
+    monkeypatch.setattr(local_authority_io, fault_name, fail)
+    with pytest.raises(OSError, match=fault_name):
+        install_generation(
+            catalog,
+            tenant_id="tenant",
+            asset_id="asset",
+            split_paths=_splits(tmp_path),
+            build_fingerprint="a" * 64,
+        )
+
+    generations = catalog / "generations"
+    assert generations.is_dir()
+    assert list(generations.iterdir()) == []
+
+
+def test_generation_reclaims_staging_when_child_post_open_rebind_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child temp rebind fault cannot strand its containing staging tree."""
+    catalog = tmp_path / "catalog"
+    real_stat_child = local_authority_io.stat_child
+    injected = False
+
+    def fail_first_split_temp_rebind(
+        directory: local_authority_io.DirectoryLike,
+        name: str,
+    ) -> local_authority_io.NodeInfo:
+        nonlocal injected
+        if not injected and name.startswith(".train.jsonl."):
+            injected = True
+            raise OSError("injected generation-child rebind failure")
+        return real_stat_child(directory, name)
+
+    monkeypatch.setattr(
+        local_authority_io,
+        "stat_child",
+        fail_first_split_temp_rebind,
+    )
+    with pytest.raises(OSError, match="generation-child rebind failure"):
+        install_generation(
+            catalog,
+            tenant_id="tenant",
+            asset_id="asset",
+            split_paths=_splits(tmp_path),
+            build_fingerprint="a" * 64,
+        )
+
+    assert injected
+    assert list((catalog / "generations").iterdir()) == []
+
+
+def test_generation_reclaims_private_staging_when_open_after_mkdir_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A generation mkdir is owned before its staging descriptor can fail."""
+    catalog = tmp_path / "catalog"
+    real_open_child = local_authority_io.open_child_directory
+    injected = False
+
+    def fail_first_generation_private_open(
+        directory: local_authority_io.DirectoryLike,
+        name: str,
+        *,
+        expected: local_authority_io.NodeIdentity | None = None,
+    ) -> local_authority_io.BoundDirectory:
+        nonlocal injected
+        if not injected and ".sha256-" in name:
+            injected = True
+            raise OSError("injected generation-directory open failure")
+        return real_open_child(directory, name, expected=expected)
+
+    monkeypatch.setattr(
+        local_authority_io,
+        "open_child_directory",
+        fail_first_generation_private_open,
+    )
+    with pytest.raises(OSError, match="generation-directory open failure"):
+        install_generation(
+            catalog,
+            tenant_id="tenant",
+            asset_id="asset",
+            split_paths=_splits(tmp_path),
+            build_fingerprint="a" * 64,
+        )
+
+    assert injected
+    assert list((catalog / "generations").iterdir()) == []
+
+
+def test_generation_install_and_quarantine_use_close_rebind_workflow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Install rebinds the exact directory and quarantine closes it again."""
+    catalog = tmp_path / "catalog"
+    events: list[str] = []
+    validations = 0
+    real_prepare = local_authority_io.prepare_directory_source_rename
+    real_bind = local_authority_io.bind_renamed_directory
+    real_validate = publication_module._validate_generation_directory_descriptor
+
+    def record_prepare(directory: local_authority_io.BoundDirectory) -> None:
+        events.append(f"prepare:{directory.path.name}")
+        real_prepare(directory)
+
+    def record_bind(
+        directory: local_authority_io.DirectoryLike,
+        name: str,
+        *,
+        expected: local_authority_io.NodeIdentity,
+        previous: local_authority_io.BoundDirectory,
+    ) -> local_authority_io.BoundDirectory:
+        events.append(f"bind:{name}")
+        return real_bind(
+            directory,
+            name,
+            expected=expected,
+            previous=previous,
+        )
+
+    def fail_second_validation(*args: Any, **kwargs: Any) -> None:
+        nonlocal validations
+        validations += 1
+        if validations == 2:
+            raise ValueError("injected post-install validation failure")
+        real_validate(*args, **kwargs)
+
+    monkeypatch.setattr(
+        local_authority_io,
+        "prepare_directory_source_rename",
+        record_prepare,
+    )
+    monkeypatch.setattr(
+        local_authority_io,
+        "bind_renamed_directory",
+        record_bind,
+    )
+    monkeypatch.setattr(
+        publication_module,
+        "_validate_generation_directory_descriptor",
+        fail_second_validation,
+    )
+
+    with pytest.raises(ValueError, match="content changed during installation"):
+        install_generation(
+            catalog,
+            tenant_id="tenant",
+            asset_id="asset",
+            split_paths=_splits(tmp_path),
+            build_fingerprint="a" * 64,
+        )
+
+    generation_events = events[-3:]
+    assert generation_events[0].startswith("prepare:.sha256-")
+    assert generation_events[1].startswith("bind:sha256-")
+    assert generation_events[2].startswith("prepare:sha256-")
+    assert list((catalog / "generations").iterdir()) == []
 
 
 def test_resolver_returns_one_frozen_pointer_snapshot_and_rejects_symlink(
@@ -315,19 +537,23 @@ def test_pointer_replace_failure_preserves_exact_old_release(
     old_snapshot = {
         split: path.read_bytes() for split, path in old.files.items()
     }
-    real_exchange = artifact_io.rename_exchange_at
+    real_exchange = local_authority_io.replace_with_backup
 
     def fail_release_exchange(
         directory_descriptor: int,
         source: str,
         destination: str,
         **kwargs: Any,
-    ) -> None:
+    ) -> local_authority_io.OwnedNode:
         if destination == "release.json":
             raise OSError("injected pointer replace failure")
         real_exchange(directory_descriptor, source, destination, **kwargs)
 
-    monkeypatch.setattr(artifact_io, "rename_exchange_at", fail_release_exchange)
+    monkeypatch.setattr(
+        local_authority_io,
+        "replace_with_backup",
+        fail_release_exchange,
+    )
     with pytest.raises(OSError, match="pointer replace failure"):
         write_release_pointer(catalog, new_pointer)
 
@@ -484,10 +710,7 @@ def test_generation_fault_cleanup_cannot_follow_swapped_catalog(
 
     assert external_victim is not None
     assert (external_victim / "victim.txt").read_text(encoding="utf-8") == "KEEP"
-    retained = list(parked_generations.iterdir())
-    assert len(retained) == 1
-    assert retained[0].name.endswith(".tmp")
-    assert not any(retained[0].iterdir())
+    assert list(parked_generations.iterdir()) == []
 
 
 def test_generation_fault_cleanup_never_removes_a_replacement_directory(
@@ -588,7 +811,7 @@ def test_bound_atomic_writer_rejects_target_replacement_without_data_loss(
     victim = tmp_path / "victim.json"
     victim.write_bytes(b"KEEP")
     victim_identity = victim.stat()
-    original = artifact_io.rename_exchange_at
+    original = local_authority_io.replace_with_backup
     swapped = False
 
     def exchange_after_race(
@@ -596,15 +819,19 @@ def test_bound_atomic_writer_rejects_target_replacement_without_data_loss(
         source: str,
         destination: str,
         **kwargs: Any,
-    ) -> None:
+    ) -> local_authority_io.OwnedNode:
         nonlocal swapped
         if not swapped:
             target.rename(parked)
             victim.rename(target)
             swapped = True
-        original(descriptor, source, destination, **kwargs)
+        return original(descriptor, source, destination, **kwargs)
 
-    monkeypatch.setattr(artifact_io, "rename_exchange_at", exchange_after_race)
+    monkeypatch.setattr(
+        local_authority_io,
+        "replace_with_backup",
+        exchange_after_race,
+    )
     descriptor = artifact_io.os.open(tmp_path, artifact_io.os.O_RDONLY)
     try:
         with pytest.raises(ValueError):
@@ -642,7 +869,7 @@ def test_bound_atomic_writer_rejects_temporary_source_replacement(
     victim.write_bytes(b"VICTIM")
     swapped = False
     original = (
-        artifact_io.rename_exchange_at
+        local_authority_io.replace_with_backup
         if existing_target
         else artifact_io.rename_noreplace_at
     )
@@ -660,11 +887,14 @@ def test_bound_atomic_writer_rejects_temporary_source_replacement(
             swapped = True
         return original(descriptor, source, destination, **kwargs)
 
-    monkeypatch.setattr(
-        artifact_io,
-        "rename_exchange_at" if existing_target else "rename_noreplace_at",
-        race_source,
-    )
+    if existing_target:
+        monkeypatch.setattr(
+            local_authority_io,
+            "replace_with_backup",
+            race_source,
+        )
+    else:
+        monkeypatch.setattr(artifact_io, "rename_noreplace_at", race_source)
     descriptor = artifact_io.os.open(tmp_path, artifact_io.os.O_RDONLY)
     try:
         with pytest.raises(ValueError):
@@ -749,7 +979,7 @@ def test_bound_atomic_writer_rejects_temporary_content_race(
     if existing_target:
         target.write_bytes(b"OLD")
     original = (
-        artifact_io.rename_exchange_at
+        local_authority_io.replace_with_backup
         if existing_target
         else artifact_io.rename_noreplace_at
     )
@@ -767,11 +997,14 @@ def test_bound_atomic_writer_rejects_temporary_content_race(
             mutated = True
         return original(descriptor, source, destination, **kwargs)
 
-    monkeypatch.setattr(
-        artifact_io,
-        "rename_exchange_at" if existing_target else "rename_noreplace_at",
-        mutate_source,
-    )
+    if existing_target:
+        monkeypatch.setattr(
+            local_authority_io,
+            "replace_with_backup",
+            mutate_source,
+        )
+    else:
+        monkeypatch.setattr(artifact_io, "rename_noreplace_at", mutate_source)
     descriptor = artifact_io.os.open(tmp_path, artifact_io.os.O_RDONLY)
     try:
         with pytest.raises(ValueError, match="temporary.*content"):
@@ -784,7 +1017,11 @@ def test_bound_atomic_writer_rejects_temporary_content_race(
         assert target.read_bytes() == b"OLD"
     else:
         assert not target.exists()
-    assert any(path.read_bytes() == b"EVIL" for path in tmp_path.iterdir() if path.is_file())
+    assert not any(
+        path.read_bytes() == b"EVIL"
+        for path in tmp_path.iterdir()
+        if path.is_file()
+    )
 
 
 def test_generation_install_quarantines_same_inode_content_race(
@@ -948,11 +1185,18 @@ def test_generation_inventory_and_members_share_one_bound_directory(
         encoding="utf-8",
     )
     original_listdir = publication_module.os.listdir
+    generation_identity = generation.generation_dir.stat()
     swapped = False
 
     def swap_before_inventory(path: int | str | bytes | Path) -> list[str]:
         nonlocal swapped
-        if not swapped and isinstance(path, int):
+        opened = os.fstat(path) if isinstance(path, int) else None
+        if (
+            not swapped
+            and opened is not None
+            and (opened.st_dev, opened.st_ino)
+            == (generation_identity.st_dev, generation_identity.st_ino)
+        ):
             generation.generation_dir.rename(parked)
             replacement.rename(generation.generation_dir)
             swapped = True
@@ -1125,10 +1369,6 @@ def test_generation_temp_creation_rejects_foreign_replacement(
             and dir_fd is not None
             and not attacked
         ):
-            control_jsonl_module.fcntl.flock(
-                dir_fd,
-                control_jsonl_module.fcntl.LOCK_UN,
-            )
             created = catalog / "generations" / path
             created.rename(parked)
             foreign.rename(created)
@@ -1194,7 +1434,7 @@ def test_release_pointer_exchange_race_restores_concurrent_authority(
     write_release_pointer(catalog, old_pointer)
     pointer_path = catalog / "release.json"
     parked_old = catalog / "parked-old-release.json"
-    original = artifact_io._rename_with_flags_at
+    original = local_authority_io._rename_with_flags_posix
     attacked = False
 
     def race_after_identity_check(
@@ -1219,8 +1459,8 @@ def test_release_pointer_exchange_race_restores_concurrent_authority(
         )
 
     monkeypatch.setattr(
-        artifact_io,
-        "_rename_with_flags_at",
+        local_authority_io,
+        "_rename_with_flags_posix",
         race_after_identity_check,
     )
     with pytest.raises(ValueError):
@@ -1231,13 +1471,11 @@ def test_release_pointer_exchange_race_restores_concurrent_authority(
     assert parked_old.read_bytes() == publication_module._persisted_json_bytes(
         old_pointer
     )
-    assert any(
-        path.read_bytes() == publication_module._persisted_json_bytes(new_pointer)
-        for path in catalog.iterdir()
-        if path.name.startswith(".release.json.")
+    assert not any(
+        path.name.startswith(".release.json.") for path in catalog.iterdir()
     )
 
-    monkeypatch.setattr(artifact_io, "_rename_with_flags_at", original)
+    monkeypatch.setattr(local_authority_io, "_rename_with_flags_posix", original)
     write_release_pointer(catalog, new_pointer)
     assert pointer_path.read_bytes() == publication_module._persisted_json_bytes(
         new_pointer
@@ -1257,7 +1495,7 @@ def test_generation_install_race_quarantines_foreign_source(
     foreign = tmp_path / "foreign-generation"
     foreign.mkdir()
     (foreign / "KEEP").write_bytes(b"FOREIGN")
-    original = artifact_io._rename_with_flags_at
+    original = local_authority_io._rename_with_flags_posix
     attacked = False
 
     def race_after_identity_check(
@@ -1288,8 +1526,8 @@ def test_generation_install_race_quarantines_foreign_source(
         )
 
     monkeypatch.setattr(
-        artifact_io,
-        "_rename_with_flags_at",
+        local_authority_io,
+        "_rename_with_flags_posix",
         race_after_identity_check,
     )
     with pytest.raises(ValueError):
@@ -1314,7 +1552,7 @@ def test_generation_install_race_quarantines_foreign_source(
         if path.name.startswith(".sha256-") and (path / "KEEP").is_file()
     )
 
-    monkeypatch.setattr(artifact_io, "_rename_with_flags_at", original)
+    monkeypatch.setattr(local_authority_io, "_rename_with_flags_posix", original)
     generation = install_generation(
         catalog,
         tenant_id="tenant",
@@ -1499,7 +1737,7 @@ def test_generation_quarantine_raw_race_restores_concurrent_authority(
     )
     parked_owned = generations / "parked-owned-generation"
     original_install = publication_module.rename_noreplace_at
-    original_raw = artifact_io._rename_with_flags_at
+    original_raw = local_authority_io._rename_with_flags_posix
     mutated = False
     attacked = False
     final_name: str | None = None
@@ -1555,8 +1793,8 @@ def test_generation_quarantine_raw_race_restores_concurrent_authority(
         mutate_staging,
     )
     monkeypatch.setattr(
-        artifact_io,
-        "_rename_with_flags_at",
+        local_authority_io,
+        "_rename_with_flags_posix",
         race_quarantine,
     )
     try:

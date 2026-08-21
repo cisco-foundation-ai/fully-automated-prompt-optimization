@@ -561,8 +561,21 @@ def _evaluation_cluster_summaries(
 class TenantStore:
     """Resolves and reads tenant artifacts under a single tenants root."""
 
-    def __init__(self, tenants_root: Path) -> None:
-        self.root = tenants_root.resolve()
+    def __init__(
+        self,
+        tenants_root: Path,
+        *,
+        repository_base: Path | None = None,
+    ) -> None:
+        effective_base = repository_base if repository_base is not None else Path.cwd()
+        probe = EvaluationAssetLayout(
+            tenants_root,
+            "store",
+            "layout",
+            repository_base=effective_base,
+        )
+        self.root = probe.tenants_root
+        self.repository_base = probe.repository_base
 
     # -- path safety -----------------------------------------------------
 
@@ -686,7 +699,11 @@ class TenantStore:
         if tenant_dir is None:
             return []
         assets: List[Dict[str, Any]] = []
-        for layout in list_asset_layouts(self.root, tenant_id):
+        for layout in list_asset_layouts(
+            self.root,
+            tenant_id,
+            repository_base=self.repository_base,
+        ):
             try:
                 config = layout.load_config().to_dict()
                 state = layout.load_state().to_dict()
@@ -712,7 +729,12 @@ class TenantStore:
         if tenant_dir is None or stage not in _EVALUATION_STAGE_PATTERNS:
             return None
         try:
-            layout = EvaluationAssetLayout(self.root, tenant_id, asset_id)
+            layout = EvaluationAssetLayout(
+                self.root,
+                tenant_id,
+                asset_id,
+                repository_base=self.repository_base,
+            )
             config = layout.load_config()
             state = layout.load_state()
         except (OSError, ValueError, KeyError, json.JSONDecodeError):

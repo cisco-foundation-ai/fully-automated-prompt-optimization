@@ -259,34 +259,59 @@ adoption transaction whose target hashes match the semantically replayed
 receipts, not from receipt origin labels. Version 1 or mixed-version journals
 require explicit repair because they lack the complete before-state evidence
 needed for safe roll-forward.
-One cross-process per-asset lock protects create, run/resume, revision,
+One cross-process per-asset hard lock protects create, run/resume, revision,
 adoption, and extension mutations across library, CLI, and Studio callers.
+`filelock` supplies bounded acquisition and reentrancy over the already
+identity-bound handle: POSIX uses `flock`, while Windows uses `LockFileEx`.
+Process-global exact-identity ownership distinguishes same-thread recursion
+from other threads that share one native handle. Bound handles record their
+opening process and fail closed if inherited across `fork`; child work must
+reopen the literal path and revalidate its identity.
+Missing native hard-lock or atomic-CAS support fails explicitly instead of
+selecting a soft lock or check-then-replace fallback.
 Every Evaluation Asset Studio authority-root, authority-ancestor, stage,
 receipt, publication-catalog, generation, and generation-staging directory
-creator also takes an exclusive lock on the already-open parent and uses the
-same descriptor-relative helper with private names, no-follow opens, exact
-identity rechecks, and no-replace installation. The finite production guard
+creator also locks the already-open parent and uses the same platform adapter
+with private names, no-follow POSIX descriptors or reparse-rejecting Windows
+handles, exact identity rechecks, and native no-replace installation. Windows
+retains the complete no-share-delete, reparse-checked ancestor handle chain
+until the bound directory closes. Darwin and Windows reject
+Unicode-normalized case-fold aliases in authority names. A movable Windows
+private directory is closed immediately before its exact-identity rename and
+the installed name is reopened with stable no-share-delete guards. The
+reentrant parent
+lock also spans each complete single-file observe/create/CAS/sync/reclaim and
+generation collision/stage/install/sync/reclaim transaction. The finite
+production guard
 rejects other `Path.mkdir`, `os.mkdir`, and `os.makedirs` spellings, including
 literal persistence attributes constructed through `operator.attrgetter` or
 `operator.methodcaller`; unresolved dynamic attribute names are outside this
-finite claim. Its only directory-creation compatibility seams are the literal
-internal `os.mkdir` in `create_and_open_local_directory_at`, the generic parent
-bootstraps in
+finite claim. Its authority adapter audits only named native create, write,
+CAS, and exact-owned reclamation functions. The remaining directory-creation
+compatibility seams are the generic parent bootstraps in
 `_atomic_write_text` and `_atomic_write_binary`, and the deprecated non-Studio
 `assemble_dataset_bundle`; a live release check verifies that the latter three
 never bootstrap the authority or generation directories listed above.
 This boundary fails closed on preexisting or detectably substituted nodes.
-POSIX does not provide an atomic `mkdirat`-and-return-descriptor operation, so
-the workspace must not be concurrently mutated by an unaudited process running
-as the same OS user during directory creation; use an exclusive trusted OS
+POSIX provides neither an atomic `mkdirat`-and-return-descriptor operation nor
+handle-conditional `unlink`/`rmdir`; Windows uses an identity-keyed parent mutex
+around create/open/install. Exact-owned POSIX reclamation is therefore safe
+against cooperating Studio writers that honor the same parent lock, not an
+arbitrary noncooperating same-identity namespace swap. The
+workspace must not be concurrently mutated by an unaudited process running as
+the same OS identity during authority mutation; use an exclusive trusted OS
 identity and filesystem permissions for the Studio workspace.
 Default providers are constructed only after that lock, recovery, lifecycle
 and immutable raw-snapshot checks, revision, and configuration reload. Injected
-providers must declare nonblank `provider_name` and `model` attributes; receipts
-identify the provider instance and model actually used instead of substituting
-configured defaults. Service jobs persist `queued`, then return
+providers must pass the strict provider/model/settings allowlists and
+secret-shaped-value rejection used by persisted provenance. Complete
+prospective call rows, stage provenance, and receipts validate in memory before
+calls or mutable writes; receipts identify the provider instance and model
+actually used instead of substituting configured defaults. Service jobs persist `queued`, then return
 acceptance only after separate lock and preflight decisions from the live
-worker, without abandoning a lock-owning worker on a fixed timeout.
+worker, without abandoning a lock-owning worker on a fixed timeout. A verified
+recovery that itself reaches `released` is accepted as a completed terminal
+resume before the worker exits.
 
 After Stage 8 succeeds, the authoritative split artifacts remain inside the
 asset workspace and a content-addressed consumer generation is installed at:
@@ -305,8 +330,14 @@ tenants/<tenant_id>/datasets/evaluation_assets/<asset_id>/
 
 The generation descriptor hashes all four files and the deterministic build
 fingerprint. A same-filesystem hidden temporary directory is validated and
-synced before one rename installs the immutable generation; exact content is
-reused, while an address collision fails without overwrite. `release.json` is
+synced before one native no-replace operation installs the immutable
+generation; exact content is reused, while an address collision fails without
+overwrite. Exact operation-owned staging, displaced, and quarantine nodes are
+reclaimed after success, ordinary Python exceptions, and recoverable retry
+paths. Raced foreign nodes and ambiguous durability failures are retained and
+fail closed. Hard process termination can therefore leave an unproven hidden
+node for explicit inspection; the next process does not scavenge by name.
+Immutable final generations are never garbage-collected. `release.json` is
 the sole mutable catalog authority and is replaced atomically only after the
 generation, Stage 8 receipt, build provenance, manifests, and hashes agree.
 Released state and its event follow the pointer under the recovery journal, so
@@ -317,7 +348,9 @@ are retained; invalidation does not delete them or the release pointer.
 `asset_manifest.json` and the Stage 8 manifest expose the current generation
 ID, release pointer, hashes, and literal immutable paths. Evaluation configs do
 not interpret `release.json`; set `dataset.path` to the exact generation file
-path recorded in a manifest. These local derived files are not uploaded by the
+path recorded in a manifest. These paths are relative to the explicit
+repository/invocation base; CLI and service entry points reject a tenants root
+outside that base or traversing an intermediate symlink before writing. These local derived files are not uploaded by the
 Studio. A separate `customer-data --scope derived` operation can sync them only
 when the tenant storage configuration includes `datasets/` in its configured
 `derived_local` tree.

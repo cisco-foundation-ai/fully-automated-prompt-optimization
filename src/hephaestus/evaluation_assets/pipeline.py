@@ -69,6 +69,7 @@ from src.hephaestus.evaluation_assets.durability import (
     load_completed_release_handoff_control,
     mutable_rebuild_boundary,
     persisted_json_sha256,
+    validate_stage_receipt_payload,
     verify_completed_release_candidate,
     verify_raw_snapshot_floor,
     verify_released_asset,
@@ -92,6 +93,7 @@ from src.hephaestus.evaluation_assets.provenance import (
     sanitize_call_metadata,
     unavailable,
     validate_build_provenance,
+    validate_current_stage_provenance,
     working_source_identity,
     write_provider_call_ledger,
 )
@@ -436,7 +438,7 @@ class EvaluationAssetPipeline:
         }
 
     def _validate_injected_provider_identities(self) -> None:
-        """Reject incomplete injected identities before any authority mutation."""
+        """Validate complete injected bindings before any authority mutation."""
         injected = {
             "rubric": (
                 self._injected_rubric_provider,
@@ -464,6 +466,12 @@ class EvaluationAssetPipeline:
                     f"injected {role} provider identity is unavailable; "
                     f"declare non-empty {missing}"
                 )
+            provider_settings(
+                provider,
+                role=role,
+                identity=identity,
+                pipeline_batch_size=self.config.batch_size,
+            )
 
     def _provider_identity_for_stage(
         self,
@@ -577,12 +585,17 @@ class EvaluationAssetPipeline:
         rubric_provider: Optional[RubricProvider] = None,
         embedding_provider: Optional[EmbeddingProvider] = None,
         initial_status: str = "draft",
+        *,
+        repository_base: Path | None = None,
     ) -> "EvaluationAssetPipeline":
         """Create a self-contained workspace by copying both source files."""
         layout = EvaluationAssetLayout(
             tenants_root=tenants_root,
             tenant_id=config.tenant_id,
             asset_id=config.asset_id,
+            repository_base=(
+                repository_base if repository_base is not None else Path.cwd()
+            ),
         )
         layout.initialize(
             config,
@@ -590,7 +603,11 @@ class EvaluationAssetPipeline:
             unlabeled_source,
             initial_status=initial_status,
         )
-        return cls(layout, rubric_provider=rubric_provider, embedding_provider=embedding_provider)
+        return cls(
+            layout,
+            rubric_provider=rubric_provider,
+            embedding_provider=embedding_provider,
+        )
 
     def run(
         self,
@@ -618,6 +635,8 @@ class EvaluationAssetPipeline:
             if state.status == "released":
                 verify_released_asset(self.layout, state)
                 if recovered:
+                    if _preflight_accepted_callback is not None:
+                        _preflight_accepted_callback()
                     return state
                 raise EvaluationAssetImmutableError(
                     self.layout.tenant_id,
@@ -646,7 +665,17 @@ class EvaluationAssetPipeline:
                 if handoff_control is not None
                 else self.layout.load_config()
             )
-            self._validate_injected_provider_identities()
+            current_config = self.config
+            prospective_config = (
+                self.layout._resolve_config_updates(current_config, config_updates)
+                if config_updates is not None
+                else current_config
+            )
+            self.config = prospective_config
+            try:
+                self._validate_injected_provider_identities()
+            finally:
+                self.config = current_config
             self.last_revision = (
                 self.layout._revise_config_locked(config_updates)
                 if config_updates is not None
@@ -749,6 +778,13 @@ class EvaluationAssetPipeline:
                 prompt_values=STAGE_PROMPTS.get(stage, {}),
                 provider_identity=self._provider_identity_for_stage(stage),
             )
+            validate_stage_receipt_payload(
+                receipt,
+                expected_stage=stage,
+                expected_origin="native",
+                expected_counts=counts,
+                expected_provider_identity=self._provider_identity_for_stage(stage),
+            )
             self.layout._write_authority_json(
                 self.layout.receipt_path(stage),
                 receipt,
@@ -821,22 +857,37 @@ class EvaluationAssetPipeline:
                 stage=stage.value,
                 trusted_root=self.layout.tenants_root,
             )
+        provider_identity = self._provider_identity_for_stage(stage)
+        prompt_values = STAGE_PROMPTS.get(stage, {})
+        code = working_source_identity(Path(__file__).resolve().parents[3])
+        seeds = _stage_seeds(
+            stage,
+            self.config,
+            call_count=len(calls or []),
+        )
+        algorithms = _stage_algorithms(
+            stage,
+            self.config,
+            extension=bool(self.lineage),
+        )
         stage_provenance = build_stage_provenance(
             stage=stage.value,
-            provider_identity=self._provider_identity_for_stage(stage),
-            prompt_values=STAGE_PROMPTS.get(stage, {}),
+            provider_identity=provider_identity,
+            prompt_values=prompt_values,
             calls=calls,
-            code=working_source_identity(Path(__file__).resolve().parents[3]),
-            seeds=_stage_seeds(
-                stage,
-                self.config,
-                call_count=len(calls or []),
-            ),
-            algorithms=_stage_algorithms(
-                stage,
-                self.config,
-                extension=bool(self.lineage),
-            ),
+            code=code,
+            seeds=seeds,
+            algorithms=algorithms,
+        )
+        validate_current_stage_provenance(
+            stage_provenance,
+            stage=stage.value,
+            provider_identity=provider_identity,
+            prompt_values=prompt_values,
+            calls=calls,
+            code=code,
+            seeds=seeds,
+            algorithms=algorithms,
         )
         self.layout._write_authority_json(
             self.layout.stage_provenance_path(stage),
@@ -971,9 +1022,9 @@ class EvaluationAssetPipeline:
             check_expected_write_data=True,
         )
         manifest = dict(self._stage_eight_manifest)
-        generation_directory = generation.generation_dir.relative_to(
-            self.layout.tenants_root.parent
-        ).as_posix()
+        generation_directory = self.layout.repository_relative_path(
+            generation.generation_dir
+        )
         manifest["published_datasets"] = {
             "directory": self.layout.published_datasets.relative_to(
                 self.layout.tenant_root

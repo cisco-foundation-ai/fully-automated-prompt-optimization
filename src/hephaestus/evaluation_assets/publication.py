@@ -11,6 +11,7 @@ import json
 import os
 import re
 import stat
+import sys
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -18,6 +19,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
+from src.hephaestus import local_authority_io as authority_io
 from src.hephaestus.artifact_io import (
     atomic_write_bytes_at,
     rename_noreplace_at,
@@ -173,6 +175,26 @@ def generation_id_for_descriptor(descriptor: Mapping[str, Any]) -> str:
     return f"sha256-{canonical_sha256(dict(descriptor))}"
 
 
+def build_generation_manifest(
+    *,
+    tenant_id: str,
+    asset_id: str,
+    descriptor: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the exact immutable generation manifest without filesystem writes."""
+    generation_id = generation_id_for_descriptor(descriptor)
+    manifest = {
+        "schema_version": GENERATION_MANIFEST_SCHEMA_VERSION,
+        "tenant_id": tenant_id,
+        "asset_id": asset_id,
+        "generation_id": generation_id,
+        "descriptor": dict(descriptor),
+    }
+    if not tenant_id or not asset_id:
+        raise ValueError("generation manifest identity is invalid")
+    return manifest
+
+
 def install_generation(
     catalog_root: Path,
     *,
@@ -199,13 +221,11 @@ def install_generation(
         split_payloads=split_payloads,
     )
     generation_id = generation_id_for_descriptor(descriptor)
-    manifest = {
-        "schema_version": GENERATION_MANIFEST_SCHEMA_VERSION,
-        "tenant_id": tenant_id,
-        "asset_id": asset_id,
-        "generation_id": generation_id,
-        "descriptor": descriptor,
-    }
+    manifest = build_generation_manifest(
+        tenant_id=tenant_id,
+        asset_id=asset_id,
+        descriptor=descriptor,
+    )
     with open_local_authority_directory(
         root,
         authority_root,
@@ -215,6 +235,10 @@ def install_generation(
             catalog_descriptor,
             "generations",
         )
+        namespace_lock = authority_io.exclusive_parent_namespace_lock(
+            generations_descriptor
+        )
+        namespace_lock.__enter__()
         try:
             if _exact_directory_entry_exists(
                 generations_descriptor,
@@ -241,54 +265,51 @@ def install_generation(
                     ),
                 )
             )
+            owned_name = temporary_name
+            owned_children: dict[str, tuple[int, int, int]] = {}
+            reclaim_staging = True
             try:
-                named_before_mutation = os.stat(
+                named_before_mutation = authority_io.stat_child(
+                    generations_descriptor,
                     temporary_name,
-                    dir_fd=generations_descriptor,
-                    follow_symlinks=False,
                 )
-                if (
-                    named_before_mutation.st_dev,
-                    named_before_mutation.st_ino,
-                    stat.S_IFMT(named_before_mutation.st_mode),
-                ) != temporary_identity:
+                if named_before_mutation.identity != temporary_identity:
                     raise ValueError(
                         "temporary generation changed before first mutation"
                     )
                 _call_fault(fault_hook, "after_generation_temp_created")
                 for split in LOGICAL_SPLITS:
-                    atomic_write_bytes_at(
+                    filename = f"{split}.jsonl"
+                    owned_children[filename] = atomic_write_bytes_at(
                         temporary_descriptor,
-                        f"{split}.jsonl",
+                        filename,
                         split_payloads[split],
                     )
                     _call_fault(fault_hook, f"after_generation_split_{split}")
-                atomic_write_bytes_at(
+                owned_children["generation_manifest.json"] = atomic_write_bytes_at(
                     temporary_descriptor,
                     "generation_manifest.json",
                     _persisted_json_bytes(manifest),
                 )
                 _call_fault(fault_hook, "after_generation_manifest_write")
-                os.fsync(temporary_descriptor)
+                authority_io.sync_bound_directory(temporary_descriptor)
                 _call_fault(fault_hook, "after_generation_temp_sync")
                 _validate_generation_directory_descriptor(
                     temporary_descriptor,
                     manifest,
                     split_payloads,
                 )
-                named_temporary = os.stat(
+                named_temporary = authority_io.stat_child(
+                    generations_descriptor,
                     temporary_name,
-                    dir_fd=generations_descriptor,
-                    follow_symlinks=False,
                 )
-                if (
-                    named_temporary.st_dev,
-                    named_temporary.st_ino,
-                    stat.S_IFMT(named_temporary.st_mode),
-                ) != temporary_identity:
+                if named_temporary.identity != temporary_identity:
                     raise ValueError(
                         "temporary generation changed before installation"
                     )
+                authority_io.prepare_directory_source_rename(
+                    temporary_descriptor
+                )
                 if not rename_noreplace_at(
                     generations_descriptor,
                     temporary_name,
@@ -304,20 +325,22 @@ def install_generation(
                         collision=True,
                         trusted_root=authority_root,
                     )
-                installed_stat = os.stat(
+                installed = authority_io.stat_child(
+                    generations_descriptor,
                     generation_id,
-                    dir_fd=generations_descriptor,
-                    follow_symlinks=False,
                 )
-                installed_identity = (
-                    installed_stat.st_dev,
-                    installed_stat.st_ino,
-                    stat.S_IFMT(installed_stat.st_mode),
-                )
+                installed_identity = installed.identity
                 if installed_identity != temporary_identity:
                     raise ValueError(
                         "temporary generation changed during installation"
                     )
+                temporary_descriptor = authority_io.bind_renamed_directory(
+                    generations_descriptor,
+                    generation_id,
+                    expected=temporary_identity,
+                    previous=temporary_descriptor,
+                )
+                reclaim_staging = False
                 try:
                     _validate_generation_directory_descriptor(
                         temporary_descriptor,
@@ -327,6 +350,9 @@ def install_generation(
                 except (OSError, TypeError, UnicodeError, ValueError) as exc:
                     rejected_name = (
                         f".{generation_id}.{uuid.uuid4().hex}.rejected"
+                    )
+                    authority_io.prepare_directory_source_rename(
+                        temporary_descriptor
                     )
                     if not rename_noreplace_at(
                         generations_descriptor,
@@ -338,18 +364,39 @@ def install_generation(
                         raise OSError(
                             "raced generation install could not be quarantined"
                         ) from exc
+                    owned_name = rejected_name
+                    reclaim_staging = True
                     raise ValueError(
                         "temporary generation content changed during installation"
                     ) from exc
-                os.fsync(generations_descriptor)
+                authority_io.sync_bound_directory(generations_descriptor)
                 _call_fault(fault_hook, "after_generation_install")
             finally:
-                # A failed install retains its uniquely named staging tree.
-                # Portable unlink/rmdir APIs address reusable names rather
-                # than the opened inode, so cleanup could delete raced nodes.
-                os.close(temporary_descriptor)
+                active_error = sys.exc_info()[0] is not None
+                temporary_descriptor.close()
+                if reclaim_staging:
+                    try:
+                        reclaimed = authority_io.reclaim_owned_tree(
+                            generations_descriptor,
+                            authority_io.OwnedNode(
+                                owned_name,
+                                temporary_identity,
+                                "directory",
+                                dict(owned_children),
+                            ),
+                        )
+                        if not reclaimed and not active_error:
+                            raise ValueError(
+                                "owned generation staging tree changed before reclamation"
+                            )
+                    except OSError:
+                        if not active_error:
+                            raise
         finally:
-            os.close(generations_descriptor)
+            try:
+                namespace_lock.__exit__(*sys.exc_info())
+            finally:
+                generations_descriptor.close()
     return _validate_generation(
         root,
         generation_id,
@@ -648,43 +695,26 @@ def _capture_generation_directory(
         directory,
         trusted_root,
     ) as directory_descriptor:
-        names_before = set(os.listdir(directory_descriptor))
+        names_before = set(authority_io.list_children(directory_descriptor))
         if names_before != expected_names:
             raise ValueError("generation file inventory is invalid")
         identities: dict[str, tuple[int, int, int]] = {}
         for name in sorted(expected_names):
-            details = os.stat(
-                name,
-                dir_fd=directory_descriptor,
-                follow_symlinks=False,
-            )
-            if stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode):
+            details = authority_io.stat_child(directory_descriptor, name)
+            if details.kind != "file":
                 raise ValueError("generation member is not an exact regular file")
-            identities[name] = (
-                details.st_dev,
-                details.st_ino,
-                stat.S_IFMT(details.st_mode),
-            )
+            identities[name] = details.identity
         payloads: dict[str, bytes] = {}
         for name in sorted(expected_names):
             payload, opened_identity = read_local_authority_file_with_identity_at(
                 directory_descriptor,
                 name,
             )
-            rebound = os.stat(
-                name,
-                dir_fd=directory_descriptor,
-                follow_symlinks=False,
-            )
-            rebound_identity = (
-                rebound.st_dev,
-                rebound.st_ino,
-                stat.S_IFMT(rebound.st_mode),
-            )
-            if opened_identity != identities[name] or rebound_identity != identities[name]:
+            rebound = authority_io.stat_child(directory_descriptor, name)
+            if opened_identity != identities[name] or rebound.identity != identities[name]:
                 raise ValueError("generation member changed while reading")
             payloads[name] = payload
-        if set(os.listdir(directory_descriptor)) != names_before:
+        if set(authority_io.list_children(directory_descriptor)) != names_before:
             raise ValueError("generation file inventory changed while reading")
     return payloads
 
@@ -828,9 +858,9 @@ def _authority_bytes(path: Path, trusted_root: Path, label: str) -> bytes:
 
 
 def _open_or_create_child_directory(
-    parent_descriptor: int,
+    parent_descriptor: authority_io.DirectoryLike,
     name: str,
-) -> int:
+) -> authority_io.BoundDirectory:
     """Open one exact child directory, creating it relative to a stable parent."""
     try:
         return _open_exact_child_directory(parent_descriptor, name)
@@ -850,33 +880,18 @@ def _open_or_create_child_directory(
 
 
 def _open_exact_child_directory(
-    parent_descriptor: int,
+    parent_descriptor: authority_io.DirectoryLike,
     name: str,
-) -> int:
+) -> authority_io.BoundDirectory:
     """Open and identity-bind one non-symlink directory entry."""
-    before = os.stat(
-        name,
-        dir_fd=parent_descriptor,
-        follow_symlinks=False,
-    )
-    if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
+    before = authority_io.stat_child(parent_descriptor, name)
+    if before.kind != "directory":
         raise ValueError("generation authority directory is not exact")
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_DIRECTORY", 0)
+    return authority_io.open_child_directory(
+        parent_descriptor,
+        name,
+        expected=before.identity,
     )
-    descriptor = os.open(name, flags, dir_fd=parent_descriptor)
-    opened = os.fstat(descriptor)
-    if (
-        opened.st_dev != before.st_dev
-        or opened.st_ino != before.st_ino
-        or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
-    ):
-        os.close(descriptor)
-        raise ValueError("generation authority directory changed while opening")
-    return descriptor
 
 
 def _nearest_existing_ancestor(path: Path) -> Path:
@@ -897,55 +912,37 @@ def _nearest_existing_ancestor(path: Path) -> Path:
 
 
 def _exact_directory_entry_exists(
-    parent_descriptor: int,
+    parent_descriptor: authority_io.DirectoryLike,
     name: str,
 ) -> bool:
     """Return whether one exact non-symlink child directory exists."""
-    try:
-        details = os.stat(
-            name,
-            dir_fd=parent_descriptor,
-            follow_symlinks=False,
-        )
-    except FileNotFoundError:
+    details = authority_io.optional_stat_child(parent_descriptor, name)
+    if details is None:
         return False
-    if stat.S_ISLNK(details.st_mode) or not stat.S_ISDIR(details.st_mode):
+    if details.kind != "directory":
         raise ValueError("immutable generation target is not an exact directory")
     return True
 
 
-def _descriptor_file_bytes(directory_descriptor: int, name: str) -> bytes:
+def _descriptor_file_bytes(
+    directory_descriptor: authority_io.DirectoryLike,
+    name: str,
+) -> bytes:
     """Read one regular child file through a stable directory descriptor."""
-    before = os.stat(
-        name,
-        dir_fd=directory_descriptor,
-        follow_symlinks=False,
-    )
-    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+    before = authority_io.stat_child(directory_descriptor, name)
+    if before.kind != "file":
         raise ValueError("generation temporary file is not exact")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(name, flags, dir_fd=directory_descriptor)
+    file = authority_io.open_child_file(directory_descriptor, name)
     try:
-        opened = os.fstat(descriptor)
-        if (
-            opened.st_dev != before.st_dev
-            or opened.st_ino != before.st_ino
-            or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(before.st_mode)
-        ):
+        if file.identity != before.identity:
             raise ValueError("generation temporary file changed while opening")
-        chunks: list[bytes] = []
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        return b"".join(chunks)
+        return authority_io.read_bound_file(file)
     finally:
-        os.close(descriptor)
+        file.close()
 
 
 def _validate_generation_directory_descriptor(
-    directory_descriptor: int,
+    directory_descriptor: authority_io.DirectoryLike,
     manifest: Mapping[str, Any],
     split_payloads: Mapping[str, bytes],
 ) -> None:
@@ -954,7 +951,7 @@ def _validate_generation_directory_descriptor(
         "generation_manifest.json",
         *(f"{split}.jsonl" for split in LOGICAL_SPLITS),
     }
-    if set(os.listdir(directory_descriptor)) != expected_names:
+    if set(authority_io.list_children(directory_descriptor)) != expected_names:
         raise ValueError("generation file inventory is invalid")
     if _descriptor_file_bytes(
         directory_descriptor,

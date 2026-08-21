@@ -201,7 +201,7 @@ We classify results as **confirmed defects** (reproduced or unavoidable from the
 
 The idea is viable and tackles a real bottleneck: FAPO cannot optimize reliably until a tenant has useful cases and a meaningful scorer. Studio's basic evidence rule is good, and its main splitting step is stronger than FAPO's inherited split handling.
 
-The audited code is not yet ready to promise an independent regression set, enforced review, unchangeable versions, or identity-safe redaction. The largest research flaw is easy to state: it learns grading rules from all trusted feedback and only afterward reserves some feedback for validation, test, and regression. A rule found only in saved test data can therefore appear in training. The main engineering risks are publication of unapproved AI-generated cases, raw files that Git may track, redaction that changes IDs, and unsafe resume behavior.
+The audited code is not yet ready to promise an independent regression set, enforced review, ~~unchangeable versions~~, or identity-safe redaction. The largest research flaw is easy to state: it learns grading rules from all trusted feedback and only afterward reserves some feedback for validation, test, and regression. A rule found only in saved test data can therefore appear in training. The main engineering risks are publication of unapproved AI-generated cases, raw files that Git may track, redaction that changes IDs, and ~~unsafe resume behavior~~.
 
 These are repairable problems, not proof that the idea is infeasible. Until they are fixed and tested, Studio should be described as a versioned dataset-drafting tool, not as a producer of optimization-ready evaluation assets. Section 18 lists the good foundations that should remain intact.
 
@@ -213,7 +213,7 @@ These are repairable problems, not proof that the idea is infeasible. Until they
 | EA-02 | `review_required` is only a label | Six unapproved derived cases were published | FAPO may train or select on unchecked labels | P0 |
 | EA-03 | The actual asset folders are not ignored by Git | Reproduced with `git check-ignore` | Protected feedback may be committed | P0 |
 | EA-04 | Redaction also rewrites IDs | Distinct email/IP-shaped IDs became identical | Records and split groups can collapse | P0 |
-| EA-05 | A completed asset can change or lose files unnoticed | Both behaviors reproduced | One version ID can mean different data | P0 |
+| ~~EA-05~~ | ~~A completed asset can change or lose files unnoticed~~ | ~~Both behaviors reproduced~~ | ~~One version ID can mean different data~~ | ~~P0~~ |
 | EA-06 | Format-valid feedback may contain no usable correctness rule | Established from contract and code | The model must invent a rule or fail | P1 |
 | EA-08 | Near-duplicate real cases are not grouped before splitting | Identical cases crossed train/validation | Information can leak across splits | P1 |
 | EA-09 | Alternate public commands use different splitting rules | One `group_id` crossed train/validation | The same product name has incompatible behavior | P1 |
@@ -457,7 +457,7 @@ Several important parts already work and should survive the fixes:
 - **Source history is rich.** Each criterion records where it came from, when it applies, severity, suggested checks, conflicts, uncertainty, and support. Stage 3 fails if it drops a trusted feedback record.
 - **Provider failure is explicit.** Unsupported guideline or embedding providers raise errors instead of silently switching models. Disabling synthetic generation makes no model call and writes clear empty artifacts.
 - **Local algorithms are repeatable with unchanged inputs.** Group assignment, clustering after vectors exist, representative choice, and queue sampling follow fixed rules. Model and embedding calls may still change.
-- **Child versions are substantially self-contained.** They receive new IDs, verify a completed same-tenant parent, copy parent outputs, preserve group assignments, and can finish after the parent is removed. The flaw is that `resume` can alter a completed asset, not that child copying is absent.
+- **Child versions are substantially self-contained.** They receive new IDs, verify a completed same-tenant parent, copy parent outputs, preserve group assignments, and can finish after the parent is removed. ~~The flaw is that `resume` can alter a completed asset, not that child copying is absent.~~
 - ~~**Most stage-file writes resist partial writes.** They replace temporary files in the same directory. Event/history appends and the full publication bundle still need one all-or-nothing save.~~
 - **FAPO separates optimizer and task model.** This permits one model to optimize a pipeline that runs another.
 - **Trying text changes first is a reasonable cost rule.** It avoids unnecessary structural edits, as long as escalation remains a documented judgment rather than a guarantee.
@@ -564,8 +564,8 @@ The eight integration tests were deselected. The two skips were a CTI-RCM scorer
 | ID preservation | Two email IDs both became `<email>`; two IP group IDs both became `<ip_address>` |
 | Near-duplicate splitting | Identical contexts with different group IDs landed in train and validation |
 | Alternate assembly command | One shared group landed in train and validation across trusted and synthetic sources |
-| Missing saved file | After deleting a completed intent inventory, resume still returned completed, made no provider call, and did not restore it |
-| Editing a completed asset | Revising one threshold changed the asset to queued and deleted its manifest and publication |
+| ~~Missing saved file~~ | ~~After deleting a completed intent inventory, resume still returned completed, made no provider call, and did not restore it~~ |
+| ~~Editing a completed asset~~ | ~~Revising one threshold changed the asset to queued and deleted its manifest and publication~~ |
 | Reading a saved default | Constructor ratio `20.0` became `null` when the saved field was absent |
 | Failure diagnosis inputs | Adding context or expected evidence changed fallback diagnoses to retrieval and formatting failures |
 | Duplicate eval IDs | The inherited loader accepted two cases with the same ID |
@@ -600,7 +600,7 @@ The holdout leak is confirmed because a planted phrase crossed into training wit
 
 Evaluation Asset Studio is promising because it addresses the right earlier problem: building evaluation data before optimization begins. Its strongest ideas are clear—trusted evidence defines correctness, traffic shows coverage, shared code owns transformations, source history is saved, and records with the same exact `group_id` are split together. A traceable way to build evaluation data for a traceable optimizer is worth pursuing.
 
-**Decision for `evaluation-asset-studio@ce7f832f`: no-go for merge, protected-data use, or a claim that its output is safe for FAPO optimization.** Close every P0 item before either merge or protected-data use. First contain data and preserve IDs; then prevent held-out feedback from shaping training and enforce approval; finally make versions and resume safe. Rerun the EA-01 through EA-05 adversarial checks and the full offline suite. Close P1, including the executable scorer handoff, before calling an asset optimization-ready.
+**Decision for `evaluation-asset-studio@ce7f832f`: no-go for merge, protected-data use, or a claim that its output is safe for FAPO optimization.** Close every P0 item before either merge or protected-data use. First contain data and preserve IDs; then prevent held-out feedback from shaping training and enforce approval; ~~finally make versions and resume safe.~~ Rerun the EA-01 through EA-05 adversarial checks and the full offline suite. Close P1, including the executable scorer handoff, before calling an asset optimization-ready.
 
 After those fixes, the decisive question is simple: do Studio-built cases preserve model rankings and produce gains on later, untouched, expert-checked data at lower total cost than manual curation?
 
@@ -643,7 +643,15 @@ Asset Studio authority-root, authority-ancestor, stage, receipt,
 publication-catalog, generation, and generation-staging directory creator
 reached through repository, CLI, or Studio entry points. They serialize on the
 already-open parent directory and use private names, no-follow opens, namespace
-and inode/type rechecks, and no-replace installation. A finite guard rejects
+and inode/type rechecks, and no-replace installation. The reentrant parent lock
+spans complete file-CAS and generation installation/reclamation transactions;
+Windows retains the checked ancestor handle chain, and Darwin/Windows reject
+Unicode-normalized case-fold aliases. Process-global identity ownership
+distinguishes same-thread recursion from shared-handle threads, and inherited
+bound handles fail closed after `fork`. Movable Windows private leaves close
+before exact-identity rename and reopen the installed name with stable guards.
+Explicit repository bases reject
+intermediate-symlink tenant roots before writing. A finite guard rejects
 `Path.mkdir`, `os.mkdir`, and `os.makedirs` aliases or escapes, including
 literal `operator.attrgetter` and `operator.methodcaller` persistence
 attributes; it makes no arbitrary claim for unresolved dynamic attribute names.
@@ -652,11 +660,14 @@ the generic parent bootstraps in `_atomic_write_text` and
 `_atomic_write_binary`, and the deprecated non-Studio
 `assemble_dataset_bundle`. A live complete-release check proves that those
 compatibility bootstraps do not create directories in this boundary.
-POSIX `mkdirat` does not atomically return a descriptor, so this is not a
-guarantee against arbitrary noncooperating mutation by another process running
-as the same OS user between `mkdirat` and `openat`. Such a process is outside the
-trusted local-writer boundary; deployments must isolate the workspace from
-unaudited same-identity filesystem writers.
+POSIX neither atomically returns a descriptor from `mkdirat` nor offers
+handle-conditional `unlink`/`rmdir`, so creation and exact-owned reclamation are
+guaranteed against cooperating Studio writers that honor the same parent lock,
+not arbitrary noncooperating mutation by another process running as the same OS
+identity. Hard process termination can leave unproven hidden debris; later
+processes do not scavenge it by name. Such cases are outside the trusted
+local-writer boundary and require explicit inspection. Deployments must isolate
+the workspace from unaudited same-identity filesystem writers.
 
 PR2 also writes receipt-backed provider-call ledgers for Stages 3–7 and a
 body-free `build_provenance.json`. Its deterministic identity covers the full
