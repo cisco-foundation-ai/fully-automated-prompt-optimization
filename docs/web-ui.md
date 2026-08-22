@@ -181,10 +181,21 @@ Inside a tenant, content is organized into tabs:
 | **Docs** | `README.md` + `docs/**/*.md` | The tenant README and tenant-specific markdown docs. |
 
 A run directory is recognized recursively under the probed output roots when it
-contains any of `results.jsonl`, `run_config.json`, `summary.md`, or
-`progress.json`. Per-case ground truth is joined from the run's dataset (via
-`run_config.json`'s `dataset_path`, falling back to the tenant's only dataset)
-by matching on `case_id`.
+contains any of `results.jsonl`, `run_config.json`, `summary.md`, `progress.json`, or
+`run_manifest.json`. The API labels a valid manifest-authenticated bundle
+`authoritative`; a present but invalid manifest `invalid_unverified`; a terminal
+legacy progress record without a manifest `legacy_unverified`; and every other
+in-progress or loose directory `live_unverified`.
+
+For an `authoritative` run, ground truth is authenticated only when the bundle's
+dataset path agrees with its run identity, the validated `run_manifest.json`
+has authenticated the bundle, the resolved dataset remains inside the tenant
+dataset root, and the dataset bytes match the recorded fingerprint. The UI then
+joins the exact recorded dataset by `case_id`. Studio dataset ground truth is
+not joined from a fallback path. Legacy and live-unverified directories can
+expose only a best-effort join from `run_config.json`'s `dataset_path` (or the
+tenant's one ordinary dataset when no Studio catalog exists); that join is not
+authority.
 
 ## Interactive features
 

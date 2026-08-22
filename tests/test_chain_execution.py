@@ -263,7 +263,7 @@ def test_chain_execution_step_outputs_in_results(
 def test_chain_execution_error_propagates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Provider error is caught per-case; eval completes with 0 score and diagnostics."""
+    """Provider errors become sanitized failed case outcomes."""
     dataset = write_dataset(tmp_path, cases=1)
     template = tmp_path / "variant.md"
     template.write_text("User: hello ${inputs.Name}", encoding="utf-8")
@@ -297,7 +297,12 @@ def test_chain_execution_error_propagates(
 
     assert len(results) == 1
     assert results[0]["output_text"] == ""
-    assert any("Chain exception" in d for d in results[0]["diagnostics"])
+    assert results[0]["execution_status"] == "failed"
+    assert results[0]["execution_error"] == {
+        "phase": "chain",
+        "category": "runtime",
+        "summary": "Chain execution failed.",
+    }
 
 
 def test_chain_with_custom_state_fields(
@@ -369,6 +374,14 @@ def test_chain_missing_output_text_warns(
     """Eval runner warns when chain returns state without output_text."""
     dataset = write_dataset(tmp_path, cases=1)
     scorer = write_scorer(tmp_path)
+    chain_source = tmp_path / "chain.py"
+    chain_source.write_text(
+        """\
+def build_chain(provider, config):
+    raise AssertionError("the test replaces chain construction")
+""",
+        encoding="utf-8",
+    )
 
     config = EvalConfig(
         tenant_id="demo",
@@ -377,7 +390,7 @@ def test_chain_missing_output_text_warns(
         dataset_path=str(dataset),
         scoring_profile={"scorer": {"module_path": str(scorer)}},
         output_dir=str(tmp_path / "out"),
-        chain=ChainConfig(path="unused.py", fn="build_chain", config={}),
+        chain=ChainConfig(path=str(chain_source), fn="build_chain", config={}),
     )
 
     class BadChain:
@@ -398,7 +411,7 @@ def test_chain_missing_output_text_warns(
 def test_chain_node_error_propagates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Exception in a chain node is caught per-case; eval completes with 0 score."""
+    """Chain-node exceptions become sanitized failed case outcomes."""
     dataset = write_dataset(tmp_path, cases=1)
     scorer = write_scorer(tmp_path)
 
@@ -448,7 +461,12 @@ def build_chain(provider, config):
 
     assert len(results) == 1
     assert results[0]["output_text"] == ""
-    assert any("Chain exception" in d for d in results[0]["diagnostics"])
+    assert results[0]["execution_status"] == "failed"
+    assert results[0]["execution_error"] == {
+        "phase": "chain",
+        "category": "runtime",
+        "summary": "Chain execution failed.",
+    }
 
 
 def test_diagnostics_populated_for_unresolved_placeholders(

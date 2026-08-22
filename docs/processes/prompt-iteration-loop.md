@@ -36,6 +36,11 @@ Claude Code and Codex use parallel prompt sets. Users running Claude Code should
 | Synthetic Samples | `.claude/commands/synthetic-samples.md` | `.codex/commands/synthetic-samples.md` | Creates synthetic examples for dataset augmentation |
 | Synthetic Pruner | `.claude/commands/synthetic-pruner.md` | `.codex/commands/synthetic-pruner.md` | Validates and cleans synthetic data |
 
+The synthetic-samples and synthetic-pruner commands are generic tenant-level
+synthetic-data helpers. They are not Evaluation Asset Studio Stage 7: Stage 7
+is a receipt-backed core-pipeline stage with its own supported-cluster,
+mechanical-filter, dependency-fingerprint, and review/finalization rules.
+
 ### Dataset Process References
 
 | Process | Reference | Role |
@@ -47,6 +52,19 @@ Evaluation asset preparation precedes the optimization loop. The shared core,
 not the assistant prompt, owns normalization, evaluation-guideline creation, clustering,
 coverage decisions, label inference, synthetic coverage, and dataset splitting.
 The resulting versioned splits become inputs to optimization and evaluation.
+
+## Enforcement Boundary
+
+This is the canonical contract for which controls the current implementation
+enforces. Agent-enforced controls are useful protocol checks, but a user or any
+other process with checkout access can bypass them; they are not runtime or
+operating-system security boundaries.
+
+| Category | Exact current members |
+|---|---|
+| **Runtime-enforced** | config/schema validation; duplicate physical `case_id` rejection; exclusive output reservation; per-case execution status; successful-only aggregates; manifest authentication; and run-identity comparison controls. |
+| **Agent-enforced / bypassable** | tenant playbook and scope; training-only authoring; independent variant review; clone-new-variant; fixed scorer; validation-only selection; and iteration memory. |
+| **Recommended conventions** | one focused edit; smallest useful/prompt-first escalation; repeated trials; scorer/judge calibration; and untouched future validation. |
 
 ### Operational Tools
 

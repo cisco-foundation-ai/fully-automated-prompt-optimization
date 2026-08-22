@@ -13,8 +13,11 @@ where the model calls tools exposed by [Model Context Protocol](https://modelcon
 servers, using a real ReAct loop. The protocol is implemented with the official
 `mcp` Python SDK — there is nothing left to stub in.
 
-A complete, runnable example lives at `tenants/mcp_example/`. This guide walks
-through using it and building your own agentic tenant.
+An implementation scaffold lives at `tenants/mcp_example/`. The checkout does
+not include `tenants/mcp_example/datasets/tool_tasks.jsonl`, so that tenant is
+not a self-contained runnable fixture until you supply a contract-valid JSONL
+dataset at the configured path. This guide also walks through building your own
+agentic tenant.
 
 What you get out of the box:
 - MCP server lifecycle management (start, tool discovery, execution, clean shutdown)
@@ -37,9 +40,11 @@ The `mcp` SDK ships as a core dependency, so no extra install step is needed.
 
 ---
 
-## Run the example tenant
+## Run the example tenant after supplying its dataset
 
-The fastest way to see it working end to end:
+First supply `tenants/mcp_example/datasets/tool_tasks.jsonl` using the schema in
+`tenants/mcp_example/docs/data-contract.md`. Without that file, the documented
+command intentionally fails dataset-path preflight. Once it exists, run:
 
 ```bash
 python3 -m hephaestus.cli eval --config tenants/mcp_example/configs/eval.json
@@ -47,7 +52,7 @@ python3 -m hephaestus.cli eval --config tenants/mcp_example/configs/eval.json
 
 This uses a bundled mock MCP server (`tests/fixtures/mock_mcp_server.py`, built on
 the MCP SDK) that exposes three tools: `echo`, `add`, and `fail` (the last is for
-exercising error handling). The dataset has 30 cases mixing tool-use tasks with
+exercising error handling). A supplied dataset can mix tool-use tasks with
 reasoning tasks the agent should answer *without* tools.
 
 **Expected behavior:**
@@ -61,8 +66,11 @@ Check results:
 
 ```bash
 cat tenants/mcp_example/evals/run-001/summary.md
-cat tenants/mcp_example/evals/run-001/results.jsonl | python3 -m json.tool | head -40
+head -n 1 tenants/mcp_example/evals/run-001/results.jsonl | python3 -m json.tool
 ```
+
+`results.jsonl` contains one JSON object per line, so `python3 -m json.tool`
+must receive one selected line rather than the whole multi-row file.
 
 ---
 
@@ -101,7 +109,11 @@ cat tenants/mcp_example/evals/run-001/results.jsonl | python3 -m json.tool | hea
     "path": "tenants/my_agent/chains/agent.py",
     "fn": "build_chain",
     "config": {
-      "prompt_paths": {"agent": "tenants/my_agent/prompts/agent.md"}
+      "prompt_paths": {"agent": "tenants/my_agent/prompts/agent.md"},
+      "agent_limits": {
+        "max_iterations": 10,
+        "max_tool_calls_per_iteration": 5
+      }
     }
   },
   "scoring_profile": {
@@ -122,15 +134,28 @@ cat tenants/mcp_example/evals/run-001/results.jsonl | python3 -m json.tool | hea
 | `servers[].command` / `args` | How to launch the server (stdio transport) |
 | `servers[].env` | Env vars for the server process. Supports `${VAR_NAME}` substitution from your environment (e.g. `{"BRAVE_API_KEY": "${BRAVE_API_KEY}"}`) |
 | `servers[].enabled` | Set `false` to skip a server without deleting its config |
-| `servers[].timeout_seconds` | Startup/connection allowance for this server |
-| `tool_execution.max_iterations` | Max ReAct loop iterations per case |
-| `tool_execution.max_tool_calls_per_iteration` | Max tool calls the model may issue in a single turn |
-| `tool_execution.timeout_seconds` | Per-tool-call execution timeout |
+| `servers[].timeout_seconds` | Contributes to the manager's aggregate startup-ready wait ceiling; it is not a per-server connection deadline |
+| `tool_execution.max_iterations` | Parsed MCP configuration/provenance fact; not automatically a node limit |
+| `tool_execution.max_tool_calls_per_iteration` | Parsed MCP configuration/provenance fact; not automatically a node limit |
+| `tool_execution.timeout_seconds` | Parsed MCP configuration/provenance fact; not automatically an executor timeout |
 
-> The per-case tool-call ceiling is derived automatically as
-> `max_iterations * max_tool_calls_per_iteration`. A fresh executor is created
-> for each case, so this limit is per-case (not cumulative across the run) and
-> safe under `max_workers > 1`.
+The current runner does not automatically wire `mcp.tool_execution` into a
+generic tenant factory, `make_agentic_node`, or `MCPToolExecutor`; explicit
+`make_agentic_node` arguments control the ReAct limits. The node derives its
+per-case executor ceiling as `max_iterations * max_tool_calls_per_iteration`;
+a fresh executor makes that ceiling per-case rather than cumulative across the
+run. A top-level `max_tool_calls` is not wired into the MCP executor. The
+manager uses one aggregate startup-ready wait ceiling equal to the maximum
+enabled-server value plus 30 seconds (or 60 seconds when no
+enabled-server value is available); it does not enforce a per-server connection
+deadline. Separately, standard `make_agentic_node` always uses the executor's
+30-second default because that node has no executor-timeout argument.
+`mcp.tool_execution.timeout_seconds` does not change either boundary.
+
+The `agent_limits` block in the example is ordinary tenant chain config and is
+passed explicitly below. Tool support also depends on the configured provider: OpenAI
+non-reasoning models forward tool schemas, while `o1`, `o3`, `o4`, `gpt-5`,
+`gpt5`, Baseten, and SageMaker currently follow the text-only path.
 
 ### Step 2: Write the chain
 
@@ -152,6 +177,7 @@ from src.hephaestus.chains.nodes import make_llm_node
 def build_chain(provider, config, mcp_manager=None):
     """Agentic chain with optional MCP support."""
     prompt_path = Path(config["prompt_paths"]["agent"])
+    limits = config["agent_limits"]
     graph = StateGraph(ChainState)
 
     if mcp_manager:
@@ -162,8 +188,8 @@ def build_chain(provider, config, mcp_manager=None):
                 prompt_template_path=prompt_path,
                 mcp_manager=mcp_manager,
                 output_key="answer",
-                max_iterations=10,
-                max_tool_calls_per_iteration=5,
+                max_iterations=limits["max_iterations"],
+                max_tool_calls_per_iteration=limits["max_tool_calls_per_iteration"],
             ),
         )
     else:
@@ -203,9 +229,10 @@ User: ${task}
 Think step by step and use tools as needed.
 ```
 
-Tool schemas are discovered from the MCP server automatically and passed to the
-model — you do not list them in config. The prompt is just guidance on *when* to
-use them.
+Tool schemas are discovered from the MCP server automatically — you do not list
+them in config. They are forwarded to the model only when the selected
+provider/model tool-calling capability supports it; unsupported models take the
+text-only fallback. The prompt is just guidance on *when* to use them.
 
 ### Step 4: Score with tool awareness (optional)
 
@@ -257,10 +284,10 @@ Each case in `results.jsonl` includes tool-call tracking:
 }
 ```
 
-Failed tool calls are also surfaced in step attribution
-(`src/hephaestus/analysis/step_attribution.py`), which classifies tool errors by
-type (`timeout`, `not_found`, `invalid_args`, `permission`, `other`) and counts
-them under `tool_addressable` in the summary.
+Failed tool calls are surfaced in deterministic runtime attribution
+(`src/hephaestus/analysis/step_attribution.py`) under a small safe category
+allowlist. A later optimizer may perform semantic failure analysis, but that is
+not a runtime tool-error judgment.
 
 ---
 
@@ -302,6 +329,14 @@ error isolation.
 
 ## Troubleshooting
 
+The generic runner records top-level `mcp.tool_execution` but does not apply it
+to a tenant node or executor. **Do not change top-level `mcp.tool_execution` to
+alter a node or executor**. Use explicit `make_agentic_node` arguments for the
+iteration and per-iteration call limits. Changing the executor timeout requires
+a custom agentic node (or a future factory interface that exposes it); creating
+a separate `MCPToolExecutor` does not affect the executor constructed inside the
+standard node.
+
 ### Server fails to start
 - Check the command exists: `which npx` / `which python3`
 - Check required env vars are set (referenced via `${VAR_NAME}`)
@@ -313,18 +348,24 @@ error isolation.
 - Enable debug logging: `logging.getLogger("src.hephaestus.mcp").setLevel(logging.DEBUG)`
 
 ### "Tool execution timed out"
-- Increase `tool_execution.timeout_seconds`
+- The standard node uses a 30-second per-call timeout. To change it, implement a
+  custom agentic node that constructs `MCPToolExecutor(timeout_seconds=...)`;
+  the top-level `mcp.tool_execution.timeout_seconds` is not wired into that
+  executor
 - Check the server isn't blocking on something external
 
 ### "Exceeded max_tool_calls limit"
 - The per-case ceiling is `max_iterations * max_tool_calls_per_iteration`. Raise
-  either value in `tool_execution` if a legitimately complex task needs more
-  calls. (This limit is per-case; it does not accumulate across the run.)
+  either explicit `make_agentic_node` argument in the tenant chain if a
+  legitimately complex task needs more calls. (This limit is per-case; it does
+  not accumulate across the run.)
 
 ### Eval hangs
-- Lower `max_iterations` to bound the ReAct loop
+- Lower the explicit `make_agentic_node(max_iterations=...)` setting to bound
+  the ReAct loop
 - Verify the server reads stdin and responds (a server that never replies will
-  hit the per-tool timeout rather than hang indefinitely)
+  hit the standard node's 30-second per-tool timeout rather than hang
+  indefinitely)
 
 ---
 

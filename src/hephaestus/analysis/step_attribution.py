@@ -2,10 +2,11 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Post-hoc failure attribution from eval results.
+"""Post-hoc failure attribution from evaluation results.
 
-Loads a results.jsonl file, identifies failed cases, and attributes
-failures to specific chain steps using rule-based heuristics.
+Analyzes result rows in memory, optionally joining verified case evidence, and
+attributes failures to specific chain steps using rule-based heuristics. A legacy
+file-only wrapper deliberately remains context-free.
 
 Supports format failure detection, cascading failure tracking,
 retrieval quality tiers, confidence scoring, and per-level summaries.
@@ -14,8 +15,11 @@ retrieval quality tiers, confidence scoring, and per-level summaries.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+INFRASTRUCTURE_FAILURE_KEY = "__infrastructure__"
 
 
 def _is_retrieval_step(step_name: str) -> bool:
@@ -170,11 +174,108 @@ def _confidence_for_heuristic(
         return "low"
 
 
+def _record_value(record: Any, name: str, default: Any = None) -> Any:
+    """Read one field from either a serialized row or a result/case object."""
+    if isinstance(record, Mapping):
+        return record.get(name, default)
+    return getattr(record, name, default)
+
+
+def _record_case_id(record: Any) -> str:
+    """Return a valid case ID without exposing any other record content."""
+    case_id = _record_value(record, "case_id")
+    if not isinstance(case_id, str) or not case_id:
+        raise ValueError("Attribution inputs require a non-empty string case_id")
+    return case_id
+
+
+def _join_cases_by_order(
+    results: List[Any], cases: Optional[Iterable[Any]]
+) -> Dict[str, Any]:
+    """Validate and build an exact ordered in-memory case join."""
+    if cases is None:
+        return {}
+
+    case_list = list(cases)
+    result_ids = [_record_case_id(result) for result in results]
+    case_ids = [_record_case_id(case) for case in case_list]
+    if result_ids != case_ids:
+        raise ValueError(
+            "Cannot join attribution inputs: ordered case IDs do not match"
+        )
+    if len(case_ids) != len(set(case_ids)):
+        raise ValueError("Cannot join attribution inputs with duplicate case IDs")
+    return dict(zip(case_ids, case_list))
+
+
+def _joined_case_evidence(case: Any) -> tuple[Dict[str, str], Optional[str]]:
+    """Extract transient diagnostic evidence from one verified in-memory case."""
+    if case is None:
+        return {}, None
+
+    raw_context = _record_value(case, "context", {})
+    context = (
+        {str(key): str(value) for key, value in raw_context.items()}
+        if isinstance(raw_context, Mapping)
+        else {}
+    )
+
+    expected = _record_value(case, "expected", {})
+    if not isinstance(expected, Mapping):
+        return context, str(expected) if expected is not None else None
+
+    for key in (
+        "answer",
+        "expected_answer",
+        "reference_output",
+        "label",
+        "cwe_id",
+    ):
+        value = expected.get(key)
+        if isinstance(value, (str, int, float, bool)):
+            return context, str(value)
+    return context, None
+
+
+def _is_execution_failure(result: Any) -> bool:
+    """Return whether a result explicitly represents an infrastructure failure."""
+    status = _record_value(result, "execution_status")
+    if status is None:
+        return bool(_record_value(result, "execution_error"))
+    return str(status).strip().lower() not in {
+        "success",
+        "succeeded",
+        "completed",
+    }
+
+
+def _infrastructure_failure_stage(result: Any) -> str:
+    """Classify an execution failure into a small, non-sensitive allowlist."""
+    provenance = _record_value(result, "evaluation_provenance", {})
+    if isinstance(provenance, Mapping):
+        for key in ("failure_stage", "component"):
+            candidate = str(provenance.get(key, "")).strip().lower()
+            if candidate in {"provider", "chain", "scorer", "mcp"}:
+                return candidate
+
+    raw_error = _record_value(result, "execution_error", {})
+    if isinstance(raw_error, Mapping):
+        candidate = str(raw_error.get("phase", "")).strip().lower()
+        if candidate in {"provider", "chain", "scorer", "mcp"}:
+            return candidate
+
+    error = str(raw_error).lower()
+    for candidate in ("provider", "chain", "scorer", "mcp"):
+        if candidate in error:
+            return candidate
+    return "unknown"
+
+
 def attribute_failures(
     results_path: Path,
     threshold: float = 100.0,
 ) -> Dict[str, Dict[str, Any]]:
-    """Attribute failures to chain steps.
+    """Attribute a legacy results file without loading protected case data.
 
     Args:
         results_path: Path to a results.jsonl file.
@@ -197,18 +298,111 @@ def attribute_failures(
             if line:
                 results.append(json.loads(line))
 
+    return attribute_results(results, threshold=threshold)
+
+
+def attribute_verified_run(
+    output_dir: Path,
+    threshold: float = 100.0,
+) -> Dict[str, Dict[str, Any]]:
+    """Attribute one authoritative run using its exact recorded dataset.
+
+    The run bundle, complete run identity, dataset bytes, and ordered case IDs
+    must all validate before protected case evidence is joined in memory. Any
+    mismatch fails closed; this function never falls back to loose result files.
+
+    Args:
+        output_dir: Directory containing an authoritative terminal run bundle.
+        threshold: Successful cases below this score are considered failed.
+
+    Returns:
+        The same aggregate mapping as :func:`attribute_results`.
+    """
+    from src.hephaestus.datasets.jsonl_loader import load_cases_with_identity
+    from src.hephaestus.runs.bundle import load_run_bundle
+    from src.hephaestus.runs.identity import validate_run_identity_payload
+
+    bundle = load_run_bundle(Path(output_dir))
+    identity = validate_run_identity_payload(bundle.run_identity)
+    controls = identity.always_controls
+
+    dataset_path = controls["dataset_path"]
+    if bundle.run_config.get("dataset_path") != dataset_path:
+        raise ValueError("run bundle dataset path does not match run identity")
+
+    dataset_control = controls["dataset"]
+    if dataset_control.get("status") != "available":
+        raise ValueError("run identity dataset fingerprint is unavailable")
+
+    loaded = load_cases_with_identity(Path(dataset_path))
+    actual_fingerprint = f"sha256:{loaded.raw_sha256}"
+    if actual_fingerprint != dataset_control["fingerprint"]:
+        raise ValueError("dataset fingerprint does not match run identity")
+
+    expected_case_ids = tuple(controls["ordered_case_ids"])
+    if loaded.ordered_case_ids != expected_case_ids:
+        raise ValueError("dataset ordered case IDs do not match run identity")
+
+    cases_by_id = {case.case_id: case for case in loaded.cases}
+    joined_cases = [cases_by_id[_record_case_id(result)] for result in bundle.results]
+    return attribute_results(bundle.results, joined_cases, threshold=threshold)
+
+
+def attribute_results(
+    results: Iterable[Any],
+    cases: Optional[Iterable[Any]] = None,
+    threshold: float = 100.0,
+) -> Dict[str, Dict[str, Any]]:
+    """Attribute failures using an optional verified, in-memory case join.
+
+    ``cases`` must have exactly the same ordered IDs as ``results``. Protected
+    context and expected values are used transiently and never returned. File-only
+    callers omit ``cases`` and therefore remain context-free.
+
+    Args:
+        results: Serialized result rows or result objects.
+        cases: Corresponding case rows or objects already verified by the caller.
+        threshold: Successful cases below this score are considered failed.
+
+    Returns:
+        Per-step aggregate attribution. Explicit execution failures are reported
+        separately under ``__infrastructure__``.
+    """
+    result_list = list(results)
+    cases_by_id = _join_cases_by_order(result_list, cases)
     attribution: Dict[str, Dict[str, Any]] = {}
 
-    failed = [r for r in results if float(r.get("composite_score", 0)) < threshold]
-    if not failed:
-        return attribution
+    for result in result_list:
+        case_id = _record_case_id(result)
+        if _is_execution_failure(result):
+            _add_attribution(
+                attribution,
+                INFRASTRUCTURE_FAILURE_KEY,
+                case_id,
+                heuristic="execution_failure",
+                confidence="high",
+            )
+            infrastructure = attribution[INFRASTRUCTURE_FAILURE_KEY]
+            infrastructure["infrastructure_failure"] = True
+            stage = _infrastructure_failure_stage(result)
+            if "failure_stage" not in infrastructure:
+                infrastructure["failure_stage"] = stage
+            stage_counts = infrastructure.setdefault("failure_stage_counts", {})
+            stage_counts[stage] = stage_counts.get(stage, 0) + 1
+            continue
 
-    for case in failed:
-        case_id = case.get("case_id", "unknown")
-        step_outputs: Dict[str, str] = case.get("step_outputs", {})
-        context: Dict[str, str] = case.get("context", {})
-        expected_answer = case.get("expected_answer", context.get("answer", ""))
-        tool_history: List[Dict[str, Any]] = case.get("tool_call_history", [])
+        if float(_record_value(result, "composite_score", 0)) >= threshold:
+            continue
+
+        raw_step_outputs = _record_value(result, "step_outputs", {})
+        step_outputs: Dict[str, str] = (
+            dict(raw_step_outputs) if isinstance(raw_step_outputs, Mapping) else {}
+        )
+        context, expected_answer = _joined_case_evidence(cases_by_id.get(case_id))
+        raw_tool_history = _record_value(result, "tool_call_history", [])
+        tool_history: List[Dict[str, Any]] = (
+            list(raw_tool_history) if isinstance(raw_tool_history, list) else []
+        )
 
         if not step_outputs:
             _add_attribution(
@@ -360,6 +554,7 @@ def summarize(attribution: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
             - structural_addressable: count of failures fixable by structural changes
             - tool_addressable: count of failures fixable by tool/MCP changes
             - format_failures: count of format-related failures
+            - infrastructure_failures: count of failed case executions
             - total_failures: total failure count
             - by_confidence: {high: N, medium: N, low: N}
             - by_retrieval_tier: {hit: N, partial: N, miss: N}
@@ -369,6 +564,7 @@ def summarize(attribution: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     structural_count = 0
     tool_count = 0
     format_count = 0
+    infrastructure_count = 0
     total_count = 0
     by_confidence: Dict[str, int] = {"high": 0, "medium": 0, "low": 0}
     by_retrieval_tier: Dict[str, int] = {"hit": 0, "partial": 0, "miss": 0}
@@ -377,34 +573,56 @@ def summarize(attribution: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     for info in attribution.values():
         count = info["count"]
         total_count += count
-        heuristic = info.get("heuristic", "")
-        confidence = info.get("confidence", "low")
-        by_confidence[confidence] = by_confidence.get(confidence, 0) + count
+        heuristic_counts = info.get("heuristic_counts")
+        if not isinstance(heuristic_counts, Mapping):
+            heuristic_counts = {info.get("heuristic", ""): count}
+        confidence_counts = info.get("confidence_counts")
+        if not isinstance(confidence_counts, Mapping):
+            confidence_counts = {info.get("confidence", "low"): count}
+        for confidence, confidence_count in confidence_counts.items():
+            by_confidence[str(confidence)] = (
+                by_confidence.get(str(confidence), 0) + int(confidence_count)
+            )
 
-        if info.get("retrieval_tier"):
-            tier = info["retrieval_tier"]
-            by_retrieval_tier[tier] = by_retrieval_tier.get(tier, 0) + count
+        retrieval_tier_counts = info.get("retrieval_tier_counts")
+        if not isinstance(retrieval_tier_counts, Mapping):
+            tier = info.get("retrieval_tier")
+            retrieval_tier_counts = {tier: count} if tier else {}
+        for tier, tier_count in retrieval_tier_counts.items():
+            by_retrieval_tier[str(tier)] = (
+                by_retrieval_tier.get(str(tier), 0) + int(tier_count)
+            )
+
+        if info.get("infrastructure_failure"):
+            infrastructure_count += count
+            continue
 
         # Track tool error types
         if info.get("tool_failure"):
-            error_type = info.get("tool_error_type", "other")
-            tool_error_types[error_type] = tool_error_types.get(error_type, 0) + count
+            error_counts = info.get("tool_error_type_counts")
+            if not isinstance(error_counts, Mapping):
+                error_type = info.get("tool_error_type", "other")
+                error_counts = {error_type: count}
+            for error_type, error_count in error_counts.items():
+                tool_error_types[str(error_type)] = (
+                    tool_error_types.get(str(error_type), 0) + int(error_count)
+                )
 
         # Classify by optimization level
-        if heuristic.startswith("tool_failure_"):
-            tool_count += count
-        elif heuristic in ("retrieval_empty", "retrieval_overlap", "cascade"):
-            structural_count += count
-        elif heuristic == "cascade_downstream":
-            pass  # Already counted via cascade root
-            total_count -= count  # Don't double-count
-        elif heuristic == "format_failure":
-            prompt_count += count
-            format_count += count
-        elif heuristic in ("final_step_fallback", "empty_intermediate"):
-            prompt_count += count
-        else:
-            prompt_count += count
+        for heuristic, observation_count in heuristic_counts.items():
+            heuristic = str(heuristic)
+            observation_count = int(observation_count)
+            if heuristic.startswith("tool_failure_"):
+                tool_count += observation_count
+            elif heuristic in ("retrieval_empty", "retrieval_overlap", "cascade"):
+                structural_count += observation_count
+            elif heuristic == "cascade_downstream":
+                total_count -= observation_count
+            elif heuristic == "format_failure":
+                prompt_count += observation_count
+                format_count += observation_count
+            else:
+                prompt_count += observation_count
 
     return {
         "prompt_addressable": prompt_count,
@@ -414,6 +632,7 @@ def summarize(attribution: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
         "structural_addressable": structural_count,
         "tool_addressable": tool_count,
         "format_failures": format_count,
+        "infrastructure_failures": infrastructure_count,
         "total_failures": total_count,
         "by_confidence": by_confidence,
         "by_retrieval_tier": by_retrieval_tier,
@@ -440,19 +659,30 @@ def _add_attribution(
             "case_ids": [],
             "heuristic": heuristic,
             "confidence": confidence,
+            "heuristic_counts": {},
+            "confidence_counts": {},
         }
-        if retrieval_tier:
-            attribution[step_name]["retrieval_tier"] = retrieval_tier
-        if cascade_root:
-            attribution[step_name]["cascade_root"] = cascade_root
-        if format_failure:
-            attribution[step_name]["format_failures"] = 0
-        if tool_failure:
-            attribution[step_name]["tool_failure"] = True
-            attribution[step_name]["tool_error_type"] = tool_error_type
-    attribution[step_name]["count"] += 1
-    attribution[step_name]["case_ids"].append(case_id)
+    entry = attribution[step_name]
+    entry["count"] += 1
+    entry["case_ids"].append(case_id)
+
+    heuristic_counts = entry.setdefault("heuristic_counts", {})
+    heuristic_counts[heuristic] = heuristic_counts.get(heuristic, 0) + 1
+    confidence_counts = entry.setdefault("confidence_counts", {})
+    confidence_counts[confidence] = confidence_counts.get(confidence, 0) + 1
+
+    if retrieval_tier:
+        entry.setdefault("retrieval_tier", retrieval_tier)
+        tier_counts = entry.setdefault("retrieval_tier_counts", {})
+        tier_counts[retrieval_tier] = tier_counts.get(retrieval_tier, 0) + 1
+    if cascade_root:
+        entry.setdefault("cascade_root", cascade_root)
+        root_counts = entry.setdefault("cascade_root_counts", {})
+        root_counts[cascade_root] = root_counts.get(cascade_root, 0) + 1
+    if tool_failure:
+        entry["tool_failure"] = True
+        entry.setdefault("tool_error_type", tool_error_type)
+        error_counts = entry.setdefault("tool_error_type_counts", {})
+        error_counts[tool_error_type] = error_counts.get(tool_error_type, 0) + 1
     if format_failure:
-        attribution[step_name]["format_failures"] = (
-            attribution[step_name].get("format_failures", 0) + 1
-        )
+        entry["format_failures"] = entry.get("format_failures", 0) + 1

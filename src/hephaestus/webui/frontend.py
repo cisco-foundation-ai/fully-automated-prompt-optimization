@@ -257,6 +257,19 @@ function scoreClass(v) {
 function fmtScore(v) {
   return (v === null || v === undefined) ? '–' : Number(v).toFixed(1);
 }
+function authorityLabel(authority) {
+  const labels = {
+    authoritative: 'manifest verified',
+    invalid_unverified: 'invalid / unverified',
+    live_unverified: 'live / unverified',
+    legacy_unverified: 'legacy / unverified',
+  };
+  return labels[authority] || 'unverified';
+}
+function authoritativeCompletedScore(run) {
+  return run && run.authority === 'authoritative' && run.status === 'completed'
+    ? run.avg_composite_score : null;
+}
 // Filter text persists by input id so auto-refresh re-renders don't lose it.
 const FILTERS = {};
 // HTML for a filter input above a table; pre-filled from the persisted value.
@@ -416,7 +429,7 @@ async function renderDashboard() {
     <div class="stat"><div class="num ${cls}">${num}</div><div class="lbl">${lbl}</div></div>`;
 
   // Chart: recent scored runs in chronological order (oldest left → newest right).
-  const scored = recent.filter(r => r.avg_composite_score != null).slice().reverse();
+  const scored = recent.filter(r => authoritativeCompletedScore(r) != null).slice().reverse();
   const gridlines = [0, 25, 50, 75, 100].map(g => `
     <div class="gridline" style="bottom:${g}%"><span>${g}</span></div>`).join('');
   const chartHtml = scored.length ? `
@@ -478,9 +491,9 @@ async function renderDashboard() {
         <div class="asset-state-line"><span class="dot ${esc(assetStatus)}"></span>
           ${esc(assetStage(asset))}</div>
         <div class="latest">${lr
-          ? `<span class="dot ${esc(lr.status||'unknown')}"></span> latest: <b>${esc(lr.name)}</b>
+          ? `<span class="dot ${esc(lr.status||'unknown')}"></span> latest verified: <b>${esc(lr.name)}</b>
              <span class="muted">· ${esc(lr.model||'—')} · ${esc((lr.updated_at||'').replace('T',' ').slice(0,16))}</span>`
-          : `<span class="none">no eval runs yet</span>`}</div>
+          : `<span class="none">no verified completed eval runs yet</span>`}</div>
       </div>`;
     }).join('')}</div>
 
@@ -489,8 +502,9 @@ async function renderDashboard() {
       <div class="recent-row" data-id="${esc(r.tenant_id)}" data-run="${esc(r.run_dir)}">
         <span class="dot ${esc(r.status||'unknown')}"></span>
         <span class="rt">${esc(r.tenant_id)}</span>
-        <span class="rn">${esc(r.name)} · ${esc(r.model||'—')} · ${esc((r.updated_at||'').replace('T',' ').slice(0,16))}</span>
-        <span class="rscore" style="color:${scoreColorVar(r.avg_composite_score)}">${fmtScore(r.avg_composite_score)}</span>
+        <span class="rn">${esc(r.name)} · ${esc(r.model||'—')} · ${esc((r.updated_at||'').replace('T',' ').slice(0,16))}
+          · <span class="pill">${esc(authorityLabel(r.authority))}</span></span>
+        <span class="rscore" style="color:${scoreColorVar(authoritativeCompletedScore(r))}">${fmtScore(authoritativeCompletedScore(r))}</span>
       </div>`).join('')}</div>` : ''}
 
     ${chartHtml}`;
@@ -557,14 +571,15 @@ async function renderRuns() {
   if (!runs.length) { view.innerHTML = '<div class="empty">No eval runs for this tenant.</div>'; return; }
   view.innerHTML = `${filterBox('runs-filter', 'Filter runs by name, model, status…')}
     <table id="runs-table"><thead><tr>
-      <th>Run</th><th>Status</th><th>Model</th><th>Cases</th><th>Avg score</th><th>Updated</th>
+      <th>Run</th><th>Status</th><th>Authority</th><th>Model</th><th>Cases</th><th>Avg score</th><th>Updated</th>
     </tr></thead><tbody>${runs.map(r => `
       <tr class="clickable" data-run="${esc(r.run_dir)}">
         <td><b>${esc(r.name)}</b><div class="muted" style="font-size:11px">${esc(r.run_id)}</div></td>
         <td><span class="pill">${esc(r.status || '—')}</span></td>
+        <td><span class="pill">${esc(authorityLabel(r.authority))}</span></td>
         <td>${esc(r.model || '—')}</td>
         <td>${r.completed_cases ?? '—'}/${r.total_cases ?? '—'}</td>
-        <td class="score ${scoreClass(r.avg_composite_score)}">${fmtScore(r.avg_composite_score)}</td>
+        <td class="score ${scoreClass(authoritativeCompletedScore(r))}">${fmtScore(authoritativeCompletedScore(r))}</td>
         <td class="muted">${esc((r.updated_at||'').replace('T',' ').slice(0,19))}</td>
       </tr>`).join('')}</tbody></table>`;
   view.querySelectorAll('tr.clickable').forEach(node =>
@@ -582,6 +597,9 @@ async function renderRunDetail() {
   const cases = d.cases || [];
   view.innerHTML = `
     <div class="crumb"><a id="back">← runs</a> / ${esc(d.run_dir)}</div>
+    <div class="card"><b>Run authority:</b> ${esc(authorityLabel(d.authority))}
+      ${d.authority === 'authoritative' ? '' : '<div class="muted">Unverified artifacts are diagnostic only and are not score evidence.</div>'}
+    </div>
     <div class="grid2">
       <div class="card"><h3>Configuration</h3>
         <div class="kv"><b>provider:</b> ${esc(cfg.provider||'—')} · ${esc(ps.model||'—')}</div>

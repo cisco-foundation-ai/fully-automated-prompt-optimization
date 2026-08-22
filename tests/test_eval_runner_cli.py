@@ -223,6 +223,63 @@ def test_load_chain_config_with_chain_config(tmp_path: Path) -> None:
     assert loaded.chain.config == chain_cfg
 
 
+def test_load_config_defaults_only_present_textual_variant_dimensions(
+    tmp_path: Path,
+) -> None:
+    base = _write_base_config(tmp_path)
+    base["chain"] = {
+        "path": "chains/my_chain.py",
+        "config": {
+            "prompt_paths": {"answer": "prompts/answer.md"},
+            "skill_paths": ["skills/research.md"],
+        },
+    }
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(base), encoding="utf-8")
+
+    loaded = load_eval_config(config_path)
+
+    assert loaded.comparison_variant_dimensions == ["prompts", "skills"]
+
+
+def test_load_config_accepts_explicit_non_textual_variant_dimensions(
+    tmp_path: Path,
+) -> None:
+    base = _write_base_config(tmp_path)
+    base["chain"] = {"path": "chains/my_chain.py", "config": {}}
+    base["comparison"] = {
+        "variant_dimensions": ["chain_structure", "sampling"],
+    }
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(base), encoding="utf-8")
+
+    loaded = load_eval_config(config_path)
+
+    assert loaded.comparison_variant_dimensions == ["chain_structure", "sampling"]
+
+
+@pytest.mark.parametrize(
+    "dimensions",
+    [
+        ["dataset"],
+        ["prompts", "prompts"],
+        "prompts",
+    ],
+)
+def test_load_config_rejects_invalid_variant_dimensions(
+    tmp_path: Path,
+    dimensions: object,
+) -> None:
+    base = _write_base_config(tmp_path)
+    base["chain"] = {"path": "chains/my_chain.py", "config": {}}
+    base["comparison"] = {"variant_dimensions": dimensions}
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(base), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="comparison.variant_dimensions"):
+        load_eval_config(config_path)
+
+
 def test_load_config_requires_chain(tmp_path: Path) -> None:
     """Config without 'chain' key raises ValueError."""
     base = _write_base_config(tmp_path)
@@ -797,7 +854,7 @@ def test_cli_eval_progress_missing_file(tmp_path: Path, capsys: pytest.CaptureFi
 def test_eval_marks_failed_on_exception(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Eval completes with 0 scores when provider raises (exceptions caught per-case)."""
+    """Per-case provider failures remain distinct from successful zero scores."""
     dataset = write_dataset(tmp_path, cases=2)
     scorer = write_scorer(tmp_path)
     template = tmp_path / "template.md"
@@ -828,19 +885,27 @@ def test_eval_marks_failed_on_exception(
     assert len(results) == 2
     for r in results:
         assert r["output_text"] == ""
-        assert any("Chain exception" in d for d in r["diagnostics"])
+        assert r["execution_status"] == "failed"
+        assert r["execution_error"] == {
+            "phase": "chain",
+            "category": "runtime",
+            "summary": "Chain execution failed.",
+        }
+        assert "Simulated failure" not in json.dumps(r)
 
     from src.hephaestus.runs.progress import read_progress
 
     progress = read_progress(out_dir)
     assert progress is not None
-    assert progress.status == "completed"
+    assert progress.status == "failed"
+    assert progress.successful_case_ids == []
+    assert progress.failed_case_ids == ["c1", "c2"]
 
 
-def test_eval_marks_completed_after_write_outputs(
+def test_eval_marks_failed_when_bundle_publication_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Eval marks completed only after write_outputs succeeds."""
+    """A pre-manifest publication failure leaves progress failed."""
     dataset = write_dataset(tmp_path, cases=1)
     scorer = write_scorer(tmp_path)
     template = tmp_path / "template.md"
@@ -858,13 +923,20 @@ def test_eval_marks_completed_after_write_outputs(
         lambda _p, _s: TrackingProvider(responses=["resp"]),
     )
 
-    # Mock write_outputs to fail
-    _original_write_outputs = eval_runner.write_outputs
+    class SuccessfulChain:
+        def stream(self, _state):
+            yield {"classify": {"output_text": "resp", "step_outputs": {}}}
 
-    def failing_write_outputs(*args, **kwargs):
+    monkeypatch.setattr(
+        eval_runner,
+        "_ensure_chain",
+        lambda *_args, **_kwargs: SuccessfulChain(),
+    )
+
+    def failing_publish(*args, **kwargs):
         raise IOError("Simulated write failure")
 
-    monkeypatch.setattr(eval_runner, "write_outputs", failing_write_outputs)
+    monkeypatch.setattr(eval_runner.RunBundleWriter, "publish", failing_publish)
 
     config = load_eval_config(config_path)
     with pytest.raises(IOError):
@@ -876,6 +948,7 @@ def test_eval_marks_completed_after_write_outputs(
     assert progress is not None
     assert progress.status == "failed"
     assert progress.completed_cases == 1  # Case was evaluated
+    assert not (out_dir / "run_manifest.json").exists()
 
 
 def test_eval_marks_failed_on_keyboard_interrupt(

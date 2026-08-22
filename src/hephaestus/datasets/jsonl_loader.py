@@ -4,13 +4,23 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Mapping, Tuple
 
 from src.hephaestus.types import EvalCase
 
 REQUIRED_KEYS = {"case_id", "task_type", "context", "expected", "metadata"}
+
+
+@dataclass(frozen=True)
+class LoadedCasesWithIdentity:
+    cases: Tuple[EvalCase, ...]
+    raw_sha256: str
+    ordered_case_ids: Tuple[str, ...]
+    physical_rows_by_case_id: Mapping[str, int]
 
 
 def _validate_case(raw: dict, line_number: int) -> EvalCase:
@@ -54,15 +64,36 @@ def _validate_case(raw: dict, line_number: int) -> EvalCase:
     )
 
 
-def load_cases(path: Path) -> List[EvalCase]:
+def load_cases_with_identity(path: Path) -> LoadedCasesWithIdentity:
     if not path.exists():
         raise FileNotFoundError(f"Dataset path not found: {path}")
 
+    raw_bytes = path.read_bytes()
     cases: List[EvalCase] = []
-    for index, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    ordered_case_ids: List[str] = []
+    physical_rows_by_case_id: Dict[str, int] = {}
+    for index, line in enumerate(raw_bytes.decode("utf-8").splitlines(), start=1):
         text = line.strip()
         if not text:
             continue
         raw = json.loads(text)
-        cases.append(_validate_case(raw, index))
-    return cases
+        case = _validate_case(raw, index)
+        previous_row = physical_rows_by_case_id.get(case.case_id)
+        if previous_row is not None:
+            raise ValueError(
+                f"Duplicate case_id {case.case_id!r} at rows {previous_row} and {index}"
+            )
+        cases.append(case)
+        ordered_case_ids.append(case.case_id)
+        physical_rows_by_case_id[case.case_id] = index
+
+    return LoadedCasesWithIdentity(
+        cases=tuple(cases),
+        raw_sha256=hashlib.sha256(raw_bytes).hexdigest(),
+        ordered_case_ids=tuple(ordered_case_ids),
+        physical_rows_by_case_id=physical_rows_by_case_id,
+    )
+
+
+def load_cases(path: Path) -> List[EvalCase]:
+    return list(load_cases_with_identity(path).cases)

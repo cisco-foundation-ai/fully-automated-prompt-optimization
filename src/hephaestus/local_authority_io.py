@@ -284,6 +284,51 @@ def open_bound_directory(path: Path) -> BoundDirectory:
         raise
 
 
+def open_or_create_bound_directory(
+    path: Path,
+    *,
+    mode: int = 0o755,
+) -> BoundDirectory:
+    """Walk and create one absolute directory without following symlink ancestors."""
+    lexical = Path(os.path.abspath(os.fspath(path)))
+    anchor = Path(lexical.anchor)
+    if not anchor.anchor:
+        raise ValueError("local authority path has no filesystem anchor")
+    try:
+        relative = lexical.relative_to(anchor)
+        current = open_bound_directory(anchor)
+    except (OSError, ValueError) as exc:
+        raise ValueError("local authority ancestor is missing or unsafe") from exc
+    try:
+        for part in relative.parts:
+            observed = optional_stat_child(current, part)
+            if observed is None:
+                try:
+                    child = create_child_directory(current, part, mode=mode)
+                except FileExistsError:
+                    observed = stat_child(current, part)
+                else:
+                    sync_bound_directory(current)
+                    current.close()
+                    current = child
+                    continue
+            if observed.kind != "directory":
+                raise ValueError(
+                    "local authority ancestor is not an exact directory"
+                )
+            child = open_child_directory(
+                current,
+                part,
+                expected=observed.identity,
+            )
+            current.close()
+            current = child
+        return current
+    except BaseException:
+        current.close()
+        raise
+
+
 def validate_existing_directory_chain(base: Path, path: Path) -> None:
     """Bind every existing directory component beneath one lexical trust anchor."""
     lexical_base = Path(os.path.abspath(os.fspath(base)))
