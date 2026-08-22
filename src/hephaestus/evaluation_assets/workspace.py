@@ -350,7 +350,7 @@ def _legacy_wal_before_authority(
 ) -> bytes:
     """Select the exact LF or Windows-CRLF bytes authenticated by legacy WAL."""
     canonical = _persisted_json_bytes(before)
-    candidates = (canonical, canonical.replace(b"\n", b"\r\n"))
+    candidates = (canonical, b"\r\n".join(canonical.split(b"\n")))
     matches = tuple(
         candidate
         for candidate in candidates

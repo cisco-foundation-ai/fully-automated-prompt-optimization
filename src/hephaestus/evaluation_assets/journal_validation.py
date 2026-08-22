@@ -1977,7 +1977,7 @@ def _matches_persisted_snapshot_sha256(
     if hashlib.sha256(persisted).hexdigest() == expected:
         return True
     return allow_historical_crlf and hashlib.sha256(
-        persisted.replace(b"\n", b"\r\n")
+        b"\r\n".join(persisted.split(b"\n"))
     ).hexdigest() == expected
 
 
