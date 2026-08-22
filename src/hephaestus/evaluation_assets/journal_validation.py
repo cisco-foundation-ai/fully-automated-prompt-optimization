@@ -449,8 +449,16 @@ def _validate_prepared(
         or canonical_before_config.get("asset_id") != layout.asset_id
         or before_state.get("tenant_id") != layout.tenant_id
         or before_state.get("asset_id") != layout.asset_id
-        or _persisted_sha256(before_config) != before["config_sha256"]
-        or _persisted_sha256(before_state) != before["state_sha256"]
+        or not _matches_persisted_snapshot_sha256(
+            before_config,
+            before["config_sha256"],
+            allow_historical_crlf=kind == "legacy_adoption",
+        )
+        or not _matches_persisted_snapshot_sha256(
+            before_state,
+            before["state_sha256"],
+            allow_historical_crlf=kind == "legacy_adoption",
+        )
     ):
         raise ValueError("journal before snapshots are inconsistent")
 
@@ -1956,6 +1964,21 @@ def _utc_timestamp(value: Any) -> datetime:
 
 def _persisted_sha256(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(_persisted_json_bytes(payload)).hexdigest()
+
+
+def _matches_persisted_snapshot_sha256(
+    payload: Mapping[str, Any],
+    expected: str,
+    *,
+    allow_historical_crlf: bool,
+) -> bool:
+    """Match exact shared-writer bytes, including its historical Windows form."""
+    persisted = _persisted_json_bytes(payload)
+    if hashlib.sha256(persisted).hexdigest() == expected:
+        return True
+    return allow_historical_crlf and hashlib.sha256(
+        persisted.replace(b"\n", b"\r\n")
+    ).hexdigest() == expected
 
 
 def _persisted_json_bytes(payload: Mapping[str, Any]) -> bytes:

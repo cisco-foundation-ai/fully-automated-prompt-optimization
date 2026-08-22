@@ -17,12 +17,44 @@ from typing import Any
 
 import pytest
 
+from src.hephaestus import artifact_io
 from src.hephaestus import local_authority_io as authority_io
 from src.hephaestus.artifact_io import atomic_write_bytes_at
 from src.hephaestus.evaluation_assets import control_jsonl as control_jsonl_module
 from src.hephaestus.evaluation_assets.control_jsonl import (
     create_and_open_local_directory_at,
 )
+
+
+def test_atomic_text_writers_request_literal_lf_and_emit_portable_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared text primitives disable platform-native newline translation."""
+    original = artifact_io.tempfile.NamedTemporaryFile
+    requested_newlines: list[str | None] = []
+
+    def named_temporary_file(*args: Any, **kwargs: Any) -> Any:
+        requested_newlines.append(kwargs.get("newline"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        artifact_io.tempfile,
+        "NamedTemporaryFile",
+        named_temporary_file,
+    )
+    json_path = tmp_path / "payload.json"
+    jsonl_path = tmp_path / "rows.jsonl"
+    text_path = tmp_path / "report.md"
+
+    artifact_io.atomic_write_json(json_path, {"value": "line"})
+    artifact_io.atomic_write_jsonl(jsonl_path, [{"value": 1}, {"value": 2}])
+    artifact_io.atomic_write_text(text_path, ["alpha\n", "beta\n"])
+
+    assert requested_newlines == ["\n", "\n", "\n"]
+    assert json_path.read_bytes() == b'{\n  "value": "line"\n}\n'
+    assert jsonl_path.read_bytes() == b'{"value": 1}\n{"value": 2}\n'
+    assert text_path.read_bytes() == b"alpha\nbeta\n"
 
 
 def test_public_imports_survive_missing_fcntl_and_lock_fails_explicitly(

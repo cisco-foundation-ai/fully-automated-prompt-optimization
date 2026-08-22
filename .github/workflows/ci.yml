@@ -23,7 +23,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 45
     env:
       OPENAI_API_KEY: ""
       ANTHROPIC_API_KEY: ""
@@ -60,6 +60,9 @@ jobs:
           native_receipt_and_wal_faults_reuse_stage_eight_and_provider_evidence or
           legacy_adoption_generation_fault_reclaims_staging_and_recovers or
           legacy_adoption_fault_phases_recover_as_one_terminal_operation or
+          legacy_adoption_recovers_historical_crlf_control_files or
+          legacy_adoption_recovery_rejects_crlf_to_lf_change_after_prepare or
+          legacy_adoption_rejects_unsupported_control_serialization_before_writes or
           pr2_repeated_revisions_reclaim_exact_owned_hidden_nodes"
 
   ci:

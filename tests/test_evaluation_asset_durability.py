@@ -8077,6 +8077,126 @@ def test_legacy_adoption_generation_fault_reclaims_staging_and_recovers(
     verify_released_asset(layout, adopted)
 
 
+@pytest.mark.parametrize(
+    "fault_name",
+    [
+        "after_prepared_journal",
+        "after_state_replace",
+        "after_event_append",
+    ],
+)
+def test_legacy_adoption_recovers_historical_crlf_control_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault_name: str,
+) -> None:
+    """Recovery authenticates exact Windows output from the legacy text writer."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+
+    before_payloads: dict[str, Mapping[str, Any]] = {}
+    before_hashes: dict[str, str] = {}
+    for name, path in (
+        ("config", layout.config_path),
+        ("state", layout.state_path),
+    ):
+        payload = _rewrite_control_json_with_crlf(layout, path)
+        before_payloads[name] = payload
+        before_hashes[name] = file_sha256(path)
+        assert before_hashes[name] != durability_module.persisted_json_sha256(
+            payload
+        )
+
+    def inject(name: str) -> None:
+        if name == fault_name:
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", inject)
+    with pytest.raises(_InjectedFault, match=fault_name):
+        layout.adopt_legacy()
+    prepared = _read_jsonl(layout.recovery_journal_path)[0]
+    assert prepared["before_config"] == before_payloads["config"]
+    assert prepared["before_state"] == before_payloads["state"]
+    assert prepared["before"]["config_sha256"] == before_hashes["config"]
+    assert prepared["before"]["state_sha256"] == before_hashes["state"]
+
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+    assert layout.recover() == [prepared["operation_id"]]
+    adopted = layout.load_state()
+    assert adopted.status == "released"
+    verify_released_asset(layout, adopted)
+
+
+def test_legacy_adoption_recovery_rejects_crlf_to_lf_change_after_prepare(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid alternate legacy encoding remains byte-bound after WAL prepare."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+    _rewrite_control_json_with_crlf(layout, layout.state_path)
+
+    def stop_after_prepare(name: str) -> None:
+        if name == "after_prepared_journal":
+            raise _InjectedFault(name)
+
+    monkeypatch.setattr(workspace_module, "_fault_point", stop_after_prepare)
+    with pytest.raises(_InjectedFault, match="after_prepared_journal"):
+        layout.adopt_legacy()
+    prepared = _read_jsonl(layout.recovery_journal_path)[0]
+    assert prepared["before"]["state_sha256"] == file_sha256(layout.state_path)
+
+    control_jsonl_module.write_local_authority_json(
+        layout.state_path,
+        layout.tenants_root,
+        prepared["before_state"],
+        expected_current=layout.state_path.read_bytes(),
+        check_expected_current=True,
+    )
+    assert prepared["before"]["state_sha256"] != file_sha256(layout.state_path)
+    before = _authority_bytes(layout)
+    monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
+
+    with pytest.raises(EvaluationAssetIntegrityError):
+        layout.recover()
+
+    assert _authority_bytes(layout) == before
+
+
+@pytest.mark.parametrize("control_name", ["config", "state"])
+def test_legacy_adoption_rejects_unsupported_control_serialization_before_writes(
+    tmp_path: Path,
+    control_name: str,
+) -> None:
+    """Unsupported legacy JSON bytes fail before WAL or generated authority."""
+    pipeline, _, _ = _create_pipeline(tmp_path)
+    pipeline.run()
+    layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
+    path = layout.config_path if control_name == "config" else layout.state_path
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    control_jsonl_module.write_local_authority_text(
+        path,
+        layout.tenants_root,
+        json.dumps(payload, sort_keys=True, allow_nan=False),
+        expected_current=path.read_bytes(),
+        check_expected_current=True,
+    )
+    before = _authority_bytes(layout)
+
+    with pytest.raises(EvaluationAssetLegacyError):
+        layout.adopt_legacy()
+
+    assert _authority_bytes(layout) == before
+    assert not layout.recovery_journal_path.exists()
+    assert not layout.generations_root.exists()
+    assert not any(layout.receipts_root.glob("*.json"))
+
+
 def test_legacy_adoption_counts_use_the_validated_artifact_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -15568,6 +15688,27 @@ def _downgrade_to_legacy_completed(layout: EvaluationAssetLayout) -> None:
         layout.artifact_path(PipelineStage.DATASET_SPLITS, "dataset_manifest.json"),
         manifest,
     )
+
+
+def _rewrite_control_json_with_crlf(
+    layout: EvaluationAssetLayout,
+    path: Path,
+) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    canonical = json.dumps(
+        payload,
+        indent=2,
+        sort_keys=True,
+        allow_nan=False,
+    ) + "\n"
+    control_jsonl_module.write_local_authority_text(
+        path,
+        layout.tenants_root,
+        canonical.replace("\n", "\r\n"),
+        expected_current=path.read_bytes(),
+        check_expected_current=True,
+    )
+    return payload
 
 
 def _make_released_checkpoint_mutable(

@@ -247,13 +247,19 @@ def _handle_release_state_failure(
     preexisting: bool,
     pointer: Mapping[str, Any],
     installed_identity: tuple[int, int, int] | None,
+    before_authority: bytes | None = None,
 ) -> None:
     """Rollback a pointer only while state remains the exact WAL-before bytes."""
     try:
         present, current = _optional_local_authority_bytes(layout, layout.state_path)
     except (OSError, ValueError):
         return
-    if not present or current != _persisted_json_bytes(before_state):
+    expected_before = (
+        before_authority
+        if before_authority is not None
+        else _persisted_json_bytes(before_state)
+    )
+    if not present or current != expected_before:
         # Target and foreign/unknown states retain the pointer so recovery never
         # compounds a possibly completed state installation.
         del target_state
@@ -312,10 +318,23 @@ def _wal_json_write_expectation(
     path: Path,
     before: Mapping[str, Any],
     target: Mapping[str, Any],
+    *,
+    before_authority: bytes | None = None,
 ) -> bytes:
     """Accept only an exact WAL before/target JSON authority on recovery."""
+    expected_before = (
+        before_authority
+        if before_authority is not None
+        else _persisted_json_bytes(before)
+    )
+    if parse_strict_json_object(expected_before) != dict(before):
+        raise EvaluationAssetIntegrityError(
+            layout.tenant_id,
+            layout.asset_id,
+            "prior control authority disagrees with its WAL snapshot",
+        )
     present, payload = _optional_local_authority_bytes(layout, path)
-    allowed = {_persisted_json_bytes(before), _persisted_json_bytes(target)}
+    allowed = {expected_before, _persisted_json_bytes(target)}
     if not present or payload not in allowed:
         raise EvaluationAssetIntegrityError(
             layout.tenant_id,
@@ -323,6 +342,23 @@ def _wal_json_write_expectation(
             "control authority changed after its WAL observation",
         )
     return payload
+
+
+def _legacy_wal_before_authority(
+    before: Mapping[str, Any],
+    expected_sha256: str,
+) -> bytes:
+    """Select the exact LF or Windows-CRLF bytes authenticated by legacy WAL."""
+    canonical = _persisted_json_bytes(before)
+    candidates = (canonical, canonical.replace(b"\n", b"\r\n"))
+    matches = tuple(
+        candidate
+        for candidate in candidates
+        if hashlib.sha256(candidate).hexdigest() == expected_sha256
+    )
+    if len(matches) != 1:
+        raise ValueError("legacy WAL before-control hash is inconsistent")
+    return matches[0]
 
 
 def _wal_descriptor_write_expectation(
@@ -1749,6 +1785,22 @@ class EvaluationAssetLayout:
                     raise ValueError(
                         "legacy checkpoint configuration is not type-exact"
                     )
+                before_config = config.to_dict()
+                before_state = raw_state
+                before_config_sha256 = hashlib.sha256(
+                    legacy_artifact_snapshot[self.config_path]
+                ).hexdigest()
+                before_state_sha256 = hashlib.sha256(
+                    legacy_artifact_snapshot[self.state_path]
+                ).hexdigest()
+                _legacy_wal_before_authority(
+                    before_config,
+                    before_config_sha256,
+                )
+                _legacy_wal_before_authority(
+                    before_state,
+                    before_state_sha256,
+                )
                 legacy_artifact_paths: dict[tuple[str, str], Path] = {}
                 legacy_artifact_profiles: dict[str, str] = {}
                 counts = validate_legacy_release_candidate(
@@ -1847,8 +1899,6 @@ class EvaluationAssetLayout:
                 ) from exc
 
             operation_id = uuid.uuid4().hex
-            before_config = config.to_dict()
-            before_state = raw_state
             target_receipts = {
                 stage: receipts[stage] for stage in persisted_stages
             }
@@ -1906,21 +1956,15 @@ class EvaluationAssetLayout:
                 "before_config": before_config,
                 "before_state": before_state,
                 "before": {
-                    "config_sha256": _local_authority_sha256(
-                        self,
-                        self.config_path,
-                    ),
-                    "state_sha256": _local_authority_sha256(self, self.state_path),
+                    "config_sha256": before_config_sha256,
+                    "state_sha256": before_state_sha256,
                     "release": _file_descriptor(
                         self,
                         self.release_pointer_path,
                     ),
                 },
                 "target": {
-                    "config_sha256": _local_authority_sha256(
-                        self,
-                        self.config_path,
-                    ),
+                    "config_sha256": before_config_sha256,
                     "state_sha256": persisted_json_sha256(plan["target_state"]),
                     "receipt_sha256": plan["receipt_sha256"],
                     "release_sha256": persisted_json_sha256(pointer),
@@ -3087,6 +3131,21 @@ class EvaluationAssetLayout:
                     self.asset_id,
                     "the recovery journal is missing prior adoption release authority",
                 )
+            before_state = entry.get("before_state")
+            before_state_sha256 = before.get("state_sha256")
+            if not isinstance(before_state, Mapping) or not isinstance(
+                before_state_sha256,
+                str,
+            ):
+                raise EvaluationAssetIntegrityError(
+                    self.tenant_id,
+                    self.asset_id,
+                    "the recovery journal is missing prior state authority",
+                )
+            legacy_before_state = _legacy_wal_before_authority(
+                before_state,
+                before_state_sha256,
+            )
             pointer_preexisting, pointer_bytes = _release_pointer_write_expectation(
                 self,
                 before["release"],
@@ -3123,20 +3182,14 @@ class EvaluationAssetLayout:
                     installed_identity=installed_pointer_identity,
                 )
                 raise
-            before_state = entry.get("before_state")
-            if not isinstance(before_state, Mapping):
-                raise EvaluationAssetIntegrityError(
-                    self.tenant_id,
-                    self.asset_id,
-                    "the recovery journal is missing prior state authority",
-                )
-            expected_state = _wal_json_write_expectation(
-                self,
-                self.state_path,
-                before_state,
-                target_state,
-            )
             try:
+                expected_state = _wal_json_write_expectation(
+                    self,
+                    self.state_path,
+                    before_state,
+                    target_state,
+                    before_authority=legacy_before_state,
+                )
                 self._write_authority_json(
                     self.state_path,
                     target_state,
@@ -3152,6 +3205,7 @@ class EvaluationAssetLayout:
                     preexisting=pointer_preexisting,
                     pointer=pointer,
                     installed_identity=installed_pointer_identity,
+                    before_authority=legacy_before_state,
                 )
                 raise
             _fault_point("after_state_replace")
