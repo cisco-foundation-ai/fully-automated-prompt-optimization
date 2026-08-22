@@ -13543,15 +13543,16 @@ def test_generation_temp_created_fault_retains_only_empty_owned_directory(
     assert not list(generations_root.glob(".*.tmp"))
 
 
-def test_pr2_repeated_revisions_reclaim_exact_owned_hidden_nodes(
+def _assert_revisions_reclaim_exact_owned_hidden_nodes(
     tmp_path: Path,
+    *,
+    iterations: int,
 ) -> None:
-    """Ordinary authority replacement has bounded operation-owned storage."""
     pipeline, _, _ = _create_pipeline(tmp_path)
     pipeline.run()
     _make_released_checkpoint_mutable(pipeline.layout)
 
-    for index in range(100):
+    for index in range(iterations):
         pipeline.layout.revise_config(
             {"match_threshold": 0.2 if index % 2 == 0 else 0.3}
         )
@@ -13561,6 +13562,20 @@ def test_pr2_repeated_revisions_reclaim_exact_owned_hidden_nodes(
             if path.name.endswith((".tmp", ".removed", ".rejected"))
         ]
         assert hidden == []
+
+
+def test_pr2_repeated_revisions_reclaim_exact_owned_hidden_nodes(
+    tmp_path: Path,
+) -> None:
+    """Ordinary authority replacement has bounded operation-owned storage."""
+    _assert_revisions_reclaim_exact_owned_hidden_nodes(tmp_path, iterations=100)
+
+
+def test_native_revisions_reclaim_exact_owned_hidden_nodes(
+    tmp_path: Path,
+) -> None:
+    """Native authority replacement reclaims operation-owned hidden nodes."""
+    _assert_revisions_reclaim_exact_owned_hidden_nodes(tmp_path, iterations=3)
 
 
 def test_recovery_rejects_corrupt_prepared_release_before_pointer_install(

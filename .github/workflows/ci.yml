@@ -63,7 +63,7 @@ jobs:
           legacy_adoption_recovers_historical_crlf_control_files or
           legacy_adoption_recovery_rejects_crlf_to_lf_change_after_prepare or
           legacy_adoption_rejects_unsupported_control_serialization_before_writes or
-          pr2_repeated_revisions_reclaim_exact_owned_hidden_nodes"
+          native_revisions_reclaim_exact_owned_hidden_nodes"
 
   ci:
     runs-on: ubuntu-latest
