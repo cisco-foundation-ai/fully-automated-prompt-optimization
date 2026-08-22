@@ -22,6 +22,7 @@ from src.hephaestus.evaluation_assets.publication import (
     install_generation,
     write_release_pointer,
 )
+from src.hephaestus.evaluation_assets.review import ReviewDecisionConflictError
 from src.hephaestus.webui.data import TenantStore
 from src.hephaestus.webui.server import (
     _Handler,
@@ -297,6 +298,357 @@ def test_adopt_evaluation_asset_endpoint_uses_thin_service_api(
         "body": {"status": "released", "asset_id": "legacy-v1"},
         "status": 202,
     }
+
+
+def test_review_http_routes_bind_exact_authority_and_return_safe_json(
+    tmp_path: Path,
+) -> None:
+    """Catch a route that drops case/set identity or exposes protected review data."""
+    received = []
+
+    class FakeManager:
+        def list_reviews(self, tenant_id, asset_id, **kwargs):
+            received.append(("list", tenant_id, asset_id, kwargs))
+            return {
+                "items": [
+                    {
+                        "case_id": "inferred-u1",
+                        "fingerprint": "sha256:" + "a" * 64,
+                        "trust_tier": "inferred_from_trusted_feedback",
+                        "status": "pending",
+                    }
+                ],
+                "held": [],
+                "counts": {
+                    "pending": 1,
+                    "approved": 0,
+                    "rejected": 0,
+                    "held": 0,
+                },
+                "review_set_fingerprint": "sha256:" + "b" * 64,
+                "decision_set_fingerprint": "sha256:" + "e" * 64,
+                "review_authority_revision": "sha256:" + "f" * 64,
+                "stage7_receipt_sha256": "sha256:" + "c" * 64,
+                "finalization": None,
+                "offset": kwargs["offset"],
+                "limit": kwargs["limit"],
+                "total": 1,
+            }
+
+        def decide_review(
+            self,
+            tenant_id,
+            asset_id,
+            case_id,
+            fingerprint,
+            decision,
+            **kwargs,
+        ):
+            received.append(
+                (
+                    "decide",
+                    tenant_id,
+                    asset_id,
+                    case_id,
+                    fingerprint,
+                    decision,
+                    kwargs,
+                )
+            )
+            return {
+                "decision_id": "sha256:" + "d" * 64,
+                "case_id": case_id,
+                "fingerprint": fingerprint,
+                "status": decision,
+            }
+
+        def finalize_review(self, tenant_id, asset_id, **kwargs):
+            received.append(("finalize", tenant_id, asset_id, kwargs))
+            return {
+                "tenant_id": tenant_id,
+                "asset_id": asset_id,
+                "status": "queued",
+                "current_stage": "dataset_splits",
+                "counts": {"approved": 1, "pending": 0},
+            }
+
+    handler = type(
+        "_TestReviewHTTPHandler",
+        (_Handler,),
+        {
+            "store": TenantStore(tmp_path / "tenants", repository_base=tmp_path),
+            "asset_manager": FakeManager(),
+        },
+    )
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    port = httpd.server_address[1]
+    host = f"127.0.0.1:{port}"
+    fingerprint = "sha256:" + "a" * 64
+    review_set = "sha256:" + "b" * 64
+    decision_set = "sha256:" + "e" * 64
+
+    try:
+        status, headers, body = _http_json_request(
+            port,
+            "GET",
+            "/api/tenants/tenant_a/evaluation-assets/v1/reviews"
+            "?status=pending&offset=2&limit=7",
+            headers={"Host": host},
+        )
+        assert status == 200
+        assert headers["cache-control"] == "no-store"
+        assert body["items"] == [
+            {
+                "case_id": "inferred-u1",
+                "fingerprint": fingerprint,
+                "trust_tier": "inferred_from_trusted_feedback",
+                "status": "pending",
+            }
+        ]
+        assert body["decision_set_fingerprint"] == decision_set
+
+        status, _, _ = _http_json_request(
+            port,
+            "GET",
+            "/api/tenants/tenant_a/evaluation-assets/v1/reviews"
+            "?status=held&offset=0&limit=3",
+            headers={"Host": host},
+        )
+        assert status == 200
+
+        status, _, body = _http_json_request(
+            port,
+            "GET",
+            "/api/tenants/tenant_a/evaluation-assets/v1/reviews?limit=101",
+            headers={"Host": host},
+        )
+        assert (status, body) == (400, {"error": "invalid review request"})
+
+        mutation_headers = {
+            "Host": host,
+            "Content-Type": "application/json",
+            "Origin": f"http://{host}",
+        }
+        status, _, body = _http_json_request(
+            port,
+            "POST",
+            "/api/tenants/tenant_a/evaluation-assets/v1/reviews/finalize",
+            body=json.dumps(
+                {
+                    "reviewer": "reviewer@example.com",
+                    "expected_review_set_fingerprint": review_set,
+                }
+            ),
+            headers=mutation_headers,
+        )
+        assert (status, body) == (400, {"error": "invalid review request"})
+
+        decision_payload = json.dumps(
+            {
+                "case_id": "inferred-u1",
+                "reviewer": "reviewer@example.com",
+                "note": "checked",
+                "expected_review_set_fingerprint": review_set,
+            }
+        )
+        for action, decision in (("approve", "approved"), ("reject", "rejected")):
+            status, _, body = _http_json_request(
+                port,
+                "POST",
+                "/api/tenants/tenant_a/evaluation-assets/v1/reviews/"
+                f"{fingerprint}/{action}",
+                body=decision_payload,
+                headers=mutation_headers,
+            )
+            assert status == 200
+            assert body == {
+                "decision_id": "sha256:" + "d" * 64,
+                "case_id": "inferred-u1",
+                "fingerprint": fingerprint,
+                "status": decision,
+            }
+
+        status, _, body = _http_json_request(
+            port,
+            "POST",
+            "/api/tenants/tenant_a/evaluation-assets/v1/reviews/finalize",
+            body=json.dumps(
+                {
+                    "reviewer": "reviewer@example.com",
+                    "note": "release approved cases",
+                    "expected_review_set_fingerprint": review_set,
+                    "expected_decision_set_fingerprint": decision_set,
+                }
+            ),
+            headers=mutation_headers,
+        )
+        assert status == 202
+        assert body == {
+            "tenant_id": "tenant_a",
+            "asset_id": "v1",
+            "status": "queued",
+            "current_stage": "dataset_splits",
+            "counts": {"approved": 1, "pending": 0},
+        }
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=2)
+
+    assert received == [
+        (
+            "list",
+            "tenant_a",
+            "v1",
+            {"status": "pending", "offset": 2, "limit": 7},
+        ),
+        (
+            "list",
+            "tenant_a",
+            "v1",
+            {"status": "held", "offset": 0, "limit": 3},
+        ),
+        (
+            "decide",
+            "tenant_a",
+            "v1",
+            "inferred-u1",
+            fingerprint,
+            "approved",
+            {
+                "reviewer": "reviewer@example.com",
+                "note": "checked",
+                "expected_review_set_fingerprint": review_set,
+            },
+        ),
+        (
+            "decide",
+            "tenant_a",
+            "v1",
+            "inferred-u1",
+            fingerprint,
+            "rejected",
+            {
+                "reviewer": "reviewer@example.com",
+                "note": "checked",
+                "expected_review_set_fingerprint": review_set,
+            },
+        ),
+        (
+            "finalize",
+            "tenant_a",
+            "v1",
+            {
+                "reviewer": "reviewer@example.com",
+                "note": "release approved cases",
+                "expected_review_set_fingerprint": review_set,
+                "expected_decision_set_fingerprint": decision_set,
+            },
+        ),
+    ]
+
+
+def test_review_http_errors_are_status_specific_and_sanitized(
+    tmp_path: Path,
+) -> None:
+    """Stale authority and absent assets cannot disclose internal error details."""
+    class FakeManager:
+        def list_reviews(self, tenant_id, asset_id, **kwargs):
+            raise FileNotFoundError("/private/tenant/reviews.jsonl")
+
+        def decide_review(self, *args, **kwargs):
+            raise ReviewDecisionConflictError(
+                "stale fingerprint in /private/tenant/reviews.jsonl"
+            )
+
+    handler = type(
+        "_TestReviewErrorHTTPHandler",
+        (_Handler,),
+        {
+            "store": TenantStore(tmp_path / "tenants", repository_base=tmp_path),
+            "asset_manager": FakeManager(),
+        },
+    )
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    port = httpd.server_address[1]
+    host = f"127.0.0.1:{port}"
+    headers = {
+        "Host": host,
+        "Content-Type": "application/json",
+        "Origin": f"http://{host}",
+    }
+    fingerprint = "sha256:" + "a" * 64
+
+    try:
+        status, _, body = _http_json_request(
+            port,
+            "GET",
+            "/api/tenants/missing/evaluation-assets/v1/reviews",
+            headers={"Host": host},
+        )
+        assert (status, body) == (
+            404,
+            {"error": "evaluation asset review not found"},
+        )
+
+        status, _, body = _http_json_request(
+            port,
+            "POST",
+            "/api/tenants/tenant_a/evaluation-assets/v1/reviews/"
+            f"{fingerprint}/approve",
+            body=json.dumps(
+                {
+                    "case_id": "inferred-u1",
+                    "reviewer": "reviewer@example.com",
+                    "expected_review_set_fingerprint": "sha256:" + "b" * 64,
+                }
+            ),
+            headers=headers,
+        )
+        assert (status, body) == (
+            409,
+            {"error": "review request conflicts with current asset state"},
+        )
+        assert "/private/" not in json.dumps(body)
+
+        for path, payload in (
+            (
+                "/api/tenants/tenant_a/evaluation-assets/v1/reviews/"
+                "sha256:not-canonical/approve",
+                {
+                    "case_id": "inferred-u1",
+                    "reviewer": "reviewer@example.com",
+                    "expected_review_set_fingerprint": "sha256:" + "b" * 64,
+                },
+            ),
+            (
+                "/api/tenants/tenant_a/evaluation-assets/v1/reviews/"
+                f"{fingerprint}/approve",
+                {
+                    "reviewer": "reviewer@example.com",
+                    "expected_review_set_fingerprint": "sha256:" + "b" * 64,
+                },
+            ),
+        ):
+            status, _, body = _http_json_request(
+                port,
+                "POST",
+                path,
+                body=json.dumps(payload),
+                headers=headers,
+            )
+            assert (status, body) == (
+                400,
+                {"error": "invalid review request"},
+            )
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=2)
 
 
 def test_serve_rejects_non_loopback_bind_before_server_start(
@@ -765,5 +1117,27 @@ def _http_request(
         response = connection.getresponse()
         response.read()
         return response.status, {key.lower(): value for key, value in response.headers.items()}
+    finally:
+        connection.close()
+
+
+def _http_json_request(
+    port: int,
+    method: str,
+    path: str,
+    *,
+    body: str | None = None,
+    headers: dict[str, str],
+) -> tuple[int, dict[str, str], dict]:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+    try:
+        connection.request(method, path, body=body, headers=headers)
+        response = connection.getresponse()
+        payload = json.loads(response.read().decode("utf-8"))
+        return (
+            response.status,
+            {key.lower(): value for key, value in response.headers.items()},
+            payload,
+        )
     finally:
         connection.close()

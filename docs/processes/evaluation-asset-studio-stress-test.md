@@ -176,7 +176,7 @@ The simplest distinction is: **Studio builds the test; FAPO improves the system 
 | Which models are involved? | An optimizer, task model, and sometimes a judging model | A guideline-writing model and an embedding model (which turns text into similarity vectors) | Studio adds model calls before FAPO runs |
 | What may the agent change? | Allowed prompts, skills, parameters, or chain structure | The agent operates and reviews; shared code performs data transformations | Studio gives the agent less direct authority |
 | What decisions vary? | Pipeline variants | Models, number of groups, match cutoffs, synthetic generation, and split seed (the value that makes the split repeatable) | Studio configures a build rather than searching pipeline variants |
-| How is review used? | A candidate pipeline change is reviewed before evaluation | Generated cases carry review labels and queues | Similar intent, but Studio does not yet enforce approval before publication |
+| How is review used? | A candidate pipeline change is reviewed before evaluation | Generated cases carry review labels and queues | Similar intent, but ~~Studio does not yet enforce approval before publication~~ |
 | How are splits protected? | Separate files/configs plus access rules followed by the optimizer | The main Stage 8 keeps each `group_id` in one split and builds a trusted regression set | Studio adds a useful core safeguard |
 | How is history saved? | Numbered variants and iteration records | Asset workspaces, checkpoints, histories, and parent–child versions | Both aim to make changes traceable |
 | What comes out? | A selected pipeline and score history | Dataset files, guidelines, reports, queues, and parent–child history | Studio's output feeds FAPO |
@@ -193,7 +193,7 @@ The audit used four checks:
 3. **Offline tests.** With API credentials removed, `main` passed 330 tests, skipped 2, and deselected 8 integration tests (tests that require external systems). The Studio branch passed 387, skipped 2, and deselected 8; its focused files passed 61.
 4. **Adversarial probes.** We supplied deliberately difficult inputs that normal tests omit—for example, deleting a file from an asset still marked `completed`. These probes reproduced the defects listed below and five inherited FAPO runtime gaps.
 
-Passing the standard suite shows that expected paths work. It does not prove that harmful edge cases are impossible: most reproduced defects had no negative test, and one end-to-end test checks the `review_required` label but still permits those cases to be published.
+Passing the standard suite shows that expected paths work. It does not prove that harmful edge cases are impossible: most reproduced defects had no negative test, ~~and one end-to-end test checks the `review_required` label but still permits those cases to be published.~~
 
 We classify results as **confirmed defects** (reproduced or unavoidable from the code), **immediate improvements** (bounded fixes), **open research problems** (questions needing experiments), or **strengths** (properties already enforced). Release priorities are separate: **P0** blocks merge and use of protected tenant data; **P1** blocks claims that an asset is ready for FAPO; **P2** blocks broad empirical or production-effectiveness claims, but not a safely bounded prototype.
 
@@ -201,7 +201,7 @@ We classify results as **confirmed defects** (reproduced or unavoidable from the
 
 The idea is viable and tackles a real bottleneck: FAPO cannot optimize reliably until a tenant has useful cases and a meaningful scorer. Studio's basic evidence rule is good, and its main splitting step is stronger than FAPO's inherited split handling.
 
-The audited code is not yet ready to promise an independent regression set, enforced review, ~~unchangeable versions~~, or identity-safe redaction. The largest research flaw is easy to state: it learns grading rules from all trusted feedback and only afterward reserves some feedback for validation, test, and regression. A rule found only in saved test data can therefore appear in training. The main engineering risks are publication of unapproved AI-generated cases, raw files that Git may track, redaction that changes IDs, and ~~unsafe resume behavior~~.
+The audited code is not yet ready to promise ~~an independent regression set, enforced review,~~ ~~unchangeable versions~~, or identity-safe redaction. The largest research flaw is easy to state: ~~it learns grading rules from all trusted feedback and only afterward reserves some feedback for validation, test, and regression. A rule found only in saved test data can therefore appear in training.~~ The main engineering risks are ~~publication of unapproved AI-generated cases,~~ raw files that Git may track, redaction that changes IDs, and ~~unsafe resume behavior~~.
 
 These are repairable problems, not proof that the idea is infeasible. Until they are fixed and tested, Studio should be described as a versioned dataset-drafting tool, not as a producer of optimization-ready evaluation assets. Section 18 lists the good foundations that should remain intact.
 
@@ -209,8 +209,8 @@ These are repairable problems, not proof that the idea is infeasible. Until they
 
 | ID | What goes wrong | Evidence | Why it matters | Gate |
 | --- | --- | --- | --- | --- |
-| EA-01 | Grading rules are learned before evaluation groups are reserved | Unique test phrase leaked from regression into training | Saved evaluation evidence can shape training | P0 |
-| EA-02 | `review_required` is only a label | Six unapproved derived cases were published | FAPO may train or select on unchecked labels | P0 |
+| ~~EA-01~~ | ~~Grading rules are learned before evaluation groups are reserved~~ | ~~Unique test phrase leaked from regression into training~~ | ~~Saved evaluation evidence can shape training~~ | ~~P0~~ |
+| ~~EA-02~~ | ~~`review_required` is only a label~~ | ~~Six unapproved derived cases were published~~ | ~~FAPO may train or select on unchecked labels~~ | ~~P0~~ |
 | EA-03 | The actual asset folders are not ignored by Git | Reproduced with `git check-ignore` | Protected feedback may be committed | P0 |
 | EA-04 | Redaction also rewrites IDs | Distinct email/IP-shaped IDs became identical | Records and split groups can collapse | P0 |
 | ~~EA-05~~ | ~~A completed asset can change or lose files unnoticed~~ | ~~Both behaviors reproduced~~ | ~~One version ID can mean different data~~ | ~~P0~~ |
@@ -220,23 +220,23 @@ These are repairable problems, not proof that the idea is infeasible. Until they
 
 EA-07 is absent because Section 14 reclassifies the scorer handoff as a P1 readiness boundary, not a defect in the documented architecture.
 
-#### EA-01: saved evaluation feedback shapes training rules
+#### ~~EA-01: saved evaluation feedback shapes training rules~~
 
-**What happens.** Stage 3 reads all trusted feedback and turns it into grading rules stored in each case's `expected` field. Stage 8 divides cases into train, validation, test, and regression only afterward. See [`pipeline.py:320–455`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/blob/ce7f832fc96a4e8e7a5ef46fad49d1c24e15c50c/src/hephaestus/evaluation_assets/pipeline.py#L320-L455), [`pipeline.py:1362–1617`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/blob/ce7f832fc96a4e8e7a5ef46fad49d1c24e15c50c/src/hephaestus/evaluation_assets/pipeline.py#L1362-L1617), and [`pipeline.py:838–991`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/blob/ce7f832fc96a4e8e7a5ef46fad49d1c24e15c50c/src/hephaestus/evaluation_assets/pipeline.py#L838-L991).
+~~**What happens.** Stage 3 reads all trusted feedback and turns it into grading rules stored in each case's `expected` field. Stage 8 divides cases into train, validation, test, and regression only afterward. See [`pipeline.py:320–455`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/blob/ce7f832fc96a4e8e7a5ef46fad49d1c24e15c50c/src/hephaestus/evaluation_assets/pipeline.py#L320-L455), [`pipeline.py:1362–1617`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/blob/ce7f832fc96a4e8e7a5ef46fad49d1c24e15c50c/src/hephaestus/evaluation_assets/pipeline.py#L1362-L1617), and [`pipeline.py:838–991`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/blob/ce7f832fc96a4e8e7a5ef46fad49d1c24e15c50c/src/hephaestus/evaluation_assets/pipeline.py#L838-L991).~~
 
-**Example.** We placed the unique phrase `HOLDOUT_ONLY_CRITERION_7F3A` only in feedback record `f2`. The split put `f2` in `regression_trusted`, yet the phrase appeared in a training case's `expected` field. This is a canary test: a planted phrase reveals whether information crossed a boundary.
+~~**Example.** We placed the unique phrase `HOLDOUT_ONLY_CRITERION_7F3A` only in feedback record `f2`. The split put `f2` in `regression_trusted`, yet the phrase appeared in a training case's `expected` field. This is a canary test: a planted phrase reveals whether information crossed a boundary.~~
 
-**Why it matters.** Keeping each conversation in one split prevents direct duplication, but it does not keep the learned grading rules independent. FAPO can train against a rule learned from the very data later used to judge it.
+~~**Why it matters.** Keeping each conversation in one split prevents direct duplication, but it does not keep the learned grading rules independent. FAPO can train against a rule learned from the very data later used to judge it.~~
 
-**Fix and check.** Assign trusted groups to train, validation, test, and regression before learning any guideline. Build training guidelines only from training feedback. If every group needs its own rubric, use cross-fitting (build a group's rubric without using that group's evidence). Plant unique phrases in every held-out split (data saved for evaluation) and verify that none reaches any training guideline, inferred rubric, synthetic prompt, or `expected` field, even indirectly.
+**Fix and check.** ~~Assign trusted groups to train, validation, test, and regression before learning any guideline. Build training guidelines only from training feedback.~~ If every group needs its own rubric, use cross-fitting (build a group's rubric without using that group's evidence). Plant unique phrases in every held-out split (data saved for evaluation) and verify that none reaches any training guideline, inferred rubric, synthetic prompt, or `expected` field, even indirectly.
 
-#### EA-02: “review required” does not stop publication
+#### ~~EA-02: “review required” does not stop publication~~
 
-**What happens.** AI-inferred and synthetic cases are tagged `review_required`, but Stage 8 still writes them into train, validation, and test. There is no approve/reject action or approved-only filter. See [`pipeline.py:1705–1736`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/blob/ce7f832fc96a4e8e7a5ef46fad49d1c24e15c50c/src/hephaestus/evaluation_assets/pipeline.py#L1705-L1736) and [`pipeline.py:838–972`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/blob/ce7f832fc96a4e8e7a5ef46fad49d1c24e15c50c/src/hephaestus/evaluation_assets/pipeline.py#L838-L972).
+~~**What happens.** AI-inferred and synthetic cases are tagged `review_required`, but Stage 8 still writes them into train, validation, and test. There is no approve/reject action or approved-only filter. See [`pipeline.py:1705–1736`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/blob/ce7f832fc96a4e8e7a5ef46fad49d1c24e15c50c/src/hephaestus/evaluation_assets/pipeline.py#L1705-L1736) and [`pipeline.py:838–972`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/blob/ce7f832fc96a4e8e7a5ef46fad49d1c24e15c50c/src/hephaestus/evaluation_assets/pipeline.py#L838-L972).~~
 
-**Example and risk.** The probe published six pending cases: five labels inferred for real traffic and one synthetic case. A generated rubric is only a guess about correctness. Training or selecting a pipeline with that guess can reward the wrong behavior.
+~~**Example and risk.** The probe published six pending cases: five labels inferred for real traffic and one synthetic case. A generated rubric is only a guess about correctness. Training or selecting a pipeline with that guess can reward the wrong behavior.~~
 
-**Fix and check.** Store an unchangeable `pending`, `approved`, or `rejected` decision for the exact case and rubric version (identified by a content fingerprint). Publish trusted and approved cases only; keep pending cases in a review bundle. With only pending cases, zero derived rows should be published. Editing an approved case or rubric should return it to pending.
+~~**Fix and check.** Store an unchangeable `pending`, `approved`, or `rejected` decision for the exact case and rubric version (identified by a content fingerprint). Publish trusted and approved cases only; keep pending cases in a review bundle. With only pending cases, zero derived rows should be published. Editing an approved case or rubric should return it to pending.~~
 
 #### EA-03: Git can track the folders that hold protected data
 
@@ -270,7 +270,7 @@ EA-07 is absent because Section 14 reclassifies the scorer handoff as a P1 readi
 
 **Why it matters.** A reaction does not explain what was right or wrong. The model must invent a rule, produce an empty rule, or fail. The code records conflicts and uncertainty but still activates the resulting guideline; documented holds for unsafe, contradictory, irreproducible, or privacy-blocked feedback are not implemented.
 
-**Fix and check.** Before guideline creation, separately ask whether the file is well formed and whether its evidence is safe and sufficient to trust. Send weak or conflicting records to review with clear reason codes. An unexplained rating should create no active guideline unless a programmatically detectable failure or correction supplies the missing evidence.
+**Fix and check.** Before guideline creation, separately ask whether the file is well formed and whether its evidence is safe and sufficient to trust. Send weak or conflicting records to review with clear reason codes. ~~An unexplained rating should create no active guideline unless a programmatically detectable failure or correction supplies the missing evidence.~~
 
 #### EA-08: near-identical cases can cross splits
 
@@ -278,7 +278,7 @@ EA-07 is absent because Section 14 reclassifies the scorer handoff as a P1 readi
 
 **Example.** Two cases with identical runtime context but different groups landed in train and validation.
 
-**Fix and check.** Before splitting, find exact duplicates and high-confidence paraphrases across all sources. Keep each duplicate family in one split; send uncertain matches to review. Tests should show that differently named copies never cross splits.
+**Fix and check.** Before splitting, ~~find exact duplicates~~ and high-confidence paraphrases across all sources. ~~Keep each duplicate family in one split;~~ send uncertain matches to review. ~~Tests should show that differently named copies never cross splits.~~
 
 #### EA-09: public commands disagree about what an asset means
 
@@ -300,15 +300,15 @@ Before calling an asset ready, either compile supported plans into a shared scor
 
 #### Rerun extensions when any input changes
 
-In an extension that keeps existing traffic groups, Stages 6 and 7 may reuse old rubrics and synthetic cases whenever the match status and intent ID stay unchanged. New feedback can change the actual guideline, support, confidence, or tool rules without changing that ID, leaving old outputs in place. Rerun these stages as documented, or compare a fingerprint of every dependency. A test should change guideline text while keeping the ID fixed and require new downstream fingerprints.
+In an extension that keeps existing traffic groups, Stages 6 and 7 may reuse old rubrics and synthetic cases whenever the match status and intent ID stay unchanged. New feedback can change the actual guideline, support, confidence, or tool rules without changing that ID, leaving old outputs in place. ~~Rerun these stages as documented, or compare a fingerprint of every dependency. A test should change guideline text while keeping the ID fixed and require new downstream fingerprints.~~
 
 #### Validate duplicate guidelines and inferred rubric substance
 
-Duplicate guideline IDs can silently overwrite one another, and an inferred rubric may contain no usable requirement at all. Merge or reject duplicate IDs while preserving every source record, and hold any rubric that lacks at least one applicable, scoreable rule.
+Duplicate guideline IDs can silently overwrite one another, and an inferred rubric may contain no usable requirement at all. ~~Merge or reject duplicate IDs while preserving every source record, and hold any rubric that lacks at least one applicable, scoreable rule.~~
 
 #### Make synthetic filtering claims match implementation
 
-The synthetic filter performs mechanical checks: required fields, nonempty context, a scoreable field, narrow literal leakage (for example, an expected answer copied word-for-word into the request), and high word overlap with existing cases. It does not prove that a case is factually correct, solvable, safe, compatible with available tools, or free of indirect answer leakage. Describe the filter narrowly and send meaning-level correctness to executable checks or human review. Empty tool/runtime fields also limit coverage of tool-using behavior.
+The synthetic filter performs mechanical checks: required fields, nonempty context, a scoreable field, narrow literal leakage (for example, an expected answer copied word-for-word into the request), and high word overlap with existing cases. It does not prove that a case is factually correct, solvable, safe, compatible with available tools, or free of indirect answer leakage. ~~Describe the filter narrowly and send meaning-level correctness to executable checks or human review.~~ Empty tool/runtime fields also limit coverage of tool-using behavior.
 
 #### Fail before paid model work
 
@@ -453,7 +453,7 @@ Several important parts already work and should survive the fixes:
 - **Traffic is not treated as truth.** The system creates labels only for traffic groups that match trusted feedback; unsupported groups go to a queue.
 - **Earlier assistant answers stay context.** They and the feedback rationale are not copied into the model-visible evaluation input as an answer key.
 - **The main final-splitting step handles exact groups well.** Stage 8 keeps each `group_id` in one split, reserves regression from trusted cases, and sends derived cases that conflict with regression groups to `triage_hold` (a review-only bucket). Tests cover this strongly.
-- **Regression contains trusted cases only.** Inferred and synthetic cases never enter it, although EA-01 shows that its feedback still influences guidelines too early.
+- **Regression contains trusted cases only.** Inferred and synthetic cases never enter it, ~~although EA-01 shows that its feedback still influences guidelines too early.~~
 - **Source history is rich.** Each criterion records where it came from, when it applies, severity, suggested checks, conflicts, uncertainty, and support. Stage 3 fails if it drops a trusted feedback record.
 - **Provider failure is explicit.** Unsupported guideline or embedding providers raise errors instead of silently switching models. Disabling synthetic generation makes no model call and writes clear empty artifacts.
 - **Local algorithms are repeatable with unchanged inputs.** Group assignment, clustering after vectors exist, representative choice, and queue sampling follow fixed rules. Model and embedding calls may still change.
@@ -475,8 +475,8 @@ The audit also found narrower problems than initially suspected:
 
 ~~1. **Prevent data exposure.** Ignore the full asset runtime tree, test protected paths with `git check-ignore`, allow imports only into the correct tenant, and document where files really live.~~
 2. ~~**Preserve IDs.** Redact only content fields, then recheck record IDs and groups.~~ Add a broader privacy screen and review hold.
-3. **Keep saved evaluation feedback out of training rules.** Split trusted groups before learning guidelines; build training-visible rules only from training feedback. Use cross-fitting where a group-specific rule is needed.
-4. **Require approval before publication.** Store fixed review decisions and exclude every pending inferred or synthetic case from train, validation, and test.
+3. ~~**Keep saved evaluation feedback out of training rules.** Split trusted groups before learning guidelines; build training-visible rules only from training feedback.~~ Use cross-fitting where a group-specific rule is needed.
+~~4. **Require approval before publication.** Store fixed review decisions and exclude every pending inferred or synthetic case from train, validation, and test.~~
 ~~5. **Treat released assets as read-only.** Separate draft from released states, create a child ID for every change, and publish through a versioned pointer or content fingerprint.~~
 ~~6. **Make restart safe.** Use cross-process locks, record the planned rebuild before deleting files, verify each stage's dependencies and outputs, recover from mismatches, and publish all files together.~~
 7. **Check evidence, not only file format.** Before guideline creation, hold weak, unsafe, contradictory, or privacy-blocked feedback with a clear reason.
@@ -486,8 +486,8 @@ The audit also found narrower problems than initially suspected:
 1. **Complete scoring.** Provide a shared scorer that runs supported guideline checks, or require each tenant scorer to declare its capabilities against a strict registry of executable checks and pass calibration against trusted judgments.
 ~~2. **Give every public command the same rules.** Remove alternate commands or route them through the same contract, matching policy, splitter, and regression builder.~~
 3. **Group near-duplicates before splitting.** Search across trusted, inferred, and synthetic sources and save the duplicate audit.
-4. **Rerun work whenever any dependency changes.** Fingerprint full guidelines, matches, providers, settings, and parent files; do not reuse stale outputs.
-5. **Validate generated data deeply.** Require unique guideline IDs, nonempty scoreable rubrics, valid nested fields, ~~sound embedding shapes/indices~~, and accurate filter labels.
+~~4. **Rerun work whenever any dependency changes.** Fingerprint full guidelines, matches, providers, settings, and parent files; do not reuse stale outputs.~~
+5. **Validate generated data deeply.** ~~Require unique guideline IDs, nonempty scoreable rubrics,~~ valid nested fields, ~~sound embedding shapes/indices~~, ~~and accurate filter labels.~~
 ~~6. **Record enough build history.** Save code and prompt fingerprints, resolved defaults, provider revisions, random settings, request/response IDs, usage, and stage fingerprints.~~
 7. **Handle large inputs.** Stream files, combine evidence in stages, reuse average group vectors, and enforce provider input/token limits before calls.
 8. **Repair inherited FAPO checks.** Preserve diagnostic evidence, reject duplicate case IDs, compare only compatible runs, keep original startup errors, and distinguish successful, degraded, and failed runs.
@@ -559,8 +559,8 @@ The eight integration tests were deselected. The two skips were a CTI-RCM scorer
 
 | Targeted probe | What happened |
 | --- | --- |
-| Planted holdout phrase | Feedback `f2` entered `regression_trusted`; its unique rule appeared in `train_trusted.expected` |
-| Unapproved publication | Six `review_required` inferred/synthetic cases appeared in train, validation, or test |
+| ~~Planted holdout phrase~~ | ~~Feedback `f2` entered `regression_trusted`; its unique rule appeared in `train_trusted.expected`~~ |
+| ~~Unapproved publication~~ | ~~Six `review_required` inferred/synthetic cases appeared in train, validation, or test~~ |
 | ID preservation | Two email IDs both became `<email>`; two IP group IDs both became `<ip_address>` |
 | Near-duplicate splitting | Identical contexts with different group IDs landed in train and validation |
 | Alternate assembly command | One shared group landed in train and validation across trusted and synthetic sources |
@@ -578,13 +578,13 @@ The eight integration tests were deselected. The two skips were a CTI-RCM scorer
 | Promise | What the code does | Conclusion |
 | --- | --- | --- |
 | IDs remain unchanged | Redaction rewrites the full row, including IDs | Defect EA-04 |
-| Validation/test do not influence authoring | Guidelines use all feedback before Stage 8 splits it | Defect EA-01 |
-| Inferred/synthetic cases require review | No approval state; every derived case is published | Defect EA-02 |
+| ~~Validation/test do not influence authoring~~ | ~~Guidelines use all feedback before Stage 8 splits it~~ | ~~Defect EA-01~~ |
+| ~~Inferred/synthetic cases require review~~ | ~~No approval state; every derived case is published~~ | ~~Defect EA-02~~ |
 | ~~Asset versions are immutable~~ | ~~A completed asset can be revised in place~~ | ~~Defect EA-05~~ |
 | ~~Resume safely skips completed work~~ | ~~It trusts status without checking saved files~~ | ~~Defect EA-05~~ |
 | Near-duplicates are grouped before splitting | Only synthetic candidates receive a word-overlap check | Defect EA-08 |
 | Groups stay in one split | Main Stage 8 does this; the alternate assembler does not | Main-path strength plus EA-09 |
-| Regression contains trusted cases only | Main Stage 8 reserves trusted cases and holds conflicting derived groups | Strength, qualified by EA-01 |
+| Regression contains trusted cases only | Main Stage 8 reserves trusted cases and holds conflicting derived groups | ~~Strength, qualified by EA-01~~ |
 | Unsupported request types are not labeled | Inference accepts only groups matched to trusted feedback | Strength |
 | Published files can feed FAPO | They fit FAPO's format, but Studio does not run their scoring plans | Format compatibility; scorer still required |
 | FAPO compares variants fairly | The comparison utility does not verify equal data or settings | Runtime gap FAPO-02 |
@@ -594,13 +594,13 @@ The eight integration tests were deselected. The two skips were a CTI-RCM scorer
 
 This audit establishes offline code paths and information flow at two exact commits. It did not judge a live guideline model, embedding model, or LLM judge; use protected tenant data; run an expert-labeling study; test 10,000 to 1 million traces; crash the process at every file operation; or run simultaneous writers. Those require separate experiments.
 
-The holdout leak is confirmed because a planted phrase crossed into training with a valid fake provider; it is not merely a concern that might occur in live traffic. Feedback bias, match quality, future drift, and total cost remain hypotheses until the proposed studies measure them.
+~~The holdout leak is confirmed because a planted phrase crossed into training with a valid fake provider; it is not merely a concern that might occur in live traffic.~~ Feedback bias, match quality, future drift, and total cost remain hypotheses until the proposed studies measure them.
 
 ### 23. Final assessment
 
 Evaluation Asset Studio is promising because it addresses the right earlier problem: building evaluation data before optimization begins. Its strongest ideas are clear—trusted evidence defines correctness, traffic shows coverage, shared code owns transformations, source history is saved, and records with the same exact `group_id` are split together. A traceable way to build evaluation data for a traceable optimizer is worth pursuing.
 
-**Decision for `evaluation-asset-studio@ce7f832f`: no-go for merge, protected-data use, or a claim that its output is safe for FAPO optimization.** Close every P0 item before either merge or protected-data use. First contain data and preserve IDs; then prevent held-out feedback from shaping training and enforce approval; ~~finally make versions and resume safe.~~ Rerun the EA-01 through EA-05 adversarial checks and the full offline suite. Close P1, including the executable scorer handoff, before calling an asset optimization-ready.
+**Decision for `evaluation-asset-studio@ce7f832f`: no-go for merge, protected-data use, or a claim that its output is safe for FAPO optimization.** Close every P0 item before either merge or protected-data use. First contain data and preserve IDs; ~~then prevent held-out feedback from shaping training and enforce approval;~~ ~~finally make versions and resume safe.~~ Rerun the EA-01 through EA-05 adversarial checks and the full offline suite. Close P1, including the executable scorer handoff, before calling an asset optimization-ready.
 
 After those fixes, the decisive question is simple: do Studio-built cases preserve model rankings and produce gains on later, untouched, expert-checked data at lower total cost than manual curation?
 
@@ -609,7 +609,7 @@ After those fixes, the decisive question is simple: do Studio-built cases preser
 This successor section records remediation status after the historical
 `ce7f832f` audit. Every preceding observation remains verbatim inside explicit
 strike-through markup, which marks only the bounded remediation verified in
-PR1 and PR2; unresolved portions remain unstruck. Checked items below are
+PR1, PR2, and PR3; unresolved portions remain unstruck. Checked items below are
 likewise limited to behavior verified in those changes;
 unchecked items remain required or research-dependent. `PR_LINK_PLACEHOLDER`
 will be replaced with published PR and commit traceability in Task 10.
@@ -677,6 +677,39 @@ audit-only Git and transport facts cannot change the generation fingerprint.
 Strict allowlists and explicit unavailable markers prevent prompts, request or
 response bodies, headers, exceptions, and secrets from entering provenance.
 
+### Trust-isolation, review-authority, and generated-output correction
+
+PR3 assigns exact-context-connected trusted groups before guideline authoring,
+preserves verified parent assignments in child versions, and limits the reusable
+guideline and trusted-intent inventory to eligible training evidence. Protected
+validation, test, and regression criteria are compiled only within their own
+split/group visibility unit and cannot enter downstream authoring payloads or UI
+previews. An unexplained rating with no material correction or declared
+deterministic/executable signal remains auditable but activates no guideline or
+trusted case.
+
+Stage 7 now commits complete derived-case/dependency fingerprints and pauses at
+`awaiting_review`. Append-only exact-fingerprint decisions and one explicit
+finalization authorize Stage 8, which publishes non-held trusted cases plus
+approved derived cases only. Exact model-visible-context families are united
+transitively across supplied groups and sources; conflicting expected/scoring
+truth is held. The released manifests bind the exact review-set/finalization
+authority, trusted/approved/pending/rejected/held counts, and per-case
+fingerprints.
+
+Stages 6 and 7 bind complete guideline, match/cluster, source, provider/model,
+prompt, setting, and parent dependencies before extension reuse. Duplicate
+response identities and compiled Stage 3 identities fail instead of
+overwriting; unscoreable inferred or synthetic outputs are held. Trusted-intent
+matching excludes normative criterion statements, Stage 5 labels its
+centroid-near queue as non-probability correctness-label acquisition, and the
+synthetic documentation now claims only the implemented mechanical filters.
+
+These bounded fixes do not implement semantic/paraphrase deduplication,
+cross-fitting, broad contradiction/safety/privacy screening, executable scorer
+compilation, or empirical calibration. Those clauses remain unstruck and
+unchecked below.
+
 ### Successor checklist: immediate engineering and release gates
 
 - [x] Restrict create and extension inputs to regular JSONL files under the selected tenant's `source_artifacts/` or ordinary `datasets/`, reject cross-tenant, generated-output, non-file, suffix, and symlink escapes before workspace creation. PR: `PR_LINK_PLACEHOLDER`; tests: `test_layout_rejects_unauthorized_sources_before_initializing`, `test_service_create_and_extend_share_tenant_source_boundary`.
@@ -685,17 +718,21 @@ response bodies, headers, exceptions, and secrets from entering provenance.
 - [x] Preserve schema, identity, grouping, request, task, route/intent-label, message-role, and structural tool-name fields byte-for-byte while redacting approved content-bearing fields, including every mapping/list descendant under explicit content fields and nested tool/runtime/metadata content; recheck normalized record-ID uniqueness with both physical source rows/IDs. PR: `PR_LINK_PLACEHOLDER`; tests: `test_normalization_preserves_structural_fields_and_redacts_content`, `test_normalization_recurses_through_composite_structural_fields`, `test_normalization_traverses_nested_tool_name_collections`, `test_normalization_preserves_name_only_in_structural_descriptor_context`, `test_normalization_routes_singular_tool_descriptor_by_context`, `test_normalization_redacts_every_descendant_of_explicit_content_fields`, `test_prepare_inputs_rejects_normalized_duplicate_with_both_sources`.
 - [x] Document stable identifier pseudonymization as an adapter responsibility when policy requires it. PR: `PR_LINK_PLACEHOLDER`; verification: documentation review in this PR.
 - [ ] Add and validate a broader privacy screen and review hold for names, phone numbers, addresses, credentials, tokens, health/payment data, IPv6, and other policy-defined sensitive values.
-- [ ] Split trusted groups before guideline learning, keep held-out evidence out of training-visible rules, and use cross-fitting where group-specific rules are necessary (EA-01).
-- [ ] Persist immutable approve/reject decisions for exact derived case/rubric versions and publish trusted plus approved cases only (EA-02).
+- [x] Split exact-context-connected trusted groups before guideline learning, preserve verified parent assignments, build reusable guidelines only from eligible training feedback, and keep protected held-out evidence out of downstream authoring and UI previews (bounded EA-01 remediation). PR: `PR_LINK_PLACEHOLDER`; tests: `test_stage_three_isolates_held_out_canaries_and_skips_ineligible_feedback`, `test_held_out_canaries_never_reach_later_authoring_or_ui_previews`, `test_trusted_split_plan_retains_parent_assignment_after_safe_component_growth`, `test_pre_v3_extension_rebuilds_stage_three_and_inherits_parent_assignments`, `test_pre_v3_extension_does_not_promote_unreceipted_current_profile_files`.
+- [ ] Evaluate cross-fitting or another independently validated construction when a held-out group's scoring rubric must not use that group's own evidence (remaining EA-01 research boundary).
+- [x] Persist immutable exact-fingerprint approve/reject decisions, pause before Stage 8, publish trusted plus approved derived cases only, preserve pending/rejected/held audit authority, and bind exact counts/fingerprints into released manifests (EA-02). PR: `PR_LINK_PLACEHOLDER`; tests: `test_pending_only_finalization_publishes_no_derived_cases`, `test_exact_approve_and_reject_control_release_inclusion`, `test_finalization_rejects_a_stale_decision_snapshot_and_replays_release`, `test_review_pagination_bounds_the_combined_eligible_and_held_projection`, `test_review_revision_tracks_decisions_and_safe_current_finalization`, `test_review_decision_and_finalization_are_serialized_per_asset`, `test_review_loader_ignores_stale_cross_tenant_completion_for_same_asset`, `test_child_inherits_identical_fingerprint_decisions`, `test_review_finalization_posts_exact_set_clears_state_and_refreshes`, `test_review_finalization_failure_preserves_state_and_restores_button`, `test_exact_context_copies_share_one_approved_published_family`, `test_conflicting_truth_holds_and_excludes_the_complete_exact_family`, `test_pipeline_is_self_contained_and_writes_canonical_layout`.
 - [x] Make released assets read-only and require a child version for every post-release change (EA-05). PR: `PR_LINK_PLACEHOLDER`; tests: `test_released_revision_and_run_fail_before_any_mutation`, `test_extension_records_verified_parent_evidence_and_is_self_contained`.
 - [x] Add cross-process locking, durable rebuild intent, stage dependency/output verification, mismatch recovery, and generation-wide atomic publication (EA-05; PR2). PR: `PR_LINK_PLACEHOLDER`; tests: `test_native_pre_receipt_faults_recompute_stage_eight_without_provider_rerun`, `test_native_receipt_and_wal_faults_reuse_stage_eight_and_provider_evidence`, `test_corrupt_completed_stage_eight_handoff_fails_closed_without_writes`, `test_pointer_replace_failure_preserves_exact_old_release`, `test_concurrent_pointer_switch_readers_observe_only_old_or_new`, `test_release_cross_link_corruption_fails_closed_without_repair_writes`, `test_legacy_adoption_fault_phases_recover_as_one_terminal_operation`.
-- [ ] Hold weak, contradictory, unsafe, or privacy-blocked feedback before guideline generation (EA-06).
-- [ ] Group near-duplicate trusted, inferred, and synthetic cases globally before splitting and persist the duplicate audit (EA-08).
+- [x] Hold an unexplained rating with no material correction or declared deterministic/executable signal as `insufficient_correctness_evidence`, with no active guideline/trusted case and no unnecessary guideline call (bounded EA-06 remediation). PR: `PR_LINK_PLACEHOLDER`; tests: `test_correctness_eligibility_holds_empty_evidence_even_with_a_tool_error`, `test_stage_three_isolates_held_out_canaries_and_skips_ineligible_feedback`.
+- [ ] Add broader contradiction, safety, privacy, and policy screening before guideline generation (remaining EA-06 boundary).
+- [x] Group exact canonical model-visible-context duplicates transitively across trusted, inferred, and synthetic sources, unite them with supplied groups, hold truth conflicts, and persist the family audit (bounded EA-08 remediation). PR: `PR_LINK_PLACEHOLDER`; tests: `test_exact_context_family_is_transitive_across_sources_and_groups`, `test_conflicting_truth_holds_every_member_of_the_connected_component`, `test_exact_family_does_not_fold_whitespace_case_or_paraphrase`, `test_exact_context_copies_share_one_approved_published_family`, `test_conflicting_truth_holds_and_excludes_the_complete_exact_family`.
+- [ ] Add and validate semantic/paraphrase duplicate detection with an uncertainty review policy (remaining EA-08 boundary).
 - [x] Remove/deprecate alternate asset commands or route them through the same contract, matching, splitting, and regression policies (EA-09). PR: `PR_LINK_PLACEHOLDER`; test: `test_assets_help_exposes_only_canonical_pipeline_commands`.
 - [ ] Provide or capability-check executable scorers for every supported guideline evaluator and calibrate them against trusted judgments.
-- [ ] Fingerprint complete guideline/match/provider/setting/parent dependencies and rerun extension outputs whenever any dependency changes.
-- [ ] Reject or safely merge duplicate guideline IDs and hold inferred rubrics without an applicable scoreable requirement.
-- [ ] Narrow synthetic-filter documentation to its mechanical guarantees and send semantic correctness, solvability, tool compatibility, and indirect leakage to executable or human review.
+- [x] Fingerprint complete guideline/rubric, match/cluster, provider/model/prompt, setting, source-membership, and parent dependencies; reuse extension outputs and terminal review decisions only for exact matches. PR: `PR_LINK_PLACEHOLDER`; tests: `test_stage_six_dependency_binds_every_declared_input`, `test_stage_seven_dependency_binds_every_declared_input`, `test_child_inherits_only_an_identical_fingerprint_and_case`, `test_identical_child_reuses_both_derived_stages_and_inherits_reviews`, `test_cluster_local_stage_six_dependency_mutation_regenerates_only_that_cluster`, `test_refreshed_cluster_membership_regenerates_stable_cluster_ids`, `test_global_stage_six_dependency_mutation_regenerates_all_clusters`, `test_stage_seven_only_mutation_reuses_inference_and_invalidates_synthetic_reviews`, `test_stage_seven_reuse_reaches_a_stable_dependency_fixed_point`, `test_stage_seven_reuse_preserves_canonical_cross_cluster_filter_order`.
+- [x] Reject duplicate generated-response identities and duplicate/colliding compiled Stage 3 identities with source-aware errors; hold inferred and synthetic outputs without an applicable scoreable requirement. PR: `PR_LINK_PLACEHOLDER`; tests: `test_generated_model_response_rejects_duplicate_identity`, `test_native_writer_rejects_duplicate_stage_three_identities_before_persistence`, `test_review_item_scoreability_hook_fails_closed`.
+- [x] Narrow synthetic-filter documentation to schema, nonempty-context, scoreability, narrow literal-leakage, and token-overlap guarantees; route semantic correctness, solvability, tool compatibility, and indirect leakage to executable or human review. PR: `PR_LINK_PLACEHOLDER`; tests: `test_filter_synthetic_cases_rejects_empty_deterministic_checks`, `test_synthetic_leakage_check_is_literal_with_a_24_character_minimum`, `test_synthetic_duplicate_check_uses_context_token_set_overlap`.
+- [x] Remove normative criterion statements from trusted-intent matching text and mark Stage 5 centroid-near acquisition as deterministic, purpose-specific, and non-probability. PR: `PR_LINK_PLACEHOLDER`; tests: `test_native_trusted_intent_uses_only_source_request_semantics`, `test_labeling_queue_marks_non_probability_acquisition_semantics`.
 - [x] Revalidate copied inputs and reject impossible unlabeled-count/exact-effective-route cluster allocations in Stage 1 before rubric or embedding calls. PR: `PR_LINK_PLACEHOLDER`; tests: `test_stage_one_revalidates_each_copied_input_before_provider_calls`, `test_stage_one_rejects_infeasible_clustering_before_provider_calls`, `test_stage_one_accepts_one_cluster_per_record_and_effective_route`, `test_stage_one_treats_present_whitespace_routes_as_exact_bytes`.
 - [x] Preserve physical JSONL line numbers through source initialization, copied-input Stage 1 validation, and normalized-identity collision diagnostics while ignoring blank lines as records. PR: `PR_LINK_PLACEHOLDER`; tests: `test_initialize_contract_error_uses_physical_row_after_leading_blanks`, `test_stage_one_contract_error_uses_copied_input_physical_row`, `test_prepare_inputs_rejects_normalized_duplicate_with_both_sources`.
 - [x] Validate raw and injected embedding batches for exact count and unique indices, finite real non-boolean coordinates, consistent positive dimension, and nonzero vectors at Stages 4 and 5. PR: `PR_LINK_PLACEHOLDER`; tests: `test_openai_embedding_response_rejects_malformed_batches`, `test_openai_embedding_provider_rejects_cross_batch_dimension_drift`, `test_pipeline_validates_injected_embedding_batches_at_every_stage`.

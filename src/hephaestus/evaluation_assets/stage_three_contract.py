@@ -10,10 +10,11 @@ import hashlib
 import json
 import math
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 from src.hephaestus.datasets.evaluation_assets import validate_fapo_case
 from src.hephaestus.evaluation_assets.input_contract import effective_route
+from src.hephaestus.evaluation_assets.trust_tiers import TRUSTED_FEEDBACK
 
 CRITERION_KINDS = frozenset({"required", "prohibited", "preferred"})
 CRITERION_SEVERITIES = frozenset({"critical", "major", "minor"})
@@ -26,6 +27,10 @@ EVALUATOR_TYPES = frozenset(
         "human_review",
     }
 )
+GuidelineIdentityProfile = Literal["current_v2", "historical_v1"]
+TrustedIntentTextProfile = Literal["current", "historical_v1"]
+_CURRENT_GUIDELINE_IDENTITY_REVISION = "fapo-guideline-identity-v2"
+_CURRENT_CRITERION_IDENTITY_REVISION = "fapo-criterion-identity-v2"
 
 _EVIDENCE_FIELDS = {
     "record_id",
@@ -119,6 +124,7 @@ def normalize_guideline_response(
     evidence: Sequence[Mapping[str, Any]],
     rubric_provider: str,
     rubric_model: str,
+    identity_profile: GuidelineIdentityProfile = "current_v2",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Validate and canonicalize provider candidates before persistence."""
     items = response.get("guidelines")
@@ -139,6 +145,7 @@ def normalize_guideline_response(
             evidence,
             rubric_provider,
             rubric_model,
+            identity_profile=identity_profile,
         ),
     )
 
@@ -267,13 +274,77 @@ def normalize_guideline_criteria(
     return criteria
 
 
+def _guideline_identity_profile(value: str) -> GuidelineIdentityProfile:
+    if value == "current_v2":
+        return "current_v2"
+    if value == "historical_v1":
+        return "historical_v1"
+    raise ValueError(f"Unsupported guideline identity profile {value!r}")
+
+
+def _guideline_id(
+    *,
+    route: str,
+    guideline_payload: Mapping[str, Any],
+    identity_profile: GuidelineIdentityProfile,
+) -> str:
+    if identity_profile == "historical_v1":
+        identity = json.dumps(
+            {
+                "route": route,
+                "intent_label": guideline_payload["intent_label"],
+                "criteria": [
+                    item["statement"] for item in guideline_payload["criteria"]
+                ],
+            },
+            sort_keys=True,
+        )
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:10]
+    else:
+        digest = _canonical_identity_digest(
+            {
+                "revision": _CURRENT_GUIDELINE_IDENTITY_REVISION,
+                "guideline": guideline_payload,
+            }
+        )
+    return f"guideline-{_slug(route)}-{digest}"
+
+
+def _current_criterion_id(
+    guideline_id: str,
+    criterion_payload: Mapping[str, Any],
+) -> str:
+    digest = _canonical_identity_digest(
+        {
+            "revision": _CURRENT_CRITERION_IDENTITY_REVISION,
+            "guideline_id": guideline_id,
+            "criterion": criterion_payload,
+        }
+    )
+    return f"criterion-{digest}"
+
+
+def _canonical_identity_digest(value: Mapping[str, Any]) -> str:
+    payload = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def compile_evaluation_guidelines(
     candidates: Sequence[Mapping[str, Any]],
     evidence: Sequence[Mapping[str, Any]],
     rubric_provider: str,
     rubric_model: str,
+    *,
+    identity_profile: GuidelineIdentityProfile = "current_v2",
 ) -> list[dict[str, Any]]:
     """Compile canonical candidates into exact versioned guideline rows."""
+    identity_profile = _guideline_identity_profile(identity_profile)
     evidence_by_id = {str(item["record_id"]): item for item in evidence}
     represented: set[str] = set()
     provisional: list[dict[str, Any]] = []
@@ -285,18 +356,6 @@ def compile_evaluation_guidelines(
         criteria = normalize_guideline_criteria(
             canonical["criteria"], route, source_ids
         )
-        identity = json.dumps(
-            {
-                "route": route,
-                "intent_label": canonical["intent_label"],
-                "criteria": [item["statement"] for item in criteria],
-            },
-            sort_keys=True,
-        )
-        guideline_id = (
-            f"guideline-{_slug(route)}-"
-            f"{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:10]}"
-        )
         groups = {
             str(evidence_by_id[record_id].get("group_id") or record_id)
             for record_id in source_ids
@@ -306,40 +365,70 @@ def compile_evaluation_guidelines(
             for record_id in source_ids
             for correction in evidence_by_id[record_id]["requested_corrections"]
         }
+        criterion_payloads = [
+            {
+                field: value
+                for field, value in criterion.items()
+                if field != "criterion_id"
+            }
+            for criterion in criteria
+        ]
+        guideline_payload = {
+            "route": route,
+            "intent_label": canonical["intent_label"],
+            "description": canonical["description"],
+            "confidence": canonical["confidence"],
+            "source_record_ids": source_ids,
+            "support": {
+                "trusted_example_count": len(source_ids),
+                "trusted_group_count": len(groups),
+            },
+            "criteria": criterion_payloads,
+            "conflicts": canonical["conflicts"],
+            "uncertainties": sorted(
+                {
+                    *(
+                        uncertainty
+                        for record_id in source_ids
+                        for uncertainty in evidence_by_id[record_id]["uncertainties"]
+                    ),
+                    *canonical["uncertainties"],
+                }
+            ),
+            "tool_expectations": canonical["tool_expectations"],
+            "reference_output": (
+                next(iter(corrections)) if len(corrections) == 1 else None
+            ),
+            "unknown_policy": "needs_review",
+            "activation_status": "active_from_trusted_evidence",
+            "calibration_status": "uncalibrated",
+            "guideline_provider": rubric_provider,
+            "guideline_model": rubric_model,
+            "oracle_version": "fapo-evaluation-guideline-v1",
+        }
+        guideline_id = _guideline_id(
+            route=route,
+            guideline_payload=guideline_payload,
+            identity_profile=identity_profile,
+        )
+        if identity_profile == "current_v2":
+            compiled_criteria = [
+                {
+                    "criterion_id": _current_criterion_id(
+                        guideline_id,
+                        criterion,
+                    ),
+                    **criterion,
+                }
+                for criterion in criterion_payloads
+            ]
+        else:
+            compiled_criteria = criteria
         provisional.append(
             {
                 "guideline_id": guideline_id,
-                "route": route,
-                "intent_label": canonical["intent_label"],
-                "description": canonical["description"],
-                "confidence": canonical["confidence"],
-                "source_record_ids": source_ids,
-                "support": {
-                    "trusted_example_count": len(source_ids),
-                    "trusted_group_count": len(groups),
-                },
-                "criteria": criteria,
-                "conflicts": canonical["conflicts"],
-                "uncertainties": sorted(
-                    {
-                        *(
-                            uncertainty
-                            for record_id in source_ids
-                            for uncertainty in evidence_by_id[record_id]["uncertainties"]
-                        ),
-                        *canonical["uncertainties"],
-                    }
-                ),
-                "tool_expectations": canonical["tool_expectations"],
-                "reference_output": (
-                    next(iter(corrections)) if len(corrections) == 1 else None
-                ),
-                "unknown_policy": "needs_review",
-                "activation_status": "active_from_trusted_evidence",
-                "calibration_status": "uncalibrated",
-                "guideline_provider": rubric_provider,
-                "guideline_model": rubric_model,
-                "oracle_version": "fapo-evaluation-guideline-v1",
+                **guideline_payload,
+                "criteria": compiled_criteria,
             }
         )
     missing = sorted(set(evidence_by_id) - represented)
@@ -359,8 +448,15 @@ def replay_native_stage_three(
     candidates: Sequence[Mapping[str, Any]],
     *,
     asset_id: str,
+    identity_profile: GuidelineIdentityProfile,
+    text_profile: TrustedIntentTextProfile,
 ) -> dict[str, list[dict[str, Any]]]:
     """Reconstruct every deterministic native Stage 3 derivative."""
+    if (identity_profile, text_profile) not in {
+        ("current_v2", "current"),
+        ("historical_v1", "historical_v1"),
+    }:
+        raise ValueError("Stage 3 replay profiles are incompatible")
     normalized_by_id = _unique_by(normalized, "record_id")
     evidence_by_id = _unique_by(evidence, "record_id")
     if set(normalized_by_id) != set(evidence_by_id):
@@ -423,6 +519,7 @@ def replay_native_stage_three(
                 route_evidence,
                 rubric_provider,
                 rubric_model,
+                identity_profile=identity_profile,
             )
         )
     if len(canonical_candidates) != len(candidates):
@@ -430,7 +527,12 @@ def replay_native_stage_three(
     guidelines.sort(key=lambda item: str(item["guideline_id"]))
     grouped = guidelines_by_source_record(guidelines)
     trusted_intents = [
-        trusted_intent_from_guideline(row, normalized_by_id) for row in guidelines
+        trusted_intent_from_guideline(
+            row,
+            normalized_by_id,
+            text_profile=text_profile,
+        )
+        for row in guidelines
     ]
     trusted_cases = [
         trusted_case(
@@ -617,20 +719,31 @@ def rubric_from_guidelines(
 def trusted_intent_from_guideline(
     guideline: Mapping[str, Any],
     normalized_by_id: Mapping[str, Mapping[str, Any]],
+    *,
+    text_profile: TrustedIntentTextProfile = "current",
 ) -> dict[str, Any]:
     source_ids = [str(value) for value in guideline["source_record_ids"]]
     groups = {str(normalized_by_id[value]["group_id"]) for value in source_ids}
     polarities = sorted(
         {str(normalized_by_id[value]["feedback"]["polarity"]) for value in source_ids}
     )
-    return {
-        "intent_id": guideline["guideline_id"],
-        "label": guideline["intent_label"],
-        "texts": [
+    if text_profile == "historical_v1":
+        texts = [
             str(guideline["description"]),
             *(str(item["statement"]) for item in guideline["criteria"]),
             *(str(normalized_by_id[value]["user_input"]) for value in source_ids),
-        ],
+        ]
+    elif text_profile == "current":
+        texts = [
+            _canonical_source_intent_text(normalized_by_id[value])
+            for value in source_ids
+        ]
+    else:
+        raise ValueError(f"Unsupported trusted-intent text profile {text_profile!r}")
+    return {
+        "intent_id": guideline["guideline_id"],
+        "label": guideline["intent_label"],
+        "texts": texts,
         "route": guideline["route"],
         "metadata": {
             "trusted_example_count": len(source_ids),
@@ -640,6 +753,33 @@ def trusted_intent_from_guideline(
             "source_record_ids": source_ids,
         },
     }
+
+
+def _canonical_source_intent_text(row: Mapping[str, Any]) -> str:
+    user_input = str(row.get("user_input") or "").strip()
+    context_text = ""
+    context = row.get("conversation_context")
+    if isinstance(context, list):
+        for message in reversed(context):
+            if isinstance(message, Mapping) and message.get("content"):
+                context_text = str(message["content"]).strip()
+                break
+
+    tool_names: set[str] = set()
+    tool_calls = row.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for call in tool_calls:
+            name: Any = None
+            if isinstance(call, str):
+                name = call
+            elif isinstance(call, Mapping):
+                name = call.get("name") or call.get("tool")
+            if name:
+                tool_names.add(str(name))
+    tools_text = f"tools {' '.join(sorted(tool_names))}" if tool_names else ""
+    return " ".join(
+        part for part in (user_input, context_text, tools_text) if part
+    )
 
 
 def expected_from_rubric(rubric: Mapping[str, Any]) -> dict[str, Any]:
@@ -683,7 +823,7 @@ def trusted_case(
             "dataset_version": asset_id,
             "group_id": row["group_id"],
             "request_id": row["request_id"],
-            "trust_tier": "trusted_feedback",
+            "trust_tier": TRUSTED_FEEDBACK,
         },
     }
     validate_fapo_case(case)
@@ -726,7 +866,23 @@ def validate_stage_three_identities(
             raise ValueError("Stage 3 candidates are not unique")
         candidate_payloads.add(payload)
 
-    _unique_by(guidelines, "guideline_id")
+    guideline_by_id: dict[str, Mapping[str, Any]] = {}
+    for guideline in guidelines:
+        guideline_id = _nonempty_string(guideline.get("guideline_id"))
+        previous = guideline_by_id.get(guideline_id)
+        if previous is not None:
+            previous_sources = sorted(
+                str(value) for value in previous.get("source_record_ids", [])
+            )
+            colliding_sources = sorted(
+                str(value) for value in guideline.get("source_record_ids", [])
+            )
+            raise ValueError(
+                f"Duplicate compiled guideline_id {guideline_id!r}: "
+                f"source_record_ids {previous_sources!r} collides with "
+                f"source_record_ids {colliding_sources!r}"
+            )
+        guideline_by_id[guideline_id] = guideline
     criterion_ids: set[str] = set()
     for guideline in guidelines:
         criteria = guideline.get("criteria")

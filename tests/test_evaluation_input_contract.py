@@ -11,6 +11,7 @@ import pytest
 from src.hephaestus.evaluation_assets.input_contract import (
     SCHEMA_VERSION,
     input_contract_document,
+    redact_correctness_signals,
     validate_input_records,
 )
 
@@ -81,3 +82,134 @@ def test_contract_document_is_versioned_and_explicit() -> None:
         "assistant_output",
         "feedback",
     ]
+    assert contract["feedback"]["optional"] == [
+        "correction",
+        "source",
+        "correctness_signals",
+    ]
+    assert contract["correctness_signal"] == {
+        "required": ["kind", "check_id", "passed"],
+        "types": {
+            "kind": "string",
+            "check_id": "string",
+            "passed": "boolean",
+        },
+        "optional": ["content"],
+        "kinds": ["deterministic", "executable"],
+    }
+
+
+def test_contract_accepts_structured_correctness_signals() -> None:
+    labeled = {
+        **_record(),
+        "assistant_output": "The input was processed.",
+        "feedback": {
+            "polarity": "mixed",
+            "rationale": "",
+            "correctness_signals": [
+                {
+                    "kind": "deterministic",
+                    "check_id": "schema-check",
+                    "passed": True,
+                    "content": {"observed": "valid"},
+                },
+                {
+                    "kind": "executable",
+                    "check_id": "exit-status",
+                    "passed": False,
+                },
+            ],
+        },
+    }
+
+    validate_input_records([labeled], labeled=True, path=Path("labeled.jsonl"))
+
+
+@pytest.mark.parametrize(
+    ("signals", "message"),
+    [
+        ({}, "correctness_signals.*array"),
+        (["failed"], r"correctness_signals\[0\].*object"),
+        (
+            [{"check_id": "check", "passed": True}],
+            r"correctness_signals\[0\]\.kind.*required",
+        ),
+        (
+            [{"kind": "heuristic", "check_id": "check", "passed": True}],
+            r"correctness_signals\[0\]\.kind.*deterministic.*executable",
+        ),
+        (
+            [{"kind": [], "check_id": "check", "passed": True}],
+            r"correctness_signals\[0\]\.kind.*deterministic.*executable",
+        ),
+        (
+            [{"kind": "deterministic", "check_id": "  ", "passed": True}],
+            r"correctness_signals\[0\]\.check_id.*non-empty",
+        ),
+        (
+            [{"kind": "executable", "check_id": "check", "passed": 0}],
+            r"correctness_signals\[0\]\.passed.*boolean",
+        ),
+        (
+            [
+                {
+                    "kind": "executable",
+                    "check_id": "check",
+                    "passed": False,
+                    "vendor_error": "ordinary tool error",
+                }
+            ],
+            r"correctness_signals\[0\].*unsupported field.*vendor_error",
+        ),
+    ],
+)
+def test_contract_rejects_malformed_correctness_signals(
+    signals: object,
+    message: str,
+) -> None:
+    labeled = {
+        **_record(),
+        "assistant_output": "The input was processed.",
+        "feedback": {
+            "polarity": "negative",
+            "rationale": "",
+            "correctness_signals": signals,
+        },
+    }
+
+    with pytest.raises(ValueError, match=message):
+        validate_input_records(
+            [labeled],
+            labeled=True,
+            path=Path("labeled.jsonl"),
+        )
+
+
+def test_correctness_signal_redaction_preserves_structure_only() -> None:
+    seen_content: list[object] = []
+
+    def redact_content(value: object) -> object:
+        seen_content.append(value)
+        return {"detail": "<email>"}
+
+    redacted = redact_correctness_signals(
+        [
+            {
+                "kind": "executable",
+                "check_id": "owner@example.com",
+                "passed": False,
+                "content": {"detail": "owner@example.com"},
+            }
+        ],
+        redact_content=redact_content,
+    )
+
+    assert redacted == [
+        {
+            "kind": "executable",
+            "check_id": "owner@example.com",
+            "passed": False,
+            "content": {"detail": "<email>"},
+        }
+    ]
+    assert seen_content == [{"detail": "owner@example.com"}]

@@ -158,8 +158,12 @@ _EVALUATION_STAGE_PATTERNS = {
     "prepared_inputs": (
         "stages/02_prepared_inputs/normalized_feedback.jsonl",
         "stages/02_prepared_inputs/intent_records.jsonl",
+        "stages/02_prepared_inputs/trusted_split_plan.jsonl",
+        "stages/02_prepared_inputs/feedback_eligibility.jsonl",
         "prepared_inputs/normalized_feedback.jsonl",
         "prepared_inputs/intent_records.jsonl",
+        "prepared_inputs/trusted_split_plan.jsonl",
+        "prepared_inputs/feedback_eligibility.jsonl",
     ),
     "rubric_extraction": (
         "stages/03_evaluation_guidelines/feedback_evidence.jsonl",
@@ -167,12 +171,20 @@ _EVALUATION_STAGE_PATTERNS = {
         "stages/03_evaluation_guidelines/evaluation_guidelines.jsonl",
         "stages/03_evaluation_guidelines/trusted_intents.jsonl",
         "stages/03_evaluation_guidelines/trusted_cases.jsonl",
+        "stages/03_evaluation_guidelines/protected_feedback_evidence.jsonl",
+        "stages/03_evaluation_guidelines/protected_candidate_guidelines.jsonl",
+        "stages/03_evaluation_guidelines/protected_evaluation_guidelines.jsonl",
+        "stages/03_evaluation_guidelines/protected_trusted_cases.jsonl",
         "stages/03_rubric_extraction/feedback_evidence.jsonl",
         "stages/03_rubric_extraction/candidate_guidelines.jsonl",
         "stages/03_rubric_extraction/evaluation_guidelines.jsonl",
         "stages/03_rubric_extraction/feedback_rubrics.jsonl",
         "stages/03_rubric_extraction/trusted_intents.jsonl",
         "stages/03_rubric_extraction/trusted_cases.jsonl",
+        "stages/03_rubric_extraction/protected_feedback_evidence.jsonl",
+        "stages/03_rubric_extraction/protected_candidate_guidelines.jsonl",
+        "stages/03_rubric_extraction/protected_evaluation_guidelines.jsonl",
+        "stages/03_rubric_extraction/protected_trusted_cases.jsonl",
         "decision_assets/feedback_rubrics.jsonl",
         "prepared_inputs/trusted_intents.jsonl",
         "prepared_inputs/trusted_cases.jsonl",
@@ -196,6 +208,8 @@ _EVALUATION_STAGE_PATTERNS = {
         "stages/06_label_inference/missing_labeled_feedback_clusters.jsonl",
         "stages/06_label_inference/missing_labeled_feedback_report.md",
         "stages/06_label_inference/inferred_cases.jsonl",
+        "stages/06_label_inference/inference_dependencies.jsonl",
+        "stages/06_label_inference/held_inference_outputs.jsonl",
         "decision_assets/inferred_unlabeled_cluster_rubrics.jsonl",
         "decision_assets/inferred_unlabeled_labels.jsonl",
         "decision_assets/missing_labeled_feedback_clusters.jsonl",
@@ -207,6 +221,12 @@ _EVALUATION_STAGE_PATTERNS = {
         "stages/07_synthetic_coverage/rejected_synthetic.jsonl",
         "stages/07_synthetic_coverage/synthetic_filter_issues.jsonl",
         "stages/07_synthetic_coverage/synthetic_cases.jsonl",
+        "stages/07_synthetic_coverage/derived_review_items.jsonl",
+        "stages/07_synthetic_coverage/duplicate_families.jsonl",
+        "stages/07_synthetic_coverage/held_derived_cases.jsonl",
+        "stages/07_synthetic_coverage/synthetic_dependencies.jsonl",
+        "reviews/decisions.jsonl",
+        "reviews/finalizations.jsonl",
         "decision_assets/synthetic_candidates.jsonl",
         "decision_assets/rejected_synthetic.jsonl",
         "decision_assets/synthetic_filter_issues.jsonl",
@@ -243,8 +263,18 @@ _ARTIFACT_CATALOG = {
     ),
     "intent_records.jsonl": (
         "Prepared intent records",
-        "Redacted unlabeled records with canonical intent text.",
+        "Protected canonical intent records; content previews are disabled.",
         "Key outputs",
+    ),
+    "trusted_split_plan.jsonl": (
+        "Trusted split plan",
+        "Deterministic group assignments with protected source content omitted.",
+        "Supporting data",
+    ),
+    "feedback_eligibility.jsonl": (
+        "Feedback eligibility",
+        "Metadata-only evidence eligibility and hold decisions.",
+        "Needs attention",
     ),
     "feedback_evidence.jsonl": (
         "Trusted feedback evidence",
@@ -275,6 +305,26 @@ _ARTIFACT_CATALOG = {
         "Trusted evaluation cases",
         "Evaluation cases built directly from trusted feedback.",
         "Key outputs",
+    ),
+    "protected_feedback_evidence.jsonl": (
+        "Protected split-local evidence",
+        "Held-out evidence metadata; content previews are disabled.",
+        "Supporting data",
+    ),
+    "protected_candidate_guidelines.jsonl": (
+        "Protected candidate guidelines",
+        "Split-local candidate metadata; content previews are disabled.",
+        "Supporting data",
+    ),
+    "protected_evaluation_guidelines.jsonl": (
+        "Protected evaluation guidelines",
+        "Split-local guideline metadata; content previews are disabled.",
+        "Supporting data",
+    ),
+    "protected_trusted_cases.jsonl": (
+        "Protected trusted cases",
+        "Held-out trusted case metadata; content previews are disabled.",
+        "Supporting data",
     ),
     "intent_inventory.jsonl": (
         "Intent cluster inventory",
@@ -345,6 +395,51 @@ _ARTIFACT_CATALOG = {
         "Synthetic filter audit",
         "Reasons synthetic candidates were rejected.",
         "Diagnostics",
+    ),
+    "derived_review_items.jsonl": (
+        "Derived review queue",
+        "Metadata-only queue bound to exact content fingerprints.",
+        "Needs attention",
+    ),
+    "duplicate_families.jsonl": (
+        "Exact duplicate families",
+        "Metadata-only exact-context grouping and conflict status.",
+        "Supporting data",
+    ),
+    "held_derived_cases.jsonl": (
+        "Held derived cases",
+        "Metadata-only held-case reasons; case bodies remain protected.",
+        "Needs attention",
+    ),
+    "inference_dependencies.jsonl": (
+        "Inference dependencies",
+        "Protected full-content dependency descriptors; previews are disabled.",
+        "Diagnostics",
+    ),
+    "held_inference_outputs.jsonl": (
+        "Held inference outputs",
+        "Protected invalid inference outputs; previews are disabled.",
+        "Needs attention",
+    ),
+    "synthetic_dependencies.jsonl": (
+        "Synthetic dependencies",
+        "Protected full-content dependency descriptors; previews are disabled.",
+        "Diagnostics",
+    ),
+    "decisions.jsonl": (
+        "Immutable review decisions",
+        "Metadata-only terminal approval and rejection records.",
+        "Needs attention",
+    ),
+    "finalizations.jsonl": (
+        "Immutable review finalizations",
+        "Metadata-only snapshots authorizing dataset construction.",
+        "Needs attention",
+    ),
+    "review_snapshot.json": (
+        "Review snapshot",
+        "Metadata-only finalization authority consumed by dataset construction.",
+        "Supporting data",
     ),
     "dataset_manifest.json": (
         "Dataset manifest",
@@ -439,6 +534,146 @@ def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
     return rows
 
 
+_METADATA_ONLY_ARTIFACTS = frozenset(
+    {
+        "trusted_split_plan.jsonl",
+        "feedback_eligibility.jsonl",
+        "labeling_queue.jsonl",
+        "derived_review_items.jsonl",
+        "duplicate_families.jsonl",
+        "held_derived_cases.jsonl",
+        "decisions.jsonl",
+        "finalizations.jsonl",
+        "review_snapshot.json",
+    }
+)
+
+_PROTECTED_STAGE_THREE_ARTIFACTS = frozenset(
+    {
+        "protected_feedback_evidence.jsonl",
+        "protected_candidate_guidelines.jsonl",
+        "protected_evaluation_guidelines.jsonl",
+        "protected_trusted_cases.jsonl",
+        # Defensive compatibility with pre-implementation design artifacts.
+        "protected_trusted_rubrics.jsonl",
+    }
+)
+
+_PROTECTED_DERIVED_ARTIFACTS = frozenset(
+    {
+        "inferred_unlabeled_cluster_rubrics.jsonl",
+        "inferred_unlabeled_labels.jsonl",
+        "inferred_cases.jsonl",
+        "inference_dependencies.jsonl",
+        "held_inference_outputs.jsonl",
+        "synthetic_candidates.jsonl",
+        "synthetic_cases.jsonl",
+        "rejected_synthetic.jsonl",
+        "synthetic_filter_issues.jsonl",
+        "synthetic_dependencies.jsonl",
+    }
+)
+
+_SAFE_METADATA_FIELDS = frozenset(
+    {
+        "schema_version",
+        "record_id",
+        "record_ids",
+        "group_id",
+        "group_ids",
+        "split_group_id",
+        "split_group_ids",
+        "context_fingerprint",
+        "context_fingerprints",
+        "split",
+        "assignment_source",
+        "parent_split_group_ids",
+        "evidence_eligible",
+        "eligible",
+        "eligibility_source",
+        "hold_reason",
+        "queue_id",
+        "cluster_id",
+        "purpose",
+        "method",
+        "sampling_semantics",
+        "review_item_id",
+        "item_id",
+        "case_id",
+        "case_ids",
+        "family_id",
+        "member_case_ids",
+        "member_fingerprints",
+        "decision_id",
+        "finalization_id",
+        "fingerprint",
+        "case_content_sha256",
+        "content_fingerprint",
+        "truth_fingerprint",
+        "dependency_fingerprint",
+        "source_fingerprint",
+        "review_set_fingerprint",
+        "stage_7_receipt_sha256",
+        "approved_fingerprints",
+        "pending_fingerprints",
+        "rejected_fingerprints",
+        "held_fingerprints",
+        "status",
+        "decision",
+        "initial_decision",
+        "inherited_from",
+        "trust_tier",
+        "counts",
+        "pending",
+        "approved",
+        "rejected",
+        "held",
+        "total",
+    }
+)
+
+
+def _metadata_projection(value: Any) -> Any:
+    """Project one artifact value onto non-authoring audit metadata only."""
+    if isinstance(value, dict):
+        return {
+            key: _metadata_projection(item)
+            for key, item in value.items()
+            if key in _SAFE_METADATA_FIELDS
+        }
+    if isinstance(value, list):
+        return [_metadata_projection(item) for item in value]
+    return value
+
+
+def _artifact_preview_access(relative_path: str) -> tuple[str, str]:
+    """Return visibility and preview policy for one persisted artifact path."""
+    parts = Path(relative_path).parts
+    name = parts[-1]
+    if (
+        name in {"labeled_feedback.jsonl", "unlabeled.jsonl"}
+        or name in {"normalized_feedback.jsonl", "intent_records.jsonl"}
+    ):
+        return "protected_source", "disabled"
+    if name in _PROTECTED_STAGE_THREE_ARTIFACTS:
+        return "protected_held_out", "disabled"
+    if name in _PROTECTED_DERIVED_ARTIFACTS:
+        return "protected_review", "disabled"
+    if "08_dataset_splits" in parts or "dataset_splits" in parts:
+        stem = Path(name).stem
+        if (
+            stem in {"validation", "test", "regression_trusted", "triage_hold"}
+            or stem.startswith("validation_")
+            or stem.startswith("test_")
+            or stem.startswith("regression_trusted_")
+            or stem.startswith("triage_hold_")
+        ):
+            return "protected_held_out", "disabled"
+    if name in _METADATA_ONLY_ARTIFACTS:
+        return "audit_metadata", "metadata_only"
+    return "authoring", "full"
+
+
 def _evaluation_asset_preview(
     path: Path,
     tenant_dir: Path,
@@ -451,6 +686,11 @@ def _evaluation_asset_preview(
     except OSError:
         size = 0
     metadata = _artifact_metadata(relative_path)
+    visibility, preview_policy = _artifact_preview_access(relative_path)
+    access = {
+        "visibility": visibility,
+        "preview_policy": preview_policy,
+    }
     if path.suffix.lower() == ".jsonl":
         rows: List[Any] = []
         row_count = 0
@@ -464,9 +704,14 @@ def _evaluation_asset_preview(
                     if len(rows) >= preview_limit:
                         continue
                     try:
-                        rows.append(json.loads(text))
+                        value = json.loads(text)
+                        if preview_policy == "full":
+                            rows.append(value)
+                        elif preview_policy == "metadata_only":
+                            rows.append(_metadata_projection(value))
                     except json.JSONDecodeError:
-                        rows.append(text)
+                        if preview_policy == "full":
+                            rows.append(text)
         except (OSError, UnicodeDecodeError):
             pass
         return {
@@ -476,10 +721,13 @@ def _evaluation_asset_preview(
             "bytes": size,
             "row_count": row_count,
             "preview": rows,
+            **access,
             **metadata,
         }
     if path.suffix.lower() == ".json":
-        content = _read_json(path)
+        content = _read_json(path) if preview_policy != "disabled" else None
+        if preview_policy == "metadata_only" and content is not None:
+            content = _metadata_projection(content)
         return {
             "name": path.name,
             "path": relative_path,
@@ -487,6 +735,18 @@ def _evaluation_asset_preview(
             "bytes": size,
             "row_count": 1 if content is not None else 0,
             "preview": [content] if content is not None else [],
+            **access,
+            **metadata,
+        }
+    if preview_policy == "disabled":
+        return {
+            "name": path.name,
+            "path": relative_path,
+            "kind": "markdown",
+            "bytes": size,
+            "row_count": None,
+            "preview": "",
+            **access,
             **metadata,
         }
     text = _read_text(path) or ""
@@ -500,6 +760,7 @@ def _evaluation_asset_preview(
         "preview": text[:4000],
         "content": text[:rendered_limit],
         "content_truncated": len(text) > rendered_limit,
+        **access,
         **metadata,
     }
 
@@ -514,45 +775,17 @@ def _evaluation_cluster_summaries(
         "intent_inventory.jsonl",
     )
     clusters = _read_jsonl(inventory_path)[:limit]
-    representative_ids = {
-        str(record_id)
-        for cluster in clusters
-        for record_id in cluster.get("representative_ids", [])
-    }
-    records_by_id = {
-        str(row.get("record_id")): row
-        for row in _read_jsonl(
-            layout.artifact_path(
-                PipelineStage.PREPARED_INPUTS,
-                "intent_records.jsonl",
-            )
-        )
-        if str(row.get("record_id")) in representative_ids
-    }
     summaries = []
     for cluster in clusters:
-        representatives = [
-            records_by_id.get(str(record_id), {})
-            for record_id in cluster.get("representative_ids", [])
-        ]
         summaries.append(
             {
                 "cluster_id": cluster.get("cluster_id"),
                 "route": cluster.get("route"),
                 "size": cluster.get("size", len(cluster.get("record_ids", []))),
-                "top_terms": cluster.get("top_terms", []),
-                "representatives": [
-                    row.get("user_input") or row.get("canonical_intent_text")
-                    for row in representatives
-                    if row
+                "representative_ids": [
+                    str(record_id)
+                    for record_id in cluster.get("representative_ids", [])
                 ],
-                "tools": sorted(
-                    {
-                        str(tool)
-                        for row in representatives
-                        for tool in row.get("tool_names", [])
-                    }
-                ),
             }
         )
     return summaries

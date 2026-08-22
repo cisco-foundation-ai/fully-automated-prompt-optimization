@@ -17,8 +17,10 @@ The workflow keeps three ideas separate:
 - Trusted feedback defines what correctness means.
 - Unlabeled traces define what users actually ask for.
 - Matched unlabeled traces may receive inferred labels from trusted feedback,
-  but only after an intent coverage gate passes.
-- Synthetic examples expand coverage only when their intent matches trusted labeled evidence.
+  but only after an intent coverage gate passes and an exact-fingerprint review
+  decision approves the resulting case.
+- Synthetic examples are proposed only for intents matched to trusted labeled
+  evidence. They are published only after exact-fingerprint approval.
 
 ## Product and Execution Model
 
@@ -30,8 +32,8 @@ The workflow has three entry points backed by the same persisted state:
 
 | Entry point | Use |
 |---|---|
-| Evaluation Asset Studio at `/evaluation-assets/` | Create assets, choose models, cluster count, and match threshold, inspect every pipeline stage, preview artifacts, monitor progress, and resume failures |
-| `python -m hephaestus.cli assets ...` | Scriptable create, run/resume, status, verified extension, and explicit legacy adoption |
+| Evaluation Asset Studio at `/evaluation-assets/` | Create assets, choose models, cluster count, and match threshold, inspect every pipeline stage, preview safe artifacts, monitor progress, review derived cases, finalize publication, and resume failures |
+| `python -m hephaestus.cli assets ...` | Scriptable create, run/resume, status, fingerprint-bound review, finalization, verified extension, and explicit legacy adoption |
 | Evaluation Asset Assistant (`.claude/agents/` or `.codex/agents/`) | Trigger the core workflow, poll state, validate artifacts, diagnose failures, and explain human review decisions |
 
 FAPO Explorer remains at `/`. It shows a read-only evaluation-asset summary and
@@ -67,6 +69,8 @@ not require tenant docs, prompts, chains, configs, adapters, or a legacy
   - Feedback polarity: `positive`, `negative`, or `mixed`.
   - Feedback rationale, if available.
   - Optional corrected answer, edited query, accepted tool output, or follow-up outcome.
+  - Optional declared deterministic/executable correctness signals with stable
+    check IDs and boolean outcomes.
   - Human or SME review state, if available.
 - Unlabeled production traces:
   - High-volume application logs without correctness labels.
@@ -87,13 +91,13 @@ and are not additional evaluation-asset stages.
 | Stage | Inputs | What happens | Outputs |
 |---|---|---|---|
 | 1. `raw_inputs` — Validate raw inputs | Copied `labeled_feedback.jsonl` and `unlabeled.jsonl` | Reject empty inputs; revalidate every copied record against `fapo-evaluation-input-v1` while retaining physical JSONL line numbers across blank lines; require feedback only on labeled records; reject cluster counts that exceed unlabeled rows or cannot allocate at least one cluster to every exact effective route; count rows and calculate source hashes. These checks finish before any provider call | `stages/01_raw_inputs/` |
-| 2. `prepared_inputs` — Prepare canonical inputs | Validated raw input files | Redact every descendant of content-bearing values, including nested tool arguments/results and named runtime/metadata content; preserve identity, exact routing, message-role, and tool-name fields byte-for-byte only at their structural paths; default `request_id` to `record_id` and an absent `route` to the exact `task_type`; recheck normalized record-ID uniqueness using physical source rows; create canonical intent text for clustering | `stages/02_prepared_inputs/` |
-| 3. `rubric_extraction` — Create evaluation guidelines | `normalized_feedback.jsonl`; configured guideline model | First extract atomic claims, corrections, and uncertainties directly supported by each feedback record. Then synthesize compatible evidence within each route into reusable guidelines and compile every criterion with provenance, applicability, severity, scoring, and a preferred evaluator type. Build trusted intents and cases from the compiled guidelines | `stages/03_evaluation_guidelines/` |
+| 2. `prepared_inputs` — Prepare canonical inputs and trusted split plan | Validated raw input files; split seed; verified parent plan for extensions | Redact every descendant of content-bearing values, including nested tool arguments/results and named runtime/metadata content; preserve identity, exact routing, message-role, and tool-name fields byte-for-byte only at their structural paths; default `request_id` to `record_id` and an absent `route` to the exact `task_type`; recheck normalized record-ID uniqueness using physical source rows; derive exact-context-connected `split_group_id` values without changing `group_id`; assign trusted components to train, validation, test, or regression before authoring; record minimum correctness-evidence eligibility; create canonical intent text for clustering | `stages/02_prepared_inputs/`, including `trusted_split_plan.jsonl` and `feedback_eligibility.jsonl` |
+| 3. `rubric_extraction` — Create evaluation guidelines | Eligible training rows from `normalized_feedback.jsonl`; protected eligible held-out units; configured guideline model | Extract and synthesize the reusable guideline library from eligible training feedback only. Build trusted-intent matching text from source request/context semantics and observed tools, not normative criteria. Separately compile validation/test/regression evidence within its assigned split, `split_group_id`, original `group_id`, and route for that held-out trusted case only; never expose protected criteria to Stages 5–7, later provider payloads, or UI previews | Public training-only and protected held-out artifacts under `stages/03_evaluation_guidelines/` |
 | 4. `intent_clustering` — Mine intent clusters | `intent_records.jsonl`; configured embedding provider/model; exact cluster count | Vectorize canonical intent text with the selected OpenAI embedding model or local TF-IDF; allocate the configured cluster count across routes; cluster deterministically within each route; retain representative record IDs and top terms | `stages/04_intent_clustering/` |
-| 5. `coverage_decisions` — Apply coverage decisions | `intent_inventory.jsonl`, `intent_records.jsonl`, `trusted_intents.jsonl`; configured embedding provider/model and coverage parameters | Compare each mined cluster with trusted intents; apply the match threshold (default `0.6`) and trusted-support constraints; classify every cluster; sample centroid-near traces from under-supported and unsupported clusters for labeling | `stages/05_coverage_decisions/`, including `review_queue/` |
-| 6. `label_inference` — Infer reviewable labels | Intent clusters and matches; canonical unlabeled records; normalized feedback; trusted evaluation guidelines; configured guideline model | For matched clusters only, use the configured LLM and matched guideline as correctness evidence to infer a case rubric, attach inferred labels to the real unlabeled records, and build inferred FAPO cases; separately report every unsupported cluster | `stages/06_label_inference/` |
-| 7. `synthetic_coverage` — Optional synthetic coverage | Supported clusters, representative requests, inferred cluster rubrics; enable flag and candidates-per-cluster setting | When enabled, use the configured LLM to generate exactly the requested candidates per supported cluster, then filter invalid, duplicate, inconsistent, leaky, or unsolvable candidates. When disabled, make no model call and write empty artifacts | `stages/07_synthetic_coverage/` |
-| 8. `dataset_splits` — Build dataset splits | Trusted, inferred, and accepted synthetic cases; split seed | Reserve an approximately 20%, deterministic, group-safe trusted-only regression holdout; send inferred or synthetic cases that share its groups to `triage_hold`; globally assign every remaining group across train, validation, and test; write combined and provenance-specific splits and manifests; publish the combined train, validation, test, and trusted regression files to the tenant dataset catalog | `stages/08_dataset_splits/`, root `asset_manifest.json`, and `datasets/evaluation_assets/<asset_id>/` |
+| 5. `coverage_decisions` — Apply coverage decisions | `intent_inventory.jsonl`, `intent_records.jsonl`, training-derived `trusted_intents.jsonl`; configured embedding provider/model and coverage parameters | Compare each mined cluster with trusted intents; apply the match threshold (default `0.6`) and trusted-support constraints; classify every cluster; deterministically select centroid-near traces from under-supported and unsupported clusters for correctness-label acquisition. Every queue row records `purpose`, `method`, and `sampling_semantics: non_probability`; it is not an unbiased sample or prevalence estimate | `stages/05_coverage_decisions/`, including `review_queue/` |
+| 6. `label_inference` — Infer reviewable labels | Intent clusters and matches; canonical unlabeled records; training-visible trusted evaluation guidelines; configured guideline model | For matched clusters only, use the configured LLM and matched guideline to propose a case rubric and inferred cases. Persist a complete dependency fingerprint over the guideline, support, match/cluster/source membership, provider/model/settings, prompt, split plan, and algorithm. Hold an output with no scoreable rule/check/reference/tool expectation; it produces no cases or synthesis | `stages/06_label_inference/`, including inference dependencies and held outputs |
+| 7. `synthetic_coverage` — Optional synthetic coverage and review preparation | Supported clusters, representative requests, scoreable inferred rubrics and Stage 6 dependencies; enable flag and candidates-per-cluster setting | When enabled, request the configured number of candidates and apply only the enforced schema, nonempty-context, substantive-scoreability, narrow literal-label-leakage, and token-overlap checks. Persist complete Stage 7 dependencies, exact review fingerprints, exact canonical-context duplicate families, and conflict/scoreability holds. When disabled, make no synthetic model call and write empty synthetic artifacts. After the Stage 7 receipt commits, transition to `awaiting_review` | `stages/07_synthetic_coverage/`, `reviews/decisions.jsonl`, and `reviews/finalizations.jsonl` |
+| 8. `dataset_splits` — Finalize and build dataset splits | Trusted cases; one explicit current review finalization; exact duplicate-family authority; split seed | Publish non-held trusted cases plus exact-fingerprint-approved inferred/synthetic cases only; pending and rejected cases stay in review artifacts, and held cases stay in triage. Preserve early trusted assignments, keep each exact-context/supplied-group family in one split, never put a derived case in regression, and publish the four immutable consumer files | `stages/08_dataset_splits/`, root `asset_manifest.json`, and `datasets/evaluation_assets/<asset_id>/` |
 
 The persisted Stage 3 identifier remains `rubric_extraction` so existing
 `pipeline_state.json`, CLI, and API clients stay compatible. Its product name,
@@ -125,6 +129,17 @@ completed state, an exact state-to-receipt hash match, and a strict receipt
 inventory authenticating both copied raw files. Missing, malformed, incomplete,
 or stale evidence—and rewritten raw/receipt bytes that no longer match the
 recorded state hash—fails before revision writes or provider construction.
+
+A native run stops after a verified Stage 7 receipt with top-level status
+`awaiting_review`; Stage 8 remains pending and no release generation or pointer
+exists. Listing and deciding reviews retain that state. An explicit
+finalization requires both the exact review-set fingerprint over current
+items/dependencies/holds and the exact decision-set fingerprint over resolved
+eligible statuses and decision IDs. The core revalidates both under the asset
+lock before authorizing Stage 8; it does not approve pending items. A Stage 8
+failure preserves the current finalization so an ordinary resume can retry
+publication without repeating provider calls or asking for another review
+decision.
 
 Provider transport plus semantic response validation and normalization share
 one sanitized boundary. Failures retain their original exception as an
@@ -262,6 +277,16 @@ seeds, and algorithms. Strict allowlists and explicit unavailable or
 not-applicable markers exclude protected prompt/request/response bodies,
 headers, secrets, and exceptions.
 
+Stage 6 and Stage 7 also write one self-authenticating dependency descriptor
+per supported cluster. The Stage 6 descriptor binds complete cluster and match
+rows, complete guideline content and support, hashed current source members,
+provider/model/settings, prompt identity, and algorithm revision. Stage 7 binds
+the complete inferred rubric and Stage 6 dependency, comparison members,
+provider/model/settings, prompt, mechanical filter settings, and generation
+set. Reuse requires exact descriptor equality. Every derived review fingerprint
+then binds that dependency, the complete pre-publication case, and source
+provenance, so a changed case or dependency cannot inherit an old approval.
+
 ### Updating decisions on resume
 
 A stopped pipeline can resume with its existing configuration or an updated
@@ -283,16 +308,47 @@ set of decisions. The Studio's **Edit decisions & resume** form and optional
 
 | Changed decision | Earliest stage rebuilt |
 |---|---|
+| Split seed | Stage 2, `prepared_inputs` |
 | Guideline provider/model or LLM batch size | Stage 3, `rubric_extraction` |
 | Embedding provider/model or exact cluster count | Stage 4, `intent_clustering` |
 | Match threshold or trusted-support constraints | Stage 5, `coverage_decisions` |
 | Synthetic coverage enable flag or cases per cluster | Stage 7, `synthetic_coverage` |
-| Split seed | Stage 8, `dataset_splits` |
 
 An unchanged submitted value does not invalidate anything. Decision edits are
 rejected while the same asset has an active background runner. If the pipeline
 already has an incomplete stage earlier than the decision's dependency, the
 audit records both boundaries and execution resumes at that earlier stage.
+
+### Reviewing and finalizing derived cases
+
+Stage 7 writes eligible inferred and synthetic proposals to
+`derived_review_items.jsonl`. Each item starts pending and binds the complete
+case, its scoreable expected payload, Stage 6/7 dependency, and source
+provenance to an exact SHA-256 fingerprint. Unscoreable cases and exact-context
+truth conflicts are held outside the approvable queue. Exact canonical
+model-visible contexts are transitively united with supplied groups in
+`duplicate_families.jsonl`; the core does not use embeddings, normalization,
+token overlap, edit distance, or paraphrase similarity for this split identity.
+
+Review operations use the same asset lock and recompute the current Stage 7
+receipt, dependencies, item fingerprints, holds, review-set fingerprint, and
+decision-set fingerprint. The review set is stable across decision-only changes;
+the decision set binds the canonical resolved `case_id`, item fingerprint,
+status, and decision ID rows. An eligible item may append one immutable
+`approved` or `rejected` decision for its exact fingerprint. Missing, stale,
+duplicate, malformed, or mismatched authority fails closed to pending or an
+integrity error; there is no latest-write-wins reversal. Decisions and
+historical finalizations remain append-only across invalidation.
+
+Finalization is a separate explicit action. It accepts the displayed review-set
+and decision-set fingerprints as preconditions and snapshots the exact current
+items, effective decisions, holds, and Stage 7 receipt. It may leave any number
+of items pending: Stage 8 always excludes pending, rejected, and held derived
+cases. An exact replay against a released asset is idempotent, but a released
+asset cannot revise the snapshot; create a child version. The Stage 8 and root
+manifests report exact trusted, approved, pending, rejected, and held counts
+plus the corresponding case-content or review fingerprints, the review-set
+fingerprint, finalization ID, and Stage 7 receipt hash.
 
 ### Extending a released asset
 
@@ -315,8 +371,8 @@ The Studio and `assets extend` CLI expose two modes:
 
 | Mode | Allowed additions | Stage behavior |
 |---|---|---|
-| `keep` | Labeled feedback only | Merge and validate full inputs; prepare canonical inputs; extract evidence only for added feedback; rebuild guidelines across the complete evidence pool; restore the exact Stage 4 inventory from the verified child snapshot on every run or rebuild; recalculate Stages 5–8 without reclustering |
-| `refresh` | Labeled feedback, unlabeled records, or both | Merge and validate full inputs; extract only added feedback evidence; rebuild guidelines; rerun Stage 4 over the combined unlabeled pool; recalculate Stages 5–8 |
+| `keep` | Labeled feedback only | Merge and validate full inputs; preserve parent trusted assignments; prepare the current eligibility/split view; extend reusable evidence only with newly added eligible training feedback; rebuild training-only guidelines and protected held-out units; restore the exact Stage 4 inventory from the verified child snapshot on every run or rebuild; reuse Stage 6/7 outputs only for exact dependency matches; rebuild review authority and recalculate Stage 8 after finalization without reclustering |
+| `refresh` | Labeled feedback, unlabeled records, or both | Merge and validate full inputs; preserve parent trusted assignments and assign only new components from the inherited seed; rebuild training-only guidelines and protected held-out units; rerun Stage 4 over the combined unlabeled pool; reuse Stage 6/7 outputs only for exact dependency matches; rebuild review authority and recalculate Stage 8 after finalization |
 
 Keep mode requires the parent's producing embedding provider/model, cluster
 count, and guideline provider/model. Refresh retains the producing guideline
@@ -333,10 +389,14 @@ original unlabeled trace. The trace remains in the intent inventory so traffic
 frequency and cluster membership stay stable, but it is excluded from inferred
 cases once its trusted feedback is added.
 
-Stage 8 preserves the parent's group assignments. Existing groups stay in
-their train, validation, test, or regression location; new groups receive a
-deterministic assignment from the inherited split seed. This prevents an
-extension from reshuffling the established evaluation population.
+Stage 2 preserves the parent's trusted-group assignments before any guideline
+call. Existing groups stay in their train, validation, test, or regression
+location; new connected groups receive a deterministic assignment from the
+inherited split seed. A new exact-context bridge between incompatible parent
+splits fails closed instead of reshuffling either population. A child inherits
+an approval or rejection only when the complete review fingerprint and
+canonical case bytes are identical; dependency or case changes return the item
+to pending.
 
 Refresh mode writes
 `stages/04_intent_clustering/cluster_lineage.jsonl`. Each row relates a previous
@@ -360,7 +420,10 @@ index at `/evaluation-assets/`. Its creation form accepts:
 
 Selecting a tenant and asset shows the eight-stage strip. Selecting a stage
 opens its inputs, processing operations, outputs, counts, artifact list, and
-one syntax-highlighted example per artifact. The Intent Mining stage also
+one syntax-highlighted example per safe artifact. Protected held-out criteria,
+inferred/synthetic case bodies, and dependency bodies have previews disabled;
+metadata-only artifacts are projected through a fixed safe-field allowlist.
+The Intent Mining stage also
 shows the projection-style cluster explorer with route filters, cluster sizes,
 representative requests, and observed tools. Visualization data is separate
 from artifact examples; the example panel never loads an entire JSONL file.
@@ -380,6 +443,21 @@ editor directly on the failed stage. The editor shows only stage-relevant
 settings and explains when changing one rebuilds from an earlier stage. Raw
 inputs remain immutable within an asset; a Stage 1 source correction requires
 a new asset version.
+
+At `awaiting_review`, the Studio renders a dedicated review panel before Stage
+8. It shows the exact review-set and decision-set fingerprints, safe paged item
+metadata, and pending/approved/rejected/held counts. One offset and a
+1-through-100 limit bound the combined deterministic eligible-plus-held
+projection, and `held` is a supported status filter. Each eligible current
+fingerprint has an individual approve or reject action; there is no bulk or
+implicit approval. Decisions send the displayed review-set fingerprint;
+finalization sends both fingerprints, so a stale auto-refreshed view fails
+rather than freezing a different decision snapshot. Asset summaries expose a
+safe `review_authority_revision` that changes after external decisions or
+finalization and prompts the Studio to reload. The review payload exposes only
+safe finalization identity/count metadata, including after release.
+Finalization warns that pending, rejected, and held derived cases remain
+unpublished.
 
 Selecting **Extend asset** opens an execution-plan preview. Adding an unlabeled
 path automatically selects refreshed clustering; keep mode disables embedding
@@ -447,24 +525,42 @@ Each evaluation asset produces the fixed FAPO JSONL split files below:
 | Split | Contents | Primary Use |
 |---|---|---|
 | `train_trusted` | Trusted feedback cases selected for optimization | Optimization and failure discovery |
-| `train_inferred` | Unlabeled traces with inferred labels from matched trusted feedback | Optimization coverage |
-| `train_synthetic` | Filtered synthetic coverage cases for matched trusted intents | Optimization coverage |
+| `train_inferred` | Exact-fingerprint-approved labels on real traces from matched trusted feedback | Optimization coverage |
+| `train_synthetic` | Mechanically accepted and exact-fingerprint-approved synthetic cases | Optimization coverage |
 | `validation_trusted` | Held-out trusted examples | Candidate selection |
-| `validation_inferred` | Inferred unlabeled labels assigned to validation for this dataset version | Coverage-oriented validation |
-| `validation_synthetic` | Filtered synthetic examples assigned to validation for this dataset version | Coverage-oriented validation |
+| `validation_inferred` | Exact-fingerprint-approved inferred labels assigned to validation for this dataset version | Coverage-oriented validation |
+| `validation_synthetic` | Mechanically accepted and exact-fingerprint-approved synthetic examples assigned to validation | Coverage-oriented validation |
 | `test_trusted` | Held-out trusted examples used for release-candidate testing | Final release check |
-| `test_inferred` | Inferred unlabeled labels assigned to test for this dataset version | Coverage-oriented final check |
-| `test_synthetic` | Filtered synthetic examples assigned to test for this dataset version | Coverage-oriented final check |
+| `test_inferred` | Exact-fingerprint-approved inferred labels assigned to test for this dataset version | Coverage-oriented final check |
+| `test_synthetic` | Mechanically accepted and exact-fingerprint-approved synthetic examples assigned to test | Coverage-oriented final check |
 | `regression_trusted` | Automatic 20% holdout sampled only from trusted feedback cases | Tight non-regression gate |
-| `triage_hold` | Ambiguous, conflicting, or under-specified feedback | Review queue only |
+| `triage_hold` | Exact-truth conflicts, unscoreable derived cases, and approved derived cases attached to regression | Audit/repair queue only |
 
-`regression_trusted` is created automatically. The pipeline deterministically
-shuffles trusted feedback groups using the split seed, reserves approximately
-20% as the regression gate, and excludes those cases from train, validation,
-and test. Whole `group_id` values remain together, so the exact percentage may
-vary slightly when groups contain multiple cases. Inferred and synthetic cases
-never enter this split. If either shares a `group_id` selected for regression,
-the conflicting case is written to `triage_hold`.
+`regression_trusted` is created automatically from the early Stage 2 plan. A
+stable hash of the split seed and each connected `split_group_id` assigns
+approximately 20% of components to regression before guideline authoring and
+excludes those cases from train, validation, and test. The original `group_id`
+is preserved; exact canonical model-visible contexts and supplied groups are
+transitively united only in the derived split identity. Inferred and synthetic
+cases never enter regression. An approved derived case attached to a regression
+component is written to `triage_hold` instead.
+
+Before final splitting, the core builds exact duplicate families across trusted,
+inferred, and synthetic pre-publication cases. If one exact context has
+different expected/scoring truth, every case in that connected component is
+held rather than selecting a preferred source. Otherwise, the complete family
+stays in one split. This exact mechanism does not detect paraphrases or claim
+semantic equivalence; the separate Stage 7 token-overlap heuristic is only a
+candidate-rejection check.
+
+The root `asset_manifest.json` and Stage 8 manifest carry the same authenticated
+`review` authority: the review-set fingerprint, finalization ID, Stage 7 receipt,
+exact trusted/approved/pending/rejected/held counts, and canonical per-case
+fingerprints. Trusted rows are bound by complete case-content fingerprints;
+derived rows by complete review fingerprints; held rows by their fingerprint
+and reason. Released verification recomputes the inventory from the persisted
+finalization snapshot, so a changed count, identity, fingerprint, or reason
+fails closed.
 
 ## Intent Coverage Gate
 
@@ -472,7 +568,9 @@ Unlabeled traces are not labels. They should be used to discover high-volume int
 
 For each mined intent cluster:
 
-- If the intent matches the trusted labeled pool and passes statistical coverage thresholds, use that trusted evidence to synthesize coverage cases.
+- If the intent matches the training-visible trusted pool and passes the
+  configured support thresholds, use that trusted evidence to propose coverage
+  cases for fingerprint-bound review.
 - If the semantic match is good but trusted support is too thin, request more trusted examples before relying on synthetic expansion.
 - If the intent has missing or weak labels, do not synthesize labels for it yet. Route representative examples to application feedback prompts, annotation queues, or SME review.
 
@@ -482,7 +580,7 @@ The generic gate emits these statuses:
 
 | Status | Meaning | Next Action |
 |---|---|---|
-| `matched_trusted_intent` | The unlabeled cluster matches trusted labeled evidence and meets support thresholds | Proceed to label inference and, when enabled, optional synthetic coverage |
+| `matched_trusted_intent` | The unlabeled cluster matches training-visible trusted labeled evidence and meets configured support thresholds | Proceed to label inference, optional synthetic proposal, and fingerprint-bound review |
 | `needs_more_trusted_examples` | The cluster appears to match an intent, but trusted examples are statistically thin for the cluster volume | Request targeted feedback or SME review for representative examples |
 | `missing_or_weak_labels` | No trusted intent match is strong enough | Request feedback or SME review before synthesis |
 
@@ -530,20 +628,28 @@ The core uses the following deterministic mechanics:
    Legacy slug-based cluster IDs remain unchanged when route slugs are unique;
    routes whose exact values collide after slugging receive a stable digest of
    the exact route bytes so cluster IDs cannot overwrite one another.
-5. Stage 5 builds comparable text for clusters and trusted intents, vectorizes
-   it with the same configured provider, chooses the best same-route trusted
-   match by cosine similarity, and applies the configured coverage policy.
+5. Stage 5 builds comparable text for clusters and training-derived trusted
+   intents, vectorizes it with the same configured provider, chooses the best
+   same-route trusted match by cosine similarity, and applies the configured
+   coverage policy. Trusted text uses source user requests, the latest
+   conversation context, observed tool names, and the intent label; normative
+   guideline criterion statements are not traffic semantics.
 6. For each `needs_more_trusted_examples` or `missing_or_weak_labels` cluster,
    Stage 5 selects 10% of its records, with a minimum of one and a maximum of
    three. Selection uses the centroid-near representatives already calculated
    by Stage 4, so it is deterministic and favors typical traces over outliers.
    The selected redacted traces are written to
    `stages/05_coverage_decisions/review_queue/labeling_queue.jsonl` with their
-   cluster status and reason.
+   cluster status and reason. Each row also declares acquisition purpose
+   `correctness_label_acquisition`, method
+   `deterministic_centroid_nearest`, and
+   `sampling_semantics: non_probability`.
 
 Stage 5 does not call an LLM and has no manual review checkpoint. Its output is
-the persisted coverage decision and an external labeling work queue. Stage 6
-uses the configured guideline LLM only for clusters whose Stage 5 status is
+the persisted coverage decision and an external labeling work queue. The queue
+intentionally favors centroid-near representative traces; it is not an unbiased
+sample and cannot estimate traffic prevalence. Stage 6 uses the configured
+guideline LLM only for clusters whose Stage 5 status is
 `matched_trusted_intent`.
 
 This asset creation step is not a FAPO eval run. It produces versioned datasets and coverage reports that the FAPO optimization loop consumes afterward.
@@ -572,13 +678,14 @@ Each new asset contains:
 | Directory | Contents |
 |---|---|
 | `stages/01_raw_inputs/` | Immutable copied labeled and unlabeled JSONL plus source hashes |
-| `stages/02_prepared_inputs/` | Normalized feedback and canonical intent records |
-| `stages/03_evaluation_guidelines/` | Feedback evidence, candidate and compiled guidelines, trusted intents, and trusted evaluation cases |
+| `stages/02_prepared_inputs/` | Normalized feedback, canonical intent records, early trusted split plan, and feedback-eligibility decisions |
+| `stages/03_evaluation_guidelines/` | Public training-only evidence/guidelines/intents/cases plus protected split-local held-out evidence/guidelines/cases |
 | `stages/04_intent_clustering/` | Intent cluster inventory |
-| `stages/05_coverage_decisions/` | Match decisions, coverage report, and nested human labeling queue |
-| `stages/06_label_inference/` | Inferred labels and cases plus unsupported-cluster reports |
-| `stages/07_synthetic_coverage/` | Candidate, accepted, rejected, and filter-audit synthetic artifacts |
-| `stages/08_dataset_splits/` | Authoritative component and combined train, validation, test, regression, and triage files |
+| `stages/05_coverage_decisions/` | Match decisions, coverage report, and nested non-probability correctness-labeling queue |
+| `stages/06_label_inference/` | Inferred rubrics/labels/cases, complete dependency descriptors, held unscoreable outputs, and unsupported-cluster reports |
+| `stages/07_synthetic_coverage/` | Candidate, mechanically accepted/rejected, filter-audit, dependency, derived-review, exact-family, and held artifacts |
+| `reviews/` | Append-only immutable exact-fingerprint decisions and finalization snapshots |
+| `stages/08_dataset_splits/` | Final review snapshot and authoritative approved-only component/combined train, validation, test, regression, and triage files |
 | `datasets/evaluation_assets/<asset_id>/release.json` | Sole mutable pointer to the current verified consumer generation |
 | `datasets/evaluation_assets/<asset_id>/generations/sha256-<hash>/` | Immutable generation manifest and combined `train`, `validation`, `test`, and `regression_trusted` JSONL files |
 
@@ -621,8 +728,10 @@ python -m hephaestus.cli assets create \
   --synthetic-cases-per-cluster 2
 ```
 
-Omit `--enable-synthetic-coverage` to use only trusted and inferred real cases.
-The per-cluster count is persisted but ignored while Stage 7 is disabled.
+Omit `--enable-synthetic-coverage` to propose only trusted and inferred real
+cases. Inferred cases still require exact-fingerprint approval before
+publication. The per-cluster count is persisted but ignored while Stage 7 is
+disabled.
 
 For a local embedding fallback, set `--embedding-model tfidf`. Asset creation
 will persist both the TF-IDF provider and model selection:
@@ -660,6 +769,47 @@ python -m hephaestus.cli assets status \
 The Explorer UI calls the same core service. Completed stages are persisted and
 skipped only when their receipts verify on resume; model settings and the fixed
 cluster count are recorded in the asset manifest.
+
+A normal run stops at `awaiting_review` after Stage 7. List a bounded page and
+copy its current `review_set_fingerprint` and `decision_set_fingerprint`:
+
+```bash
+python -m hephaestus.cli assets reviews list \
+  --tenant <tenant_id> \
+  --asset-id <asset_id>
+```
+
+The list command's `--status` option accepts `pending`, `approved`, `rejected`,
+or `held`. It applies `--offset` and `--limit` to one combined, deterministic
+eligible-plus-held projection, and returns no more than the requested limit
+across `items` and `held`; `--limit` must be from 1 through 100.
+
+Approve or reject one eligible current item by exact case and review-set
+fingerprints:
+
+```bash
+python -m hephaestus.cli assets reviews approve \
+  --tenant <tenant_id> \
+  --asset-id <asset_id> \
+  --case-id <case_id> \
+  --fingerprint <sha256:item_fingerprint> \
+  --reviewer <reviewer_name> \
+  --review-set <sha256:review_set_fingerprint>
+```
+
+`assets reviews reject` accepts the same arguments. Re-list after the last
+decision to obtain the current decision-set fingerprint. When that exact
+snapshot is ready—including when every derived item should remain pending—freeze
+it and synchronously run Stage 8:
+
+```bash
+python -m hephaestus.cli assets reviews finalize \
+  --tenant <tenant_id> \
+  --asset-id <asset_id> \
+  --reviewer <reviewer_name> \
+  --review-set <sha256:review_set_fingerprint> \
+  --decision-set <sha256:decision_set_fingerprint>
+```
 
 Explicitly verify and adopt a legacy top-level `completed` asset:
 
@@ -700,25 +850,32 @@ Omitted settings retain their persisted values. Use
 
 ## Synthetic Coverage Cases
 
-Synthetic examples should expand known, trusted intents rather than define new unlabeled intents.
+Synthetic proposals are requested only for clusters with a scoreable inferred
+rubric derived from a training-visible trusted-intent match. They do not define
+new trusted intents or correctness criteria.
 
-Generation should use:
+The persisted mechanical filter enforces only:
 
-- Trusted evaluation guidelines or deterministic checks for correctness criteria.
-- Unlabeled intent clusters for realistic phrasing, context shape, workflow frequency, and tool-use patterns.
+- the FAPO case schema;
+- a nonempty `context` mapping;
+- at least one substantive rubric rule, deterministic check, reference, label,
+  answer, or tool expectation;
+- absence of a narrow literal leakage match for selected expected strings of at
+  least 24 characters; and
+- token-set Jaccard overlap below the fixed `0.95` threshold against
+  existing accepted cases.
 
-Filtering should remove synthetic cases that are:
+Those checks do **not** establish factual correctness, safety, domain
+consistency, tool feasibility or availability, real-world solvability,
+realism, indirect-leakage absence, privacy beyond the separate redaction
+contract, or calibrated semantic equivalence. The token-overlap heuristic is a
+candidate-rejection mechanism, not the exact canonical-context family identity
+used for split safety.
 
-- Invalid FAPO JSONL.
-- Missing concrete, scoreable criteria.
-- Inconsistent with tenant domain, tool context, or available fields.
-- Near-duplicates of existing cases.
-- Leaky, meaning expected answers or feedback rationale appear in runtime `context`.
-- Unsolvable from the provided context.
-
-Filtered synthetic examples may be assigned to training, validation, and test
-splits for the dataset version. They are never added to
-`regression_trusted`, which is sourced automatically from trusted feedback.
+Mechanically accepted synthetic cases remain pending until an exact-fingerprint
+review approves them. Approved cases may be assigned to training, validation,
+or test for that dataset version. Pending, rejected, and held cases remain
+auditable but unpublished; derived cases never enter `regression_trusted`.
 
 ## Prepared Feedback Record
 
@@ -757,6 +914,10 @@ identifier pseudonymization:
 
 The prepared record is not the eval dataset yet. It is an internal redacted
 format used for evidence extraction, guideline creation, and auditability.
+Stage 2 adds the derived `split_group_id`, `trusted_split`, and
+`evidence_eligible` fields. An ineligible row also carries
+`hold_reason: insufficient_correctness_evidence`. The original `group_id`
+remains unchanged.
 Redaction covers `user_input`, `assistant_output`, conversation content,
 feedback rationale/correction, complete tool argument/result/error subtrees,
 and explicitly content-bearing nested runtime/metadata values. Provider names,
@@ -768,19 +929,31 @@ text.
 Stage 3 deliberately separates evidence from generalization:
 
 1. `feedback_evidence.jsonl` records atomic claims, explicit corrections, and
-   uncertainties for every trusted record. The previous assistant output is
-   context and never becomes an answer key.
+   uncertainties for eligible training feedback only. The previous assistant
+   output is context and never becomes an answer key. Ineligible rows remain in
+   Stage 2 audit artifacts and make no guideline call.
 2. `candidate_guidelines.jsonl` contains model-proposed groupings of compatible
-   evidence within a route. Every trusted `record_id` must be represented.
+   eligible training evidence within a route. Every eligible training
+   `record_id` must be represented.
 3. `evaluation_guidelines.jsonl` is the compiled contract used downstream.
    Each guideline has stable provenance and criteria with source record IDs,
    `kind`, `dimension`, `severity`, `applicability`, `scoring`,
    `evidence_required`, and an evaluator plan. Conflicts and uncertainties stay
    explicit.
-4. `trusted_intents.jsonl` aggregates support counts and matching text at the
-   guideline level. `trusted_cases.jsonl` embeds the applicable guideline IDs
-   and complete guideline snapshots so split files remain independently
-   usable.
+4. `trusted_intents.jsonl` aggregates training support counts. Matching text is
+   built from the source user request, latest conversation context, observed
+   tool names, and intent label; it excludes normative criterion statements.
+   `trusted_cases.jsonl` embeds the applicable guideline IDs and complete
+   guideline snapshots so training split files remain independently usable.
+5. `protected_feedback_evidence.jsonl`,
+   `protected_candidate_guidelines.jsonl`,
+   `protected_evaluation_guidelines.jsonl`, and
+   `protected_trusted_cases.jsonl` hold eligible validation, test, and
+   regression units. Each unit is isolated by assigned split,
+   `split_group_id`, original `group_id`, and route. These criteria produce only
+   their corresponding held-out trusted cases; they never enter reusable
+   guidelines, trusted-intent matching, Stage 6/7 prompts, or UI content
+   previews.
 
 The live writer and legacy-adoption verifier share this transformation
 contract. Candidate criteria accept only `required`, `prohibited`, or
@@ -809,11 +982,12 @@ Evaluator plans use this preference order:
 5. `human_review` when the available evidence cannot support an automated
    decision.
 
-Generated guidelines are active because their source is trusted feedback, but
-they are marked `uncalibrated`. A later eval lifecycle should compare automated
-grades with human or executable outcomes before treating judge scores as a
-high-confidence release signal. This is metadata, not a blocking Stage 3 review
-gate.
+Reusable generated guidelines are active because their source is eligible
+training feedback, but they are marked `uncalibrated`. Protected held-out
+guidelines are local scoring material, not reusable authoring guidance. A later
+eval lifecycle should compare automated grades with human or executable
+outcomes before treating judge scores as a high-confidence release signal.
+This is metadata, not a blocking Stage 3 review gate.
 
 ## Oracle Construction
 
@@ -877,27 +1051,43 @@ Do not put the feedback rationale in `context` unless the production chain will 
 
 ## Filtering Rules
 
-Reject or hold cases when:
+The current core enforces these publication holds:
 
-- Feedback polarity conflicts with the written rationale.
-- The user reports a problem but gives no actionable reason and there is no deterministic failure signal.
-- The trace lacks enough context to reproduce the request.
-- The assistant output contains private data that cannot be redacted without changing the task.
-- The previous response is positively rated but violates safety, policy, grounding, or tool constraints.
-- Multiple turns in the same thread would leak nearly identical context across train and validation/test.
+- A feedback row with no nonempty rationale, material correction, or declared
+  deterministic/executable correctness signal is retained with
+  `insufficient_correctness_evidence` and activates no guideline or trusted
+  case.
+- An inferred rubric with no substantive rule, check, reference, or tool
+  expectation is retained as `unscoreable_rubric` and produces no inferred or
+  synthetic cases.
+- A derived case with an unscoreable `expected` payload is held outside the
+  approvable queue.
+- Every case in an exact-context-connected family is held when that exact
+  context has conflicting expected/scoring truth.
+- An approved derived case connected to trusted regression is held rather than
+  published in any split.
+
+Contradiction, safety, policy, broader privacy, factual grounding, and
+reproducibility checks remain separate scorer, executable-check, or human-review
+responsibilities. Passing the minimum evidence gate or mechanical synthetic
+filter is not evidence that those properties hold.
 
 ## Splitting Rules
 
-- Assign train, validation, and test globally by canonical `group_id`, not
-  separately by provenance or individual row.
-- Deduplicate semantically before splitting.
-- Keep corrected negative cases in train only after the oracle is clear enough to score.
+- Preserve the source `group_id` and assign a derived `split_group_id` for the
+  transitive union of supplied groups and exact canonical model-visible
+  contexts.
+- Assign trusted components to train, validation, test, or regression in Stage
+  2, before guideline authoring. Extensions preserve verified parent
+  assignments and use the inherited seed only for new components.
+- Do not claim semantic/paraphrase deduplication. Exact canonical contexts are
+  grouped; the token-overlap synthetic check is a separate rejection heuristic.
 - Keep validation and test examples out of prompt/skill authoring context during optimization.
-- Assign filtered synthetic examples to training, validation, and test as part of a named dataset version.
-- Automatically reserve a deterministic, group-safe 20% of trusted feedback
-  cases for `regression_trusted` before splitting the remaining trusted pool.
-- Route inferred or synthetic cases whose `group_id` is reserved for regression
-  to `triage_hold`.
+- Assign only exact-fingerprint-approved inferred and mechanically accepted,
+  exact-fingerprint-approved synthetic cases to train, validation, or test.
+- Automatically assign approximately 20% of trusted connected groups to
+  `regression_trusted` at the early boundary.
+- Route a derived case connected to a regression family to `triage_hold`.
 - Record dataset version and split membership so eval scores are compared only within compatible dataset versions.
 
 ## Scoring Pattern
@@ -938,8 +1128,12 @@ lifecycle:
 - Do not optimize directly against unresolved user complaints.
 - Do not use old assistant output as the sole target.
 - Do not leak feedback rationale into runtime context.
-- Do not mix rows from the same thread across train, validation, and test.
+- Do not expose held-out protected guideline/evidence artifacts to authoring,
+  downstream provider payloads, or UI previews.
+- Do not mix one supplied/exact-context-connected family across splits.
 - Do not synthesize labels for intents that do not match trusted labeled evidence.
+- Do not publish an inferred or synthetic case without approval for its exact
+  current fingerprint.
 - Keep inferred and synthetic cases out of `regression_trusted`; the core
   selects that gate automatically from trusted feedback.
 - Do not commit raw feedback traces or local generated datasets unless the tenant workflow explicitly allows it.

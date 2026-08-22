@@ -24,12 +24,418 @@ def test_assets_help_exposes_only_canonical_pipeline_commands() -> None:
 
     assert "intent-inventory" not in help_text
     assert "assemble" not in help_text
-    for command in ("create", "run", "extend", "adopt", "status"):
+    for command in ("create", "run", "extend", "adopt", "status", "reviews"):
         assert command in help_text
     with pytest.raises(SystemExit):
         parser.parse_args(["assets", "intent-inventory"])
     with pytest.raises(SystemExit):
         parser.parse_args(["assets", "assemble"])
+
+
+def test_assets_reviews_parser_requires_exact_review_authority() -> None:
+    """Decision and finalization commands cannot omit their stale-set guards."""
+    parser = build_parser()
+
+    list_args = parser.parse_args(
+        [
+            "assets",
+            "reviews",
+            "list",
+            "--tenant",
+            "tenant_a",
+            "--asset-id",
+            "v1",
+            "--status",
+            "pending",
+            "--offset",
+            "10",
+            "--limit",
+            "20",
+        ]
+    )
+    assert list_args.reviews_command == "list"
+    assert list_args.status == "pending"
+    assert list_args.offset == 10
+    assert list_args.limit == 20
+
+    held_args = parser.parse_args(
+        ["assets", "reviews", "list", "--tenant", "tenant_a", "--status", "held"]
+    )
+    assert held_args.status == "held"
+
+    approve_args = parser.parse_args(
+        [
+            "assets",
+            "reviews",
+            "approve",
+            "--tenant",
+            "tenant_a",
+            "--case-id",
+            "inferred-u1",
+            "--fingerprint",
+            "sha256:" + "a" * 64,
+            "--reviewer",
+            "reviewer@example.com",
+            "--review-set",
+            "sha256:" + "b" * 64,
+        ]
+    )
+    assert approve_args.reviews_command == "approve"
+    assert approve_args.case_id == "inferred-u1"
+    assert approve_args.expected_review_set_fingerprint == "sha256:" + "b" * 64
+
+    for command in ("approve", "reject"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(
+                [
+                    "assets",
+                    "reviews",
+                    command,
+                    "--tenant",
+                    "tenant_a",
+                    "--fingerprint",
+                    "sha256:" + "a" * 64,
+                    "--reviewer",
+                    "reviewer@example.com",
+                    "--review-set",
+                    "sha256:" + "b" * 64,
+                ]
+            )
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "assets",
+                "reviews",
+                "finalize",
+                "--tenant",
+                "tenant_a",
+                "--reviewer",
+                "reviewer@example.com",
+                "--review-set",
+                "sha256:" + "b" * 64,
+            ]
+        )
+
+    for option, value in (
+        ("--case-id", " "),
+        ("--fingerprint", "sha256:not-canonical"),
+        ("--reviewer", " "),
+        ("--review-set", "sha256:not-canonical"),
+    ):
+        arguments = [
+            "assets",
+            "reviews",
+            "approve",
+            "--tenant",
+            "tenant_a",
+            "--case-id",
+            "inferred-u1",
+            "--fingerprint",
+            "sha256:" + "a" * 64,
+            "--reviewer",
+            "reviewer@example.com",
+            "--review-set",
+            "sha256:" + "b" * 64,
+        ]
+        arguments[arguments.index(option) + 1] = value
+        with pytest.raises(SystemExit):
+            parser.parse_args(arguments)
+
+    for option, value in (("--offset", "-1"), ("--limit", "0"), ("--limit", "101")):
+        with pytest.raises(SystemExit):
+            parser.parse_args(
+                [
+                    "assets",
+                    "reviews",
+                    "list",
+                    "--tenant",
+                    "tenant_a",
+                    option,
+                    value,
+                ]
+            )
+
+
+def test_assets_reviews_cli_lists_one_bounded_safe_page(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Catch a list command that drops pagination or prints protected case content."""
+    from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
+
+    received = []
+
+    def list_review_items(
+        layout: EvaluationAssetLayout,
+        *,
+        status: str | None = None,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> dict:
+        received.append((layout.tenant_id, layout.asset_id, status, offset, limit))
+        return {
+            "items": [
+                {
+                    "case_id": "inferred-u1",
+                    "fingerprint": "sha256:" + "a" * 64,
+                    "trust_tier": "inferred_from_trusted_feedback",
+                    "status": "pending",
+                    "case": {"context": {"private": "must-not-leak"}},
+                }
+            ],
+            "held": [],
+            "counts": {"pending": 1, "approved": 0, "rejected": 0, "held": 0},
+            "review_set_fingerprint": "sha256:" + "b" * 64,
+            "stage7_receipt_sha256": "sha256:" + "c" * 64,
+            "offset": offset,
+            "limit": limit,
+            "total": 1,
+        }
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        EvaluationAssetLayout,
+        "list_review_items",
+        list_review_items,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "hephaestus",
+            "assets",
+            "reviews",
+            "list",
+            "--tenant",
+            "tenant_a",
+            "--asset-id",
+            "v1",
+            "--tenants-root",
+            "tenants",
+            "--status",
+            "pending",
+            "--offset",
+            "3",
+            "--limit",
+            "8",
+        ],
+    )
+
+    main()
+
+    assert received == [("tenant_a", "v1", "pending", 3, 8)]
+    output = json.loads(capsys.readouterr().out)
+    assert output["items"] == [
+        {
+            "case_id": "inferred-u1",
+            "fingerprint": "sha256:" + "a" * 64,
+            "trust_tier": "inferred_from_trusted_feedback",
+            "status": "pending",
+        }
+    ]
+    assert "private" not in json.dumps(output)
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_decision"),
+    (("approve", "approved"), ("reject", "rejected")),
+)
+def test_assets_reviews_cli_binds_one_exact_decision(
+    command: str,
+    expected_decision: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Catch a CLI decision that omits case identity or current-set authority."""
+    from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
+
+    received = []
+
+    def decide_review(
+        layout: EvaluationAssetLayout,
+        case_id: str,
+        fingerprint: str,
+        decision: str,
+        *,
+        reviewer: str,
+        note: str | None = None,
+        expected_review_set_fingerprint: str | None = None,
+    ) -> dict:
+        received.append(
+            (
+                layout.tenant_id,
+                layout.asset_id,
+                case_id,
+                fingerprint,
+                decision,
+                reviewer,
+                note,
+                expected_review_set_fingerprint,
+            )
+        )
+        return {
+            "decision_id": "sha256:" + "c" * 64,
+            "case_id": case_id,
+            "fingerprint": fingerprint,
+            "status": decision,
+            "note": "must-not-leak",
+        }
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        EvaluationAssetLayout,
+        "decide_review",
+        decide_review,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "hephaestus",
+            "assets",
+            "reviews",
+            command,
+            "--tenant",
+            "tenant_a",
+            "--asset-id",
+            "v1",
+            "--tenants-root",
+            "tenants",
+            "--case-id",
+            "inferred-u1",
+            "--fingerprint",
+            "sha256:" + "a" * 64,
+            "--reviewer",
+            "reviewer@example.com",
+            "--note",
+            "checked",
+            "--review-set",
+            "sha256:" + "b" * 64,
+        ],
+    )
+
+    main()
+
+    assert received == [
+        (
+            "tenant_a",
+            "v1",
+            "inferred-u1",
+            "sha256:" + "a" * 64,
+            expected_decision,
+            "reviewer@example.com",
+            "checked",
+            "sha256:" + "b" * 64,
+        )
+    ]
+    assert json.loads(capsys.readouterr().out) == {
+        "case_id": "inferred-u1",
+        "decision_id": "sha256:" + "c" * 64,
+        "fingerprint": "sha256:" + "a" * 64,
+        "status": expected_decision,
+    }
+
+
+def test_assets_reviews_cli_finalizes_current_set_synchronously(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Catch a CLI finalization that queues work without executing Stage 8."""
+    from src.hephaestus.evaluation_assets.pipeline import EvaluationAssetPipeline
+
+    received = []
+
+    class FinalState:
+        def to_dict(self) -> dict:
+            return {
+                "tenant_id": "tenant_a",
+                "asset_id": "v1",
+                "status": "released",
+                "current_stage": "dataset_splits",
+                "counts": {"approved": 1, "pending": 0},
+                "error": "must-not-leak",
+            }
+
+    def finalize_review(
+        pipeline: EvaluationAssetPipeline,
+        *,
+        reviewer: str,
+        note: str | None = None,
+        expected_review_set_fingerprint: str | None = None,
+        expected_decision_set_fingerprint: str | None = None,
+        **kwargs,
+    ) -> FinalState:
+        received.append(
+            (
+                pipeline.layout.tenant_id,
+                pipeline.layout.asset_id,
+                reviewer,
+                note,
+                expected_review_set_fingerprint,
+                expected_decision_set_fingerprint,
+                kwargs,
+            )
+        )
+        return FinalState()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        EvaluationAssetPipeline,
+        "finalize_review",
+        finalize_review,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "hephaestus",
+            "assets",
+            "reviews",
+            "finalize",
+            "--tenant",
+            "tenant_a",
+            "--asset-id",
+            "v1",
+            "--tenants-root",
+            "tenants",
+            "--reviewer",
+            "reviewer@example.com",
+            "--note",
+            "release approved cases",
+            "--review-set",
+            "sha256:" + "b" * 64,
+            "--decision-set",
+            "sha256:" + "c" * 64,
+        ],
+    )
+
+    main()
+
+    assert received == [
+        (
+            "tenant_a",
+            "v1",
+            "reviewer@example.com",
+            "release approved cases",
+            "sha256:" + "b" * 64,
+            "sha256:" + "c" * 64,
+            {},
+        )
+    ]
+    assert json.loads(capsys.readouterr().out) == {
+        "tenant_id": "tenant_a",
+        "asset_id": "v1",
+        "status": "released",
+        "current_stage": "dataset_splits",
+        "counts": {"approved": 1, "pending": 0},
+    }
 
 
 def test_assets_create_and_status_use_evaluation_assets_workspace(

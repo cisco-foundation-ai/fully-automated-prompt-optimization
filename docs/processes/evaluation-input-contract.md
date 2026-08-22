@@ -38,7 +38,11 @@ fields. In particular, `schema_version`, `record_id`, `group_id`, `request_id`,
 `task_type`, `route`, intent labels, message roles, and tool names remain
 byte-for-byte unchanged at their defined structural paths. Stage 2 rechecks
 normalized `record_id` uniqueness and reports both physical source rows and
-source IDs if a transformation creates a collision.
+source IDs if a transformation creates a collision. It then derives a
+`split_group_id`, assigns connected trusted groups to a split before guideline
+authoring, and records whether each feedback row has minimum usable correctness
+evidence. These are internal derived fields; the supplied `group_id` remains
+unchanged.
 
 ## Common Record
 
@@ -65,7 +69,11 @@ Optional common fields:
 | `assistant_output` | string | Omitted for unlabeled records when unavailable |
 
 `record_id` values must be unique within each file. `group_id` is mandatory;
-for a genuinely independent record, use its `record_id`.
+for a genuinely independent record, use its `record_id`. The core additionally
+unites supplied groups that share exact canonical model-visible context into a
+derived `split_group_id` for split safety. It does not use embeddings,
+case-folding, whitespace folding, token overlap, or paraphrase similarity for
+that identity.
 
 The effective routing identity is exact and shared by Stage 1 preflight,
 prepared records, clustering, and coverage matching. When `route` is present,
@@ -127,8 +135,23 @@ Optional feedback fields include:
 
 - `correction`: corrected output or structured correction evidence.
 - `source`: nonempty source category such as `user`, `annotator`, or `sme`.
+- `correctness_signals`: an array of closed objects requiring `kind`
+  (`deterministic` or `executable`), a nonempty `check_id`, and boolean
+  `passed`. An optional `content` field may carry arbitrary content-bearing
+  evidence and is redacted by the core. The core treats the signal as evidence
+  that an external check ran; it does not infer the check's meaning or
+  trustworthiness.
 - Additional provenance that does not change the meaning of the canonical
   fields.
+
+A labeled row remains contract-valid when `rationale` is empty and both
+`correction` and `correctness_signals` are absent. Stage 2 handles that separate
+semantic boundary: the row remains auditable but is marked
+`insufficient_correctness_evidence`, causes no guideline provider call when it
+is the only evidence in its visibility unit, and creates no active trusted
+case. A nonempty rationale, a material correction, or a well-formed declared
+correctness signal satisfies only this minimum eligibility gate; it does not
+prove factual correctness, safety, privacy, or absence of contradiction.
 
 Example:
 
@@ -212,6 +235,9 @@ Stage 1 rejects:
 - Malformed conversation messages or tool calls.
 - Labeled records without `assistant_output` or canonical feedback.
 - Feedback polarities outside the three canonical values.
+- Malformed `correctness_signals`, including unsupported kinds, blank check
+  IDs, non-boolean outcomes, or unsupported fields; `content` is the only
+  optional field.
 - Unlabeled records containing feedback.
 - A requested cluster count greater than the copied unlabeled row count.
 - A requested cluster count smaller than the number of distinct effective
@@ -231,7 +257,9 @@ GET /api/evaluation-assets/input-contract
 An external adapter is responsible for joining vendor-specific trace and
 feedback resources, traversing child spans, extracting messages, standardizing
 tool calls, assigning stable groups, and mapping feedback into canonical
-polarity and rationale.
+polarity and rationale. If an adapter emits `correctness_signals`, it is also
+responsible for assigning a stable `check_id` and ensuring that the recorded
+boolean is the actual outcome of that deterministic or executable check.
 
 Because the shared core intentionally preserves identifiers and routing fields,
 an adapter must replace identifiers with stable pseudonyms before this boundary

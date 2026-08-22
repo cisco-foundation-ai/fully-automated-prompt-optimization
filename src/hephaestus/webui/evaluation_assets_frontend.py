@@ -119,9 +119,10 @@ EVALUATION_ASSET_HTML = r"""<!doctype html>
   .asset-head code { color: var(--muted); font: 12px var(--mono); }
   .asset-head p { margin: 5px 0 0; color: var(--muted); }
   .status-draft { color: var(--muted); background: #edf2ef; }
-  .status-queued, .status-running, .status-awaiting_review { color: var(--amber); background: var(--amber-soft); }
+  .status-queued, .status-running, .status-awaiting_review, .status-pending, .status-held { color: var(--amber); background: var(--amber-soft); }
   .status-released { color: var(--green); background: var(--green-soft); }
-  .status-failed { color: var(--red); background: var(--red-soft); }
+  .status-failed, .status-rejected { color: var(--red); background: var(--red-soft); }
+  .status-approved { color: var(--green); background: var(--green-soft); }
   .pipeline { display: grid; grid-template-columns: repeat(8,minmax(108px,1fr)); gap: 9px;
     padding: 0 26px 26px; overflow-x: auto; }
   .stage { position: relative; min-height: 104px; padding: 12px 10px; border: 1px solid var(--line);
@@ -262,6 +263,42 @@ EVALUATION_ASSET_HTML = r"""<!doctype html>
   .stage-nav { display: flex; align-items: center; justify-content: space-between; padding: 0 26px 24px; }
   .stage-nav button { padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: white; }
   .stage-nav button:disabled { opacity: .35; cursor: default; }
+  .review-panel { margin: 0 0 18px; padding: 24px 26px; border-color: #e1c27a;
+    background: linear-gradient(135deg,#fffdf8,#fff9e9); }
+  .review-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+  .review-head p { max-width: 720px; margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+  .review-fingerprint { max-width: 380px; padding: 7px 9px; overflow-wrap: anywhere; border-radius: 7px;
+    color: #72551e; background: white; font: 10px var(--mono); }
+  .review-counts { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 8px; margin: 18px 0; }
+  .review-count { padding: 11px; border: 1px solid #ead9ac; border-radius: 8px; background: white; }
+  .review-count span { display: block; color: var(--muted); font-size: 9px; text-transform: uppercase; }
+  .review-count strong { display: block; margin-top: 4px; font-size: 20px; }
+  .review-items { display: grid; gap: 9px; }
+  .review-item { padding: 13px 14px; border: 1px solid #ead9ac; border-radius: 9px; background: white; }
+  .review-item-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .review-item strong { display: block; }
+  .review-item code { display: block; margin-top: 5px; color: var(--muted); font: 10px var(--mono); overflow-wrap: anywhere; }
+  .review-item-meta { margin-top: 7px; color: var(--muted); font-size: 11px; }
+  .review-item-actions { display: flex; gap: 6px; }
+  .review-item-actions button, .review-finalize button { padding: 7px 10px; border: 1px solid #c9a34c;
+    border-radius: 7px; color: #72551e; background: white; font-weight: 700; }
+  .review-item-actions button[data-review-decision="approved"] { color: var(--green); border-color: #84bfa9; }
+  .review-item-actions button[data-review-decision="rejected"] { color: var(--red); border-color: #d49a95; }
+  .review-pagination { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    margin-top: 10px; color: var(--muted); font-size: 11px; }
+  .review-pagination button { padding: 6px 9px; border: 1px solid #d8c087; border-radius: 7px;
+    color: #72551e; background: white; }
+  .review-pagination button:disabled { opacity: .35; }
+  .review-finalize { display: grid; grid-template-columns: minmax(180px,320px) 1fr auto; gap: 10px;
+    align-items: end; margin-top: 18px; padding-top: 16px; border-top: 1px solid #ead9ac; }
+  .review-finalize label { gap: 5px; }
+  .review-finalize p { margin: 0; color: #72551e; font-size: 11px; }
+  .review-finalize button { color: white; border-color: #8b671e; background: #8b671e; }
+  .review-empty { padding: 15px; border: 1px dashed #d9be7a; border-radius: 8px; color: #72551e; background: white; }
+  .review-mutation-error { margin-top: 12px; padding: 11px 13px; border: 1px solid #d49a95;
+    border-radius: 8px; color: var(--red); background: var(--red-soft); font-size: 12px; }
+  .review-panel[aria-busy="true"] button, .review-panel[aria-busy="true"] input { cursor: wait; }
+  .preview-disabled { display: block; color: #c9d8d1; font-family: ui-sans-serif,system-ui,sans-serif; }
   .grid { display: grid; grid-template-columns: 1.05fr 1fr; gap: 18px; margin-top: 18px; }
   .panel { padding: 22px; }
   .facts { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; margin-top: 16px; }
@@ -304,6 +341,9 @@ EVALUATION_ASSET_HTML = r"""<!doctype html>
     .stage-hero { flex-direction: column; } .stage-stat { text-align: left; }
     .cluster-layout { grid-template-columns: 1fr; } .cluster-head { display: block; }
     .cluster-summary { margin-top: 12px; padding: 0; border: 0; text-align: left; }
+    .review-head { display: block; } .review-fingerprint { margin-top: 12px; }
+    .review-counts { grid-template-columns: repeat(2,minmax(0,1fr)); }
+    .review-finalize { grid-template-columns: 1fr; }
     .extension-plan ol { grid-template-columns: 1fr; }
   }
 </style>
@@ -325,6 +365,10 @@ EVALUATION_ASSET_HTML = r"""<!doctype html>
 <script>
 const APP = { tenants: [], tenant: null, assets: [], assetId: null, stageKey: null,
   stageDetail: null, artifactIndex: 0, clusterRoute: 'All routes', clusterId: null,
+  reviewDetail: null, reviewTenant: null, reviewAssetId: null,
+  reviewLoadingAssets: new Set(), reviewRequestGenerations: new Map(),
+  reviewRequestGeneration: 0, reviewMutationStates: new Map(),
+  assetRequestGeneration: 0, stageRequestGeneration: 0,
   timer: null, busy: false };
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => (
   {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]
@@ -363,8 +407,10 @@ function contractFieldRows(fields, types) {
 }
 
 async function renderContract() {
+  APP.assetRequestGeneration += 1; APP.busy = false;
   APP.tenant = null; APP.assets = []; APP.assetId = null; APP.stageKey = null;
-  APP.stageDetail = null;
+  APP.stageDetail = null; APP.reviewDetail = null; APP.reviewTenant = null;
+  APP.reviewAssetId = null;
   history.replaceState(null, '', '/evaluation-assets/');
   renderSidebar();
   const main = document.getElementById('main');
@@ -465,8 +511,8 @@ const STAGE_INFO = {
   prepared_inputs: {
     eyebrow: 'Canonical preparation', description: 'Redact canonical input records and build stable representations for guideline creation and clustering.',
     inputs: ['Validated FAPO Evaluation Input v1', 'Fixed canonical fields'],
-    process: ['Redact feedback records', 'Build canonical intent text', 'Preserve provenance metadata'],
-    outputs: ['Normalized feedback', 'Canonical intent records']
+    process: ['Redact feedback records', 'Assign trusted groups to splits before guideline creation', 'Build canonical intent text', 'Preserve provenance metadata'],
+    outputs: ['Normalized feedback', 'Early trusted split plan', 'Canonical intent records']
   },
   rubric_extraction: {
     eyebrow: 'Trusted evidence', description: 'Create reusable evaluation guidelines from direct user feedback without treating old responses as answer keys.',
@@ -483,8 +529,8 @@ const STAGE_INFO = {
   coverage_decisions: {
     eyebrow: 'Trust boundary', description: 'Decide which mined clusters are supported by trusted feedback and which must be held.',
     inputs: ['Intent inventory', 'Trusted intents', 'Coverage policy'],
-    process: ['Match clusters to trusted intents', 'Apply support thresholds', 'Sample 10% of unsupported clusters for labeling'],
-    outputs: ['Coverage report', 'Cluster match decisions', 'Representative traces to label']
+    process: ['Match clusters to trusted intents', 'Apply support thresholds', 'Select a deterministic centroid-nearest 10% of records within each unsupported cluster'],
+    outputs: ['Coverage report', 'Cluster match decisions', 'Non-probability acquisition queue']
   },
   label_inference: {
     eyebrow: 'Reviewable inference', description: 'Infer labels only for clusters that pass the trusted coverage gate.',
@@ -493,15 +539,15 @@ const STAGE_INFO = {
     outputs: ['Inferred rubrics and labels', 'Inferred cases', 'Missing-feedback queue and report']
   },
   synthetic_coverage: {
-    eyebrow: 'Optional augmentation', description: 'When enabled, generate and filter additional cases for already-supported intent clusters.',
+    eyebrow: 'Optional augmentation', description: 'When enabled, generate and mechanically screen additional cases for already-supported intent clusters.',
     inputs: ['Supported clusters', 'Representative requests', 'Inferred cluster rubrics'],
-    process: ['Generate configured cases per cluster', 'Run quality filters', 'Reject unsafe or duplicate cases'],
-    outputs: ['Accepted synthetic cases', 'Rejected candidates', 'Filter audit']
+    process: ['Generate configured cases per cluster', 'Apply only mechanical schema, nonempty-context, scoreability, literal-leakage, and token-overlap checks', 'Record mechanically accepted and rejected candidates'],
+    outputs: ['Mechanically accepted synthetic cases', 'Rejected candidates', 'Filter audit']
   },
   dataset_splits: {
-    eyebrow: 'Evaluation dataset', description: 'Create deterministic, provenance-aware splits and publish the four evaluation-ready datasets.',
-    inputs: ['Trusted cases', 'Inferred cases', 'Synthetic cases'],
-    process: ['Reserve 20% of trusted groups for regression', 'Split remaining cases globally by group', 'Publish versioned tenant datasets'],
+    eyebrow: 'Evaluation dataset', description: 'Finalize the early trusted assignments with reviewed derived cases and publish the four evaluation-ready datasets.',
+    inputs: ['Stage 2 trusted split plan', 'Approved inferred cases', 'Approved synthetic cases'],
+    process: ['Preserve early trusted split assignments', 'Place approved derived families without changing trusted assignments', 'Publish finalized versioned tenant datasets'],
     outputs: ['Train dataset', 'Validation dataset', 'Test dataset', 'Trusted regression dataset']
   }
 };
@@ -530,8 +576,10 @@ function renderSidebar() {
 }
 
 function renderCreate() {
+  APP.assetRequestGeneration += 1; APP.busy = false;
   APP.tenant = null; APP.assets = []; APP.assetId = null; APP.stageKey = null;
-  APP.stageDetail = null;
+  APP.stageDetail = null; APP.reviewDetail = null; APP.reviewTenant = null;
+  APP.reviewAssetId = null;
   history.replaceState(null, '', '/evaluation-assets/');
   renderSidebar();
   document.getElementById('main').innerHTML = `
@@ -643,18 +691,25 @@ async function startAsset(event) {
 async function selectTenant(tenant) {
   if (APP.tenant !== tenant) {
     APP.assetId = null; APP.stageKey = null; APP.stageDetail = null;
+    APP.reviewDetail = null; APP.reviewTenant = null; APP.reviewAssetId = null;
   }
+  const requestGeneration = ++APP.assetRequestGeneration;
   APP.tenant = tenant; APP.busy = true;
   history.replaceState(null, '', `/evaluation-assets/?tenant=${encodeURIComponent(tenant)}`);
   renderSidebar();
   document.getElementById('main').innerHTML = '<section class="card empty">Loading evaluation assets…</section>';
   try {
-    APP.assets = await api(`/api/tenants/${encodeURIComponent(tenant)}/evaluation-assets`);
+    const assets = await api(`/api/tenants/${encodeURIComponent(tenant)}/evaluation-assets`);
+    if (APP.tenant !== tenant || APP.assetRequestGeneration !== requestGeneration) return;
+    APP.assets = assets;
     if (!APP.assets.some(a => a.asset_id === APP.assetId)) APP.assetId = APP.assets[0]?.asset_id || null;
     renderTenant();
   } catch (error) {
+    if (APP.tenant !== tenant || APP.assetRequestGeneration !== requestGeneration) return;
     document.getElementById('main').innerHTML = `<section class="card empty">${esc(error.message)}</section>`;
-  } finally { APP.busy = false; }
+  } finally {
+    if (APP.tenant === tenant && APP.assetRequestGeneration === requestGeneration) APP.busy = false;
+  }
 }
 
 const STAGE_CARD_LABELS = {
@@ -690,13 +745,36 @@ function stageCardResult(stage, counts) {
 
 function stageCards(asset) {
   const counts = asset.state?.counts || {};
-  return (asset.state?.stages || []).map((stage,index) => `
+  const awaitingReview = asset.state?.status === 'awaiting_review';
+  return (asset.state?.stages || []).map((stage,index) => {
+    const label = awaitingReview && stage.stage === 'synthetic_coverage'
+      ? 'Review ready' : awaitingReview && stage.stage === 'dataset_splits'
+        ? 'Waiting for finalization' : STAGE_CARD_LABELS[stage.stage] || stage.label;
+    return `
     <button class="stage ${esc(stage.status)} ${APP.stageKey === stage.stage ? 'active' : ''}"
       data-stage="${esc(stage.stage)}" aria-pressed="${APP.stageKey === stage.stage}">
       <span class="stage-num">0${index + 1} · ${esc(pretty(stage.status))}</span>
-      <strong>${esc(STAGE_CARD_LABELS[stage.stage] || stage.label)}</strong>
+      <strong>${esc(label)}</strong>
       <small>${esc(stageCardResult(stage, counts))}</small>
-    </button>`).join('');
+    </button>`;
+  }).join('');
+}
+
+function reviewRequestKey(tenant, assetId) {
+  return JSON.stringify([String(tenant || ''), String(assetId || '')]);
+}
+
+function invalidateReviewRequest(tenant, assetId) {
+  const key = reviewRequestKey(tenant, assetId);
+  APP.reviewRequestGenerations.set(key, ++APP.reviewRequestGeneration);
+  APP.reviewLoadingAssets.delete(key);
+}
+
+function assetExposesReviewAuthority(asset) {
+  const revision = asset?.review_authority_revision
+    ?? asset?.state?.review_authority_revision;
+  return asset?.state?.status === 'awaiting_review'
+    || (revision !== undefined && revision !== null);
 }
 
 function renderTenant() {
@@ -759,6 +837,8 @@ function renderTenant() {
         · ${asset.lineage.clustering_mode === 'keep' ? 'Original intent clustering reused'
           : 'Intent clustering refreshed'} · ${Number((asset.lineage.added_labeled_record_ids || []).length)}
         labeled and ${Number((asset.lineage.added_unlabeled_record_ids || []).length)} unlabeled records added.</div>` : ''}
+      ${renderReviewPanel(asset, APP.reviewTenant === APP.tenant
+        && APP.reviewAssetId === asset.asset_id ? APP.reviewDetail : null)}
       <div class="pipeline">${stageCards(asset)}</div>
     </section>
     <div id="stage-detail">${renderStageDetail(asset)}</div>
@@ -773,18 +853,28 @@ function renderTenant() {
   extend.disabled = !canExtend;
   if (canExtend) extend.onclick = () => renderExtend(asset);
   document.querySelectorAll('[data-asset]').forEach(button => button.onclick = () => {
+    invalidateReviewRequest(APP.tenant, APP.assetId);
     APP.assetId = button.dataset.asset; APP.stageKey = null; APP.stageDetail = null;
+    APP.reviewDetail = null; APP.reviewTenant = null; APP.reviewAssetId = null;
     renderTenant();
   });
   document.querySelectorAll('[data-stage]').forEach(button => {
     button.onclick = () => selectStage(button.dataset.stage);
   });
   wireStageDetail(asset);
+  wireReviewPanel(asset);
   const resume = document.getElementById('resume');
   if (resume) resume.onclick = () => resumeAsset(asset.asset_id, {});
   const adopt = document.getElementById('adopt');
   if (adopt) adopt.onclick = () => adoptLegacyAsset(asset.asset_id, adopt);
   if (!APP.stageDetail || APP.stageDetail.stage !== APP.stageKey) loadStage(asset.asset_id);
+  const reviewKey = reviewRequestKey(APP.tenant, asset.asset_id);
+  const currentReviewLoaded = APP.reviewTenant === APP.tenant
+    && APP.reviewAssetId === asset.asset_id;
+  if (assetExposesReviewAuthority(asset) && !currentReviewLoaded
+      && !APP.reviewLoadingAssets.has(reviewKey)) {
+    loadReview(asset.asset_id).catch(() => {});
+  }
 }
 
 function renderExtend(parent) {
@@ -954,7 +1044,7 @@ function failedStageInputs(config, stage) {
     synthetic_cases_per_cluster: `<label>Data points per supported cluster <span>Changing this rebuilds from Stage 7.</span>
       <input name="synthetic_cases_per_cluster" type="number" min="1" max="100"
         value="${esc(config.synthetic_cases_per_cluster)}" required></label>`,
-    split_seed: `<label>Dataset split seed <span>Changing this rebuilds Stage 8.</span>
+    split_seed: `<label>Dataset split seed <span>Changing this repartitions trusted feedback at Stage 2 and rebuilds downstream stages.</span>
       <input name="split_seed" type="number" value="${esc(config.split_seed)}" required></label>`
   };
   const fields = {
@@ -991,6 +1081,180 @@ function renderFailedStageEditor(config, stage) {
         <span class="message" id="resume-message"></span></div>
     </form>
   </div></section>`;
+}
+
+function safeReviewItem(item) {
+  const nestedDecision = item?.decision && typeof item.decision === 'object'
+    ? item.decision : {};
+  const initialDecision = item?.initial_decision && typeof item.initial_decision === 'object'
+    ? item.initial_decision : {};
+  const directDecision = typeof item?.decision === 'string' ? item.decision : null;
+  return {
+    itemId: item?.review_item_id || item?.item_id || item?.case_id || '',
+    caseId: item?.case_id || '',
+    decisionId: item?.decision_id || nestedDecision.decision_id || '',
+    finalizationId: item?.finalization_id || '',
+    fingerprint: item?.fingerprint || item?.content_fingerprint || item?.case_content_sha256 || '',
+    reviewSetFingerprint: item?.review_set_fingerprint || '',
+    decisionSetFingerprint: item?.decision_set_fingerprint || '',
+    trustTier: item?.trust_tier || '',
+    dependencyFingerprint: item?.dependency_fingerprint || '',
+    contextFingerprint: item?.context_fingerprint || '',
+    truthFingerprint: item?.truth_fingerprint || '',
+    status: item?.status || directDecision || nestedDecision.status || nestedDecision.decision
+      || initialDecision.status || 'pending',
+    holdReason: item?.hold_reason || ''
+  };
+}
+
+function reviewCount(review, key, items, heldItems) {
+  const value = review?.counts?.[key];
+  if (Number.isFinite(Number(value))) return Number(value);
+  if (key === 'held') return heldItems.length;
+  return items.filter(item => item.status === key).length;
+}
+
+function reviewDecisionRequest(assetId, item, decision, reviewer, reviewSetFingerprint, tenant = APP.tenant) {
+  const action = decision === 'approved' ? 'approve' : decision === 'rejected' ? 'reject' : '';
+  if (!action || !item.caseId || !item.fingerprint) throw new Error('A current review case and fingerprint are required.');
+  const base = `/api/tenants/${encodeURIComponent(tenant)}/evaluation-assets/${encodeURIComponent(assetId)}`;
+  return {
+    path: `${base}/reviews/${encodeURIComponent(item.fingerprint)}/${action}`,
+    options: {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({
+        case_id: item.caseId,
+        reviewer,
+        expected_review_set_fingerprint: reviewSetFingerprint
+      })
+    }
+  };
+}
+
+function reviewFinalizationRequest(
+  assetId, reviewer, reviewSetFingerprint, decisionSetFingerprint, tenant = APP.tenant
+) {
+  if (!reviewSetFingerprint || !decisionSetFingerprint) {
+    throw new Error('Current review-set and decision-set fingerprints are required.');
+  }
+  const base = `/api/tenants/${encodeURIComponent(tenant)}/evaluation-assets/${encodeURIComponent(assetId)}`;
+  return {
+    path: `${base}/reviews/finalize`,
+    options: {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({
+        reviewer,
+        expected_review_set_fingerprint: reviewSetFingerprint,
+        expected_decision_set_fingerprint: decisionSetFingerprint
+      })
+    }
+  };
+}
+
+function reviewMutationState(tenant, assetId) {
+  return APP.reviewMutationStates.get(reviewRequestKey(tenant, assetId))
+    || {inFlight: false, error: ''};
+}
+
+function syncReviewMutationControls(tenant, assetId) {
+  if (APP.tenant !== tenant || APP.assetId !== assetId) return;
+  const panel = document.getElementById('review-panel');
+  if (!panel) return;
+  panel.setAttribute?.('aria-busy', 'true');
+  panel.querySelectorAll?.('button,input')?.forEach(control => { control.disabled = true; });
+}
+
+function beginReviewMutation(tenant, assetId) {
+  const key = reviewRequestKey(tenant, assetId);
+  if (reviewMutationState(tenant, assetId).inFlight) return false;
+  APP.reviewMutationStates.set(key, {inFlight: true, error: ''});
+  syncReviewMutationControls(tenant, assetId);
+  return true;
+}
+
+function finishReviewMutation(tenant, assetId, error = '') {
+  APP.reviewMutationStates.set(
+    reviewRequestKey(tenant, assetId),
+    {inFlight: false, error: String(error || '')}
+  );
+  if (APP.tenant === tenant && APP.assetId === assetId
+      && document.getElementById('main')) renderTenant();
+}
+
+function renderReviewItem(item, held = false, controlsDisabled = false) {
+  const title = item.itemId || item.caseId || 'Review item';
+  const identity = item.caseId && item.caseId !== title ? ` · ${esc(item.caseId)}` : '';
+  const status = held ? 'held' : item.status;
+  const terminal = status === 'approved' || status === 'rejected' || held;
+  return `<article class="review-item"><div class="review-item-head"><div>
+      <strong>${esc(title)}${identity}</strong>
+      ${item.fingerprint ? `<code>${esc(item.fingerprint)}</code>` : ''}
+      ${item.decisionId ? `<code>decision ${esc(item.decisionId)}</code>` : ''}
+      ${item.dependencyFingerprint ? `<code>dependency ${esc(item.dependencyFingerprint)}</code>` : ''}
+      ${item.contextFingerprint ? `<code>context ${esc(item.contextFingerprint)}</code>` : ''}
+      ${item.truthFingerprint ? `<code>truth ${esc(item.truthFingerprint)}</code>` : ''}
+    </div><span class="pill status-${esc(status)}"><i class="dot"></i>${esc(pretty(status))}</span></div>
+    ${item.trustTier ? `<div class="review-item-meta">Trust tier: ${esc(pretty(item.trustTier))}</div>` : ''}
+    ${item.holdReason ? `<div class="review-item-meta">Hold reason: ${esc(String(item.holdReason).replaceAll('_',' '))}</div>` : ''}
+    ${!terminal && item.fingerprint ? `<div class="review-item-actions">
+      <button type="button" data-review-decision="approved" data-review-case="${esc(item.caseId)}" data-review-fingerprint="${esc(item.fingerprint)}" ${controlsDisabled ? 'disabled' : ''}>Approve</button>
+      <button type="button" data-review-decision="rejected" data-review-case="${esc(item.caseId)}" data-review-fingerprint="${esc(item.fingerprint)}" ${controlsDisabled ? 'disabled' : ''}>Reject</button>
+    </div>` : ''}</article>`;
+}
+
+function renderReviewPanel(asset, review) {
+  if (!review && asset?.state?.status !== 'awaiting_review') return '';
+  if (!review) {
+    return `<section class="card review-panel"><div class="review-empty">
+      <strong>Review queue is loading</strong><br>Stage 8 remains blocked until an explicit finalization.</div></section>`;
+  }
+  if (review.error) {
+    return `<section class="card review-panel"><div class="review-empty">
+      <strong>Review queue is unavailable</strong><br>Reload after the review service is ready.</div></section>`;
+  }
+  const items = (Array.isArray(review.items) ? review.items
+    : Array.isArray(review.review_items) ? review.review_items : []).map(safeReviewItem);
+  const heldItems = (Array.isArray(review.held) ? review.held
+    : Array.isArray(review.held_items) ? review.held_items
+      : Array.isArray(review.holds) ? review.holds : []).map(safeReviewItem);
+  const fingerprint = review.review_set_fingerprint || '';
+  const decisionSetFingerprint = review.decision_set_fingerprint || '';
+  const finalization = review.finalization && typeof review.finalization === 'object'
+    ? safeReviewItem(review.finalization) : null;
+  const mutation = reviewMutationState(APP.tenant, asset?.asset_id);
+  const offset = Math.max(0, Number(review.offset || 0));
+  const limit = Math.max(1, Number(review.limit || 100));
+  const total = Math.max(items.length, Number(review.total || items.length));
+  const previousOffset = Math.max(0, offset - limit);
+  const nextOffset = offset + limit;
+  const counts = ['pending','approved','rejected','held'].map(key => [
+    key, reviewCount(review, key, items, heldItems)
+  ]);
+  return `<section class="card review-panel" id="review-panel" aria-busy="${mutation.inFlight}"><div class="review-head"><div>
+      <p class="eyebrow">Fingerprint-bound human review</p><h2>Review derived cases</h2>
+      <p>Decisions are immutable and apply only to the exact fingerprint shown. Case bodies and protected held-out evidence are intentionally omitted from this view.</p>
+    </div><div>${fingerprint ? `<div class="review-fingerprint">review ${esc(fingerprint)}</div>` : ''}
+      ${decisionSetFingerprint ? `<div class="review-fingerprint">decisions ${esc(decisionSetFingerprint)}</div>` : ''}</div></div>
+    <div class="review-counts">${counts.map(([key,value]) => `<div class="review-count">
+      <span>${esc(key)}</span><strong>${Number(value).toLocaleString()}</strong></div>`).join('')}</div>
+    <div class="review-items">
+      ${items.map(item => renderReviewItem(item, false, mutation.inFlight)).join('') || '<div class="review-empty">No eligible derived cases are waiting for a decision.</div>'}
+      ${heldItems.map(item => renderReviewItem(item, true, mutation.inFlight)).join('')}
+    </div>
+    ${total > limit ? `<div class="review-pagination">
+      <button type="button" data-review-page="${previousOffset}" ${offset === 0 || mutation.inFlight ? 'disabled' : ''}>Previous review page</button>
+      <span>${offset + 1}–${Math.min(total, offset + limit)} of ${total}</span>
+      <button type="button" data-review-page="${nextOffset}" ${nextOffset >= total || mutation.inFlight ? 'disabled' : ''}>Next review page</button>
+    </div>` : ''}
+    ${finalization ? `<div class="review-item-meta">Finalization ${esc(finalization.finalizationId
+      || finalization.reviewSetFingerprint || finalization.itemId || finalization.fingerprint)}
+      ${finalization.decisionSetFingerprint ? ` · decisions ${esc(finalization.decisionSetFingerprint)}` : ''}</div>` : ''}
+    ${mutation.error ? `<div class="review-mutation-error" role="alert"><strong>Review action failed</strong><br>${esc(mutation.error)}</div>` : ''}
+    ${asset?.state?.status === 'awaiting_review' ? `<div class="review-finalize">
+      <label>Reviewer <span>Required for every immutable decision and finalization.</span>
+        <input id="reviewer-name" autocomplete="name" placeholder="Reviewer name" ${mutation.inFlight ? 'disabled' : ''}></label>
+      <p>Finalization freezes this review set. Pending, rejected, and held cases are excluded; trusted cases and exact-fingerprint approved derived cases proceed.</p>
+      <button type="button" id="finalize-review" data-review-set="${esc(fingerprint)}" data-decision-set="${esc(decisionSetFingerprint)}" ${mutation.inFlight ? 'disabled' : ''}>Finalize review and build datasets</button>
+    </div>` : ''}
+  </section>`;
 }
 
 function renderStageDetail(asset) {
@@ -1099,9 +1363,35 @@ function stagePrimaryCount(detail) {
   return metrics.length && /^\d/.test(String(metrics[0][1])) ? metrics[0][1] : (detail.artifacts || []).length;
 }
 
+const SAFE_ARTIFACT_METADATA_FIELDS = new Set([
+  'schema_version','record_id','record_ids','group_id','group_ids','split_group_id','split_group_ids',
+  'context_fingerprint','context_fingerprints','split','assignment_source','parent_split_group_ids',
+  'evidence_eligible','eligible','eligibility_source','hold_reason','queue_id','cluster_id','purpose',
+  'method','sampling_semantics','review_item_id','item_id','case_id','case_ids','family_id',
+  'member_case_ids','member_fingerprints','decision_id','finalization_id','fingerprint',
+  'case_content_sha256','content_fingerprint','truth_fingerprint','dependency_fingerprint',
+  'source_fingerprint','review_set_fingerprint','decision_set_fingerprint','stage_7_receipt_sha256','approved_fingerprints',
+  'pending_fingerprints','rejected_fingerprints','held_fingerprints','status','decision',
+  'initial_decision','inherited_from','trust_tier',
+  'counts','pending','approved','rejected','held','total'
+]);
+
+function safeArtifactMetadata(value) {
+  if (Array.isArray(value)) return value.map(safeArtifactMetadata);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value)
+    .filter(([key]) => SAFE_ARTIFACT_METADATA_FIELDS.has(key))
+    .map(([key,item]) => [key, safeArtifactMetadata(item)]));
+}
+
 function formatArtifactPreview(artifact, stage) {
+  if (artifact.preview_policy === 'disabled') {
+    return '<span class="preview-disabled">Preview disabled for protected content. Counts and audit metadata remain available.</span>';
+  }
   if (artifact.kind === 'markdown') return esc(artifact.preview || 'This artifact is empty.');
-  const example = (artifact.preview || [])[0];
+  const supplied = (artifact.preview || [])[0];
+  const example = artifact.preview_policy === 'metadata_only'
+    ? safeArtifactMetadata(supplied) : supplied;
   if (example === undefined) return 'This artifact is empty.';
   const json = JSON.stringify(example, null, 2);
   return json.replace(
@@ -1256,17 +1546,16 @@ function clusterNode(cluster, clusters, routes, colors) {
 
 function clusterInspector(cluster, color) {
   if (!cluster) return '<div class="cluster-inspector">No clusters in this route.</div>';
-  const representative = (cluster.representatives || [])[0] || cluster.cluster_id;
-  const label = representative.length > 58 ? `${representative.slice(0, 55)}…` : representative;
+  const representativeIds = Array.isArray(cluster.representative_ids) ? cluster.representative_ids : [];
+  const label = cluster.cluster_id;
   return `<div class="cluster-inspector" style="--cluster-color:${color}">
     <div class="cluster-inspector-head"><i></i><div><span>${esc(pretty(cluster.route))}</span>
       <strong>${esc(label)}</strong></div></div>
     <div class="cluster-id">${esc(cluster.cluster_id)}</div>
     <div class="cluster-stats"><div><span>Records</span><strong>${Number(cluster.size || 0)}</strong></div>
-      <div><span>Tools</span><strong>${(cluster.tools || []).length || 'None'}</strong></div></div>
-    <div class="representatives"><strong>Representative intents</strong>
-      ${(cluster.representatives || []).map(text => `<p>“${esc(text)}”</p>`).join('') || '<p>No representative text available.</p>'}</div>
-    <div class="cluster-tools">${(cluster.tools || []).map(tool => `<span>${esc(tool)}</span>`).join('') || '<span>no tool call</span>'}</div>
+      <div><span>Representatives</span><strong>${representativeIds.length}</strong></div></div>
+    <div class="representatives"><strong>Representative record IDs</strong>
+      ${representativeIds.map(recordId => `<p>${esc(recordId)}</p>`).join('') || '<p>No representative IDs available.</p>'}</div>
   </div>`;
 }
 
@@ -1314,6 +1603,17 @@ function wireStageDetail(asset) {
   });
 }
 
+function wireReviewPanel(asset) {
+  document.querySelectorAll('[data-review-decision]').forEach(button => {
+    button.onclick = () => submitReviewDecision(asset, button);
+  });
+  document.querySelectorAll('[data-review-page]').forEach(button => {
+    button.onclick = () => loadReview(asset.asset_id, Number(button.dataset.reviewPage));
+  });
+  const finalize = document.getElementById('finalize-review');
+  if (finalize) finalize.onclick = () => submitReviewFinalization(asset, finalize);
+}
+
 function updateStageDetail(asset) {
   const container = document.getElementById('stage-detail');
   if (!container) return;
@@ -1331,17 +1631,141 @@ async function selectStage(stage) {
 }
 
 async function loadStage(assetId) {
+  const tenant = APP.tenant;
   const requestedStage = APP.stageKey;
+  const requestGeneration = ++APP.stageRequestGeneration;
   try {
-    const detail = await api(`/api/tenants/${encodeURIComponent(APP.tenant)}/evaluation-assets/${encodeURIComponent(assetId)}/stages/${encodeURIComponent(requestedStage)}`);
-    if (APP.stageKey !== requestedStage || APP.assetId !== assetId) return;
+    const detail = await api(`/api/tenants/${encodeURIComponent(tenant)}/evaluation-assets/${encodeURIComponent(assetId)}/stages/${encodeURIComponent(requestedStage)}`);
+    if (APP.tenant !== tenant || APP.stageKey !== requestedStage
+        || APP.assetId !== assetId || APP.stageRequestGeneration !== requestGeneration) return;
     APP.stageDetail = detail;
     const asset = APP.assets.find(item => item.asset_id === assetId) || APP.assets[0];
     updateStageDetail(asset);
   } catch (error) {
+    if (APP.tenant !== tenant || APP.stageKey !== requestedStage
+        || APP.assetId !== assetId || APP.stageRequestGeneration !== requestGeneration) return;
     const container = document.getElementById('stage-detail');
     if (container) container.innerHTML = `<section class="card stage-detail empty">${esc(error.message)}</section>`;
   }
+}
+
+async function loadReview(assetId, offset = 0, rerender = true) {
+  const tenant = APP.tenant;
+  const key = reviewRequestKey(tenant, assetId);
+  const requestGeneration = ++APP.reviewRequestGeneration;
+  APP.reviewRequestGenerations.set(key, requestGeneration);
+  APP.reviewLoadingAssets.add(key);
+  const path = `/api/tenants/${encodeURIComponent(tenant)}/evaluation-assets/${encodeURIComponent(assetId)}/reviews?offset=${Number(offset)}&limit=100`;
+  const isCurrent = () => APP.tenant === tenant && APP.assetId === assetId
+    && APP.reviewRequestGenerations.get(key) === requestGeneration;
+  try {
+    const review = await api(path, null);
+    if (!isCurrent()) return review;
+    APP.reviewTenant = tenant;
+    APP.reviewAssetId = assetId;
+    APP.reviewDetail = review;
+    if (rerender) renderTenant();
+    return review;
+  } catch (error) {
+    if (isCurrent()) {
+      APP.reviewTenant = tenant;
+      APP.reviewAssetId = assetId;
+      APP.reviewDetail = {error: true};
+      if (rerender) renderTenant();
+    }
+    throw error;
+  } finally {
+    if (APP.reviewRequestGenerations.get(key) === requestGeneration) {
+      APP.reviewLoadingAssets.delete(key);
+    }
+  }
+}
+
+function reviewInput() {
+  const input = document.getElementById('reviewer-name');
+  const reviewer = String(input?.value || '').trim();
+  if (!reviewer && input) {
+    input.title = 'Reviewer name is required.';
+    input.focus?.();
+  }
+  return reviewer;
+}
+
+async function submitReviewDecision(asset, button) {
+  const reviewer = reviewInput();
+  if (!reviewer) return;
+  const tenant = APP.tenant;
+  const assetId = asset.asset_id;
+  const item = {
+    caseId: button.dataset.reviewCase,
+    fingerprint: button.dataset.reviewFingerprint
+  };
+  const request = reviewDecisionRequest(
+    asset.asset_id,
+    item,
+    button.dataset.reviewDecision,
+    reviewer,
+    APP.reviewDetail?.review_set_fingerprint || '',
+    tenant
+  );
+  if (!beginReviewMutation(tenant, assetId)) return;
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = button.dataset.reviewDecision === 'approved' ? 'Approving…' : 'Rejecting…';
+  try {
+    await api(request.path, request.options);
+    if (APP.tenant === tenant && APP.assetId === assetId) {
+      await loadReview(assetId, Number(APP.reviewDetail?.offset || 0));
+    }
+  } catch (error) {
+    button.title = error.message;
+    finishReviewMutation(tenant, assetId, error.message);
+    return;
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+  finishReviewMutation(tenant, assetId);
+}
+
+async function submitReviewFinalization(asset, button) {
+  const reviewer = reviewInput();
+  if (!reviewer) return;
+  const tenant = APP.tenant;
+  const assetId = asset.asset_id;
+  let request;
+  try {
+    request = reviewFinalizationRequest(
+      assetId,
+      reviewer,
+      APP.reviewDetail?.review_set_fingerprint || '',
+      APP.reviewDetail?.decision_set_fingerprint || '',
+      tenant
+    );
+  } catch (error) {
+    button.title = error.message;
+    finishReviewMutation(tenant, assetId, error.message);
+    return;
+  }
+  if (!beginReviewMutation(tenant, assetId)) return;
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Finalizing review…';
+  try {
+    await api(request.path, request.options);
+    if (APP.tenant === tenant && APP.assetId === assetId) {
+      APP.reviewDetail = null; APP.reviewTenant = null; APP.reviewAssetId = null;
+      await selectTenant(tenant);
+    }
+  } catch (error) {
+    button.title = error.message;
+    finishReviewMutation(tenant, assetId, error.message);
+    return;
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+  finishReviewMutation(tenant, assetId);
 }
 
 async function resumeWithChanges(event, assetId) {
@@ -1401,6 +1825,9 @@ function assetRevision(assets) {
     updated_at: asset.state?.updated_at,
     status: asset.state?.status,
     current_stage: asset.state?.current_stage,
+    counts: asset.state?.counts,
+    review_authority_revision: asset.review_authority_revision
+      ?? asset.state?.review_authority_revision,
     runner_active: asset.runner_active,
     directories: asset.directories
   })));
@@ -1431,18 +1858,28 @@ function restoreViewScroll(position) {
 
 async function refresh() {
   if (!APP.tenant || APP.busy || document.hidden || ['INPUT','SELECT'].includes(document.activeElement?.tagName)) return;
+  const tenant = APP.tenant;
+  const requestGeneration = ++APP.assetRequestGeneration;
   APP.busy = true;
   try {
-    const nextAssets = await api(`/api/tenants/${encodeURIComponent(APP.tenant)}/evaluation-assets`);
+    const nextAssets = await api(`/api/tenants/${encodeURIComponent(tenant)}/evaluation-assets`);
+    if (APP.tenant !== tenant || APP.assetRequestGeneration !== requestGeneration) return;
     if (assetRevision(nextAssets) === assetRevision(APP.assets)) return;
     const scrollPosition = captureViewScroll();
     APP.assets = nextAssets;
+    const refreshedAsset = APP.assets.find(item => item.asset_id === APP.assetId) || APP.assets[0];
+    if (refreshedAsset && assetExposesReviewAuthority(refreshedAsset)) {
+      invalidateReviewRequest(tenant, refreshedAsset.asset_id);
+      APP.reviewDetail = null; APP.reviewTenant = null; APP.reviewAssetId = null;
+    }
     renderTenant();
     const asset = APP.assets.find(item => item.asset_id === APP.assetId) || APP.assets[0];
     if (asset) await loadStage(asset.asset_id);
     restoreViewScroll(scrollPosition);
   }
-  finally { APP.busy = false; }
+  finally {
+    if (APP.tenant === tenant && APP.assetRequestGeneration === requestGeneration) APP.busy = false;
+  }
 }
 
 async function boot() {

@@ -44,6 +44,10 @@ from src.hephaestus.evaluation_assets.control_jsonl import (
     write_local_authority_jsonl,
     write_local_authority_text,
 )
+from src.hephaestus.evaluation_assets.dependencies import (
+    STAGE_SEVEN_DEPENDENCY_SCHEMA_VERSION,
+    STAGE_SIX_DEPENDENCY_SCHEMA_VERSION,
+)
 from src.hephaestus.evaluation_assets.durability import (
     STAGE_SPECIFICATIONS,
     EvaluationAssetBusyError,
@@ -58,10 +62,12 @@ from src.hephaestus.evaluation_assets.durability import (
     build_stage_receipt,
     persisted_json_sha256,
     released_parent_evidence,
+    stage_three_text_profile_for_receipt_schema,
     validate_legacy_release_candidate,
     verify_raw_snapshot_floor,
     verify_release_candidate,
     verify_released_asset,
+    verify_stage_receipt,
 )
 from src.hephaestus.evaluation_assets.input_contract import validate_input_records
 from src.hephaestus.evaluation_assets.journal_transitions import (
@@ -82,7 +88,9 @@ from src.hephaestus.evaluation_assets.journal_validation import (
     validate_recovery_journal,
 )
 from src.hephaestus.evaluation_assets.lineage_validation import (
+    APPEND_STAGE_THREE_EVIDENCE_OPERATION,
     LINEAGE_SCHEMA_VERSION,
+    REBUILD_STAGE_THREE_WITHOUT_PARENT_SEEDS_OPERATION,
     REUSE_SCHEMA_VERSION,
     SNAPSHOT_SCHEMA_VERSION,
 )
@@ -111,6 +119,30 @@ from src.hephaestus.evaluation_assets.publication import (
     validate_historical_generation,
     write_release_pointer,
 )
+from src.hephaestus.evaluation_assets.review import (
+    ReviewIntegrityError,
+    decision_set_fingerprint,
+    dependency_fingerprint,
+    parse_review_finalization,
+    record_review_decision,
+    resolve_review_decision,
+    review_set_fingerprint,
+    validate_review_finalization,
+    validate_review_item,
+)
+from src.hephaestus.evaluation_assets.review import (
+    review_authority_revision as build_review_authority_revision,
+)
+from src.hephaestus.evaluation_assets.split_isolation import (
+    PARENT_SPLIT_ASSIGNMENT_CONFLICT,
+    build_trusted_split_plan,
+)
+from src.hephaestus.evaluation_assets.trust_tiers import (
+    CURRENT_TRUST_TIERS,
+    INFERRED_FROM_TRUSTED_FEEDBACK,
+    SYNTHETIC_FROM_TRUSTED_RUBRIC,
+    TRUSTED_FEEDBACK,
+)
 
 SAFE_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$")
 STAGE_DIRECTORIES = dict(
@@ -129,6 +161,48 @@ STAGE_DIRECTORIES = dict(
         strict=True,
     )
 )
+
+
+@dataclass(frozen=True)
+class _VerifiedReviewAuthority:
+    """One receipt-bound current review set loaded under the asset lock."""
+
+    items: tuple[dict[str, Any], ...]
+    held: tuple[dict[str, Any], ...]
+    decisions: tuple[dict[str, Any], ...]
+    finalizations: tuple[dict[str, Any], ...]
+    dependencies: dict[str, dict[str, Any]]
+    stage7_receipt_sha256: str
+    review_set_sha256: str
+    trusted_count: int
+
+
+def _current_review_finalization(
+    authority: _VerifiedReviewAuthority,
+) -> dict[str, Any] | None:
+    """Return the sole finalization authenticated by current live authority."""
+    valid: list[dict[str, Any]] = []
+    for raw in authority.finalizations:
+        parsed = parse_review_finalization(raw)
+        if parsed["review_set_fingerprint"] != authority.review_set_sha256:
+            continue
+        try:
+            candidate = validate_review_finalization(
+                parsed,
+                review_items=authority.items,
+                dependencies=authority.dependencies,
+                decisions=authority.decisions,
+                held_cases=authority.held,
+                stage7_receipt_sha256=authority.stage7_receipt_sha256,
+            )
+        except (TypeError, ValueError):
+            continue
+        if candidate["counts"]["trusted"] != authority.trusted_count:
+            continue
+        valid.append(candidate)
+    if len(valid) > 1:
+        raise ReviewIntegrityError("multiple current review finalizations exist")
+    return valid[0] if valid else None
 
 
 def _persisted_stages_v2() -> tuple[str, ...]:
@@ -860,6 +934,21 @@ class EvaluationAssetLayout:
     def receipts_root(self) -> Path:
         return self.root / "receipts"
 
+    @property
+    def reviews_root(self) -> Path:
+        """Return the asset-level append-only review authority directory."""
+        return self.root / "reviews"
+
+    @property
+    def review_decisions_path(self) -> Path:
+        """Return the immutable terminal review-decision log path."""
+        return self.reviews_root / "decisions.jsonl"
+
+    @property
+    def review_finalizations_path(self) -> Path:
+        """Return the immutable review-finalization log path."""
+        return self.reviews_root / "finalizations.jsonl"
+
     def receipt_path(self, stage: PipelineStage | str) -> Path:
         """Return the commit-marker path for one ordered stage."""
         stage_name = str(getattr(stage, "value", stage))
@@ -1061,6 +1150,7 @@ class EvaluationAssetLayout:
                 self.stage_directory(stage)
                 for stage in evaluation_asset_models.PipelineStage
             ]
+            paths.append(self.reviews_root)
         else:
             paths = [self.root / name for name in LEGACY_DIRECTORIES]
         if precondition is not None:
@@ -1223,6 +1313,8 @@ class EvaluationAssetLayout:
             self.unlabeled_path,
             trusted_root=self.tenants_root,
         )
+        self._write_authority_jsonl(self.review_decisions_path, [])
+        self._write_authority_jsonl(self.review_finalizations_path, [])
         timestamp = utc_now()
         state = PipelineState.new(config, timestamp)
         state.status = initial_status
@@ -1352,15 +1444,26 @@ class EvaluationAssetLayout:
         )
         compatibility_artifacts = ("feedback_rubrics.jsonl",)
         shared_artifacts = ("trusted_intents.jsonl", "trusted_cases.jsonl")
+        protected_artifacts = (
+            "protected_feedback_evidence.jsonl",
+            "protected_candidate_guidelines.jsonl",
+            "protected_evaluation_guidelines.jsonl",
+            "protected_trusted_cases.jsonl",
+        )
         stage_three_paths = {
             name: parent.artifact_path(PERSISTED_STAGE_VALUES_V2[2], name)
             for name in (
                 *guideline_artifacts,
                 *compatibility_artifacts,
                 *shared_artifacts,
+                *protected_artifacts,
             )
         }
         fixed_snapshot_sources = {
+            "parent_trusted_split_plan.jsonl": parent.artifact_path(
+                PERSISTED_STAGE_VALUES_V2[1],
+                "trusted_split_plan.jsonl",
+            ),
             "parent_intent_inventory.jsonl": parent.artifact_path(
                 PERSISTED_STAGE_VALUES_V2[3],
                 "intent_inventory.jsonl",
@@ -1373,10 +1476,40 @@ class EvaluationAssetLayout:
                 PERSISTED_STAGE_VALUES_V2[5],
                 "inferred_unlabeled_cluster_rubrics.jsonl",
             ),
+            "parent_inferred_cases.jsonl": parent.artifact_path(
+                PERSISTED_STAGE_VALUES_V2[5],
+                "inferred_cases.jsonl",
+            ),
+            "parent_inference_dependencies.jsonl": parent.artifact_path(
+                PERSISTED_STAGE_VALUES_V2[5],
+                "inference_dependencies.jsonl",
+            ),
+            "parent_held_inference_outputs.jsonl": parent.artifact_path(
+                PERSISTED_STAGE_VALUES_V2[5],
+                "held_inference_outputs.jsonl",
+            ),
             "parent_synthetic_cases.jsonl": parent.artifact_path(
                 PERSISTED_STAGE_VALUES_V2[6],
                 "synthetic_cases.jsonl",
             ),
+            "parent_synthetic_dependencies.jsonl": parent.artifact_path(
+                PERSISTED_STAGE_VALUES_V2[6],
+                "synthetic_dependencies.jsonl",
+            ),
+            "parent_derived_review_items.jsonl": parent.artifact_path(
+                PERSISTED_STAGE_VALUES_V2[6],
+                "derived_review_items.jsonl",
+            ),
+            "parent_duplicate_families.jsonl": parent.artifact_path(
+                PERSISTED_STAGE_VALUES_V2[6],
+                "duplicate_families.jsonl",
+            ),
+            "parent_held_derived_cases.jsonl": parent.artifact_path(
+                PERSISTED_STAGE_VALUES_V2[6],
+                "held_derived_cases.jsonl",
+            ),
+            "parent_review_decisions.jsonl": parent.review_decisions_path,
+            "parent_review_finalizations.jsonl": parent.review_finalizations_path,
             **{
                 f"parent_{split}.jsonl": parent.artifact_path(
                     PERSISTED_STAGE_VALUES_V2[7],
@@ -1406,33 +1539,18 @@ class EvaluationAssetLayout:
             parent_authority_presence[path] = present
             if present:
                 parent_authority_snapshot[path] = payload
-        stage_three_artifacts = (
-            guideline_artifacts + shared_artifacts
-            if parent_authority_presence[
-                stage_three_paths["evaluation_guidelines.jsonl"]
-            ]
-            else compatibility_artifacts + shared_artifacts
-        )
-        snapshot_sources = {
-            **{
-                f"parent_{name}": stage_three_paths[name]
-                for name in stage_three_artifacts
-            },
-            **fixed_snapshot_sources,
-        }
-        required_parent_paths = {
+        base_required_parent_paths = {
             parent.state_path,
             parent.config_path,
             parent.historical_feedback_path,
             parent.historical_unlabeled_path,
+            parent.receipt_path(PERSISTED_STAGE_VALUES_V2[1]),
             parent.receipt_path(PERSISTED_STAGE_VALUES_V2[2]),
             parent.receipt_path(PERSISTED_STAGE_VALUES_V2[3]),
-            *(stage_three_paths[name] for name in stage_three_artifacts),
-            *fixed_snapshot_sources.values(),
         }
         if any(
             not parent_authority_presence.get(path, False)
-            for path in required_parent_paths
+            for path in base_required_parent_paths
         ):
             raise EvaluationAssetIntegrityError(
                 parent.tenant_id,
@@ -1442,6 +1560,100 @@ class EvaluationAssetLayout:
         parent_config = EvaluationAssetConfig.from_dict(
             parse_strict_json_object(parent_authority_snapshot[parent.config_path])
         )
+        stage_two_receipt = parse_strict_json_object(
+            parent_authority_snapshot[
+                parent.receipt_path(PERSISTED_STAGE_VALUES_V2[1])
+            ]
+        )
+        current_profile = (
+            stage_three_text_profile_for_receipt_schema(
+                stage_two_receipt.get("schema_version"),
+                origin=stage_two_receipt.get("origin"),
+            )
+            == "current"
+        )
+        if current_profile:
+            stage_three_artifacts = (
+                guideline_artifacts + shared_artifacts + protected_artifacts
+            )
+            snapshot_source_paths = {
+                **{
+                    f"parent_{name}": stage_three_paths[name]
+                    for name in stage_three_artifacts
+                },
+                **fixed_snapshot_sources,
+            }
+            required_profile_paths = {
+                *(stage_three_paths[name] for name in stage_three_artifacts),
+                *fixed_snapshot_sources.values(),
+            }
+            seeded_stage_three_operation = APPEND_STAGE_THREE_EVIDENCE_OPERATION
+            snapshot_payloads = {
+                name: parent_authority_snapshot[source]
+                for name, source in snapshot_source_paths.items()
+                if parent_authority_presence.get(source, False)
+            }
+        else:
+            stage_three_artifacts = ()
+            historical_snapshot_names = (
+                "parent_intent_inventory.jsonl",
+                "parent_intent_matches.jsonl",
+                "parent_inferred_cluster_rubrics.jsonl",
+                "parent_synthetic_cases.jsonl",
+                "parent_train.jsonl",
+                "parent_validation.jsonl",
+                "parent_test.jsonl",
+                "parent_regression_trusted.jsonl",
+            )
+            required_profile_paths = {
+                fixed_snapshot_sources[name]
+                for name in historical_snapshot_names
+            }
+            seeded_stage_three_operation = (
+                REBUILD_STAGE_THREE_WITHOUT_PARENT_SEEDS_OPERATION
+            )
+            snapshot_payloads = {
+                name: parent_authority_snapshot[fixed_snapshot_sources[name]]
+                for name in historical_snapshot_names
+                if parent_authority_presence.get(
+                    fixed_snapshot_sources[name],
+                    False,
+                )
+            }
+        if any(
+            not parent_authority_presence.get(path, False)
+            for path in required_profile_paths
+        ):
+            raise EvaluationAssetIntegrityError(
+                parent.tenant_id,
+                parent.asset_id,
+                "released parent extension authority is incomplete",
+            )
+        if not current_profile:
+            feedback_rows_for_plan = _jsonl_rows_from_bytes(
+                parent.historical_feedback_path,
+                parent_authority_snapshot[parent.historical_feedback_path],
+            )
+            plan = _historical_parent_split_plan(
+                feedback_rows_for_plan,
+                {
+                    split: _jsonl_rows_from_bytes(
+                        fixed_snapshot_sources[f"parent_{split}.jsonl"],
+                        snapshot_payloads[f"parent_{split}.jsonl"],
+                    )
+                    for split in (
+                        "train",
+                        "validation",
+                        "test",
+                        "regression_trusted",
+                    )
+                },
+                split_seed=parent_config.split_seed,
+            )
+            snapshot_payloads["parent_trusted_split_plan.jsonl"] = "".join(
+                json.dumps(row, sort_keys=True, allow_nan=False) + "\n"
+                for row in plan
+            ).encode("utf-8")
         updates = dict(config_updates or {})
         expected_rubric_identity = _required_extension_provider_identity(
             role="rubric",
@@ -1487,6 +1699,10 @@ class EvaluationAssetLayout:
                 else "openai"
             )
         config = EvaluationAssetConfig.from_dict(merged_config)
+        if config.split_seed != parent_config.split_seed:
+            raise ValueError(
+                "incremental extension must keep the parent's early split seed"
+            )
         if (config.rubric_provider, config.rubric_model) != (
             expected_rubric_identity
         ):
@@ -1552,6 +1768,8 @@ class EvaluationAssetLayout:
         _validate_local_authority_layout(self)
         self._write_authority_jsonl(self.feedback_path, feedback_rows)
         self._write_authority_jsonl(self.unlabeled_path, unlabeled_rows)
+        self._write_authority_jsonl(self.review_decisions_path, [])
+        self._write_authority_jsonl(self.review_finalizations_path, [])
 
         seeded_artifacts = []
         for name in stage_three_artifacts:
@@ -1566,9 +1784,8 @@ class EvaluationAssetLayout:
             )
             seeded_artifacts.append(name)
         snapshot_artifacts = []
-        for name, source in snapshot_sources.items():
+        for name, destination_bytes in snapshot_payloads.items():
             destination = self.parent_snapshot / name
-            destination_bytes = parent_authority_snapshot[source]
             self._write_authority_text(
                 destination,
                 destination_bytes.decode("utf-8"),
@@ -1655,7 +1872,7 @@ class EvaluationAssetLayout:
             "seeded_incremental_stage": {
                 "stage": PERSISTED_STAGE_VALUES_V2[2],
                 "artifacts": seeded_artifacts,
-                "operation": "append_evidence_and_rebuild_guidelines",
+                "operation": seeded_stage_three_operation,
             },
             "reused_stages": (
                 [
@@ -2318,6 +2535,433 @@ class EvaluationAssetLayout:
             )
         setattr(state, "_persisted_authority_bytes", authority)
         return state
+
+    def list_review_items(
+        self,
+        *,
+        status: str | None = None,
+        offset: int = 0,
+        limit: int = 100,
+        lock_timeout: float = 0,
+    ) -> Dict[str, Any]:
+        """Return a verified page from the current receipt-bound review set."""
+        if status not in {None, "pending", "approved", "rejected", "held"}:
+            raise ValueError(
+                "review status must be pending, approved, rejected, or held"
+            )
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            raise ValueError("review offset must be a non-negative integer")
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= 100
+        ):
+            raise ValueError("review limit must be an integer between 1 and 100")
+        with self.asset_lock(lock_timeout):
+            self._recover_locked()
+            authority = self._verified_review_authority_locked()
+            resolved = []
+            for item in authority.items:
+                case_id = str(item["case_id"])
+                decision = resolve_review_decision(
+                    item,
+                    authority.decisions,
+                    dependency=authority.dependencies[case_id],
+                )
+                resolved.append({**item, **decision})
+            resolved.sort(key=lambda row: (row["case_id"], row["fingerprint"]))
+            counts = {
+                "trusted": authority.trusted_count,
+                "approved": sum(row["status"] == "approved" for row in resolved),
+                "pending": sum(row["status"] == "pending" for row in resolved),
+                "rejected": sum(row["status"] == "rejected" for row in resolved),
+                "held": len(authority.held),
+            }
+            counts["total"] = sum(counts.values())
+            held = [
+                {**row, "status": "held", "hold_reason": row["reason"]}
+                for row in authority.held
+            ]
+            combined = [
+                *(("item", row) for row in resolved),
+                *(("held", row) for row in held),
+            ]
+            combined.sort(
+                key=lambda entry: (
+                    entry[1]["case_id"],
+                    entry[1]["fingerprint"],
+                    entry[0],
+                )
+            )
+            matching = (
+                combined
+                if status is None
+                else [entry for entry in combined if entry[1]["status"] == status]
+            )
+            window = matching[offset : offset + limit]
+            current_decision_set = decision_set_fingerprint(
+                review_set_fingerprint=authority.review_set_sha256,
+                review_items=authority.items,
+                dependencies=authority.dependencies,
+                decisions=authority.decisions,
+            )
+            current_finalization = _current_review_finalization(authority)
+            finalization_id = (
+                str(current_finalization["finalization_id"])
+                if current_finalization is not None
+                else None
+            )
+            return {
+                "review_set_fingerprint": authority.review_set_sha256,
+                "decision_set_fingerprint": current_decision_set,
+                "review_authority_revision": build_review_authority_revision(
+                    decision_set_sha256=current_decision_set,
+                    finalization_id=finalization_id,
+                ),
+                "stage7_receipt_sha256": authority.stage7_receipt_sha256,
+                "items": [row for kind, row in window if kind == "item"],
+                "held": [row for kind, row in window if kind == "held"],
+                "finalization": (
+                    {
+                        "finalization_id": current_finalization["finalization_id"],
+                        "review_set_fingerprint": current_finalization[
+                            "review_set_fingerprint"
+                        ],
+                        "counts": dict(current_finalization["counts"]),
+                    }
+                    if current_finalization is not None
+                    else None
+                ),
+                "counts": counts,
+                "offset": offset,
+                "limit": limit,
+                "total": len(matching),
+            }
+
+    def current_review_authority_revision(
+        self,
+        *,
+        lock_timeout: float = 0,
+    ) -> str | None:
+        """Return a safe revision when current review authority is available."""
+        try:
+            with self.asset_lock(lock_timeout):
+                state = self.load_state()
+                stage_state = next(
+                    (
+                        item
+                        for item in state.stages
+                        if item.stage == PipelineStage.SYNTHETIC_COVERAGE.value
+                    ),
+                    None,
+                )
+                if (
+                    stage_state is None
+                    or stage_state.status != "completed"
+                    or stage_state.receipt_sha256 is None
+                ):
+                    return None
+                authority = self._verified_review_authority_locked(state=state)
+                current_decisions = decision_set_fingerprint(
+                    review_set_fingerprint=authority.review_set_sha256,
+                    review_items=authority.items,
+                    dependencies=authority.dependencies,
+                    decisions=authority.decisions,
+                )
+                finalization = _current_review_finalization(authority)
+                return build_review_authority_revision(
+                    decision_set_sha256=current_decisions,
+                    finalization_id=(
+                        str(finalization["finalization_id"])
+                        if finalization is not None
+                        else None
+                    ),
+                )
+        except (
+            EvaluationAssetBusyError,
+            EvaluationAssetIntegrityError,
+            FileNotFoundError,
+            KeyError,
+            OSError,
+            TypeError,
+            UnicodeError,
+            ValueError,
+        ):
+            return None
+
+    def decide_review(
+        self,
+        case_id: str,
+        fingerprint: str,
+        decision: str,
+        *,
+        reviewer: str,
+        note: str | None = None,
+        expected_review_set_fingerprint: str,
+        lock_timeout: float = 0,
+    ) -> Dict[str, Any]:
+        """Append one immutable decision for an exact current review item."""
+        with self.asset_lock(lock_timeout):
+            self._recover_locked()
+            state = self.load_state()
+            if state.status == "released":
+                verify_released_asset(self, state)
+                raise EvaluationAssetImmutableError(self.tenant_id, self.asset_id)
+            if state.status != "awaiting_review":
+                raise ValueError("evaluation asset is not awaiting review")
+            authority = self._verified_review_authority_locked(state=state)
+            if expected_review_set_fingerprint != authority.review_set_sha256:
+                raise ValueError("current review set does not match the request")
+            current = next(
+                (
+                    item
+                    for item in authority.items
+                    if item["case_id"] == case_id
+                    and item["fingerprint"] == fingerprint
+                ),
+                None,
+            )
+            if current is None:
+                raise KeyError("current review item not found")
+            row, append = record_review_decision(
+                current,
+                authority.decisions,
+                status=decision,
+                reviewer=reviewer,
+                timestamp=utc_now(),
+                note=note,
+            )
+            if append:
+                self._append_control_row(self.review_decisions_path, row)
+            return {
+                **row,
+                "review_set_fingerprint": authority.review_set_sha256,
+            }
+
+    def _verified_review_authority_locked(
+        self,
+        *,
+        state: PipelineState | None = None,
+    ) -> _VerifiedReviewAuthority:
+        """Load and authenticate the complete current review authority."""
+        current_state = state if state is not None else self.load_state()
+        stage_state = next(
+            (
+                item
+                for item in current_state.stages
+                if item.stage == PipelineStage.SYNTHETIC_COVERAGE.value
+            ),
+            None,
+        )
+        if (
+            stage_state is None
+            or stage_state.status != "completed"
+            or stage_state.receipt_sha256 is None
+        ):
+            raise ValueError("Stage 7 review authority is not available")
+        config = self.load_config()
+        try:
+            verify_stage_receipt(
+                self,
+                current_state,
+                PipelineStage.SYNTHETIC_COVERAGE,
+                config,
+                prompt_values={},
+                provider_identity=None,
+                compare_current_dependencies=False,
+            )
+        except EvaluationAssetIntegrityError:
+            raise
+        except (KeyError, OSError, TypeError, UnicodeError, ValueError) as exc:
+            raise EvaluationAssetIntegrityError(
+                self.tenant_id,
+                self.asset_id,
+                "Stage 7 receipt verification failed",
+            ) from exc
+
+        dependency_catalogs: dict[str, dict[str, dict[str, Any]]] = {}
+        try:
+            for stage, name, schema, trust_tier in (
+                (
+                    PipelineStage.LABEL_INFERENCE,
+                    "inference_dependencies.jsonl",
+                    STAGE_SIX_DEPENDENCY_SCHEMA_VERSION,
+                    INFERRED_FROM_TRUSTED_FEEDBACK,
+                ),
+                (
+                    PipelineStage.SYNTHETIC_COVERAGE,
+                    "synthetic_dependencies.jsonl",
+                    STAGE_SEVEN_DEPENDENCY_SCHEMA_VERSION,
+                    SYNTHETIC_FROM_TRUSTED_RUBRIC,
+                ),
+            ):
+                catalog: dict[str, dict[str, Any]] = {}
+                for row in self._read_required_review_rows(
+                    self.artifact_path(stage, name),
+                    "review dependency",
+                ):
+                    if set(row) != {"cluster_id", "dependency"}:
+                        raise ValueError("dependency row fields are invalid")
+                    cluster_id = row.get("cluster_id")
+                    dependency = row.get("dependency")
+                    if (
+                        not isinstance(cluster_id, str)
+                        or not cluster_id
+                        or not isinstance(dependency, Mapping)
+                        or dependency.get("schema_version") != schema
+                        or cluster_id in catalog
+                    ):
+                        raise ValueError("dependency identity is invalid")
+                    dependency_fingerprint(dependency)
+                    catalog[cluster_id] = dict(dependency)
+                dependency_catalogs[trust_tier] = catalog
+        except (TypeError, ValueError) as exc:
+            raise EvaluationAssetIntegrityError(
+                self.tenant_id,
+                self.asset_id,
+                "review dependency authority is inconsistent",
+            ) from exc
+
+        raw_items = self._read_required_review_rows(
+            self.artifact_path(
+                PipelineStage.SYNTHETIC_COVERAGE,
+                "derived_review_items.jsonl",
+            ),
+            "review item",
+        )
+        dependencies: dict[str, dict[str, Any]] = {}
+        items: list[dict[str, Any]] = []
+        try:
+            for raw_item in raw_items:
+                raw_case = raw_item.get("case")
+                metadata = (
+                    raw_case.get("metadata")
+                    if isinstance(raw_case, Mapping)
+                    else None
+                )
+                trust_tier = (
+                    metadata.get("trust_tier")
+                    if isinstance(metadata, Mapping)
+                    else None
+                )
+                cluster_id = (
+                    metadata.get("source_cluster")
+                    if isinstance(metadata, Mapping)
+                    else None
+                )
+                catalog = dependency_catalogs.get(str(trust_tier))
+                dependency = (
+                    catalog.get(str(cluster_id)) if catalog is not None else None
+                )
+                if dependency is None:
+                    raise ValueError("review item dependency is unavailable")
+                item = validate_review_item(raw_item, dependency=dependency)
+                case_id = str(item["case_id"])
+                if case_id in dependencies:
+                    raise ValueError("review item case_id is duplicated")
+                dependencies[case_id] = dependency
+                items.append(item)
+            items.sort(key=lambda row: (row["case_id"], row["fingerprint"]))
+        except (TypeError, ValueError) as exc:
+            raise EvaluationAssetIntegrityError(
+                self.tenant_id,
+                self.asset_id,
+                "review item dependency authority is inconsistent",
+            ) from exc
+
+        held = self._read_required_review_rows(
+            self.artifact_path(
+                PipelineStage.SYNTHETIC_COVERAGE,
+                "held_derived_cases.jsonl",
+            ),
+            "held review",
+        )
+        decisions = self._read_required_review_rows(
+            self.review_decisions_path,
+            "review decision",
+        )
+        finalizations = self._read_required_review_rows(
+            self.review_finalizations_path,
+            "review finalization",
+        )
+        stage7_receipt_sha256 = "sha256:" + stage_state.receipt_sha256
+        try:
+            current_set = review_set_fingerprint(
+                stage7_receipt_sha256=stage7_receipt_sha256,
+                review_items=items,
+                held_cases=held,
+                dependencies=dependencies,
+            )
+            held_case_ids = {str(row["case_id"]) for row in held}
+            if held_case_ids & {str(item["case_id"]) for item in items}:
+                raise ValueError("review items and held cases overlap")
+            for row in held:
+                trust_tier = row.get("trust_tier")
+                reason = row.get("reason")
+                if trust_tier not in CURRENT_TRUST_TIERS:
+                    raise ValueError("held review trust_tier is invalid")
+                if not isinstance(reason, str) or not reason:
+                    raise ValueError("held review reason is invalid")
+            trusted_rows = []
+            for name in ("trusted_cases.jsonl", "protected_trusted_cases.jsonl"):
+                trusted_rows.extend(
+                    self._read_required_review_rows(
+                        self.artifact_path(PipelineStage.RUBRIC_EXTRACTION, name),
+                        "trusted review",
+                    )
+                )
+            trusted_case_ids: set[str] = set()
+            for row in trusted_rows:
+                case_id = row.get("case_id")
+                metadata = row.get("metadata")
+                if (
+                    not isinstance(case_id, str)
+                    or not case_id
+                    or not isinstance(metadata, Mapping)
+                    or metadata.get("trust_tier") != TRUSTED_FEEDBACK
+                    or case_id in trusted_case_ids
+                ):
+                    raise ValueError("trusted review case identity is invalid")
+                trusted_case_ids.add(case_id)
+            trusted_count = len(trusted_case_ids - held_case_ids)
+        except EvaluationAssetIntegrityError:
+            raise
+        except (KeyError, TypeError, ValueError) as exc:
+            raise EvaluationAssetIntegrityError(
+                self.tenant_id,
+                self.asset_id,
+                "current review authority is inconsistent",
+            ) from exc
+        return _VerifiedReviewAuthority(
+            items=tuple(items),
+            held=tuple(
+                sorted(
+                    held,
+                    key=lambda row: (row["case_id"], row["fingerprint"]),
+                )
+            ),
+            decisions=tuple(decisions),
+            finalizations=tuple(finalizations),
+            dependencies=dependencies,
+            stage7_receipt_sha256=stage7_receipt_sha256,
+            review_set_sha256=current_set,
+            trusted_count=trusted_count,
+        )
+
+    def _read_required_review_rows(
+        self,
+        path: Path,
+        label: str,
+    ) -> list[Dict[str, Any]]:
+        """Read one required strict JSONL review authority file."""
+        try:
+            return parse_strict_jsonl_objects(_local_authority_bytes(self, path))
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+            raise EvaluationAssetIntegrityError(
+                self.tenant_id,
+                self.asset_id,
+                f"{label} authority is missing or malformed",
+            ) from exc
 
     def save_state(self, state: PipelineState) -> None:
         """Atomically persist run state."""
@@ -3553,7 +4197,7 @@ class EvaluationAssetLayout:
     def _commit_journal_operation(self, prepared: Mapping[str, Any]) -> None:
         self._append_journal_once(
             {
-                "schema_version": JOURNAL_SCHEMA_VERSION,
+                "schema_version": str(prepared["schema_version"]),
                 "operation_id": str(prepared["operation_id"]),
                 "kind": str(prepared["kind"]),
                 "phase": "committed",
@@ -3803,6 +4447,7 @@ class EvaluationAssetLayout:
                 for name, path in directories
             },
             "config_revisions": self.config_revision_summary(),
+            "review_authority_revision": self.current_review_authority_revision(),
         }
 
 
@@ -3969,6 +4614,54 @@ def _jsonl_rows_from_bytes(path: Path, payload: bytes) -> list[Dict[str, Any]]:
             raise ValueError(f"Expected JSON object at {path}:{line_number}")
         rows.append(row)
     return rows
+
+
+def _historical_parent_split_plan(
+    feedback_rows: Sequence[Mapping[str, Any]],
+    split_rows: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    split_seed: int,
+) -> list[Dict[str, Any]]:
+    """Recover early-split authority from a verified pre-v3 release."""
+    feedback_group_ids = {str(row["group_id"]) for row in feedback_rows}
+    assignments: dict[str, str] = {}
+    for persisted_split, rows in split_rows.items():
+        split = (
+            "regression"
+            if persisted_split == "regression_trusted"
+            else persisted_split
+        )
+        if split not in {"train", "validation", "test", "regression"}:
+            raise ValueError("historical parent split name is invalid")
+        for case in rows:
+            metadata = case.get("metadata")
+            group_id = (
+                metadata.get("group_id")
+                if isinstance(metadata, Mapping)
+                else None
+            )
+            if not isinstance(group_id, str) or group_id not in feedback_group_ids:
+                continue
+            previous = assignments.setdefault(group_id, split)
+            if previous != split:
+                raise ValueError(
+                    f"{PARENT_SPLIT_ASSIGNMENT_CONFLICT}: parent group_id "
+                    f"'{group_id}' appears in both {previous} and {split}"
+                )
+    missing = sorted(feedback_group_ids - set(assignments))
+    if missing:
+        raise ValueError(
+            "historical parent is missing trusted split assignments for "
+            + ", ".join(missing)
+        )
+    return [
+        entry.to_dict()
+        for entry in build_trusted_split_plan(
+            feedback_rows,
+            split_seed=split_seed,
+            parent_assignments=assignments,
+        )
+    ]
 
 
 def _read_jsonl_rows(path: Optional[Path]) -> list[Dict[str, Any]]:

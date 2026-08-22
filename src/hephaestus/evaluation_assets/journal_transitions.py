@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
@@ -23,7 +24,9 @@ from src.hephaestus.evaluation_assets.models import (
     PipelineStage,
 )
 
-JOURNAL_SCHEMA_VERSION = "fapo-recovery-journal-v2"
+HISTORICAL_JOURNAL_SCHEMA_VERSION_V2 = "fapo-recovery-journal-v2"
+HISTORICAL_JOURNAL_SCHEMA_VERSION_V3 = "fapo-recovery-journal-v3"
+JOURNAL_SCHEMA_VERSION = HISTORICAL_JOURNAL_SCHEMA_VERSION_V3
 PERSISTED_STAGE_VALUES_V2 = (
     "raw_inputs",
     "prepared_inputs",
@@ -95,6 +98,88 @@ PERSISTED_CONFIG_STAGE_DEPENDENCIES_V2 = MappingProxyType(
         "split_seed": "dataset_splits",
     }
 )
+PERSISTED_CONFIG_STAGE_DEPENDENCIES_V3 = MappingProxyType(
+    {
+        "rubric_provider": "rubric_extraction",
+        "rubric_model": "rubric_extraction",
+        "batch_size": "rubric_extraction",
+        "embedding_provider": "intent_clustering",
+        "embedding_model": "intent_clustering",
+        "cluster_count": "intent_clustering",
+        "match_threshold": "coverage_decisions",
+        "min_trusted_examples": "coverage_decisions",
+        "min_trusted_groups": "coverage_decisions",
+        "max_unlabeled_to_trusted_ratio": "coverage_decisions",
+        "synthetic_coverage_enabled": "synthetic_coverage",
+        "synthetic_cases_per_cluster": "synthetic_coverage",
+        "split_seed": "prepared_inputs",
+    }
+)
+
+
+@dataclass(frozen=True)
+class JournalTransitionProfile:
+    """Frozen transition registries selected by one persisted journal schema."""
+
+    schema_version: str
+    stage_values: tuple[str, ...]
+    stage_count_keys: Mapping[str, frozenset[str]]
+    config_stage_dependencies: Mapping[str, str]
+
+
+_JOURNAL_TRANSITION_PROFILES = MappingProxyType(
+    {
+        HISTORICAL_JOURNAL_SCHEMA_VERSION_V2: JournalTransitionProfile(
+            schema_version=HISTORICAL_JOURNAL_SCHEMA_VERSION_V2,
+            stage_values=PERSISTED_STAGE_VALUES_V2,
+            stage_count_keys=PERSISTED_STAGE_COUNT_KEYS_V2,
+            config_stage_dependencies=PERSISTED_CONFIG_STAGE_DEPENDENCIES_V2,
+        ),
+        HISTORICAL_JOURNAL_SCHEMA_VERSION_V3: JournalTransitionProfile(
+            schema_version=HISTORICAL_JOURNAL_SCHEMA_VERSION_V3,
+            stage_values=PERSISTED_STAGE_VALUES_V2,
+            stage_count_keys=PERSISTED_STAGE_COUNT_KEYS_V2,
+            config_stage_dependencies=PERSISTED_CONFIG_STAGE_DEPENDENCIES_V3,
+        ),
+    }
+)
+
+
+def journal_transition_profile(schema_version: Any) -> JournalTransitionProfile:
+    """Return the immutable transition profile named by persisted authority."""
+    try:
+        return _JOURNAL_TRANSITION_PROFILES[str(schema_version)]
+    except (KeyError, TypeError) as exc:
+        raise ValueError("journal schema is unsupported") from exc
+
+
+def _require_profile_stage_inventory(
+    state: Mapping[str, Any],
+    profile: JournalTransitionProfile,
+) -> None:
+    """Reject authoring changes that require an unversioned journal profile."""
+    stages = state.get("stages")
+    actual = (
+        tuple(str(item.get("stage")) for item in stages)
+        if isinstance(stages, list)
+        and all(isinstance(item, Mapping) for item in stages)
+        else ()
+    )
+    if actual != profile.stage_values:
+        raise ValueError(
+            "state stage inventory is incompatible with journal schema "
+            f"{profile.schema_version}; define a new journal schema profile"
+        )
+
+
+if {
+    field: stage.value for field, stage in CONFIG_STAGE_DEPENDENCIES.items()
+} != dict(PERSISTED_CONFIG_STAGE_DEPENDENCIES_V3):
+    raise RuntimeError("live and persisted v3 config dependencies differ")
+if tuple(stage.value for stage in PipelineStage) != PERSISTED_STAGE_VALUES_V2 or {
+    stage.value: frozenset(keys) for stage, keys in STAGE_COUNT_KEYS.items()
+} != dict(PERSISTED_STAGE_COUNT_KEYS_V2):
+    raise RuntimeError("live state/count shape differs from persisted v2")
 _RELEASE_STAGE_VALUES_V2 = PERSISTED_STAGE_VALUES_V2
 _RELEASE_STAGE_LABELS_V2 = MappingProxyType({
     "raw_inputs": "Validate raw inputs",
@@ -441,17 +526,12 @@ def derive_revision_plan(
     operation_id: str,
     prepared_at: str,
     revision: int,
-    historical_profile: bool = False,
+    journal_schema_version: str = JOURNAL_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     """Derive the only writer-reachable configuration revision payload."""
-    dependencies = (
-        PERSISTED_CONFIG_STAGE_DEPENDENCIES_V2
-        if historical_profile
-        else {
-            field: stage.value
-            for field, stage in CONFIG_STAGE_DEPENDENCIES.items()
-        }
-    )
+    profile = journal_transition_profile(journal_schema_version)
+    _require_profile_stage_inventory(before_state, profile)
+    dependencies = profile.config_stage_dependencies
     unknown = set(updates) - set(dependencies)
     if unknown:
         names = ", ".join(sorted(unknown))
@@ -473,11 +553,7 @@ def derive_revision_plan(
     }
     if not changes:
         raise ValueError("configuration revision is empty")
-    ordered = (
-        list(PERSISTED_STAGE_VALUES_V2)
-        if historical_profile
-        else [stage.value for stage in PipelineStage]
-    )
+    ordered = list(profile.stage_values)
     earliest = min(
         (dependencies[field] for field in changes),
         key=ordered.index,
@@ -498,7 +574,7 @@ def derive_revision_plan(
         resume_stage=resume,
         operation_id=operation_id,
         prepared_at=prepared_at,
-        historical_profile=historical_profile,
+        journal_schema_version=journal_schema_version,
     )
     result = {
         "changed_fields": changes,
@@ -538,15 +614,13 @@ def derive_rebuild_plan(
     *,
     operation_id: str,
     prepared_at: str,
-    historical_profile: bool = False,
+    journal_schema_version: str = JOURNAL_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     """Derive the only writer-reachable checkpoint rebuild payload."""
     del before_config
-    ordered = (
-        list(PERSISTED_STAGE_VALUES_V2)
-        if historical_profile
-        else [stage.value for stage in PipelineStage]
-    )
+    profile = journal_transition_profile(journal_schema_version)
+    _require_profile_stage_inventory(before_state, profile)
+    ordered = list(profile.stage_values)
     boundary_value = str(getattr(boundary, "value", boundary))
     invalidated = ordered[ordered.index(boundary_value) :]
     target_state = derive_mutable_target_state(
@@ -555,7 +629,7 @@ def derive_rebuild_plan(
         resume_stage=boundary_value,
         operation_id=operation_id,
         prepared_at=prepared_at,
-        historical_profile=historical_profile,
+        journal_schema_version=journal_schema_version,
     )
     return {
         "target_state": target_state,
@@ -726,9 +800,11 @@ def derive_release_publication_plan(
     *,
     operation_id: str,
     prepared_at: str,
+    journal_schema_version: str = JOURNAL_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     """Derive the only writer-reachable native release publication payload."""
     del before_config
+    journal_transition_profile(journal_schema_version)
     raw_stages = before_state.get("stages")
     mutation_sequence = before_state.get("mutation_sequence")
     if (
@@ -795,9 +871,10 @@ def derive_mutable_target_state(
     resume_stage: PipelineStage | str,
     operation_id: str,
     prepared_at: str,
-    historical_profile: bool = False,
+    journal_schema_version: str = JOURNAL_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     """Clone a state and blank exactly one declared suffix."""
+    profile = journal_transition_profile(journal_schema_version)
     target = deepcopy(dict(before_state))
     invalidated_names = {
         str(getattr(stage, "value", stage)) for stage in invalidated
@@ -805,13 +882,7 @@ def derive_mutable_target_state(
     invalidated_count_keys = {
         key
         for stage in invalidated
-        for key in (
-            PERSISTED_STAGE_COUNT_KEYS_V2[str(getattr(stage, "value", stage))]
-            if historical_profile
-            else STAGE_COUNT_KEYS[
-                PipelineStage(str(getattr(stage, "value", stage)))
-            ]
-        )
+        for key in profile.stage_count_keys[str(getattr(stage, "value", stage))]
     }
     target["counts"] = {
         key: value

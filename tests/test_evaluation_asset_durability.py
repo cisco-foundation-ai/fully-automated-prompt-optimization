@@ -17,6 +17,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import replace
 from enum import Enum
+from functools import partial
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -25,6 +26,7 @@ import pytest
 from src.hephaestus import artifact_io, local_authority_io
 from src.hephaestus.datasets import embedding_providers as embedding_provider_module
 from src.hephaestus.datasets import rubric_providers as rubric_provider_module
+from src.hephaestus.datasets.evaluation_assets import filter_synthetic_cases
 from src.hephaestus.datasets.jsonl_loader import load_cases
 from src.hephaestus.evaluation_assets import control_jsonl as control_jsonl_module
 from src.hephaestus.evaluation_assets import durability as durability_module
@@ -35,6 +37,7 @@ from src.hephaestus.evaluation_assets import models as evaluation_asset_models
 from src.hephaestus.evaluation_assets import pipeline as pipeline_module
 from src.hephaestus.evaluation_assets import provenance as provenance_module
 from src.hephaestus.evaluation_assets import publication as publication_module
+from src.hephaestus.evaluation_assets import review as review_module
 from src.hephaestus.evaluation_assets import service as service_module
 from src.hephaestus.evaluation_assets import stage_three_contract
 from src.hephaestus.evaluation_assets import workspace as workspace_module
@@ -162,6 +165,7 @@ def _install_drifted_authoring_registry(
             module,
             "CONFIG_STAGE_DEPENDENCIES",
             drifted_dependencies,
+            raising=False,
         )
 
 
@@ -3727,7 +3731,7 @@ def test_spawned_process_holds_same_deterministic_asset_lock(tmp_path: Path) -> 
             EvaluationAssetBusyError,
             match="tenant_a/v1.*already being modified",
         ) as exc_info:
-            pipeline.run()
+            _run_to_release(pipeline)
         assert str(tmp_path) not in str(exc_info.value)
         assert layout.lock_path == (
             tenants_root.resolve()
@@ -4023,7 +4027,7 @@ def test_service_preflight_rejection_has_no_provider_or_stage_work_and_cleans_th
 ) -> None:
     """Immutable and corrupt releases reject synchronously with no orphan worker."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     if condition == "corrupt":
         receipt = layout.receipt_path(PipelineStage.DATASET_SPLITS)
@@ -4067,7 +4071,7 @@ def test_service_accepts_terminal_release_recovery_and_cleans_worker(
 
     monkeypatch.setattr(workspace_module, "_fault_point", stop_after_release_prepare)
     with pytest.raises(_InjectedFault, match="after_release_publication_prepared"):
-        pipeline.run()
+        _run_to_release(pipeline)
     layout = pipeline.layout
     rows = _read_jsonl(layout.recovery_journal_path)
     assert rows[-1]["phase"] == "prepared"
@@ -4115,7 +4119,7 @@ def test_service_extension_persists_queued_before_worker_preflight(
         rubric_provider=rubric,
         repository_base=tmp_path,
     )
-    parent_pipeline.run()
+    _run_to_release(parent_pipeline)
     entered = threading.Event()
     release = threading.Event()
     finished = threading.Event()
@@ -4216,10 +4220,11 @@ def test_revised_rubric_model_constructs_only_the_new_default_after_lock(
     )
 
     assert constructed == []
-    released = pipeline.run(config_updates={"rubric_model": "new-rubric"})
+    released = _run_to_release(pipeline, config_updates={"rubric_model": "new-rubric"})
 
     assert released.status == "released"
-    assert constructed == ["new-rubric"]
+    assert constructed
+    assert set(constructed) == {"new-rubric"}
     receipt = json.loads(
         pipeline.layout.receipt_path(PipelineStage.RUBRIC_EXTRACTION).read_text(
             encoding="utf-8"
@@ -4285,10 +4290,11 @@ def test_embedding_revision_constructs_only_the_selected_default_provider(
     )
 
     assert constructed == []
-    released = pipeline.run(config_updates={"embedding_model": revised_model})
+    released = _run_to_release(pipeline, config_updates={"embedding_model": revised_model})
 
     assert released.status == "released"
-    assert constructed == expected_models
+    assert bool(constructed) is bool(expected_models)
+    assert set(constructed) == set(expected_models)
     receipt = json.loads(
         pipeline.layout.receipt_path(PipelineStage.INTENT_CLUSTERING).read_text(
             encoding="utf-8"
@@ -4307,7 +4313,7 @@ def test_injected_provider_identity_is_receipted_and_manifested_as_actual(
     embedding.model = "actual-embedding"
     embedding.provider_name = "injected-embedding"
 
-    pipeline.run()
+    _run_to_release(pipeline)
 
     rubric_receipt = json.loads(
         pipeline.layout.receipt_path(PipelineStage.RUBRIC_EXTRACTION).read_text(
@@ -4340,11 +4346,21 @@ def test_injected_provider_identity_is_receipted_and_manifested_as_actual(
             PipelineStage.RUBRIC_EXTRACTION,
             "feedback_evidence.jsonl",
         )
+    ) + _read_jsonl(
+        pipeline.layout.artifact_path(
+            PipelineStage.RUBRIC_EXTRACTION,
+            "protected_feedback_evidence.jsonl",
+        )
     )
     guidelines = _read_jsonl(
         pipeline.layout.artifact_path(
             PipelineStage.RUBRIC_EXTRACTION,
             "evaluation_guidelines.jsonl",
+        )
+    ) + _read_jsonl(
+        pipeline.layout.artifact_path(
+            PipelineStage.RUBRIC_EXTRACTION,
+            "protected_evaluation_guidelines.jsonl",
         )
     )
     inferred = _read_jsonl(
@@ -4356,6 +4372,7 @@ def test_injected_provider_identity_is_receipted_and_manifested_as_actual(
     assert {row["guideline_provider"] for row in evidence} == {"injected-rubric"}
     assert {row["guideline_provider"] for row in guidelines} == {"injected-rubric"}
     assert {row["rubric_provider"] for row in inferred} == {"injected-rubric"}
+    assert {row["rubric_model"] for row in inferred} == {"actual-rubric"}
 
 
 def test_mutable_resume_invalidates_from_changed_injected_provider_settings(
@@ -4377,7 +4394,7 @@ def test_mutable_resume_invalidates_from_changed_injected_provider_settings(
 
     monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", fail_at_clustering)
     with pytest.raises(RuntimeError, match="pause after rubric receipt"):
-        pipeline.run()
+        _run_to_release(pipeline)
     old_receipt = pipeline.layout.receipt_path(
         PipelineStage.RUBRIC_EXTRACTION
     ).read_bytes()
@@ -4394,11 +4411,13 @@ def test_mutable_resume_invalidates_from_changed_injected_provider_settings(
         return original_run_stage(instance, stage)
 
     monkeypatch.setattr(EvaluationAssetPipeline, "_run_stage", record_stage)
-    released = EvaluationAssetPipeline(
-        pipeline.layout,
-        rubric_provider=changed_rubric,
-        embedding_provider=embedding,
-    ).run()
+    released = _run_to_release(
+        EvaluationAssetPipeline(
+            pipeline.layout,
+            rubric_provider=changed_rubric,
+            embedding_provider=embedding,
+        )
+    )
 
     assert released.status == "released"
     assert rerun_stages[0] == PipelineStage.RUBRIC_EXTRACTION
@@ -4414,7 +4433,7 @@ def test_released_verification_reaggregates_authenticated_provider_ledgers(
 ) -> None:
     """Release verification binds build calls to every receipt-backed ledger."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    released = pipeline.run()
+    released = _run_to_release(pipeline)
     seen: dict[str, list[dict[str, Any]]] = {}
     original = durability_module.validate_build_provenance_call_ledgers
 
@@ -4485,7 +4504,7 @@ def test_injection_missing_required_provider_name_is_rejected_before_calls(
     before = _authority_bytes(pipeline.layout)
 
     with pytest.raises(ValueError, match="injected rubric provider identity is unavailable"):
-        pipeline.run()
+        _run_to_release(pipeline)
 
     assert rubric.calls == 0
     assert _authority_bytes(pipeline.layout) == before
@@ -4500,7 +4519,7 @@ def test_injected_provider_mismatch_requires_explicit_extension_identity(
     rubric.model = "actual-rubric-model"
     embedding.provider_name = "actual-embedding-provider"
     embedding.model = "actual-embedding-model"
-    pipeline.run()
+    _run_to_release(pipeline)
     child = EvaluationAssetLayout(
         pipeline.layout.tenants_root,
         pipeline.layout.tenant_id,
@@ -4552,7 +4571,7 @@ def test_refresh_extension_accepts_complete_new_embedding_identity(
     rubric.model = "actual-rubric-model"
     embedding.provider_name = "actual-embedding-provider"
     embedding.model = "actual-embedding-model"
-    pipeline.run()
+    _run_to_release(pipeline)
     child = EvaluationAssetLayout(
         pipeline.layout.tenants_root,
         pipeline.layout.tenant_id,
@@ -4576,11 +4595,13 @@ def test_refresh_extension_accepts_complete_new_embedding_identity(
     new_embedding.provider_name = "new-embedding-provider"
     new_embedding.model = "new-embedding-model"
 
-    released = EvaluationAssetPipeline(
-        child,
-        rubric_provider=rubric,
-        embedding_provider=new_embedding,
-    ).run()
+    released = _run_to_release(
+        EvaluationAssetPipeline(
+            child,
+            rubric_provider=rubric,
+            embedding_provider=new_embedding,
+        )
+    )
 
     assert released.status == "released"
     receipt = json.loads(
@@ -4620,7 +4641,7 @@ def test_refresh_extension_rejects_implicit_or_partial_embedding_choice(
     rubric.model = "actual-rubric-model"
     embedding.provider_name = "actual-embedding-provider"
     embedding.model = "actual-embedding-model"
-    pipeline.run()
+    _run_to_release(pipeline)
     child = EvaluationAssetLayout(
         pipeline.layout.tenants_root,
         pipeline.layout.tenant_id,
@@ -4655,7 +4676,7 @@ def test_keep_extension_rejects_complete_new_embedding_identity(
     rubric.model = "actual-rubric-model"
     embedding.provider_name = "actual-embedding-provider"
     embedding.model = "actual-embedding-model"
-    pipeline.run()
+    _run_to_release(pipeline)
     child = EvaluationAssetLayout(
         pipeline.layout.tenants_root,
         pipeline.layout.tenant_id,
@@ -4686,7 +4707,7 @@ def test_unavailable_parent_provider_identity_accepts_explicit_child_choice(
 ) -> None:
     """An adopted parent can extend only with a complete explicit identity."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     _downgrade_to_legacy_completed(pipeline.layout)
     pipeline.layout.adopt_legacy()
     child = EvaluationAssetLayout(
@@ -4730,7 +4751,7 @@ def test_adopted_parent_refresh_requires_complete_provider_choices(
 ) -> None:
     """Historically unavailable identities are replaced only explicitly."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     _downgrade_to_legacy_completed(pipeline.layout)
     pipeline.layout.adopt_legacy()
     child = EvaluationAssetLayout(
@@ -4803,7 +4824,7 @@ def test_raw_snapshot_floor_rejects_before_revision_or_default_construction(
         rubric_provider=_SuccessfulRubricProvider(),
         embedding_provider=_SuccessfulEmbeddingProvider(),
     )
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _make_released_checkpoint_mutable(layout)
     if damage == "missing":
@@ -4846,7 +4867,7 @@ def test_direct_revision_rejects_invalid_raw_snapshot_without_authority_write(
 ) -> None:
     """The library revision seam authenticates its immutable rebuild floor."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _make_released_checkpoint_mutable(layout)
     if damage == "missing":
@@ -4866,7 +4887,7 @@ def test_direct_noop_revision_accepts_valid_raw_snapshot_without_write(
 ) -> None:
     """A valid immutable floor keeps the direct no-op result side-effect free."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _make_released_checkpoint_mutable(layout)
     before = _authority_bytes(layout)
@@ -4909,7 +4930,7 @@ def test_running_never_receipted_stage_one_keeps_presence_only_revision_path(
 
     monkeypatch.setattr(pipeline, "_run_stage", interrupt_before_stage_one)
     with pytest.raises(KeyboardInterrupt):
-        pipeline.run()
+        _run_to_release(pipeline)
 
     stage_one = pipeline.layout.load_state().stages[0]
     assert stage_one.status == "running"
@@ -4926,7 +4947,7 @@ def test_completed_stage_one_cannot_be_relabeled_as_never_receipted(
 ) -> None:
     """A retained completion event prevents a failed-state receipt bypass."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     state = _make_released_checkpoint_mutable(layout)
     state.stages[0].status = "failed"
@@ -4957,7 +4978,7 @@ def test_claimed_raw_snapshot_floor_requires_complete_receipt_authority(
 ) -> None:
     """A completed Stage 1 never falls back to presence-only raw validation."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _make_released_checkpoint_mutable(layout)
     receipt_path = layout.receipt_path(PipelineStage.RAW_INPUTS)
@@ -5038,7 +5059,7 @@ def test_default_provider_constructors_are_not_called_on_rejected_run(
         rubric_provider=_SuccessfulRubricProvider(),
         embedding_provider=_SuccessfulEmbeddingProvider(),
     )
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     if rejection == "busy":
         _make_released_checkpoint_mutable(layout)
@@ -5083,7 +5104,7 @@ def test_default_provider_constructors_are_not_called_on_rejected_run(
         assert ready.wait(timeout=2)
         try:
             with pytest.raises(EvaluationAssetBusyError):
-                candidate.run()
+                _run_to_release(candidate)
         finally:
             release.set()
             holder.join(timeout=2)
@@ -5091,10 +5112,10 @@ def test_default_provider_constructors_are_not_called_on_rejected_run(
         assert holder_errors == []
     elif rejection == "released":
         with pytest.raises(EvaluationAssetImmutableError):
-            candidate.run()
+            _run_to_release(candidate)
     else:
         with pytest.raises(EvaluationAssetIntegrityError):
-            candidate.run()
+            _run_to_release(candidate)
 
 
 def test_stage_specification_exhaustively_declares_required_artifacts() -> None:
@@ -5104,6 +5125,8 @@ def test_stage_specification_exhaustively_declares_required_artifacts() -> None:
         PipelineStage.PREPARED_INPUTS: {
             "normalized_feedback.jsonl",
             "intent_records.jsonl",
+            "trusted_split_plan.jsonl",
+            "feedback_eligibility.jsonl",
         },
         PipelineStage.RUBRIC_EXTRACTION: {
             "feedback_evidence.jsonl",
@@ -5111,6 +5134,10 @@ def test_stage_specification_exhaustively_declares_required_artifacts() -> None:
             "evaluation_guidelines.jsonl",
             "trusted_intents.jsonl",
             "trusted_cases.jsonl",
+            "protected_feedback_evidence.jsonl",
+            "protected_candidate_guidelines.jsonl",
+            "protected_evaluation_guidelines.jsonl",
+            "protected_trusted_cases.jsonl",
         },
         PipelineStage.INTENT_CLUSTERING: {"intent_inventory.jsonl"},
         PipelineStage.COVERAGE_DECISIONS: {
@@ -5124,12 +5151,18 @@ def test_stage_specification_exhaustively_declares_required_artifacts() -> None:
             "missing_labeled_feedback_clusters.jsonl",
             "missing_labeled_feedback_report.md",
             "inferred_cases.jsonl",
+            "inference_dependencies.jsonl",
+            "held_inference_outputs.jsonl",
         },
         PipelineStage.SYNTHETIC_COVERAGE: {
             "synthetic_candidates.jsonl",
             "rejected_synthetic.jsonl",
             "synthetic_filter_issues.jsonl",
             "synthetic_cases.jsonl",
+            "synthetic_dependencies.jsonl",
+            "derived_review_items.jsonl",
+            "duplicate_families.jsonl",
+            "held_derived_cases.jsonl",
         },
         PipelineStage.DATASET_SPLITS: {
             "train_trusted.jsonl",
@@ -5148,6 +5181,7 @@ def test_stage_specification_exhaustively_declares_required_artifacts() -> None:
             "triage_hold.jsonl",
             "dataset_manifest.json",
             "generation_manifest.json",
+            "review_snapshot.json",
         },
     }
 
@@ -5168,13 +5202,17 @@ def test_pipeline_writes_receipt_commit_markers_and_releases(tmp_path: Path) -> 
     """A new build releases only after all stage receipts exist and are referenced."""
     pipeline, rubric, embedding = _create_pipeline(tmp_path)
 
-    state = pipeline.run()
+    state = _run_to_release(pipeline)
 
     assert state.status == "released"
     assert state.schema_version == STATE_SCHEMA_VERSION
     assert all(stage.status == "completed" for stage in state.stages)
     assert rubric.calls > 0
     assert embedding.calls > 0
+    expected_algorithms = provenance_module.build_algorithm_inventory(
+        pipeline.layout.load_config().to_dict(),
+        extension=False,
+    )
     for index, stage in enumerate(PipelineStage, start=1):
         stage_state = next(item for item in state.stages if item.stage == stage.value)
         receipt_path = pipeline.layout.receipt_path(stage)
@@ -5193,6 +5231,23 @@ def test_pipeline_writes_receipt_commit_markers_and_releases(tmp_path: Path) -> 
         assert receipt["provider_identity_sha256"]
         assert receipt["provider_calls_sha256"]
         assert receipt["code_sha256"]
+        stage_provenance_path = pipeline.layout.stage_provenance_path(stage)
+        stage_provenance = json.loads(
+            stage_provenance_path.read_text(encoding="utf-8")
+        )
+        assert stage_provenance["algorithms"] == {
+            "stage": stage.value,
+            "revision": expected_algorithms[stage.value],
+        }
+        receipt_outputs = {
+            str(output["path"]): output for output in receipt["outputs"]
+        }
+        provenance_relative = stage_provenance_path.relative_to(
+            pipeline.layout.root
+        ).as_posix()
+        assert receipt_outputs[provenance_relative]["sha256"] == file_sha256(
+            stage_provenance_path
+        )
         if stage == PipelineStage.DATASET_SPLITS:
             assert receipt["build_provenance_sha256"] == file_sha256(
                 pipeline.layout.build_provenance_path
@@ -5240,8 +5295,23 @@ def test_pipeline_writes_receipt_commit_markers_and_releases(tmp_path: Path) -> 
     build_provenance = json.loads(
         pipeline.layout.build_provenance_path.read_text(encoding="utf-8")
     )
+    assert build_provenance["identity"]["algorithms"] == expected_algorithms
     assert len(build_provenance["identity"]["calls"]) == len(ledger_rows)
     assert len(build_provenance["audit"]["calls"]) == len(ledger_rows)
+    asset_manifest = json.loads(
+        pipeline.layout.manifest_path.read_text(encoding="utf-8")
+    )
+    assert asset_manifest["regression_gate"]["selection"] == (
+        "deterministic_early_connected_group_hash"
+    )
+    assert asset_manifest["review_policy"] == {
+        "evaluation_guidelines": "active_from_trusted_evidence",
+        "guideline_calibration": "uncalibrated",
+        "derived_cases": "approved_only",
+        "coverage_labeling_queue": "human_label_required",
+        "trusted_split_assignment": "before_guideline_authoring",
+        "exact_duplicate_conflicts": "triage_hold",
+    }
 
 
 _STAGE_MUTATION_TARGETS = {
@@ -5263,7 +5333,7 @@ def test_mutable_resume_rebuilds_from_first_missing_output(
 ) -> None:
     """A missing committed output invalidates that mutable stage and its suffix."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _make_released_checkpoint_mutable(layout)
     boundary = list(PipelineStage).index(stage)
@@ -5276,11 +5346,13 @@ def test_mutable_resume_rebuilds_from_first_missing_output(
     rubric = _SuccessfulRubricProvider()
     embedding = _SuccessfulEmbeddingProvider()
 
-    resumed = EvaluationAssetPipeline(
-        layout,
-        rubric_provider=rubric,
-        embedding_provider=embedding,
-    ).run()
+    resumed = _run_to_release(
+        EvaluationAssetPipeline(
+            layout,
+            rubric_provider=rubric,
+            embedding_provider=embedding,
+        )
+    )
 
     assert resumed.status == "released"
     assert target.is_file()
@@ -5297,7 +5369,7 @@ def test_mutable_resume_rebuilds_from_first_corrupt_output(
 ) -> None:
     """A parseable byte change still invalidates a mutable receipt boundary."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _make_released_checkpoint_mutable(layout)
     boundary = list(PipelineStage).index(stage)
@@ -5309,11 +5381,13 @@ def test_mutable_resume_rebuilds_from_first_corrupt_output(
     corrupt_bytes = target.read_bytes() + b" \n"
     target.write_bytes(corrupt_bytes)
 
-    resumed = EvaluationAssetPipeline(
-        layout,
-        rubric_provider=_SuccessfulRubricProvider(),
-        embedding_provider=_SuccessfulEmbeddingProvider(),
-    ).run()
+    resumed = _run_to_release(
+        EvaluationAssetPipeline(
+            layout,
+            rubric_provider=_SuccessfulRubricProvider(),
+            embedding_provider=_SuccessfulEmbeddingProvider(),
+        )
+    )
 
     assert resumed.status == "released"
     assert target.read_bytes() != corrupt_bytes
@@ -5332,7 +5406,7 @@ def test_released_asset_fails_closed_for_stage_output_damage(
 ) -> None:
     """Released verification detects every stage boundary without repair."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     target = layout.artifact_path(stage, _STAGE_MUTATION_TARGETS[stage])
     if mutation == "missing":
@@ -5358,7 +5432,7 @@ def test_released_asset_fails_closed_for_stage_output_damage(
 def test_released_revision_and_run_fail_before_any_mutation(tmp_path: Path) -> None:
     """Changed, unchanged, and run requests cannot write a released asset."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     before = _authority_bytes(layout)
 
@@ -5386,7 +5460,7 @@ def test_released_revision_and_run_fail_before_any_mutation(tmp_path: Path) -> N
 def test_legacy_completed_rejects_revision_before_any_mutation(tmp_path: Path) -> None:
     """Adoption is the legacy completion's only permitted mutation path."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     before = _authority_bytes(layout)
@@ -5400,7 +5474,7 @@ def test_legacy_completed_rejects_revision_before_any_mutation(tmp_path: Path) -
 def test_legacy_completed_run_requires_adoption_without_mutation(tmp_path: Path) -> None:
     """The strict native selector preserves the pre-v2 adoption sentinel."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     before = _authority_bytes(layout)
@@ -5419,26 +5493,25 @@ def test_downstream_revision_keeps_projected_receipt_prefix_valid(
 ) -> None:
     """Audit-only full config changes do not invalidate unrelated stages."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _make_released_checkpoint_mutable(layout)
     prefix = {
-        stage: layout.receipt_path(stage).read_bytes()
-        for stage in list(PipelineStage)[:7]
+        PipelineStage.RAW_INPUTS: layout.receipt_path(
+            PipelineStage.RAW_INPUTS
+        ).read_bytes()
     }
 
     revision = layout.revise_config({"split_seed": 73})
-    rubric = _NeverCalledRubricProvider()
-    rubric.model = "fake-rubric"
-    embedding = _NeverCalledEmbeddingProvider()
-    embedding.model = "fake-embedding"
-    resumed = EvaluationAssetPipeline(
-        layout,
-        rubric_provider=rubric,
-        embedding_provider=embedding,
-    ).run()
+    resumed = _run_to_release(
+        EvaluationAssetPipeline(
+            layout,
+            rubric_provider=_SuccessfulRubricProvider(),
+            embedding_provider=_SuccessfulEmbeddingProvider(),
+        )
+    )
 
-    assert revision["invalidated_from_stage"] == "dataset_splits"
+    assert revision["invalidated_from_stage"] == "prepared_inputs"
     assert resumed.status == "released"
     assert all(
         layout.receipt_path(stage).read_bytes() == receipt
@@ -5452,7 +5525,7 @@ def test_released_verification_does_not_require_current_code_identity(
 ) -> None:
     """Historical code hashes remain evidence after the checkout changes."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    released = pipeline.run()
+    released = _run_to_release(pipeline)
     monkeypatch.setattr(
         durability_module,
         "_code_identity",
@@ -5473,7 +5546,7 @@ def test_interim_v2_release_without_pointer_fails_closed_with_repair_guidance(
 ) -> None:
     """Task 3 releases without a publication pointer are not auto-adopted."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    released = pipeline.run()
+    released = _run_to_release(pipeline)
     pipeline.layout.release_pointer_path.unlink()
 
     with pytest.raises(
@@ -5511,7 +5584,7 @@ def test_released_verification_authenticates_config_and_terminal_state(
 ) -> None:
     """A release binds its persisted config, identity, stage set, and count shape."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    released = pipeline.run()
+    released = _run_to_release(pipeline)
     layout = pipeline.layout
     if corruption.startswith("config_"):
         payload = json.loads(layout.config_path.read_text(encoding="utf-8"))
@@ -5563,14 +5636,17 @@ def test_released_verification_replays_receipt_config_history(
 ) -> None:
     """Retained prefix receipts may use older audited configs, never unknown ones."""
     pipeline, rubric, embedding = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _make_released_checkpoint_mutable(layout)
-    revised = EvaluationAssetPipeline(
-        layout,
-        rubric_provider=rubric,
-        embedding_provider=embedding,
-    ).run(config_updates={"match_threshold": 0.2})
+    revised = _run_to_release(
+        EvaluationAssetPipeline(
+            layout,
+            rubric_provider=rubric,
+            embedding_provider=embedding,
+        ),
+        config_updates={"match_threshold": 0.2},
+    )
 
     verify_released_asset(layout, revised)
     history = _read_jsonl(layout.config_history_path)
@@ -5692,11 +5768,13 @@ def test_standalone_release_verification_uses_complete_journal_authority(
     if not layout.state_path.exists():
         raise AssertionError("test setup did not initialize the asset")
     if layout.load_state().status != "released":
-        EvaluationAssetPipeline(
-            layout,
-            rubric_provider=_SuccessfulRubricProvider(),
-            embedding_provider=_SuccessfulEmbeddingProvider(),
-        ).run()
+        _run_to_release(
+            EvaluationAssetPipeline(
+                layout,
+                rubric_provider=_SuccessfulRubricProvider(),
+                embedding_provider=_SuccessfulEmbeddingProvider(),
+            )
+        )
 
     if ledger_damage == "relabeled_origins_without_wal":
         state = layout.load_state()
@@ -5779,7 +5857,7 @@ def test_standalone_adopted_verification_replays_legacy_semantics(
 ) -> None:
     """A matching WAL and rehashed receipts cannot bless invalid legacy bytes."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     layout.adopt_legacy()
@@ -5814,7 +5892,7 @@ def test_native_terminal_candidate_requires_revision_journal_authority(
 ) -> None:
     """Terminal verification rejects missing WAL evidence before release writes."""
     pipeline, rubric, embedding = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     _make_released_checkpoint_mutable(pipeline.layout)
     resumed = EvaluationAssetPipeline(
         pipeline.layout,
@@ -5854,7 +5932,7 @@ def test_native_terminal_candidate_requires_revision_journal_authority(
     )
 
     with pytest.raises(EvaluationAssetIntegrityError):
-        resumed.run(config_updates={"match_threshold": 0.2})
+        _run_to_release(resumed, config_updates={"match_threshold": 0.2})
 
     assert pipeline.layout.load_state().status != "released"
     assert _authority_bytes(pipeline.layout) == before_verification["authority"]
@@ -5865,7 +5943,7 @@ def test_released_verification_requires_config_history_authority(
 ) -> None:
     """Receipt config hashes must be backed by the persisted revision history."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    released = pipeline.run()
+    released = _run_to_release(pipeline)
     pipeline.layout.config_history_path.unlink()
     before = _authority_bytes(pipeline.layout)
 
@@ -5905,7 +5983,7 @@ def test_native_release_authenticates_history_before_persisting_released(
     )
 
     with pytest.raises(EvaluationAssetIntegrityError):
-        pipeline.run()
+        _run_to_release(pipeline)
 
     assert pipeline.layout.load_state().status != "released"
 
@@ -5934,7 +6012,7 @@ def test_native_release_verifies_the_persisted_terminal_before_return(
         record_persisted_verification,
     )
 
-    released = pipeline.run()
+    released = _run_to_release(pipeline)
 
     assert released.status == "released"
     assert persisted_statuses
@@ -5964,13 +6042,16 @@ def test_released_verification_authenticates_exact_config_history_records(
 ) -> None:
     """Every created/updated audit field and exact row schema is release evidence."""
     pipeline, rubric, embedding = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     _make_released_checkpoint_mutable(pipeline.layout)
-    EvaluationAssetPipeline(
-        pipeline.layout,
-        rubric_provider=rubric,
-        embedding_provider=embedding,
-    ).run(config_updates={"match_threshold": 0.2})
+    _run_to_release(
+        EvaluationAssetPipeline(
+            pipeline.layout,
+            rubric_provider=rubric,
+            embedding_provider=embedding,
+        ),
+        config_updates={"match_threshold": 0.2},
+    )
     rows = _read_jsonl(pipeline.layout.config_history_path)
     if corruption == "created_timestamp":
         rows[0]["timestamp"] = "2026-08-19T00:00:00+00:00"
@@ -6017,7 +6098,7 @@ def test_released_verification_authenticates_exact_inherited_history_record(
 ) -> None:
     """An extension release binds every inherited-origin history field."""
     parent, _, _ = _create_pipeline(tmp_path)
-    parent.run()
+    _run_to_release(parent)
     child = EvaluationAssetLayout(
         parent.layout.tenants_root,
         parent.layout.tenant_id,
@@ -6029,11 +6110,13 @@ def test_released_verification_authenticates_exact_inherited_history_record(
         additional_unlabeled=None,
         clustering_mode="keep",
     )
-    released = EvaluationAssetPipeline(
-        child,
-        rubric_provider=_SuccessfulRubricProvider(),
-        embedding_provider=_SuccessfulEmbeddingProvider(),
-    ).run()
+    released = _run_to_release(
+        EvaluationAssetPipeline(
+            child,
+            rubric_provider=_SuccessfulRubricProvider(),
+            embedding_provider=_SuccessfulEmbeddingProvider(),
+        )
+    )
     rows = _read_jsonl(child.config_history_path)
     if corruption == "parent_asset":
         rows[0]["parent_asset_id"] = "different-parent"
@@ -6055,7 +6138,7 @@ def test_legacy_adoption_authenticates_terminal_history_before_wal(
 ) -> None:
     """Invalid terminal audit evidence cannot prepare adoption authority."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     rows = _read_jsonl(layout.config_history_path)
@@ -6103,7 +6186,7 @@ def test_recovery_journal_corruption_fails_closed_before_any_roll_forward(
 ) -> None:
     """Every WAL schema, identity, and hash field is authenticated before writes."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _make_released_checkpoint_mutable(layout)
 
@@ -6212,7 +6295,7 @@ def test_rehashed_revision_journal_semantic_corruption_fails_before_writes(
 ) -> None:
     """Rehashing cannot turn an operation-impossible revision into authority."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _make_released_checkpoint_mutable(layout)
 
@@ -6310,7 +6393,7 @@ def test_revision_journal_rejects_impossible_state_before_config_intermediate(
 ) -> None:
     """Only before/before, target/before, and target/target control pairs exist."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _make_released_checkpoint_mutable(layout)
 
@@ -6355,7 +6438,7 @@ def test_revision_resume_is_earliest_of_existing_failure_and_dependency_boundary
 ) -> None:
     """Revision resume always names the derived target's first incomplete stage."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _make_released_checkpoint_mutable(layout)
     state = _failed_prefix_state(layout.load_state(), failed_stage)
@@ -6389,7 +6472,7 @@ def test_rehashed_revision_target_must_be_exactly_derived_from_before_state(
 ) -> None:
     """An authenticated before snapshot proves the target after every crash phase."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _make_released_checkpoint_mutable(layout)
     fault_name = (
@@ -6656,7 +6739,7 @@ def test_recovery_rejects_committed_adoption_reverted_to_before_state(
 ) -> None:
     """A committed terminal adoption requires its exact released controls."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     layout.adopt_legacy()
@@ -6675,7 +6758,7 @@ def test_committed_adoption_terminal_recovery_is_exact_and_idempotent(
 ) -> None:
     """The exact committed adoption terminal remains a stable no-op on recovery."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     adopted = layout.adopt_legacy()
@@ -6704,7 +6787,7 @@ def test_recovery_authenticates_complete_prior_audit_prefixes(
 ) -> None:
     """Recovery rejects a rewritten append-only prefix at every audit phase."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _make_released_checkpoint_mutable(layout)
 
@@ -6740,7 +6823,7 @@ def test_recovery_journal_requires_strict_jsonl(
 ) -> None:
     """Blank rows and duplicate JSON keys never enter durable authority."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _make_released_checkpoint_mutable(layout)
 
@@ -6778,7 +6861,7 @@ def test_recovery_journal_v1_authority_requires_explicit_repair(
 ) -> None:
     """Runtime recovery never infers missing v2 before-state evidence."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _make_released_checkpoint_mutable(layout)
 
@@ -6973,7 +7056,7 @@ def test_recovery_journal_rejects_commit_that_precedes_its_prepare(
 ) -> None:
     """A matching commit is authoritative only after its prepare record."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _make_released_checkpoint_mutable(layout)
 
@@ -7013,7 +7096,7 @@ def test_rehashed_checkpoint_journal_semantics_fail_before_writes(
 ) -> None:
     """Checkpoint recovery authenticates its exact resumable target state."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _make_released_checkpoint_mutable(layout)
     target = layout.artifact_path(
@@ -7072,7 +7155,7 @@ def test_rehashed_adoption_journal_semantics_fail_before_receipt_install(
 ) -> None:
     """Adoption WAL validates terminal authority before installing receipts."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
 
@@ -7131,7 +7214,7 @@ def test_outstanding_adoption_semantic_failure_is_integrity_and_zero_write(
 ) -> None:
     """Recovery translates deep adoption replay failure before roll-forward."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
 
@@ -7163,7 +7246,7 @@ def test_outstanding_adoption_semantic_failure_is_integrity_and_zero_write(
 def test_missing_raw_snapshot_is_not_rebuildable(tmp_path: Path) -> None:
     """Mutable recovery never fabricates a missing immutable raw snapshot."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _make_released_checkpoint_mutable(layout)
     layout.feedback_path.unlink()
@@ -7197,7 +7280,7 @@ def test_revision_recovery_rolls_forward_after_each_interruption(
 ) -> None:
     """Every interrupted revision recovers one target state and one audit row."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     state = _make_released_checkpoint_mutable(layout)
     prefix_receipts = {
@@ -7272,7 +7355,7 @@ def test_revision_prepares_journal_before_changing_control_authority(
 ) -> None:
     """The prepared WAL record is durable while prior control bytes remain exact."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _make_released_checkpoint_mutable(layout)
     before = {
@@ -7324,7 +7407,7 @@ def test_checkpoint_rebuild_recovery_marks_stale_suffix_nonauthoritative(
 ) -> None:
     """Interrupted receipt repair rolls forward before a resumed stage runs."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _make_released_checkpoint_mutable(layout)
     target = layout.artifact_path(
@@ -7365,11 +7448,13 @@ def test_checkpoint_rebuild_recovery_marks_stale_suffix_nonauthoritative(
         assert target.is_file()
 
     monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
-    resumed = EvaluationAssetPipeline(
-        layout,
-        rubric_provider=_SuccessfulRubricProvider(),
-        embedding_provider=_SuccessfulEmbeddingProvider(),
-    ).run()
+    resumed = _run_to_release(
+        EvaluationAssetPipeline(
+            layout,
+            rubric_provider=_SuccessfulRubricProvider(),
+            embedding_provider=_SuccessfulEmbeddingProvider(),
+        )
+    )
 
     assert resumed.status == "released"
     phases = [
@@ -7400,7 +7485,7 @@ def test_revision_cleanup_never_follows_a_swapped_stage_directory(
 
     monkeypatch.setattr(workspace_module, "_fault_point", stop_at_completed_handoff)
     with pytest.raises(_InjectedFault):
-        pipeline.run()
+        _run_to_release(pipeline)
     layout = pipeline.layout
     stage_directory = layout.stage_directory(PipelineStage.COVERAGE_DECISIONS)
     parked = tmp_path / "parked-stage-five"
@@ -7485,7 +7570,7 @@ def test_legacy_adoption_builds_honest_receipts_then_releases(
 ) -> None:
     """Explicit adoption converts only a fully validated legacy completion."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     if schema_mode == "explicit-v1":
@@ -7522,7 +7607,7 @@ def test_legacy_adoption_accepts_declared_rubric_compatibility_profile(
 ) -> None:
     """Pre-guideline artifacts are adopted without inventing native provenance."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _convert_to_legacy_rubric_profile(layout)
     _downgrade_to_legacy_completed(layout)
@@ -7580,7 +7665,7 @@ def test_legacy_adoption_rejects_parseable_semantic_corruption_without_writes(
 ) -> None:
     """Parseable stage and cross-artifact corruption never becomes authority."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     _apply_semantic_corruption(layout, corruption)
@@ -7603,7 +7688,7 @@ def test_legacy_adoption_semantic_reads_reject_validation_seam_swap(
 ) -> None:
     """Semantic adoption reads cannot follow authority swapped after syntax checks."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     target = layout.artifact_path(
@@ -7671,7 +7756,7 @@ def test_legacy_adoption_rechecks_the_complete_snapshot_before_first_write(
 ) -> None:
     """Every captured byte and absent alternative is rechecked at write boundary."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     if replacement_kind == "appeared":
         _convert_to_legacy_rubric_profile(layout)
@@ -7743,7 +7828,7 @@ def test_legacy_adoption_binds_snapshot_inside_first_authority_write(
 ) -> None:
     """A swap inside the first adoption writer leaves no adopted authority."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     target = layout.historical_feedback_path
@@ -7800,7 +7885,7 @@ def test_legacy_adoption_rechecks_native_controls_before_first_write(
 ) -> None:
     """Late native receipt/event authority cannot be overwritten by adoption."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     target = (
@@ -7873,7 +7958,7 @@ def test_legacy_adoption_rejects_foreign_stage_provenance_without_writes(
 ) -> None:
     """Only exact retry-owned pre-WAL provenance can precede adoption."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     artifact_io.atomic_write_json(
@@ -7894,7 +7979,7 @@ def test_legacy_adoption_rejects_foreign_generation_without_writes(
 ) -> None:
     """A foreign generation is native authority, not a legacy retry artifact."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     foreign = layout.generations_root / f"sha256-{'0' * 64}"
@@ -7918,7 +8003,7 @@ def test_legacy_adoption_rechecks_generation_inventory_before_first_write(
 ) -> None:
     """A generation appearing after validation cannot precede adoption writes."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     foreign = layout.generations_root / f"sha256-{'0' * 64}"
@@ -7967,7 +8052,7 @@ def test_legacy_adoption_rechecks_final_generation_bytes_before_first_write(
 ) -> None:
     """Validated retry generation members remain frozen through the write boundary."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
 
@@ -8052,7 +8137,7 @@ def test_legacy_adoption_generation_fault_reclaims_staging_and_recovers(
 ) -> None:
     """An internal generation fault leaves WAL intent but no owned hidden tree."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
 
@@ -8092,7 +8177,7 @@ def test_legacy_adoption_recovers_historical_crlf_control_files(
 ) -> None:
     """Recovery authenticates exact Windows output from the legacy text writer."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
 
@@ -8135,7 +8220,7 @@ def test_legacy_adoption_recovery_rejects_crlf_to_lf_change_after_prepare(
 ) -> None:
     """A valid alternate legacy encoding remains byte-bound after WAL prepare."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     _rewrite_control_json_with_crlf(layout, layout.state_path)
@@ -8174,7 +8259,7 @@ def test_legacy_adoption_rejects_unsupported_control_serialization_before_writes
 ) -> None:
     """Unsupported legacy JSON bytes fail before WAL or generated authority."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     path = layout.config_path if control_name == "config" else layout.state_path
@@ -8203,7 +8288,7 @@ def test_legacy_adoption_counts_use_the_validated_artifact_snapshot(
 ) -> None:
     """Optional artifact presence cannot change between semantics and counts."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     target = layout.artifact_path(
@@ -8256,7 +8341,7 @@ def test_legacy_extension_semantics_use_the_same_captured_authority(
 ) -> None:
     """Extension semantics cannot validate bytes different from adopted bytes."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     parent = pipeline.layout
     child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
     child.initialize_extension(
@@ -8265,11 +8350,13 @@ def test_legacy_extension_semantics_use_the_same_captured_authority(
         additional_unlabeled=None,
         clustering_mode="keep",
     )
-    EvaluationAssetPipeline(
-        child,
-        rubric_provider=_SuccessfulRubricProvider(),
-        embedding_provider=_SuccessfulEmbeddingProvider(),
-    ).run()
+    _run_to_release(
+        EvaluationAssetPipeline(
+            child,
+            rubric_provider=_SuccessfulRubricProvider(),
+            embedding_provider=_SuccessfulEmbeddingProvider(),
+        )
+    )
     _downgrade_to_legacy_completed(child)
     dataset_manifest_path = child.artifact_path(
         PipelineStage.DATASET_SPLITS,
@@ -8373,7 +8460,7 @@ def test_legacy_adoption_rejects_strict_stage_three_schema_corruption(
 ) -> None:
     """Native and compatibility rows reject non-JSON and coerced field values."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     if profile == "legacy":
         _convert_to_legacy_rubric_profile(layout)
@@ -8442,7 +8529,7 @@ def test_native_writer_rejects_unsupported_candidate_domains_before_persistence(
     )
 
     with pytest.raises(ProviderCallError, match="invalid response"):
-        pipeline.run()
+        _run_to_release(pipeline)
 
     assert not pipeline.layout.artifact_path(
         PipelineStage.RUBRIC_EXTRACTION,
@@ -8452,7 +8539,7 @@ def test_native_writer_rejects_unsupported_candidate_domains_before_persistence(
 
 @pytest.mark.parametrize(
     "duplicate_shape",
-    ["exact_candidate", "criterion_identity", "derived_id_collision"],
+    ["exact_candidate", "derived_id_collision"],
 )
 def test_native_writer_rejects_duplicate_stage_three_identities_before_persistence(
     tmp_path: Path,
@@ -8473,10 +8560,6 @@ def test_native_writer_rejects_duplicate_stage_three_identities_before_persisten
             first = response["guidelines"][0]
             if duplicate_shape == "exact_candidate":
                 response["guidelines"].append(json.loads(json.dumps(first)))
-            elif duplicate_shape == "criterion_identity":
-                duplicate = json.loads(json.dumps(first["criteria"][0]))
-                duplicate["dimension"] = "colliding_secondary_dimension"
-                first["criteria"].append(duplicate)
             else:
                 second = json.loads(json.dumps(first))
                 second["intent_label"] = "distinct candidate"
@@ -8514,7 +8597,7 @@ def test_native_writer_rejects_duplicate_stage_three_identities_before_persisten
     )
 
     with pytest.raises(ProviderCallError, match="invalid response"):
-        pipeline.run()
+        _run_to_release(pipeline)
 
     stage = PipelineStage.RUBRIC_EXTRACTION
     assert not any(
@@ -8535,7 +8618,7 @@ def test_legacy_adoption_rejects_duplicate_native_candidates_without_writes(
 ) -> None:
     """Adoption applies the same exact-candidate uniqueness contract as live Stage 3."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     path = layout.artifact_path(
@@ -8622,7 +8705,7 @@ def test_native_stage_three_accepts_all_declared_domains_and_open_structures(
         rubric_provider=provider,
         embedding_provider=_SuccessfulEmbeddingProvider(),
     )
-    pipeline.run()
+    _run_to_release(pipeline)
     _downgrade_to_legacy_completed(pipeline.layout)
 
     adopted = pipeline.layout.adopt_legacy()
@@ -8645,7 +8728,7 @@ def test_legacy_adoption_rejects_nonreproducible_stage_seven_authority(
 ) -> None:
     """Accepted synthetic authority must exactly reproduce ordered filtering."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     first = _synthetic_case_fixture(
         layout,
@@ -8693,7 +8776,7 @@ def test_legacy_adoption_accepts_exact_native_synthetic_filter_outputs(
 ) -> None:
     """A genuine enabled Stage 7 output remains adoptable."""
     pipeline, provider = _create_synthetic_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     assert provider.synthetic_calls == 1
     assert len(
@@ -8717,7 +8800,7 @@ def test_legacy_adoption_reconstructs_exact_keep_mode_inherited_synthetic_output
 ) -> None:
     """Keep-mode adoption retains only the self-contained unchanged parent case."""
     pipeline, _ = _create_synthetic_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     parent = pipeline.layout
     child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
     child.initialize_extension(
@@ -8727,24 +8810,34 @@ def test_legacy_adoption_reconstructs_exact_keep_mode_inherited_synthetic_output
         clustering_mode="keep",
     )
     provider = _SuccessfulSyntheticRubricProvider()
-    EvaluationAssetPipeline(
-        child,
-        rubric_provider=provider,
-        embedding_provider=_SuccessfulEmbeddingProvider(),
-    ).run()
-    inherited = _read_jsonl(
+    _run_to_release(
+        EvaluationAssetPipeline(
+            child,
+            rubric_provider=provider,
+            embedding_provider=_SuccessfulEmbeddingProvider(),
+        )
+    )
+    synthetic = _read_jsonl(
         child.artifact_path(PipelineStage.SYNTHETIC_COVERAGE, "synthetic_cases.jsonl")
     )
-    assert provider.synthetic_calls == 0
-    assert len(inherited) == 1
-    assert inherited[0]["metadata"]["dataset_version"] == "v2"
+    assert provider.synthetic_calls == 1
+    assert len(synthetic) == 1
+    assert synthetic[0]["metadata"]["dataset_version"] == "v2"
+    assert len(
+        _read_jsonl(
+            child.artifact_path(
+                PipelineStage.SYNTHETIC_COVERAGE,
+                "synthetic_candidates.jsonl",
+            )
+        )
+    ) == 1
+    _downgrade_to_legacy_completed(child)
     assert not _read_jsonl(
         child.artifact_path(
             PipelineStage.SYNTHETIC_COVERAGE,
             "synthetic_candidates.jsonl",
         )
     )
-    _downgrade_to_legacy_completed(child)
 
     adopted = child.adopt_legacy()
 
@@ -8759,7 +8852,7 @@ def test_legacy_adoption_accepts_real_legacy_layout_alternatives(
 ) -> None:
     """Compatibility validation follows actual historical directory layouts."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _convert_to_legacy_rubric_profile(layout)
     _downgrade_to_legacy_completed(layout)
@@ -8781,7 +8874,7 @@ def test_pre_stage_legacy_adoption_rejects_external_provenance_symlink_without_w
 ) -> None:
     """Historical provenance materialization cannot escape the asset root."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _convert_to_legacy_rubric_profile(layout)
     _downgrade_to_legacy_completed(layout)
@@ -8809,7 +8902,7 @@ def test_pre_stage_legacy_adoption_preflights_every_provenance_target(
 ) -> None:
     """A later invalid provenance target cannot leave earlier provenance writes."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _convert_to_legacy_rubric_profile(layout)
     _downgrade_to_legacy_completed(layout)
@@ -8834,7 +8927,7 @@ def test_pre_stage_legacy_adoption_rejects_external_receipt_symlink_without_writ
 ) -> None:
     """Adoption cannot install authoritative receipts through an external symlink."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _convert_to_legacy_rubric_profile(layout)
     _downgrade_to_legacy_completed(layout)
@@ -8859,7 +8952,7 @@ def test_legacy_adoption_rejects_ambiguous_complete_stage_three_profiles(
 ) -> None:
     """Canonical and historical Stage 3 trees cannot compete for authority."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     old_directory = layout.stages_root / "03_rubric_extraction"
     old_directory.mkdir()
@@ -8888,7 +8981,7 @@ def test_legacy_adoption_rejects_inconsistent_manifest_without_writes(
 ) -> None:
     """Source and asset manifest claims must agree with the persisted files."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     if manifest_name == "input":
@@ -8918,7 +9011,7 @@ def test_legacy_adoption_rejects_invalid_required_artifact_without_authority_cha
 ) -> None:
     """Every stage must validate before adoption writes receipts or a journal."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     target = layout.artifact_path(stage, _STAGE_MUTATION_TARGETS[stage])
@@ -8952,7 +9045,7 @@ def test_legacy_adoption_rejects_catalog_copy_mismatch_without_authority_change(
 ) -> None:
     """The four current catalog copies must match the legacy Stage 8 outputs."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     catalog_path = layout.published_datasets / catalog_name
@@ -8974,7 +9067,7 @@ def test_legacy_adoption_recovers_installed_nonauthoritative_receipts(
 ) -> None:
     """Recovery completes adoption without rerunning any pipeline stage."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
 
@@ -9016,7 +9109,7 @@ def test_legacy_adoption_recovery_rechecks_snapshot_before_roll_forward(
 ) -> None:
     """Recovery cannot authenticate one snapshot and roll forward another."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
 
@@ -9090,7 +9183,7 @@ def test_legacy_adoption_fault_phases_recover_as_one_terminal_operation(
 ) -> None:
     """Pre-v2 adoption retries or recovers without chaining publication WAL."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
 
@@ -9130,7 +9223,7 @@ def test_adoption_recovery_rejects_impossible_manifest_prefix_without_writes(
 ) -> None:
     """Dataset-manifest target cannot precede the asset-manifest target."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
 
@@ -9169,7 +9262,7 @@ def test_adoption_recovery_rejects_authority_before_manifests(
 ) -> None:
     """Receipts, pointer, and state cannot precede all adoption manifests."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
 
@@ -9207,7 +9300,7 @@ def test_adoption_recovery_rejects_authority_before_manifests(
 def test_adopted_legacy_catalog_copies_are_nonauthoritative(tmp_path: Path) -> None:
     """Historical top-level copies no longer influence an adopted release."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     adopted = layout.adopt_legacy()
@@ -9243,7 +9336,7 @@ def test_relative_tenants_root_runs_and_adopts_with_repo_relative_paths(
         rubric_provider=_SuccessfulRubricProvider(),
         embedding_provider=_SuccessfulEmbeddingProvider(),
     )
-    released = pipeline.run()
+    released = _run_to_release(pipeline)
     assert released.status == "released"
     _downgrade_to_legacy_completed(pipeline.layout)
 
@@ -9257,7 +9350,7 @@ def test_relative_tenants_root_runs_and_adopts_with_repo_relative_paths(
 def test_service_adopt_is_a_thin_locked_core_api(tmp_path: Path) -> None:
     """Service callers use the same adoption transaction as library callers."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
 
@@ -9283,7 +9376,7 @@ def test_extension_rejects_corrupt_parent_before_child_creation(
 ) -> None:
     """A child root stays absent unless the released parent verifies fully."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     parent = pipeline.layout
     if damage == "receipt":
         target = parent.receipt_path(PipelineStage.DATASET_SPLITS)
@@ -9319,7 +9412,7 @@ def test_extension_rejects_parent_source_swap_after_release_verification(
 ) -> None:
     """Child copies remain tied to the exact parent bytes release verification saw."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     parent = pipeline.layout
     child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
     additional = _write_additional_feedback(parent.tenants_root)
@@ -9364,7 +9457,7 @@ def test_extension_rechecks_full_parent_authority_at_first_write_boundary(
 ) -> None:
     """Child creation is bound to all authority authenticating its parent."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     parent = pipeline.layout
     child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
     additional = _write_additional_feedback(parent.tenants_root)
@@ -9409,7 +9502,7 @@ def test_extension_points_legacy_parent_to_adoption_without_child_creation(
 ) -> None:
     """Legacy completed is never accepted as a released parent alias."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     parent = pipeline.layout
     _downgrade_to_legacy_completed(parent)
     child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
@@ -9430,7 +9523,7 @@ def test_extension_records_verified_parent_evidence_and_is_self_contained(
 ) -> None:
     """Verified release/source identities are copied into a runnable child."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    parent_state = pipeline.run()
+    parent_state = _run_to_release(pipeline)
     parent = pipeline.layout
     expected_evidence = released_parent_evidence(parent, parent_state)
     child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
@@ -9451,13 +9544,43 @@ def test_extension_records_verified_parent_evidence_and_is_self_contained(
     ] == expected_evidence
     shutil.rmtree(parent.root)
 
-    released = EvaluationAssetPipeline(
-        child,
-        rubric_provider=_SuccessfulRubricProvider(),
-        embedding_provider=_SuccessfulEmbeddingProvider(),
-    ).run()
+    released = _run_to_release(
+        EvaluationAssetPipeline(
+            child,
+            rubric_provider=_SuccessfulRubricProvider(),
+            embedding_provider=_SuccessfulEmbeddingProvider(),
+        )
+    )
 
     assert released.status == "released"
+    expected_algorithms = provenance_module.build_algorithm_inventory(
+        child.load_config().to_dict(),
+        extension=True,
+    )
+    for stage in (
+        PipelineStage.LABEL_INFERENCE,
+        PipelineStage.SYNTHETIC_COVERAGE,
+    ):
+        provenance_path = child.stage_provenance_path(stage)
+        stage_provenance = json.loads(
+            provenance_path.read_text(encoding="utf-8")
+        )
+        assert stage_provenance["algorithms"] == {
+            "stage": stage.value,
+            "revision": expected_algorithms[stage.value],
+        }
+        receipt = json.loads(
+            child.receipt_path(stage).read_text(encoding="utf-8")
+        )
+        relative = provenance_path.relative_to(child.root).as_posix()
+        output = next(
+            item for item in receipt["outputs"] if item["path"] == relative
+        )
+        assert output["sha256"] == file_sha256(provenance_path)
+    build_provenance = json.loads(
+        child.build_provenance_path.read_text(encoding="utf-8")
+    )
+    assert build_provenance["identity"]["algorithms"] == expected_algorithms
     verify_released_asset(child, released)
 
 
@@ -9469,7 +9592,7 @@ def test_extension_creation_uses_frozen_released_parent_stage_paths(
 ) -> None:
     """Removed current member names cannot strand a released extension parent."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     parent = pipeline.layout
     if parent_kind == "adopted":
         _downgrade_to_legacy_completed(parent)
@@ -9512,7 +9635,7 @@ def test_extension_receipts_anchor_lineage_and_every_parent_snapshot_input(
 ) -> None:
     """Incremental receipts bind the self-contained parent evidence they consume."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     parent = pipeline.layout
     child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
     child.initialize_extension(
@@ -9521,11 +9644,13 @@ def test_extension_receipts_anchor_lineage_and_every_parent_snapshot_input(
         additional_unlabeled=None,
         clustering_mode="keep",
     )
-    EvaluationAssetPipeline(
-        child,
-        rubric_provider=_SuccessfulRubricProvider(),
-        embedding_provider=_SuccessfulEmbeddingProvider(),
-    ).run()
+    _run_to_release(
+        EvaluationAssetPipeline(
+            child,
+            rubric_provider=_SuccessfulRubricProvider(),
+            embedding_provider=_SuccessfulEmbeddingProvider(),
+        )
+    )
 
     expected_snapshots = {
         PipelineStage.RUBRIC_EXTRACTION: {
@@ -9576,7 +9701,7 @@ def test_historical_extension_override_map_is_closed_and_exhaustive(
 ) -> None:
     """A partial frozen map cannot silently fall back to live authority reads."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     parent = pipeline.layout
     child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
     child.initialize_extension(
@@ -9585,11 +9710,13 @@ def test_historical_extension_override_map_is_closed_and_exhaustive(
         additional_unlabeled=None,
         clustering_mode="keep",
     )
-    EvaluationAssetPipeline(
-        child,
-        rubric_provider=_SuccessfulRubricProvider(),
-        embedding_provider=_SuccessfulEmbeddingProvider(),
-    ).run()
+    _run_to_release(
+        EvaluationAssetPipeline(
+            child,
+            rubric_provider=_SuccessfulRubricProvider(),
+            embedding_provider=_SuccessfulEmbeddingProvider(),
+        )
+    )
 
     with pytest.raises(ValueError, match="snapshot is incomplete"):
         lineage_validation_module.validate_extension_evidence(
@@ -9611,7 +9738,7 @@ def test_released_extension_uses_frozen_stage_profile_after_registry_drift(
 ) -> None:
     """Live stage changes cannot strand native or adopted extension history."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     parent = pipeline.layout
     child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
     child.initialize_extension(
@@ -9620,11 +9747,13 @@ def test_released_extension_uses_frozen_stage_profile_after_registry_drift(
         additional_unlabeled=None,
         clustering_mode="keep",
     )
-    EvaluationAssetPipeline(
-        child,
-        rubric_provider=_SuccessfulRubricProvider(),
-        embedding_provider=_SuccessfulEmbeddingProvider(),
-    ).run()
+    _run_to_release(
+        EvaluationAssetPipeline(
+            child,
+            rubric_provider=_SuccessfulRubricProvider(),
+            embedding_provider=_SuccessfulEmbeddingProvider(),
+        )
+    )
     if release_kind == "adopted":
         _downgrade_to_legacy_completed(child)
         child.adopt_legacy()
@@ -9901,7 +10030,7 @@ def test_keep_extension_restores_snapshot_after_each_preclustering_failure(
 ) -> None:
     """Keep mode restores exact parent clusters and never invokes reclustering."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     parent = pipeline.layout
     child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
     child.initialize_extension(
@@ -9928,17 +10057,19 @@ def test_keep_extension_restores_snapshot_after_each_preclustering_failure(
 
     monkeypatch.setattr(first, "_run_stage", fail_once)
     with pytest.raises(RuntimeError, match="injected pre-clustering failure"):
-        first.run()
+        _run_to_release(first)
 
     def reject_recluster(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("keep-mode extension attempted to recluster")
 
     monkeypatch.setattr(pipeline_module, "cluster_records_fixed_count", reject_recluster)
-    resumed = EvaluationAssetPipeline(
-        child,
-        rubric_provider=_SuccessfulRubricProvider(),
-        embedding_provider=_SuccessfulEmbeddingProvider(),
-    ).run()
+    resumed = _run_to_release(
+        EvaluationAssetPipeline(
+            child,
+            rubric_provider=_SuccessfulRubricProvider(),
+            embedding_provider=_SuccessfulEmbeddingProvider(),
+        )
+    )
 
     assert resumed.status == "released"
     assert child.artifact_path(
@@ -9961,7 +10092,7 @@ def test_extension_acquires_parent_and_child_locks_in_absolute_sorted_order(
 ) -> None:
     """Lock ordering is independent of caller parent/child argument order."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     parent = pipeline.layout
     child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
     acquired: list[str] = []
@@ -10079,7 +10210,7 @@ def test_each_stage_provenance_rejects_self_consistent_secret_rehash_without_wri
 ) -> None:
     """A receipt hash authenticates only strict body-free provenance semantics."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     state = layout.load_state()
     provenance_path = layout.stage_provenance_path(stage)
@@ -10109,7 +10240,7 @@ def test_stage_provenance_receipt_rejects_self_consistent_duplicate_key_json(
 ) -> None:
     """Duplicate keys cannot collapse into an apparently valid stage record."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     state = layout.load_state()
     stage = PipelineStage.RAW_INPUTS
@@ -10137,7 +10268,7 @@ def test_mutable_receipt_rejects_rehashed_undeclared_origin_without_writes(
 ) -> None:
     """Mutable verification admits only exact native or adoption profiles."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     state = layout.load_state()
     stage = PipelineStage.RAW_INPUTS
@@ -10172,7 +10303,7 @@ def test_mutable_receipt_rejects_native_legacy_hybrid_without_writes(
 ) -> None:
     """Legacy provenance cannot be paired with retained native receipt evidence."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     state = layout.load_state()
     stage = PipelineStage.RAW_INPUTS
@@ -10229,7 +10360,7 @@ def test_stage_receipt_rejects_rehashed_nested_secret_extras_without_writes(
 ) -> None:
     """Receipt subtrees are closed, body-free authentication records."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     state = layout.load_state()
     stage = PipelineStage.PREPARED_INPUTS
@@ -10274,7 +10405,7 @@ def test_stage_receipt_rejects_rehashed_duplicate_key_secret_without_writes(
 ) -> None:
     """Strict receipt parsing rejects hidden duplicate-key body content."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     state = layout.load_state()
     stage = PipelineStage.PREPARED_INPUTS
@@ -10313,7 +10444,7 @@ def test_final_release_verification_validates_every_stage_provenance(
 ) -> None:
     """Final release verification rechecks all captured stage evidence."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    released = pipeline.run()
+    released = _run_to_release(pipeline)
     calls: list[tuple[str, str]] = []
     original = durability_module.validate_stage_provenance
 
@@ -10327,7 +10458,7 @@ def test_final_release_verification_validates_every_stage_provenance(
     assert {
         stage
         for stage, profile in calls
-        if profile == provenance_module.HISTORICAL_PROVENANCE_PROFILE_V2
+        if profile == provenance_module.HISTORICAL_PROVENANCE_PROFILE_V3
     } == {
         stage.value for stage in PipelineStage
     }
@@ -10339,7 +10470,7 @@ def test_legacy_adoption_candidate_validates_every_stage_provenance(
 ) -> None:
     """Prospective adoption rejects provenance before installing release authority."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     calls: list[tuple[str, str]] = []
@@ -10357,7 +10488,7 @@ def test_legacy_adoption_candidate_validates_every_stage_provenance(
         stage
         for stage, profile in calls
         if profile
-        == provenance_module.HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2
+        == provenance_module.HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3
     } == {
         stage.value for stage in PipelineStage
     }
@@ -10415,7 +10546,7 @@ def _exercise_native_publication_fault(
 
     monkeypatch.setattr(workspace_module, "_fault_point", inject)
     with pytest.raises(_InjectedFault, match=fault_name):
-        pipeline.run()
+        _run_to_release(pipeline)
 
     calls_before_resume = (rubric.calls, embedding.calls)
     state_after_fault = pipeline.layout.load_state()
@@ -10460,7 +10591,7 @@ def _exercise_native_publication_fault(
         assert pipeline.layout.recover() == []
         recovered = pipeline.layout.load_state()
     else:
-        recovered = resumed.run()
+        recovered = _run_to_release(resumed)
 
     assert recovered.status == "released"
     assert (rubric.calls, embedding.calls) == calls_before_resume
@@ -10533,7 +10664,7 @@ def test_corrupt_completed_stage_eight_handoff_fails_closed_without_writes(
 
     monkeypatch.setattr(workspace_module, "_fault_point", inject)
     with pytest.raises(_InjectedFault, match="after_stage_8_receipt_state_complete"):
-        pipeline.run()
+        _run_to_release(pipeline)
     assert (
         pipeline.layout.load_state().current_stage
         == PipelineStage.DATASET_SPLITS.value
@@ -10576,7 +10707,7 @@ def test_reanchored_build_handoff_corruption_fails_before_any_resume_write(
 
     monkeypatch.setattr(workspace_module, "_fault_point", inject)
     with pytest.raises(_InjectedFault, match="after_stage_8_receipt_state_complete"):
-        pipeline.run()
+        _run_to_release(pipeline)
     layout = pipeline.layout
     state = layout.load_state()
     provenance = json.loads(layout.build_provenance_path.read_text(encoding="utf-8"))
@@ -10630,7 +10761,7 @@ def test_historical_stage_receipt_facts_are_bound_to_build_provenance(
 ) -> None:
     """A self-consistent receipt cannot contradict captured build/stage facts."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     stage = PipelineStage.RUBRIC_EXTRACTION
     receipt = json.loads(layout.receipt_path(stage).read_text(encoding="utf-8"))
@@ -10665,7 +10796,7 @@ def test_stage_and_build_historical_profiles_cannot_be_hybridized(
 ) -> None:
     """Every native stage record uses the release build's schema generation."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     stage = PipelineStage.RAW_INPUTS
     receipt = json.loads(layout.receipt_path(stage).read_text(encoding="utf-8"))
@@ -10698,7 +10829,7 @@ def test_receipt_and_stage_historical_profiles_cannot_be_hybridized(
 ) -> None:
     """A release cannot combine a v1 receipt with v2 stage evidence."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    released = pipeline.run()
+    released = _run_to_release(pipeline)
     layout = pipeline.layout
     stage = PipelineStage.RUBRIC_EXTRACTION
     receipt = json.loads(layout.receipt_path(stage).read_text(encoding="utf-8"))
@@ -10708,7 +10839,10 @@ def test_receipt_and_stage_historical_profiles_cannot_be_hybridized(
         item for item in released.stages if item.stage == stage.value
     ).receipt_sha256 = file_sha256(layout.receipt_path(stage))
 
-    with pytest.raises(EvaluationAssetIntegrityError, match="stage provenance"):
+    with pytest.raises(
+        EvaluationAssetIntegrityError,
+        match="required output inventory",
+    ):
         verify_stage_receipt(
             layout,
             released,
@@ -10756,7 +10890,7 @@ def test_completed_candidate_strictly_parses_build_provenance_before_writes(
 
     monkeypatch.setattr(pipeline_module, "_publication_fault_point", inject)
     with pytest.raises(_InjectedFault):
-        pipeline.run()
+        _run_to_release(pipeline)
     layout = pipeline.layout
     _write_ambiguous_build_provenance(layout, corruption)
     receipt_path = layout.receipt_path(PipelineStage.DATASET_SPLITS)
@@ -10794,7 +10928,7 @@ def test_final_publication_links_strictly_parse_build_provenance(
 ) -> None:
     """Final release verification rejects ambiguous authenticated build bytes."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    released = pipeline.run()
+    released = _run_to_release(pipeline)
     layout = pipeline.layout
     receipts = durability_module.verify_receipt_chain(layout, released)
     journal = durability_module.validate_recovery_journal(
@@ -10837,7 +10971,7 @@ def test_build_provenance_is_bound_to_persisted_release_inputs(
 ) -> None:
     """Self-rehashed build claims must equal config and Stage 1 authority."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    released = pipeline.run()
+    released = _run_to_release(pipeline)
     layout = pipeline.layout
     receipts = durability_module.verify_receipt_chain(layout, released)
     provenance = json.loads(
@@ -10867,7 +11001,7 @@ def test_build_input_rows_are_derived_from_strict_source_jsonl(
 ) -> None:
     """Matching manifest/build claims cannot overstate actual source rows."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    released = pipeline.run()
+    released = _run_to_release(pipeline)
     layout = pipeline.layout
     receipts = durability_module.verify_receipt_chain(layout, released)
     input_manifest_path = layout.artifact_path(
@@ -10913,7 +11047,7 @@ def test_release_input_row_authority_preserves_contract_blank_line_semantics(
             json.dumps(first) + "\n\n" + json.dumps(second) + "\n",
         )
 
-    released = pipeline.run()
+    released = _run_to_release(pipeline)
 
     assert released.status == "released"
     verify_released_asset(layout, released)
@@ -10924,7 +11058,7 @@ def test_extension_build_lineage_is_bound_to_local_lineage_authority(
 ) -> None:
     """Extension build hashes cannot contradict validated local lineage files."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     parent = pipeline.layout
     child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
     child.initialize_extension(
@@ -10933,11 +11067,13 @@ def test_extension_build_lineage_is_bound_to_local_lineage_authority(
         additional_unlabeled=None,
         clustering_mode="keep",
     )
-    released = EvaluationAssetPipeline(
-        child,
-        rubric_provider=_SuccessfulRubricProvider(),
-        embedding_provider=_SuccessfulEmbeddingProvider(),
-    ).run()
+    released = _run_to_release(
+        EvaluationAssetPipeline(
+            child,
+            rubric_provider=_SuccessfulRubricProvider(),
+            embedding_provider=_SuccessfulEmbeddingProvider(),
+        )
+    )
     receipts = durability_module.verify_receipt_chain(child, released)
     provenance = json.loads(
         child.build_provenance_path.read_text(encoding="utf-8")
@@ -10963,7 +11099,7 @@ def test_native_release_rejects_dangling_lineage_authority_symlinks(
 ) -> None:
     """A dangling local lineage marker cannot change meaning after release."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    released = pipeline.run()
+    released = _run_to_release(pipeline)
     path = (
         pipeline.layout.lineage_path
         if lineage_path == "lineage"
@@ -10983,7 +11119,7 @@ def released_asset_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Create one released tree copied by no-follow authority probes."""
     template_root = tmp_path_factory.mktemp("released-authority")
     pipeline, _, _ = _create_pipeline(template_root)
-    pipeline.run()
+    _run_to_release(pipeline)
     return pipeline.layout.tenants_root
 
 
@@ -11642,7 +11778,7 @@ def completed_handoff_template(
             _InjectedFault,
             match="after_stage_8_receipt_state_complete",
         ):
-            pipeline.run()
+            _run_to_release(pipeline)
     finally:
         workspace_module._fault_point = original_fault_point
     return pipeline.layout.tenants_root
@@ -11696,7 +11832,7 @@ def default_provider_completed_handoff_template(
             _InjectedFault,
             match="after_stage_8_receipt_state_complete",
         ):
-            pipeline.run()
+            _run_to_release(pipeline)
     finally:
         workspace_module._fault_point = original_fault_point
         patch.undo()
@@ -12069,11 +12205,13 @@ def test_receipt_free_legacy_status_checkpoint_remains_mutable(
             _legacy_event_row(layout, legacy_event),
         )
 
-    released = EvaluationAssetPipeline(
-        layout,
-        rubric_provider=rubric,
-        embedding_provider=embedding,
-    ).run()
+    released = _run_to_release(
+        EvaluationAssetPipeline(
+            layout,
+            rubric_provider=rubric,
+            embedding_provider=embedding,
+        )
+    )
 
     assert released.status == "released"
     assert released.schema_version == STATE_SCHEMA_VERSION
@@ -12334,7 +12472,7 @@ def test_current_extension_event_is_native_before_any_authority_write_or_call(
 ) -> None:
     """Current extension authoring emits explicit native event authority."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     parent = pipeline.layout
     child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
     child.initialize_extension(
@@ -12405,7 +12543,7 @@ def test_legacy_completed_sentinel_rejects_task4_native_evidence(
 ) -> None:
     """Task 4 evidence cannot hide behind the pre-v2 completed sentinel."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     if evidence == "stage-provenance":
@@ -12730,7 +12868,7 @@ def released_control_template(
     """Create one released authority tree copied by final-control probes."""
     template_root = tmp_path_factory.mktemp("released-control")
     pipeline, _, _ = _create_pipeline(template_root)
-    pipeline.run()
+    _run_to_release(pipeline)
     return pipeline.layout.tenants_root
 
 
@@ -12940,7 +13078,7 @@ def test_released_restart_uses_only_frozen_state_profiles(
 ) -> None:
     """Current labels cannot strand native or adopted persisted releases."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     if release_kind == "adopted":
         _downgrade_to_legacy_completed(layout)
@@ -12999,9 +13137,9 @@ def test_released_revision_journal_uses_only_frozen_stage_profiles(
 
     monkeypatch.setattr(workspace_module, "_fault_point", stop_at_completed_handoff)
     with pytest.raises(_InjectedFault):
-        pipeline.run()
+        _run_to_release(pipeline)
     monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
-    released = pipeline.run(config_updates={"match_threshold": 0.5})
+    released = _run_to_release(pipeline, config_updates={"match_threshold": 0.5})
     assert released.status == "released"
     assert any(
         row.get("kind") == "configuration_revision"
@@ -13010,7 +13148,12 @@ def test_released_revision_journal_uses_only_frozen_stage_profiles(
     for module in (journal_transitions_module, journal_validation_module):
         monkeypatch.setattr(module, "PipelineStage", _RemovedHistoricalPipelineStage)
         monkeypatch.setattr(module, "STAGE_COUNT_KEYS", {})
-        monkeypatch.setattr(module, "CONFIG_STAGE_DEPENDENCIES", {})
+        monkeypatch.setattr(
+            module,
+            "CONFIG_STAGE_DEPENDENCIES",
+            {},
+            raising=False,
+        )
     monkeypatch.setattr(
         durability_module,
         "PipelineStage",
@@ -13039,9 +13182,9 @@ def test_completed_revised_handoff_uses_only_frozen_journal_profiles(
 
     monkeypatch.setattr(workspace_module, "_fault_point", stop_at_completed_handoff)
     with pytest.raises(_InjectedFault):
-        pipeline.run()
+        _run_to_release(pipeline)
     with pytest.raises(_InjectedFault):
-        pipeline.run(config_updates={"match_threshold": 0.5})
+        _run_to_release(pipeline, config_updates={"match_threshold": 0.5})
     handoff = pipeline.layout.load_state()
     assert handoff.status == "running"
     assert all(stage.status == "completed" for stage in handoff.stages)
@@ -13052,7 +13195,12 @@ def test_completed_revised_handoff_uses_only_frozen_journal_profiles(
     for module in (journal_transitions_module, journal_validation_module):
         monkeypatch.setattr(module, "PipelineStage", _RemovedHistoricalPipelineStage)
         monkeypatch.setattr(module, "STAGE_COUNT_KEYS", {})
-        monkeypatch.setattr(module, "CONFIG_STAGE_DEPENDENCIES", {})
+        monkeypatch.setattr(
+            module,
+            "CONFIG_STAGE_DEPENDENCIES",
+            {},
+            raising=False,
+        )
     monkeypatch.setattr(
         durability_module,
         "PipelineStage",
@@ -13095,36 +13243,24 @@ def test_incomplete_checkpoint_normalizes_to_current_authoring_registry(
     assert future.receipt_sha256 is None
 
 
-def test_nonempty_revision_uses_current_authoring_registry(
+def test_nonempty_revision_rejects_unversioned_stage_registry_expansion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A mutable v2 revision retains a newly added/reordered live stage."""
+    """A new stage cannot be persisted under the frozen v3 journal schema."""
     pipeline, _, _ = _create_pipeline(tmp_path)
     layout = pipeline.layout
     _install_drifted_authoring_registry(monkeypatch)
+    before = _authority_bytes(layout)
 
-    result = layout.revise_config({"match_threshold": 0.5})
-    revised = layout.load_state()
+    with pytest.raises(
+        ValueError,
+        match="stage inventory is incompatible with journal schema",
+    ):
+        layout.revise_config({"match_threshold": 0.5})
 
-    assert result["changed_fields"] == {
-        "match_threshold": {"previous": 0.6, "new": 0.5}
-    }
-    assert tuple(item.stage for item in revised.stages) == tuple(
-        stage.value for stage in _DriftedPipelineStage
-    )
-    assert revised.stages[0].stage == _DriftedPipelineStage.FUTURE_STAGE.value
-    assert revised.current_stage == _DriftedPipelineStage.FUTURE_STAGE.value
-    assert revised.mutation_sequence == 1
+    assert _authority_bytes(layout) == before
     assert durability_module.load_completed_release_handoff_control(layout) is None
-    restarted = EvaluationAssetLayout(
-        layout.tenants_root,
-        layout.tenant_id,
-        layout.asset_id,
-    ).load_state()
-    assert tuple(item.stage for item in restarted.stages) == tuple(
-        stage.value for stage in _DriftedPipelineStage
-    )
 
 
 def test_failed_full_count_checkpoint_restarts_with_current_authoring_registry(
@@ -13140,7 +13276,7 @@ def test_failed_full_count_checkpoint_restarts_with_current_authoring_registry(
 
     monkeypatch.setattr(workspace_module, "_fault_point", stop_at_completed_handoff)
     with pytest.raises(_InjectedFault):
-        pipeline.run()
+        _run_to_release(pipeline)
     layout = pipeline.layout
     raw = json.loads(layout.state_path.read_text(encoding="utf-8"))
     raw["status"] = "failed"
@@ -13176,7 +13312,7 @@ def test_failed_full_receipt_checkpoint_uses_live_same_membership_profile(
 
     monkeypatch.setattr(workspace_module, "_fault_point", stop_at_completed_handoff)
     with pytest.raises(_InjectedFault):
-        pipeline.run()
+        _run_to_release(pipeline)
     layout = pipeline.layout
     raw = json.loads(layout.state_path.read_text(encoding="utf-8"))
     raw["status"] = "failed"
@@ -13227,7 +13363,7 @@ def test_pre_v2_adoption_uses_only_frozen_stage_profile(
 ) -> None:
     """A current enum addition or reorder cannot alter historical adoption."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     for module in (
@@ -13285,6 +13421,7 @@ def test_pre_v2_adoption_uses_only_frozen_stage_profile(
         "state-registry",
         "receipt-schema",
         "provenance-schema",
+        "review-schema",
         "stage-membership-order",
     ],
 )
@@ -13301,7 +13438,7 @@ def test_default_provider_handoff_uses_only_versioned_historical_provenance(
     registry_drift: str,
     config_updates: dict[str, Any] | None,
 ) -> None:
-    """Current registries/providers cannot strand captured v1 provenance."""
+    """Current registries/providers cannot strand captured v3 provenance."""
     tenants_root = tmp_path / "tenants"
     shutil.copytree(default_provider_completed_handoff_template, tenants_root)
     layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
@@ -13412,7 +13549,7 @@ def test_default_provider_handoff_uses_only_versioned_historical_provenance(
         monkeypatch.setattr(
             durability_module,
             "STAGE_RECEIPT_SCHEMA_VERSION",
-            "fapo-stage-receipt-v3",
+            "fapo-stage-receipt-v4",
         )
         monkeypatch.setattr(
             durability_module,
@@ -13428,17 +13565,44 @@ def test_default_provider_handoff_uses_only_versioned_historical_provenance(
         monkeypatch.setattr(
             provenance_module,
             "STAGE_PROVENANCE_SCHEMA_VERSION",
-            "fapo-stage-provenance-v3",
+            "fapo-stage-provenance-v4",
         )
         monkeypatch.setattr(
             provenance_module,
             "BUILD_PROVENANCE_SCHEMA_VERSION",
-            "fapo-evaluation-build-provenance-v3",
+            "fapo-evaluation-build-provenance-v4",
+        )
+        monkeypatch.setattr(
+            durability_module,
+            "BUILD_PROVENANCE_SCHEMA_VERSION",
+            "fapo-evaluation-build-provenance-v4",
+            raising=False,
         )
         monkeypatch.setattr(
             provenance_module,
             "BUILD_IDENTITY_SCHEMA_VERSION",
-            "fapo-evaluation-build-identity-v3",
+            "fapo-evaluation-build-identity-v4",
+        )
+    elif registry_drift == "review-schema":
+        monkeypatch.setattr(
+            review_module,
+            "REVIEW_FINALIZATION_SCHEMA_VERSION",
+            "fapo-review-finalization-v2",
+        )
+        monkeypatch.setattr(
+            review_module,
+            "REVIEW_FINALIZATION_IDENTITY_SCHEMA_VERSION",
+            "fapo-review-finalization-identity-v2",
+        )
+        monkeypatch.setattr(
+            review_module,
+            "REVIEW_FINALIZATION_FIELDS",
+            review_module.REVIEW_FINALIZATION_FIELDS | {"future_field"},
+        )
+        monkeypatch.setattr(
+            review_module,
+            "DERIVED_CASE_CONTENT_SCHEMA_VERSION",
+            "fapo-derived-case-content-v2",
         )
     elif registry_drift == "stage-membership-order":
         monkeypatch.setattr(
@@ -13537,7 +13701,7 @@ def test_generation_temp_created_fault_retains_only_empty_owned_directory(
 
     monkeypatch.setattr(workspace_module, "_fault_point", inject)
     with pytest.raises(_InjectedFault, match="after_generation_temp_created"):
-        pipeline.run()
+        _run_to_release(pipeline)
 
     generations_root = pipeline.layout.generations_root
     assert not list(generations_root.glob(".*.tmp"))
@@ -13549,7 +13713,7 @@ def _assert_revisions_reclaim_exact_owned_hidden_nodes(
     iterations: int,
 ) -> None:
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     _make_released_checkpoint_mutable(pipeline.layout)
 
     for index in range(iterations):
@@ -13591,7 +13755,7 @@ def test_recovery_rejects_corrupt_prepared_release_before_pointer_install(
 
     monkeypatch.setattr(workspace_module, "_fault_point", inject)
     with pytest.raises(_InjectedFault, match="after_release_publication_prepared"):
-        pipeline.run()
+        _run_to_release(pipeline)
     layout = pipeline.layout
     assert not layout.release_pointer_path.exists()
 
@@ -13609,7 +13773,7 @@ def test_release_recovery_rechecks_candidate_before_pointer_install(
 
     monkeypatch.setattr(workspace_module, "_fault_point", inject)
     with pytest.raises(_InjectedFault, match="after_release_publication_prepared"):
-        pipeline.run()
+        _run_to_release(pipeline)
     layout = pipeline.layout
     target = layout.build_provenance_path
     genuine = target.read_bytes()
@@ -13670,7 +13834,7 @@ def test_direct_release_rechecks_candidate_after_pointer_fault_seam(
     monkeypatch.setattr(workspace_module, "_fault_point", mutate_at_pointer_seam)
     try:
         with pytest.raises(EvaluationAssetIntegrityError):
-            pipeline.run()
+            _run_to_release(pipeline)
     finally:
         if attacked:
             target.write_bytes(genuine)
@@ -13704,7 +13868,7 @@ def test_direct_release_rolls_back_pointer_after_writer_boundary_swap(
     )
     try:
         with pytest.raises(EvaluationAssetIntegrityError):
-            pipeline.run()
+            _run_to_release(pipeline)
     finally:
         if attacked:
             target.write_bytes(genuine)
@@ -13781,7 +13945,7 @@ def test_direct_release_rejects_pointer_appearing_at_writer_boundary(
     )
 
     with pytest.raises((EvaluationAssetIntegrityError, ValueError)):
-        pipeline.run()
+        _run_to_release(pipeline)
 
     assert appeared
     assert layout.release_pointer_path.read_bytes() == foreign
@@ -13816,7 +13980,7 @@ def test_direct_release_rejects_pointer_appearing_before_expected_snapshot(
     )
 
     with pytest.raises((EvaluationAssetIntegrityError, ValueError)):
-        pipeline.run()
+        _run_to_release(pipeline)
 
     assert appeared
     assert layout.release_pointer_path.read_bytes() == foreign
@@ -13863,7 +14027,7 @@ def test_append_only_event_rejects_regular_replacement_at_writer_boundary(
     )
 
     with pytest.raises((EvaluationAssetIntegrityError, ValueError)):
-        pipeline.run()
+        _run_to_release(pipeline)
 
     assert replaced
     assert layout.events_path.read_bytes() == foreign
@@ -13880,7 +14044,7 @@ def test_revision_rejects_control_replacement_at_writer_boundary(
 ) -> None:
     """A revision cannot replace control authority raced in after its WAL."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _make_released_checkpoint_mutable(layout)
     original = workspace_module.write_local_authority_json
@@ -13944,7 +14108,7 @@ def test_terminal_state_replacement_at_writer_boundary_retains_pointer(
         pipeline, _, _ = _create_pipeline(tmp_path)
         layout = pipeline.layout
         if operation == "direct_adoption":
-            pipeline.run()
+            _run_to_release(pipeline)
             _downgrade_to_legacy_completed(layout)
             invoke = layout.adopt_legacy
         elif operation == "recovery_release":
@@ -13954,11 +14118,11 @@ def test_terminal_state_replacement_at_writer_boundary_retains_pointer(
 
             monkeypatch.setattr(workspace_module, "_fault_point", stop_after_prepare)
             with pytest.raises(_InjectedFault):
-                pipeline.run()
+                _run_to_release(pipeline)
             monkeypatch.setattr(workspace_module, "_fault_point", lambda name: None)
             invoke = layout.recover
         else:
-            invoke = pipeline.run
+            invoke = partial(_run_to_release, pipeline)
 
     original = workspace_module.write_local_authority_json
     foreign = b'{"foreign":true}\n'
@@ -14009,7 +14173,7 @@ def test_adoption_rejects_generated_control_replacement_at_writer_boundary(
         invoke = layout.recover
     else:
         pipeline, _, _ = _create_pipeline(tmp_path)
-        pipeline.run()
+        _run_to_release(pipeline)
         layout = pipeline.layout
         _downgrade_to_legacy_completed(layout)
         invoke = layout.adopt_legacy
@@ -14078,7 +14242,7 @@ def test_run_rejects_state_replacement_at_save_writer_boundary(
     )
 
     with pytest.raises((EvaluationAssetIntegrityError, ValueError)):
-        pipeline.run()
+        _run_to_release(pipeline)
 
     assert replaced
     assert layout.state_path.read_bytes() == foreign
@@ -14117,7 +14281,7 @@ def test_provider_ledger_rejects_appearance_at_writer_boundary(
     )
 
     with pytest.raises((EvaluationAssetIntegrityError, ValueError)):
-        pipeline.run()
+        _run_to_release(pipeline)
 
     assert appeared
     assert target.read_bytes() == foreign
@@ -14188,7 +14352,7 @@ def test_released_verification_uses_one_closed_authority_snapshot(
 ) -> None:
     """Semantic reopens cannot validate bytes different from authenticated bytes."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    released = pipeline.run()
+    released = _run_to_release(pipeline)
     layout = pipeline.layout
     targets = {
         "state": layout.state_path,
@@ -14286,7 +14450,7 @@ def test_pipeline_receipt_hash_rejects_post_write_authority_symlink(
     )
     try:
         with pytest.raises(ValueError):
-            pipeline.run()
+            _run_to_release(pipeline)
     finally:
         if target.is_symlink():
             target.unlink()
@@ -14336,7 +14500,7 @@ def test_stage_eight_control_reads_reject_post_preflight_symlinks(
     )
 
     with pytest.raises(ValueError):
-        pipeline.run()
+        _run_to_release(pipeline)
 
     assert attacked
     assert not layout.build_provenance_path.exists()
@@ -14349,7 +14513,7 @@ def test_pipeline_lineage_load_rejects_post_preflight_symlink_without_writes(
 ) -> None:
     """The optional lineage read is one bound observation before authoring."""
     parent_pipeline, _, _ = _create_pipeline(tmp_path)
-    parent_pipeline.run()
+    _run_to_release(parent_pipeline)
     parent = parent_pipeline.layout
     child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
     child.initialize_extension(
@@ -14387,7 +14551,7 @@ def test_pipeline_lineage_load_rejects_post_preflight_symlink_without_writes(
     )
     try:
         with pytest.raises(ValueError):
-            pipeline.run()
+            _run_to_release(pipeline)
     finally:
         if target.is_symlink():
             target.unlink()
@@ -14457,7 +14621,7 @@ def test_release_cross_link_corruption_fails_closed_without_repair_writes(
 ) -> None:
     """Pointer, generation, provenance, and receipt links are one authority DAG."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    released = pipeline.run()
+    released = _run_to_release(pipeline)
     layout = pipeline.layout
     pointer = json.loads(layout.release_pointer_path.read_text(encoding="utf-8"))
     generation_manifest = (
@@ -14538,6 +14702,35 @@ def _create_pipeline(
     return pipeline, rubric, embedding
 
 
+def _run_to_release(
+    pipeline: EvaluationAssetPipeline,
+    **run_kwargs: Any,
+) -> PipelineState:
+    """Exercise the explicit review boundary before legacy release assertions."""
+    state = pipeline.run(**run_kwargs)
+    if state.status != "awaiting_review":
+        return state
+    page = pipeline.layout.list_review_items()
+    for item in page["items"]:
+        if item["status"] != "pending":
+            continue
+        pipeline.layout.decide_review(
+            item["case_id"],
+            item["fingerprint"],
+            "approved",
+            reviewer="durability-test",
+            expected_review_set_fingerprint=page[
+                "review_set_fingerprint"
+            ],
+        )
+    page = pipeline.layout.list_review_items()
+    return pipeline.finalize_review(
+        reviewer="durability-test",
+        expected_review_set_fingerprint=page["review_set_fingerprint"],
+        expected_decision_set_fingerprint=page["decision_set_fingerprint"],
+    )
+
+
 def _create_synthetic_pipeline(
     tmp_path: Path,
 ) -> tuple[EvaluationAssetPipeline, _SuccessfulSyntheticRubricProvider]:
@@ -14572,7 +14765,7 @@ def _write_input_pair(tenants_root: Path) -> tuple[Path, Path]:
     unlabeled = sources / "unlabeled.jsonl"
     common = {
         "schema_version": "fapo-evaluation-input-v1",
-        "group_id": "group-1",
+        "group_id": "group-train-0",
         "task_type": "generic",
         "user_input": "Process the supplied input.",
         "conversation_context": [],
@@ -14648,7 +14841,7 @@ def _write_additional_feedback_v3(tenants_root: Path) -> Path:
 
 def _released_extension_parent(tmp_path: Path) -> EvaluationAssetLayout:
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     parent = pipeline.layout
     child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
     child.initialize_extension(
@@ -14657,11 +14850,13 @@ def _released_extension_parent(tmp_path: Path) -> EvaluationAssetLayout:
         additional_unlabeled=None,
         clustering_mode="keep",
     )
-    EvaluationAssetPipeline(
-        child,
-        rubric_provider=_SuccessfulRubricProvider(),
-        embedding_provider=_SuccessfulEmbeddingProvider(),
-    ).run()
+    _run_to_release(
+        EvaluationAssetPipeline(
+            child,
+            rubric_provider=_SuccessfulRubricProvider(),
+            embedding_provider=_SuccessfulEmbeddingProvider(),
+        )
+    )
     return child
 
 
@@ -14812,18 +15007,21 @@ def _release_with_config_revisions(
     revision_count: int,
 ) -> EvaluationAssetLayout:
     pipeline, rubric, embedding = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     updates = (
         {"match_threshold": 0.2},
         {"split_seed": 73},
     )
     for revision_updates in updates[:revision_count]:
         _make_released_checkpoint_mutable(pipeline.layout)
-        EvaluationAssetPipeline(
-            pipeline.layout,
-            rubric_provider=rubric,
-            embedding_provider=embedding,
-        ).run(config_updates=revision_updates)
+        _run_to_release(
+            EvaluationAssetPipeline(
+                pipeline.layout,
+                rubric_provider=rubric,
+                embedding_provider=embedding,
+            ),
+            config_updates=revision_updates,
+        )
     return pipeline.layout
 
 
@@ -14835,7 +15033,7 @@ def _layout_after_final_committed_mutation(
 ) -> EvaluationAssetLayout:
     """Build a writer-reachable post-commit state for revision/rebuild recovery."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     _make_released_checkpoint_mutable(pipeline.layout)
     config_updates: dict[str, Any] | None
     if operation_kind == "configuration_revision":
@@ -14855,7 +15053,8 @@ def _layout_after_final_committed_mutation(
             raise _InjectedFault("after_pipeline_started")
 
         with pytest.raises(_InjectedFault, match="after_pipeline_started"):
-            pipeline.run(
+            _run_to_release(
+                pipeline,
                 config_updates=config_updates,
                 _preflight_accepted_callback=stop_after_pipeline_started,
             )
@@ -14865,9 +15064,9 @@ def _layout_after_final_committed_mutation(
 
         pipeline._run_stage = fail_stage  # type: ignore[method-assign]
         with pytest.raises(_InjectedFault, match="failed_"):
-            pipeline.run(config_updates=config_updates)
+            _run_to_release(pipeline, config_updates=config_updates)
     elif lifecycle == "released":
-        pipeline.run(config_updates=config_updates)
+        _run_to_release(pipeline, config_updates=config_updates)
     else:
         raise AssertionError(lifecycle)
 
@@ -14967,7 +15166,7 @@ def _prepared_adoption(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[EvaluationAssetLayout, dict[str, Any]]:
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
 
@@ -15042,12 +15241,6 @@ def _convert_to_legacy_rubric_profile(layout: EvaluationAssetLayout) -> None:
             "normalized_feedback.jsonl",
         )
     )[0]
-    native_case = _read_jsonl(
-        layout.artifact_path(
-            PipelineStage.RUBRIC_EXTRACTION,
-            "trusted_cases.jsonl",
-        )
-    )[0]
     rubric = {
         "record_id": "feedback-1",
         "intent_label": "answer request",
@@ -15065,39 +15258,13 @@ def _convert_to_legacy_rubric_profile(layout: EvaluationAssetLayout) -> None:
         "rubric_model": "fake-rubric",
         "oracle_version": "fapo-evaluation-asset-v1",
     }
-    trusted_intent = {
-        "intent_id": "feedback-1",
-        "label": rubric["intent_label"],
-        "texts": [
-            normalized["user_input"],
-            " ".join([*rubric["must"], *rubric["must_not"]]),
-        ],
-        "route": normalized["route"],
-        "metadata": {
-            "trusted_example_count": 1,
-            "trusted_group_count": 1,
-            "feedback_polarity": normalized["feedback"]["polarity"],
-        },
-    }
-    trusted_case = {
-        "case_id": "feedback-feedback-1",
-        "task_type": normalized["task_type"],
-        "context": native_case["context"],
-        "expected": {
-            "label_source": rubric["label_source"],
-            "confidence": rubric["confidence"],
-            "rubric": {
-                "must": rubric["must"],
-                "must_not": rubric["must_not"],
-                "should": rubric["should"],
-            },
-            "deterministic_checks": rubric["deterministic_checks"],
-            "tool_expectations": rubric["tool_expectations"],
-            "reference_output": rubric["reference_output"],
-            "feedback_polarity": normalized["feedback"]["polarity"],
-        },
-        "metadata": native_case["metadata"],
-    }
+    replayed = stage_three_contract.replay_legacy_stage_three(
+        [normalized],
+        [rubric],
+        asset_id=layout.asset_id,
+    )
+    trusted_intent = replayed["trusted_intents"][0]
+    trusted_case = replayed["trusted_cases"][0]
     artifact_io.atomic_write_jsonl(
         layout.artifact_path(
             PipelineStage.RUBRIC_EXTRACTION,
@@ -15643,6 +15810,19 @@ def _set_manifest_split_count(
 
 
 def _downgrade_to_legacy_completed(layout: EvaluationAssetLayout) -> None:
+    native_guidelines = layout.artifact_path(
+        PipelineStage.RUBRIC_EXTRACTION,
+        "evaluation_guidelines.jsonl",
+    )
+    if native_guidelines.is_file():
+        _rewrite_stage_three_as_historical_native(layout)
+    else:
+        _rewrite_stage_seven_as_historical(layout)
+        _rewrite_stage_eight_as_historical(layout)
+    layout.artifact_path(
+        PipelineStage.PREPARED_INPUTS,
+        "trusted_split_plan.jsonl",
+    ).unlink(missing_ok=True)
     state = layout.load_state().to_dict()
     state.pop("schema_version", None)
     state.pop("mutation_sequence", None)
@@ -15676,9 +15856,12 @@ def _downgrade_to_legacy_completed(layout: EvaluationAssetLayout) -> None:
                 }
             )
             for event in _read_jsonl(layout.events_path)
-            if event.get("event") != "pipeline_released"
+            if event.get("event")
+            not in {"pipeline_released", "review_required"}
         ],
     )
+    if layout.reviews_root.exists():
+        shutil.rmtree(layout.reviews_root)
     if layout.generations_root.exists():
         shutil.rmtree(layout.generations_root)
     published_files = {}
@@ -15701,6 +15884,353 @@ def _downgrade_to_legacy_completed(layout: EvaluationAssetLayout) -> None:
     artifact_io.atomic_write_json(layout.manifest_path, manifest)
     artifact_io.atomic_write_json(
         layout.artifact_path(PipelineStage.DATASET_SPLITS, "dataset_manifest.json"),
+        manifest,
+    )
+
+
+def _rewrite_stage_three_as_historical_native(
+    layout: EvaluationAssetLayout,
+) -> None:
+    """Convert a current test release into the frozen pre-v3 native profile."""
+    stage_three = PipelineStage.RUBRIC_EXTRACTION
+    normalized = _read_jsonl(
+        layout.artifact_path(
+            PipelineStage.PREPARED_INPUTS,
+            "normalized_feedback.jsonl",
+        )
+    )
+
+    def unprotect(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                key: value
+                for key, value in row.items()
+                if key
+                not in {
+                    "protected_split",
+                    "source_group_id",
+                    "split_group_id",
+                    "visibility",
+                }
+            }
+            for row in rows
+        ]
+
+    evidence = [
+        *_read_jsonl(layout.artifact_path(stage_three, "feedback_evidence.jsonl")),
+        *unprotect(
+            _read_jsonl(
+                layout.artifact_path(
+                    stage_three,
+                    "protected_feedback_evidence.jsonl",
+                )
+            )
+        ),
+    ]
+    candidates = [
+        *_read_jsonl(
+            layout.artifact_path(stage_three, "candidate_guidelines.jsonl")
+        ),
+        *unprotect(
+            _read_jsonl(
+                layout.artifact_path(
+                    stage_three,
+                    "protected_candidate_guidelines.jsonl",
+                )
+            )
+        ),
+    ]
+    old_guidelines = [
+        *_read_jsonl(
+            layout.artifact_path(stage_three, "evaluation_guidelines.jsonl")
+        ),
+        *_read_jsonl(
+            layout.artifact_path(
+                stage_three,
+                "protected_evaluation_guidelines.jsonl",
+            )
+        ),
+    ]
+    old_intents = _read_jsonl(
+        layout.artifact_path(stage_three, "trusted_intents.jsonl")
+    )
+    replayed = stage_three_contract.replay_native_stage_three(
+        normalized,
+        evidence,
+        candidates,
+        asset_id=layout.asset_id,
+        identity_profile="historical_v1",
+        text_profile="historical_v1",
+    )
+
+    def guideline_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
+        return (
+            row.get("route"),
+            row.get("intent_label"),
+            row.get("description"),
+            tuple(row.get("source_record_ids") or []),
+        )
+
+    new_guidelines_by_key = {
+        guideline_key(row): row for row in replayed["guidelines"]
+    }
+    identity_replacements = {
+        str(row["guideline_id"]): str(
+            new_guidelines_by_key[guideline_key(row)]["guideline_id"]
+        )
+        for row in old_guidelines
+    }
+    new_intents_by_sources = {
+        tuple(row["metadata"]["source_record_ids"]): row
+        for row in replayed["trusted_intents"]
+    }
+    identity_replacements.update(
+        {
+            str(row["intent_id"]): str(
+                new_intents_by_sources[
+                    tuple(row["metadata"]["source_record_ids"])
+                ]["intent_id"]
+            )
+            for row in old_intents
+        }
+    )
+    for name, rows in (
+        ("feedback_evidence.jsonl", evidence),
+        ("candidate_guidelines.jsonl", replayed["candidates"]),
+        ("evaluation_guidelines.jsonl", replayed["guidelines"]),
+        ("trusted_intents.jsonl", replayed["trusted_intents"]),
+        ("trusted_cases.jsonl", replayed["trusted_cases"]),
+    ):
+        artifact_io.atomic_write_jsonl(
+            layout.artifact_path(stage_three, name),
+            rows,
+        )
+    for stage in tuple(PipelineStage)[3:]:
+        stage_root = layout.artifact_path(stage, "placeholder").parent
+        for path in stage_root.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix in {".json", ".jsonl", ".md"}:
+                text = path.read_text(encoding="utf-8")
+                for previous, replacement in identity_replacements.items():
+                    text = text.replace(previous, replacement)
+                artifact_io.atomic_write_text(path, text)
+    parent_matches_path = (
+        layout.historical_parent_snapshot / "parent_intent_matches.jsonl"
+    )
+    if parent_matches_path.is_file():
+        parent_guidelines = _read_jsonl(
+            layout.historical_parent_snapshot
+            / "parent_evaluation_guidelines.jsonl"
+        )
+        parent_identity_replacements = {
+            str(row["guideline_id"]): stage_three_contract._guideline_id(
+                route=str(row["route"]),
+                guideline_payload=row,
+                identity_profile="historical_v1",
+            )
+            for row in parent_guidelines
+        }
+        text = parent_matches_path.read_text(encoding="utf-8")
+        for previous, replacement in {
+            **identity_replacements,
+            **parent_identity_replacements,
+        }.items():
+            text = text.replace(previous, replacement)
+        artifact_io.atomic_write_text(parent_matches_path, text)
+        _refresh_parent_snapshot_manifest(layout, (parent_matches_path,))
+
+    _rewrite_stage_seven_as_historical(layout)
+    _rewrite_stage_eight_as_historical(layout)
+
+
+def _rewrite_stage_seven_as_historical(
+    layout: EvaluationAssetLayout,
+) -> None:
+    """Reconstruct the frozen pre-v3 filtering and keep-mode reuse result."""
+    stage = PipelineStage.SYNTHETIC_COVERAGE
+    candidates_path = layout.artifact_path(
+        stage,
+        "synthetic_candidates.jsonl",
+    )
+    candidates = _read_jsonl(candidates_path)
+    synthetic_cases_path = layout.artifact_path(
+        stage,
+        "synthetic_cases.jsonl",
+    )
+    if not layout.lineage_path.is_file():
+        historical_cases = []
+        for case in _read_jsonl(synthetic_cases_path):
+            copied = dict(case)
+            metadata = dict(copied.get("metadata") or {})
+            metadata.pop("dependency_sha256", None)
+            copied["metadata"] = metadata
+            historical_cases.append(copied)
+        artifact_io.atomic_write_jsonl(synthetic_cases_path, historical_cases)
+        return
+    inherited: list[dict[str, Any]] = []
+    reused_cluster_ids: set[str] = set()
+    lineage = json.loads(layout.lineage_path.read_text(encoding="utf-8"))
+    matches_path = layout.artifact_path(
+        PipelineStage.COVERAGE_DECISIONS,
+        "intent_matches.jsonl",
+    )
+    parent_matches_path = (
+        layout.historical_parent_snapshot / "parent_intent_matches.jsonl"
+    )
+    parent_cases_path = (
+        layout.historical_parent_snapshot / "parent_synthetic_cases.jsonl"
+    )
+    if (
+        lineage.get("clustering_mode") == "keep"
+        and parent_matches_path.is_file()
+        and parent_cases_path.is_file()
+    ):
+        parent_cases = []
+        for case in _read_jsonl(parent_cases_path):
+            copied = dict(case)
+            metadata = dict(copied.get("metadata") or {})
+            metadata.pop("dependency_sha256", None)
+            copied["metadata"] = metadata
+            parent_cases.append(copied)
+        artifact_io.atomic_write_jsonl(parent_cases_path, parent_cases)
+        _refresh_parent_snapshot_manifest(layout, (parent_cases_path,))
+        matches = {
+            str(row["cluster_id"]): row for row in _read_jsonl(matches_path)
+        }
+        previous = {
+            str(row["cluster_id"]): row
+            for row in _read_jsonl(parent_matches_path)
+        }
+        changed = {
+            cluster_id
+            for cluster_id, match in matches.items()
+            if cluster_id not in previous
+            or previous[cluster_id].get("status") != match.get("status")
+            or previous[cluster_id].get("matched_intent_id")
+            != match.get("matched_intent_id")
+        }
+        for case in parent_cases:
+            metadata = dict(case.get("metadata") or {})
+            cluster_id = str(metadata.get("source_cluster") or "")
+            if (
+                cluster_id
+                and cluster_id not in changed
+                and cluster_id in matches
+                and matches[cluster_id].get("status")
+                == "matched_trusted_intent"
+            ):
+                copied = dict(case)
+                metadata["dataset_version"] = layout.asset_id
+                copied["metadata"] = metadata
+                inherited.append(copied)
+                reused_cluster_ids.add(cluster_id)
+    candidates = [
+        case
+        for case in candidates
+        if str((case.get("metadata") or {}).get("source_cluster"))
+        not in reused_cluster_ids
+    ]
+    filtered = filter_synthetic_cases(
+        candidates,
+        existing_cases=[
+            *_read_jsonl(
+                layout.artifact_path(
+                    PipelineStage.RUBRIC_EXTRACTION,
+                    "trusted_cases.jsonl",
+                )
+            ),
+            *_read_jsonl(
+                layout.artifact_path(
+                    PipelineStage.LABEL_INFERENCE,
+                    "inferred_cases.jsonl",
+                )
+            ),
+            *inherited,
+        ],
+    )
+    artifact_io.atomic_write_jsonl(candidates_path, candidates)
+    artifact_io.atomic_write_jsonl(
+        layout.artifact_path(stage, "rejected_synthetic.jsonl"),
+        filtered.rejected,
+    )
+    artifact_io.atomic_write_jsonl(
+        layout.artifact_path(stage, "synthetic_filter_issues.jsonl"),
+        [
+            {
+                "case_id": issue.case_id,
+                "code": issue.code,
+                "message": issue.message,
+            }
+            for issue in filtered.issues
+        ],
+    )
+    artifact_io.atomic_write_jsonl(
+        synthetic_cases_path,
+        [*inherited, *filtered.accepted],
+    )
+
+
+def _refresh_parent_snapshot_manifest(
+    layout: EvaluationAssetLayout,
+    paths: Sequence[Path],
+) -> None:
+    """Re-anchor test-only snapshot artifacts rewritten to a historical profile."""
+    if not paths or not layout.reuse_manifest_path.is_file():
+        return
+    reuse = json.loads(layout.reuse_manifest_path.read_text(encoding="utf-8"))
+    artifacts = reuse["parent_snapshot"]["artifacts"]
+    by_name = {str(row["file"]): row for row in artifacts}
+    for path in paths:
+        row = by_name[path.name]
+        row["sha256"] = file_sha256(path)
+        row["bytes"] = path.stat().st_size
+    artifact_io.atomic_write_json(layout.reuse_manifest_path, reuse)
+
+
+def _rewrite_stage_eight_as_historical(
+    layout: EvaluationAssetLayout,
+) -> None:
+    """Rebuild current review partitions using the frozen pre-v3 splitter."""
+    historical_splits = pipeline_module._default_split_payloads(
+        _read_jsonl(
+            layout.artifact_path(
+                PipelineStage.RUBRIC_EXTRACTION,
+                "trusted_cases.jsonl",
+            )
+        ),
+        _read_jsonl(
+            layout.artifact_path(
+                PipelineStage.LABEL_INFERENCE,
+                "inferred_cases.jsonl",
+            )
+        ),
+        _read_jsonl(
+            layout.artifact_path(
+                PipelineStage.SYNTHETIC_COVERAGE,
+                "synthetic_cases.jsonl",
+            )
+        ),
+        seed=layout.load_config().split_seed,
+    )
+    for split, rows in historical_splits.items():
+        artifact_io.atomic_write_jsonl(
+            layout.artifact_path(
+                PipelineStage.DATASET_SPLITS,
+                f"{split}.jsonl",
+            ),
+            rows,
+        )
+    manifest = json.loads(layout.manifest_path.read_text(encoding="utf-8"))
+    manifest["split_counts"] = {
+        split: len(rows) for split, rows in historical_splits.items()
+    }
+    artifact_io.atomic_write_json(layout.manifest_path, manifest)
+    artifact_io.atomic_write_json(
+        layout.artifact_path(
+            PipelineStage.DATASET_SPLITS,
+            "dataset_manifest.json",
+        ),
         manifest,
     )
 
@@ -16073,7 +16603,7 @@ def test_released_journal_validation_uses_one_authority_snapshot(
 ) -> None:
     """Journal semantics cannot transiently reopen different event bytes."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    state = pipeline.run()
+    state = _run_to_release(pipeline)
     layout = pipeline.layout
     with layout.events_path.open("ab") as handle:
         handle.write(b'{"tampered":true}\n')
@@ -16129,7 +16659,7 @@ def test_direct_adoption_rejects_relabelled_native_revision_without_writes(
     pipeline, rubric, embedding = _create_pipeline(tmp_path)
     layout = pipeline.layout
     layout.revise_config({"match_threshold": 0.5})
-    pipeline.run()
+    _run_to_release(pipeline)
     _downgrade_to_legacy_completed(layout)
     before = _authority_bytes(layout)
     calls = (rubric.calls, embedding.calls)
@@ -16255,7 +16785,7 @@ def test_stage_eight_generation_manifest_rejects_writer_boundary_appearance(
     )
 
     with pytest.raises(ValueError, match="appeared before writing"):
-        pipeline.run()
+        _run_to_release(pipeline)
 
     assert attacked
     assert target.read_bytes() == foreign
@@ -16268,7 +16798,7 @@ def test_keep_inventory_rejects_writer_boundary_replacement(
 ) -> None:
     """Keep-mode inventory reuse binds its previously snapshotted target."""
     parent_pipeline, _, _ = _create_pipeline(tmp_path)
-    parent_pipeline.run()
+    _run_to_release(parent_pipeline)
     parent = parent_pipeline.layout
     child = EvaluationAssetLayout(parent.tenants_root, parent.tenant_id, "v2")
     child.initialize_extension(
@@ -16313,7 +16843,7 @@ def test_keep_inventory_rejects_writer_boundary_replacement(
     )
 
     with pytest.raises(ValueError, match="bytes changed before writing"):
-        pipeline.run()
+        _run_to_release(pipeline)
 
     assert attacked
     assert target.read_bytes() == foreign
@@ -16843,7 +17373,7 @@ def test_pre_v2_config_history_classifier_rejects_type_coercions(
     pipeline, _, _ = _create_pipeline(tmp_path)
     layout = pipeline.layout
     if mutation == "inherited-origin-bool":
-        pipeline.run()
+        _run_to_release(pipeline)
         parent = layout
         layout = EvaluationAssetLayout(
             parent.tenants_root,
@@ -17348,7 +17878,7 @@ def test_eas_directory_creation_never_bootstraps_through_compatibility_seams(
         embedding_provider=embedding,
         repository_base=tmp_path,
     )
-    released = pipeline.run()
+    released = _run_to_release(pipeline)
 
     assert released.status == "released"
     assert compatibility_creations == []
@@ -17360,7 +17890,7 @@ def test_eas_keep_extension_never_bootstraps_through_compatibility_seams(
 ) -> None:
     """Extension authority and generation parents use the bound helper too."""
     parent_pipeline, _, _ = _create_pipeline(tmp_path)
-    parent_pipeline.run()
+    _run_to_release(parent_pipeline)
     parent = parent_pipeline.layout
     additional = _write_additional_feedback(parent.tenants_root)
     original_mkdir = Path.mkdir
@@ -17384,11 +17914,13 @@ def test_eas_keep_extension_never_bootstraps_through_compatibility_seams(
         additional_unlabeled=None,
         clustering_mode="keep",
     )
-    released = EvaluationAssetPipeline(
-        child,
-        rubric_provider=_SuccessfulRubricProvider(),
-        embedding_provider=_SuccessfulEmbeddingProvider(),
-    ).run()
+    released = _run_to_release(
+        EvaluationAssetPipeline(
+            child,
+            rubric_provider=_SuccessfulRubricProvider(),
+            embedding_provider=_SuccessfulEmbeddingProvider(),
+        )
+    )
 
     assert released.status == "released"
     assert child.historical_parent_snapshot.is_dir()
@@ -17530,7 +18062,7 @@ def test_pr2_pre_v2_updated_history_adopts_and_verifies(
 ) -> None:
     """One frozen operation-free history grammar serves detection and adoption."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
     config = layout.load_config().to_dict()
@@ -17572,7 +18104,7 @@ def test_pr2_adoption_provenance_prefix_is_wal_owned_and_resumable(
 ) -> None:
     """Every adoption provenance target follows its durable prepared row."""
     pipeline, _, _ = _create_pipeline(tmp_path)
-    pipeline.run()
+    _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
 
@@ -17662,7 +18194,7 @@ def test_pr2_post_state_fault_retains_recoverable_release_tuple(
         pipeline, _, _ = _create_pipeline(tmp_path)
         layout = pipeline.layout
         if operation == "direct_adoption":
-            pipeline.run()
+            _run_to_release(pipeline)
             _downgrade_to_legacy_completed(layout)
             invoke = layout.adopt_legacy
         elif operation == "recovery_release":
@@ -17672,11 +18204,11 @@ def test_pr2_post_state_fault_retains_recoverable_release_tuple(
 
             monkeypatch.setattr(workspace_module, "_fault_point", stop_after_prepare)
             with pytest.raises(_InjectedFault, match="after_release_publication_prepared"):
-                pipeline.run()
+                _run_to_release(pipeline)
             monkeypatch.setattr(workspace_module, "_fault_point", lambda _name: None)
             invoke = layout.recover
         else:
-            invoke = pipeline.run
+            invoke = partial(_run_to_release, pipeline)
 
     original_verify = workspace_module.verify_released_asset
     failed = False
@@ -17813,7 +18345,7 @@ def test_pr2_injected_provider_payloads_fail_before_calls_or_writes(
     before = _authority_bytes(pipeline.layout)
 
     with pytest.raises((EvaluationAssetIntegrityError, ValueError)):
-        pipeline.run()
+        _run_to_release(pipeline)
 
     assert rubric.calls == 0
     assert embedding.calls == 0
@@ -17890,7 +18422,7 @@ def test_pr2_generated_payloads_validate_before_authority_writers(
         )
 
     with pytest.raises(ValueError):
-        pipeline.run()
+        _run_to_release(pipeline)
 
     assert not writer_reached
 
@@ -17936,7 +18468,7 @@ def test_pr2_manifest_repository_base_loads_native_and_adopted_generations(
         embedding_provider=_SuccessfulEmbeddingProvider(),
         repository_base=repository_base,
     )
-    state = pipeline.run()
+    state = _run_to_release(pipeline)
     if adopt:
         _downgrade_to_legacy_completed(pipeline.layout)
         state = pipeline.layout.adopt_legacy()
@@ -17960,11 +18492,15 @@ def test_pr2_manifest_repository_base_loads_native_and_adopted_generations(
     previous_cwd = Path.cwd()
     try:
         os.chdir(repository_base)
-        assert load_cases(
-            Path(manifest["published_datasets"]["files"]["train"])
-        )
+        loaded_counts = {
+            split: len(load_cases(Path(emitted)))
+            for split, emitted in manifest["published_datasets"]["files"].items()
+        }
     finally:
         os.chdir(previous_cwd)
+    assert loaded_counts == {
+        split: manifest["split_counts"][split] for split in loaded_counts
+    }
     restarted = EvaluationAssetLayout(
         tenants_root,
         "tenant_a",

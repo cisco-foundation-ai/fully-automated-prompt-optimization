@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -36,6 +37,7 @@ from src.hephaestus.evaluation_assets.pipeline import (
 from src.hephaestus.evaluation_assets.publication import (
     resolve_evaluation_asset_release,
 )
+from src.hephaestus.evaluation_assets.review import case_content_fingerprint
 from src.hephaestus.evaluation_assets.service import EvaluationAssetRunManager
 from src.hephaestus.evaluation_assets.workspace import (
     EvaluationAssetLayout,
@@ -219,6 +221,27 @@ class SecretMalformedRubricProvider(FakeRubricProvider):
             response["cases"][0]["user_input"] = ""
             response["cases"][0]["note"] = "sk-live-secret-token"
         return response
+
+
+def _approve_and_finalize(pipeline: EvaluationAssetPipeline) -> PipelineState:
+    """Run through the explicit review boundary for release-oriented tests."""
+    state = pipeline.run()
+    assert state.status == "awaiting_review"
+    page = pipeline.layout.list_review_items()
+    for item in page["items"]:
+        pipeline.layout.decide_review(
+            item["case_id"],
+            item["fingerprint"],
+            "approved",
+            reviewer="test-reviewer",
+            expected_review_set_fingerprint=page["review_set_fingerprint"],
+        )
+    page = pipeline.layout.list_review_items()
+    return pipeline.finalize_review(
+        reviewer="test-reviewer",
+        expected_review_set_fingerprint=page["review_set_fingerprint"],
+        expected_decision_set_fingerprint=page["decision_set_fingerprint"],
+    )
 
 
 def test_normalization_preserves_structural_fields_and_redacts_content() -> None:
@@ -1128,6 +1151,7 @@ def test_malformed_rubric_responses_never_persist_provider_content(
             cluster_count=1,
             rubric_model="safe-rubric-model",
             synthetic_coverage_enabled=malformed_response == "synthetic",
+            split_seed=0,
         ),
         feedback,
         unlabeled,
@@ -1874,7 +1898,7 @@ def test_extend_asset_keeps_clustering_and_extracts_only_new_rubrics(
         rubric_provider=FakeRubricProvider(),
         embedding_provider=FakeEmbeddingProvider(),
     )
-    parent_pipeline.run()
+    _approve_and_finalize(parent_pipeline)
     parent_inventory = parent_layout.artifact_path(
         PipelineStage.INTENT_CLUSTERING,
         "intent_inventory.jsonl",
@@ -1890,14 +1914,15 @@ def test_extend_asset_keeps_clustering_and_extracts_only_new_rubrics(
     )
     parent_layout.root.rename(tmp_path / "archived-parent")
     child_provider = FakeRubricProvider()
-    child_state = EvaluationAssetPipeline(
+    child_pipeline = EvaluationAssetPipeline(
         child_layout,
         rubric_provider=child_provider,
         embedding_provider=FakeEmbeddingProvider(),
-    ).run()
+    )
+    child_state = _approve_and_finalize(child_pipeline)
 
     assert child_state.status == "released"
-    assert child_provider.feedback_record_ids == ["u1"]
+    assert set(child_provider.feedback_record_ids) == {"f1", "u1"}
     assert child_layout.artifact_path(
         PipelineStage.INTENT_CLUSTERING,
         "intent_inventory.jsonl",
@@ -1912,7 +1937,16 @@ def test_extend_asset_keeps_clustering_and_extracts_only_new_rubrics(
         record_id
         for row in guidelines
         for record_id in row["source_record_ids"]
-    } == {"f1", "u1"}
+    } == {
+        row["record_id"]
+        for row in _read_test_jsonl(
+            child_layout.artifact_path(
+                PipelineStage.PREPARED_INPUTS,
+                "normalized_feedback.jsonl",
+            )
+        )
+        if row["trusted_split"] == "train" and row["evidence_eligible"]
+    }
     inferred = _read_test_jsonl(
         child_layout.artifact_path(
             PipelineStage.LABEL_INFERENCE,
@@ -1921,8 +1955,9 @@ def test_extend_asset_keeps_clustering_and_extracts_only_new_rubrics(
     )
     assert "inferred-u1" not in {row["case_id"] for row in inferred}
     child_locations = _split_case_locations(child_layout)
-    for case_id in ("feedback-f1", "inferred-u2"):
-        assert child_locations[case_id] == parent_locations[case_id]
+    assert parent_locations
+    for case_id, parent_split in parent_locations.items():
+        assert child_locations[case_id] == parent_split
     lineage = json.loads(child_layout.lineage_path.read_text(encoding="utf-8"))
     assert lineage["parent_asset_id"] == "v1"
     assert lineage["clustering_mode"] == "keep"
@@ -1956,7 +1991,7 @@ def test_extend_asset_refreshes_clustering_for_new_unlabeled_records(
         rubric_provider=FakeRubricProvider(),
         embedding_provider=FakeEmbeddingProvider(),
     )
-    parent.run()
+    _approve_and_finalize(parent)
     parent_layout = parent.layout
 
     child_layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v2")
@@ -1968,14 +2003,15 @@ def test_extend_asset_refreshes_clustering_for_new_unlabeled_records(
         config_updates={"cluster_count": 2},
     )
     child_provider = FakeRubricProvider()
-    state = EvaluationAssetPipeline(
+    child_pipeline = EvaluationAssetPipeline(
         child_layout,
         rubric_provider=child_provider,
         embedding_provider=FakeEmbeddingProvider(),
-    ).run()
+    )
+    state = _approve_and_finalize(child_pipeline)
 
     assert state.status == "released"
-    assert child_provider.feedback_record_ids == []
+    assert child_provider.feedback_record_ids == ["f1"]
     assert state.counts["unlabeled_records"] == 3
     assert state.counts["intent_clusters"] == 2
     lineage_rows = _read_test_jsonl(
@@ -2182,6 +2218,28 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
     state = pipeline.run()
     layout = pipeline.layout
 
+    assert state.status == "awaiting_review"
+    review_page = layout.list_review_items()
+    for item in review_page["items"]:
+        layout.decide_review(
+            item["case_id"],
+            item["fingerprint"],
+            "approved",
+            reviewer="test-reviewer",
+            expected_review_set_fingerprint=review_page[
+                "review_set_fingerprint"
+            ],
+        )
+    review_page = layout.list_review_items()
+    state = pipeline.finalize_review(
+        reviewer="test-reviewer",
+        expected_review_set_fingerprint=review_page[
+            "review_set_fingerprint"
+        ],
+        expected_decision_set_fingerprint=review_page[
+            "decision_set_fingerprint"
+        ],
+    )
     assert state.status == "released"
     assert all(stage.status == "completed" for stage in state.stages)
     assert layout.feedback_path.exists()
@@ -2286,8 +2344,13 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
     assert "thread_id" not in prepared_intent
     assert feedback_evidence["record_id"] == "f1"
     assert "feedback_id" not in feedback_evidence
+    normalized_feedback = _read_test_jsonl(
+        layout.artifact_path("prepared_inputs", "normalized_feedback.jsonl")
+    )
     assert set(evaluation_guideline["source_record_ids"]) == {
-        f"f{index}" for index in range(1, 11)
+        row["record_id"]
+        for row in normalized_feedback
+        if row["trusted_split"] == "train" and row["evidence_eligible"]
     }
     assert evaluation_guideline["calibration_status"] == "uncalibrated"
     assert evaluation_guideline["criteria"][0]["evaluator"]["type"] == "llm_judge"
@@ -2321,6 +2384,11 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
         "minimum_per_cluster": 1,
         "maximum_per_cluster": 3,
         "selection": "deterministic_centroid_nearest",
+        "acquisition": {
+            "purpose": "correctness_label_acquisition",
+            "method": "deterministic_centroid_nearest",
+            "sampling_semantics": "non_probability",
+        },
     }
     assert dataset_manifest["synthetic_coverage"] == {
         "enabled": synthetic_coverage_enabled,
@@ -2329,7 +2397,7 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
     assert dataset_manifest["regression_gate"] == {
         "source": "trusted_feedback",
         "fraction": 0.2,
-        "selection": "deterministic_group_safe_random",
+        "selection": "deterministic_early_connected_group_hash",
         "seed": 42,
     }
     generation_directory = release.generation_dir.relative_to(
@@ -2347,14 +2415,71 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
             for split in ("train", "validation", "test", "regression_trusted")
         },
     }
-    assert (
-        dataset_manifest["review_policy"]["regression_gate"]
-        == "automatic_trusted_feedback_holdout"
-    )
+    assert dataset_manifest["review_policy"]["derived_cases"] == "approved_only"
     assert (
         dataset_manifest["review_policy"]["coverage_labeling_queue"]
         == "human_label_required"
     )
+    review_snapshot_path = layout.artifact_path(
+        PipelineStage.DATASET_SPLITS,
+        "review_snapshot.json",
+    )
+    review_snapshot = json.loads(review_snapshot_path.read_text(encoding="utf-8"))
+    fingerprint_inventory = dataset_manifest["review"]["fingerprints"]
+    assert set(fingerprint_inventory) == {
+        "trusted",
+        "approved",
+        "pending",
+        "rejected",
+        "held",
+    }
+    assert {
+        status: len(rows) for status, rows in fingerprint_inventory.items()
+    } == dataset_manifest["review"]["counts"]
+    held_ids = {row["case_id"] for row in review_snapshot["held"]}
+    trusted_review_cases = [
+        *_read_test_jsonl(
+            layout.artifact_path(
+                PipelineStage.RUBRIC_EXTRACTION,
+                "trusted_cases.jsonl",
+            )
+        ),
+        *_read_test_jsonl(
+            layout.artifact_path(
+                PipelineStage.RUBRIC_EXTRACTION,
+                "protected_trusted_cases.jsonl",
+            )
+        ),
+    ]
+    assert fingerprint_inventory["trusted"] == sorted(
+        (
+            {
+                "case_id": row["case_id"],
+                "fingerprint": case_content_fingerprint(row),
+            }
+            for row in trusted_review_cases
+            if row["case_id"] not in held_ids
+        ),
+        key=lambda row: (row["case_id"], row["fingerprint"]),
+    )
+    assert fingerprint_inventory["held"] == review_snapshot["held"]
+    for status in ("approved", "pending", "rejected"):
+        assert fingerprint_inventory[status] == [
+            {"case_id": row["case_id"], "fingerprint": row["fingerprint"]}
+            for row in review_snapshot["items"]
+            if row["status"] == status
+        ]
+    build_provenance = json.loads(
+        layout.build_provenance_path.read_text(encoding="utf-8")
+    )
+    review_input = build_provenance["identity"]["inputs"]["review_snapshot"]
+    review_bytes = review_snapshot_path.read_bytes()
+    assert review_input == {
+        "path": review_snapshot_path.relative_to(layout.root).as_posix(),
+        "bytes": len(review_bytes),
+        "rows": 1,
+        "sha256": hashlib.sha256(review_bytes).hexdigest(),
+    }
 
     synthetic_candidates = [
         json.loads(line)
