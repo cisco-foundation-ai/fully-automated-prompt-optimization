@@ -561,12 +561,13 @@ def test_manifest_install_rejects_a_replaced_staged_source(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A staged-name replacement cannot become run authority."""
+    """A distinct staged-name replacement cannot become run authority."""
     output_dir = tmp_path / "run"
     bundle = _bundle_module()
     writer = bundle.RunBundleWriter.reserve(output_dir, run_id="run-001")
     real_rename = bundle.rename_noreplace_at
     replacement = b"FOREIGN-STAGED-MANIFEST"
+    parked = tmp_path / "original-staged-manifest"
 
     def replace_staged_source(
         directory: object,
@@ -575,9 +576,18 @@ def test_manifest_install_rejects_a_replaced_staged_source(
         **kwargs: object,
     ) -> bool:
         staged = output_dir / source
-        staged.unlink()
-        staged.write_bytes(replacement)
-        return real_rename(directory, source, destination, **kwargs)
+        staged.rename(parked)
+        try:
+            staged.write_bytes(replacement)
+            expected_source = kwargs.get("expected_source")
+            assert expected_source is not None
+            assert (
+                bundle.authority_io.stat_child(directory, source).identity
+                != expected_source
+            )
+            return real_rename(directory, source, destination, **kwargs)
+        finally:
+            parked.unlink()
 
     monkeypatch.setattr(bundle, "rename_noreplace_at", replace_staged_source)
 
@@ -585,6 +595,7 @@ def test_manifest_install_rejects_a_replaced_staged_source(
         _publish(writer)
 
     assert not (output_dir / "run_manifest.json").exists()
+    assert not parked.exists()
     staged = list(output_dir.glob(".run_manifest.json.*.staged"))
     assert len(staged) == 1
     assert staged[0].read_bytes() == replacement
