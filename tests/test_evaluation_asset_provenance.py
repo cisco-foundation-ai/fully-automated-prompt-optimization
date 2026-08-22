@@ -45,8 +45,11 @@ def _source_tree(root: Path) -> None:
         path.write_text(f"source:{relative}\n", encoding="utf-8")
 
 
-def _native_inputs() -> dict[str, dict[str, object]]:
-    return {
+def _native_inputs(
+    *,
+    include_review: bool = True,
+) -> dict[str, dict[str, object]]:
+    inputs = {
         name: {
             "path": f"stages/01_raw_inputs/{name}.jsonl",
             "bytes": 10,
@@ -55,6 +58,14 @@ def _native_inputs() -> dict[str, dict[str, object]]:
         }
         for name, digest in (("labeled_feedback", "a"), ("unlabeled", "b"))
     }
+    if include_review:
+        inputs["review_snapshot"] = {
+            "path": "stages/08_dataset_splits/review_snapshot.json",
+            "bytes": 10,
+            "rows": 1,
+            "sha256": "c" * 64,
+        }
+    return inputs
 
 
 def _native_config() -> dict[str, object]:
@@ -154,6 +165,20 @@ def _native_algorithms(*, extension: bool = False) -> dict[str, object]:
         {"embedding_provider": "custom"},
         extension=extension,
     )
+
+
+def _historical_source(
+    source: dict[str, object],
+    *,
+    members: tuple[str, ...],
+) -> dict[str, object]:
+    """Project a current source identity onto one frozen historical inventory."""
+    historical = json.loads(json.dumps(source))
+    historical["members"] = [
+        row for row in historical["members"] if row["path"] in members
+    ]
+    historical["fingerprint"] = canonical_sha256(historical["members"])
+    return historical
 
 
 def _parent_release() -> dict[str, str]:
@@ -422,6 +447,16 @@ def test_build_provenance_has_exact_schema_and_body_free_identity(
         created_at="2026-08-20T00:00:02+00:00",
     )
     assert source_changed["identity_sha256"] != first["identity_sha256"]
+
+    review_changed_arguments = dict(arguments)
+    review_changed_inputs = json.loads(json.dumps(arguments["copied_inputs"]))
+    review_changed_inputs["review_snapshot"]["sha256"] = "d" * 64
+    review_changed_arguments["copied_inputs"] = review_changed_inputs
+    review_changed = build_provenance(
+        **review_changed_arguments,
+        created_at="2026-08-20T00:00:03+00:00",
+    )
+    assert review_changed["identity_sha256"] != source_changed["identity_sha256"]
 
 
 @pytest.mark.parametrize(
@@ -1093,6 +1128,29 @@ def test_call_backed_injected_settings_survive_current_and_historical_validation
         profile=provenance_module.historical_build_provenance_profile(payload),
     )
 
+    v2_payload = json.loads(json.dumps(payload))
+    v2_payload["schema_version"] = "fapo-evaluation-build-provenance-v2"
+    v2_payload["identity"]["schema_version"] = (
+        "fapo-evaluation-build-identity-v2"
+    )
+    v2_payload["identity"]["source"] = _historical_source(
+        v2_payload["identity"]["source"],
+        members=provenance_module._HISTORICAL_SOURCE_FIXED_MEMBERS_V2,
+    )
+    v2_payload["identity"]["algorithms"] = (
+        provenance_module.historical_algorithm_inventory_v2(
+            v2_payload["identity"]["resolved_configuration"]["values"],
+            extension=False,
+        )
+    )
+    del v2_payload["identity"]["inputs"]["review_snapshot"]
+    v2_payload["identity_sha256"] = canonical_sha256(v2_payload["identity"])
+    provenance_module.validate_build_provenance_call_ledgers(
+        v2_payload,
+        ledgers,
+        profile=provenance_module.HISTORICAL_PROVENANCE_PROFILE_V2,
+    )
+
     v1_payload = json.loads(json.dumps(payload))
     v1_call = json.loads(json.dumps(call))
     v1_call["schema_version"] = "fapo-provider-call-v1"
@@ -1101,6 +1159,17 @@ def test_call_backed_injected_settings_survive_current_and_historical_validation
     v1_payload["identity"]["schema_version"] = (
         "fapo-evaluation-build-identity-v1"
     )
+    v1_payload["identity"]["source"] = _historical_source(
+        v1_payload["identity"]["source"],
+        members=provenance_module._HISTORICAL_SOURCE_FIXED_MEMBERS_V1,
+    )
+    v1_payload["identity"]["algorithms"] = (
+        provenance_module.historical_algorithm_inventory_v1(
+            v1_payload["identity"]["resolved_configuration"]["values"],
+            extension=False,
+        )
+    )
+    del v1_payload["identity"]["inputs"]["review_snapshot"]
     del v1_payload["identity"]["calls"][0]["settings_sha256"]
     v1_payload["identity_sha256"] = canonical_sha256(v1_payload["identity"])
     v1_ledgers = dict(ledgers)
@@ -1120,7 +1189,7 @@ def test_legacy_split_seed_is_bound_to_resolved_configuration() -> None:
     """Historical-unavailable provenance cannot invent a different split seed."""
     payload = provenance_module.build_legacy_provenance(
         resolved_configuration=_native_config(),
-        copied_inputs=_native_inputs(),
+        copied_inputs=_native_inputs(include_review=False),
         lineage=None,
         split_seed=int(_native_config()["split_seed"]),
         created_at="2026-08-20T00:00:00+00:00",
@@ -1156,7 +1225,7 @@ def test_legacy_lineage_profile_is_exact_and_type_sensitive(
         }
     payload = provenance_module.build_legacy_provenance(
         resolved_configuration=_native_config(),
-        copied_inputs=_native_inputs(),
+        copied_inputs=_native_inputs(include_review=False),
         lineage=lineage,
         split_seed=int(_native_config()["split_seed"]),
         created_at="2026-08-20T00:00:00+00:00",
@@ -1237,7 +1306,16 @@ def test_stage_provenance_distinguishes_calls_and_extension_algorithm() -> None:
         PipelineStage.DATASET_SPLITS,
         config,
         extension=True,
-    )["revision"]["algorithm"] == "group-safe-stable-fraction-extension-v1"
+    )["revision"] == {
+        "algorithm": (
+            "approved-exact-family-early-split-stable-extension-v1"
+        ),
+        "trusted_split_assignment": "connected-model-context-stable-hash-v1",
+        "regression_selection": "deterministic-early-connected-group-hash-v1",
+        "derived_inclusion": "approved-exact-fingerprint-only-v1",
+        "hold_policy": "exclude-held-cases-and-families-v1",
+        "regression_fraction": 0.2,
+    }
 
 
 def _native_stage_provenance_case(tmp_path: Path) -> tuple[dict[str, object], dict[str, object]]:
@@ -1301,6 +1379,29 @@ def test_stage_provenance_validator_accepts_exact_native_and_legacy_profiles(
     payload, expected = _native_stage_provenance_case(tmp_path)
 
     assert provenance_module.validate_stage_provenance(payload, **expected) == payload
+    v3_expected = dict(expected)
+    v3_expected["profile"] = provenance_module.HISTORICAL_PROVENANCE_PROFILE_V3
+    assert provenance_module.validate_stage_provenance(
+        payload,
+        **v3_expected,
+    ) == payload
+
+    v2_payload = json.loads(json.dumps(payload))
+    v2_payload["schema_version"] = "fapo-stage-provenance-v2"
+    v2_source = _historical_source(
+        v2_payload["source"],
+        members=provenance_module._HISTORICAL_SOURCE_FIXED_MEMBERS_V2,
+    )
+    v2_payload["source"] = v2_source
+    v2_expected = dict(expected)
+    v2_expected.update(
+        profile=provenance_module.HISTORICAL_PROVENANCE_PROFILE_V2,
+        expected_source=v2_source,
+    )
+    assert provenance_module.validate_stage_provenance(
+        v2_payload,
+        **v2_expected,
+    ) == v2_payload
 
     v1_payload = json.loads(json.dumps(payload))
     v1_payload["schema_version"] = "fapo-stage-provenance-v1"
@@ -1315,11 +1416,17 @@ def test_stage_provenance_validator_accepts_exact_native_and_legacy_profiles(
     for call in v1_payload["calls"]:
         call["schema_version"] = "fapo-provider-call-v1"
         del call["settings_sha256"]
+    v1_source = _historical_source(
+        v1_payload["source"],
+        members=provenance_module._HISTORICAL_SOURCE_FIXED_MEMBERS_V1,
+    )
+    v1_payload["source"] = v1_source
     v1_expected = dict(expected)
     v1_expected.update(
         profile=provenance_module.HISTORICAL_PROVENANCE_PROFILE_V1,
         expected_provider_identity=v1_provider,
         expected_calls=v1_payload["calls"],
+        expected_source=v1_source,
     )
     assert provenance_module.validate_stage_provenance(
         v1_payload,

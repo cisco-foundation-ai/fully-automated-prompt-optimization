@@ -458,6 +458,7 @@ def test_evaluation_asset_only_directory_is_a_tenant(tmp_path: Path) -> None:
     assert [row["tenant_id"] for row in listed] == ["bootstrap_tenant"]
     assert listed[0]["evaluation_asset_count"] == 1
     assert listed[0]["evaluation_asset"]["state"]["current_stage"] == "rubric_extraction"
+    assert listed[0]["evaluation_asset"]["review_authority_revision"] is None
 
 
 def test_evaluation_asset_stage_returns_bounded_artifact_previews(
@@ -595,7 +596,8 @@ def test_evaluation_asset_stage_reads_stage_oriented_layout(
     assert detail["artifacts"][0]["path"].endswith(
         "stages/04_intent_clustering/intent_inventory.jsonl"
     )
-    assert detail["clusters"][0]["representatives"] == ["request alpha"]
+    assert detail["clusters"][0]["representative_ids"] == ["r1"]
+    assert "request alpha" not in json.dumps(detail)
     guideline_detail = TenantStore(
         tmp_path,
         repository_base=tmp_path.parent,
@@ -698,3 +700,277 @@ def test_missing_label_artifacts_belong_to_label_inference(
         "missing_labeled_feedback_clusters.jsonl",
         "missing_labeled_feedback_report.md",
     }.issubset(item["name"] for item in inference["artifacts"])
+
+
+def test_evaluation_asset_stage_disables_protected_content_previews(
+    tmp_path: Path,
+) -> None:
+    tenant = tmp_path / "bootstrap_tenant"
+    asset = tenant / "evaluation_assets" / "v1"
+    _write_json(
+        asset / "config.json",
+        {"tenant_id": "bootstrap_tenant", "asset_id": "v1"},
+    )
+    _write_json(
+        asset / "pipeline_state.json",
+        {
+            "tenant_id": "bootstrap_tenant",
+            "asset_id": "v1",
+            "status": "awaiting_review",
+            "stages": [],
+        },
+    )
+    protected_rows = {
+        "stages/01_raw_inputs/labeled_feedback.jsonl": "RAW-FEEDBACK-CANARY",
+        "stages/01_raw_inputs/unlabeled.jsonl": "RAW-UNLABELED-CANARY",
+        "stages/02_prepared_inputs/normalized_feedback.jsonl": (
+            "NORMALIZED-FEEDBACK-CANARY"
+        ),
+        "stages/02_prepared_inputs/intent_records.jsonl": "INTENT-SOURCE-CANARY",
+        "stages/03_evaluation_guidelines/protected_feedback_evidence.jsonl": (
+            "PROTECTED-EVIDENCE-CANARY"
+        ),
+        "stages/03_evaluation_guidelines/protected_candidate_guidelines.jsonl": (
+            "PROTECTED-CANDIDATE-CANARY"
+        ),
+        "stages/03_evaluation_guidelines/protected_evaluation_guidelines.jsonl": (
+            "PROTECTED-GUIDELINE-CANARY"
+        ),
+        "stages/03_evaluation_guidelines/protected_trusted_cases.jsonl": (
+            "PROTECTED-CASE-CANARY"
+        ),
+        "stages/06_label_inference/inferred_unlabeled_cluster_rubrics.jsonl": (
+            "INFERRED-RUBRIC-CANARY"
+        ),
+        "stages/06_label_inference/inferred_unlabeled_labels.jsonl": (
+            "INFERRED-LABEL-CANARY"
+        ),
+        "stages/06_label_inference/inferred_cases.jsonl": "INFERRED-CASE-CANARY",
+        "stages/06_label_inference/inference_dependencies.jsonl": (
+            "INFERENCE-DEPENDENCY-CANARY"
+        ),
+        "stages/06_label_inference/held_inference_outputs.jsonl": (
+            "HELD-INFERENCE-CANARY"
+        ),
+        "stages/07_synthetic_coverage/synthetic_candidates.jsonl": (
+            "SYNTHETIC-CANDIDATE-CANARY"
+        ),
+        "stages/07_synthetic_coverage/synthetic_cases.jsonl": (
+            "SYNTHETIC-CASE-CANARY"
+        ),
+        "stages/07_synthetic_coverage/rejected_synthetic.jsonl": (
+            "REJECTED-SYNTHETIC-CANARY"
+        ),
+        "stages/07_synthetic_coverage/synthetic_dependencies.jsonl": (
+            "SYNTHETIC-DEPENDENCY-CANARY"
+        ),
+        "stages/08_dataset_splits/validation.jsonl": "VALIDATION-CANARY",
+        "stages/08_dataset_splits/test.jsonl": "TEST-CANARY",
+        "stages/08_dataset_splits/regression_trusted.jsonl": (
+            "REGRESSION-CANARY"
+        ),
+        "stages/08_dataset_splits/validation_inferred.jsonl": (
+            "VALIDATION-INFERRED-CANARY"
+        ),
+        "stages/08_dataset_splits/test_synthetic.jsonl": (
+            "TEST-SYNTHETIC-CANARY"
+        ),
+        "stages/08_dataset_splits/triage_hold.jsonl": "TRIAGE-HOLD-CANARY",
+    }
+    for relative_path, canary in protected_rows.items():
+        path = asset / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "record_id": "record-1",
+                    "user_input": canary,
+                    "assistant_output": canary,
+                    "feedback": {"rationale": canary, "correction": canary},
+                    "criteria": [canary],
+                    "provider_payload": canary,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    store = TenantStore(tmp_path, repository_base=tmp_path.parent)
+    details = [
+        store.get_evaluation_asset_stage("bootstrap_tenant", "v1", stage)
+        for stage in (
+            "raw_inputs",
+            "prepared_inputs",
+            "rubric_extraction",
+            "label_inference",
+            "synthetic_coverage",
+            "dataset_splits",
+        )
+    ]
+
+    assert all(detail is not None for detail in details)
+    artifacts = [
+        artifact
+        for detail in details
+        if detail is not None
+        for artifact in detail["artifacts"]
+    ]
+    assert {artifact["name"] for artifact in artifacts} == {
+        Path(relative_path).name for relative_path in protected_rows
+    }
+    for artifact in artifacts:
+        assert artifact["preview_policy"] == "disabled"
+        assert artifact["preview"] == []
+        assert "content" not in artifact
+        assert artifact["row_count"] == 1
+    serialized = json.dumps(details)
+    for canary in protected_rows.values():
+        assert canary not in serialized
+
+
+def test_evaluation_asset_stage_projects_split_and_review_metadata_only(
+    tmp_path: Path,
+) -> None:
+    tenant = tmp_path / "bootstrap_tenant"
+    asset = tenant / "evaluation_assets" / "v1"
+    _write_json(
+        asset / "config.json",
+        {"tenant_id": "bootstrap_tenant", "asset_id": "v1"},
+    )
+    _write_json(
+        asset / "pipeline_state.json",
+        {
+            "tenant_id": "bootstrap_tenant",
+            "asset_id": "v1",
+            "status": "awaiting_review",
+            "stages": [],
+        },
+    )
+    metadata_files = {
+        "stages/02_prepared_inputs/trusted_split_plan.jsonl": {
+            "schema_version": "fapo-trusted-split-assignment-v1",
+            "record_id": "record-1",
+            "group_id": "group-1",
+            "split_group_id": "split-group-1",
+            "context_fingerprint": "sha256:" + "1" * 64,
+            "split": "validation",
+            "assignment_source": "seeded",
+            "evidence_eligible": False,
+            "hold_reason": "insufficient_correctness_evidence",
+        },
+        "stages/02_prepared_inputs/feedback_eligibility.jsonl": {
+            "record_id": "record-1",
+            "split": "validation",
+            "evidence_eligible": False,
+            "hold_reason": "insufficient_correctness_evidence",
+        },
+        "stages/07_synthetic_coverage/derived_review_items.jsonl": {
+            "review_item_id": "review-1",
+            "case_id": "case-1",
+            "fingerprint": "sha256:" + "2" * 64,
+            "status": "pending",
+        },
+        "stages/07_synthetic_coverage/duplicate_families.jsonl": {
+            "family_id": "family-1",
+            "member_case_ids": ["case-1", "case-2"],
+            "status": "held",
+            "hold_reason": "conflicting_expected_truth",
+        },
+        "stages/07_synthetic_coverage/held_derived_cases.jsonl": {
+            "case_id": "case-3",
+            "fingerprint": "sha256:" + "3" * 64,
+            "status": "held",
+            "hold_reason": "empty_rubric",
+        },
+        "reviews/decisions.jsonl": {
+            "decision_id": "decision-1",
+            "fingerprint": "sha256:" + "2" * 64,
+            "decision": "approved",
+            "reviewer": "REVIEWER-METADATA-CANARY",
+            "timestamp": "TIMESTAMP-METADATA-CANARY",
+        },
+        "reviews/finalizations.jsonl": {
+            "finalization_id": "finalization-1",
+            "review_set_fingerprint": "sha256:" + "4" * 64,
+            "status": "finalized",
+            "reviewer": "FINALIZER-METADATA-CANARY",
+            "timestamp": "FINALIZATION-TIME-CANARY",
+        },
+    }
+    canaries: list[str] = []
+    for index, (relative_path, safe_metadata) in enumerate(metadata_files.items()):
+        canary = f"METADATA-BODY-CANARY-{index}"
+        canaries.append(canary)
+        path = asset / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    **safe_metadata,
+                    "user_input": canary,
+                    "assistant_output": canary,
+                    "rationale": canary,
+                    "correction": canary,
+                    "criteria": [canary],
+                    "provider_payload": {"body": canary},
+                    "case": {"input": canary, "expected": canary},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    _write_json(
+        asset / "stages/08_dataset_splits/review_snapshot.json",
+        {
+            "finalization_id": "finalization-1",
+            "review_set_fingerprint": "sha256:" + "4" * 64,
+            "approved_fingerprints": ["sha256:" + "2" * 64],
+            "provider_payload": {"body": "REVIEW-SNAPSHOT-CANARY"},
+        },
+    )
+    canaries.append("REVIEW-SNAPSHOT-CANARY")
+    canaries.extend(
+        (
+            "REVIEWER-METADATA-CANARY",
+            "TIMESTAMP-METADATA-CANARY",
+            "FINALIZER-METADATA-CANARY",
+            "FINALIZATION-TIME-CANARY",
+        )
+    )
+
+    store = TenantStore(tmp_path, repository_base=tmp_path.parent)
+    details = [
+        store.get_evaluation_asset_stage("bootstrap_tenant", "v1", stage)
+        for stage in ("prepared_inputs", "synthetic_coverage", "dataset_splits")
+    ]
+
+    assert all(detail is not None for detail in details)
+    artifacts = {
+        artifact["name"]: artifact
+        for detail in details
+        if detail is not None
+        for artifact in detail["artifacts"]
+    }
+    assert set(metadata_files).issubset(
+        artifact["path"].split("evaluation_assets/v1/", 1)[-1]
+        for artifact in artifacts.values()
+    )
+    for name in (
+        "trusted_split_plan.jsonl",
+        "feedback_eligibility.jsonl",
+        "derived_review_items.jsonl",
+        "duplicate_families.jsonl",
+        "held_derived_cases.jsonl",
+        "decisions.jsonl",
+        "finalizations.jsonl",
+        "review_snapshot.json",
+    ):
+        assert artifacts[name]["preview_policy"] == "metadata_only"
+        assert artifacts[name]["preview"]
+    serialized = json.dumps(details)
+    for canary in canaries:
+        assert canary not in serialized
+    assert "record-1" in serialized
+    assert "review-1" in serialized
+    assert "decision-1" in serialized
+    assert "finalization-1" in serialized

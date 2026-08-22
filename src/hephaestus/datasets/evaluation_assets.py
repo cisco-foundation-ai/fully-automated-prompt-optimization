@@ -32,6 +32,30 @@ SCOREABLE_EXPECTED_KEYS = {
 }
 
 
+def has_scoreable_rubric(rubric: Mapping[str, Any]) -> bool:
+    """Return whether a rubric contains at least one usable scoring oracle."""
+    for criteria_field in ("must", "must_not", "should"):
+        criteria = rubric.get(criteria_field)
+        if isinstance(criteria, list) and any(
+            isinstance(criterion, str) and bool(criterion.strip())
+            for criterion in criteria
+        ):
+            return True
+
+    checks = rubric.get("deterministic_checks")
+    if isinstance(checks, list) and any(
+        isinstance(check, Mapping) and bool(check) for check in checks
+    ):
+        return True
+
+    reference_output = rubric.get("reference_output")
+    if isinstance(reference_output, str) and reference_output.strip():
+        return True
+
+    tool_expectations = rubric.get("tool_expectations")
+    return isinstance(tool_expectations, Mapping) and bool(tool_expectations)
+
+
 class EmbeddingProvider(Protocol):
     """Optional tenant adapter for production embedding backends."""
 
@@ -238,7 +262,7 @@ def filter_synthetic_cases(
     existing_cases: Optional[Sequence[Dict[str, Any]]] = None,
     duplicate_threshold: float = 0.95,
 ) -> SyntheticFilterResult:
-    """Filter synthetic candidates for validity, diversity, leakage, and solvability."""
+    """Apply schema, context, scoreability, literal, and token-overlap checks."""
     accepted: List[Dict[str, Any]] = []
     rejected: List[Dict[str, Any]] = []
     issues: List[SyntheticFilterIssue] = []
@@ -473,23 +497,16 @@ def _has_scoreable_expected(expected: Mapping[str, Any]) -> bool:
     if not SCOREABLE_EXPECTED_KEYS.intersection(expected):
         return False
     rubric = expected.get("rubric")
-    if isinstance(rubric, Mapping):
-        criteria = []
-        for key in ("must", "must_not", "should"):
-            value = rubric.get(key, [])
-            if isinstance(value, list):
-                criteria.extend(item for item in value if str(item).strip())
-        if criteria:
-            return True
-    for key in ("deterministic_checks",):
-        value = expected.get(key)
-        if isinstance(value, list) and value:
-            return True
+    scoreable_rubric = dict(rubric) if isinstance(rubric, Mapping) else {}
+    for key in ("deterministic_checks", "reference_output", "tool_expectations"):
+        if key in expected:
+            scoreable_rubric[key] = expected[key]
+    if has_scoreable_rubric(scoreable_rubric):
+        return True
     for key in ("answer", "expected_output", "label", "reference_output"):
         if _stringify(expected.get(key)):
             return True
-    tool_expectations = expected.get("tool_expectations")
-    return isinstance(tool_expectations, Mapping) and bool(tool_expectations)
+    return False
 
 
 def _case_fingerprint(case: Mapping[str, Any]) -> set[str]:

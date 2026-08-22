@@ -11,6 +11,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Mapping
 
 from src.hephaestus.evaluation_assets.control_jsonl import (
@@ -23,22 +24,54 @@ from src.hephaestus.evaluation_assets.journal_transitions import (
 from src.hephaestus.evaluation_assets.models import PipelineStage
 
 LINEAGE_SCHEMA_VERSION = "fapo-evaluation-asset-lineage-v1"
-REUSE_SCHEMA_VERSION = "fapo-evaluation-asset-reuse-v1"
-SNAPSHOT_SCHEMA_VERSION = "fapo-evaluation-asset-parent-snapshot-v1"
+_HISTORICAL_REUSE_SCHEMA_VERSION_V1 = "fapo-evaluation-asset-reuse-v1"
+_HISTORICAL_SNAPSHOT_SCHEMA_VERSION_V1 = (
+    "fapo-evaluation-asset-parent-snapshot-v1"
+)
+_HISTORICAL_REUSE_SCHEMA_VERSION_V2 = "fapo-evaluation-asset-reuse-v2"
+_HISTORICAL_SNAPSHOT_SCHEMA_VERSION_V2 = (
+    "fapo-evaluation-asset-parent-snapshot-v2"
+)
+REUSE_SCHEMA_VERSION = _HISTORICAL_REUSE_SCHEMA_VERSION_V2
+SNAPSHOT_SCHEMA_VERSION = _HISTORICAL_SNAPSHOT_SCHEMA_VERSION_V2
+APPEND_STAGE_THREE_EVIDENCE_OPERATION = (
+    "append_evidence_and_rebuild_guidelines"
+)
+REBUILD_STAGE_THREE_WITHOUT_PARENT_SEEDS_OPERATION = (
+    "rebuild_guidelines_without_parent_seeds"
+)
 
-NATIVE_STAGE_THREE_SEEDS = (
+_HISTORICAL_NATIVE_STAGE_THREE_SEEDS_V1 = (
     "feedback_evidence.jsonl",
     "candidate_guidelines.jsonl",
     "evaluation_guidelines.jsonl",
     "trusted_intents.jsonl",
     "trusted_cases.jsonl",
 )
-LEGACY_STAGE_THREE_SEEDS = (
+_HISTORICAL_NATIVE_STAGE_THREE_SEEDS_V2 = (
+    "feedback_evidence.jsonl",
+    "candidate_guidelines.jsonl",
+    "evaluation_guidelines.jsonl",
+    "trusted_intents.jsonl",
+    "trusted_cases.jsonl",
+    "protected_feedback_evidence.jsonl",
+    "protected_candidate_guidelines.jsonl",
+    "protected_evaluation_guidelines.jsonl",
+    "protected_trusted_cases.jsonl",
+)
+NATIVE_STAGE_THREE_SEEDS = _HISTORICAL_NATIVE_STAGE_THREE_SEEDS_V2
+_HISTORICAL_LEGACY_STAGE_THREE_SEEDS_V1 = (
     "feedback_rubrics.jsonl",
     "trusted_intents.jsonl",
     "trusted_cases.jsonl",
 )
-COMMON_PARENT_SNAPSHOT_FILES = (
+_HISTORICAL_LEGACY_STAGE_THREE_SEEDS_V2 = (
+    "feedback_rubrics.jsonl",
+    "trusted_intents.jsonl",
+    "trusted_cases.jsonl",
+)
+LEGACY_STAGE_THREE_SEEDS = _HISTORICAL_LEGACY_STAGE_THREE_SEEDS_V2
+_HISTORICAL_COMMON_PARENT_SNAPSHOT_FILES_V1 = (
     "parent_intent_inventory.jsonl",
     "parent_intent_matches.jsonl",
     "parent_inferred_cluster_rubrics.jsonl",
@@ -48,24 +81,113 @@ COMMON_PARENT_SNAPSHOT_FILES = (
     "parent_test.jsonl",
     "parent_regression_trusted.jsonl",
 )
-_STATIC_SNAPSHOT_INPUTS = {
-    "intent_clustering": ("parent_intent_inventory.jsonl",),
-    "coverage_decisions": ("parent_intent_matches.jsonl",),
-    "label_inference": (
-        "parent_intent_matches.jsonl",
-        "parent_inferred_cluster_rubrics.jsonl",
-    ),
-    "synthetic_coverage": (
-        "parent_intent_matches.jsonl",
-        "parent_synthetic_cases.jsonl",
-    ),
-    "dataset_splits": (
-        "parent_train.jsonl",
-        "parent_validation.jsonl",
-        "parent_test.jsonl",
-        "parent_regression_trusted.jsonl",
-    ),
-}
+_HISTORICAL_COMMON_PARENT_SNAPSHOT_FILES_V2 = (
+    "parent_intent_inventory.jsonl",
+    "parent_intent_matches.jsonl",
+    "parent_inferred_cluster_rubrics.jsonl",
+    "parent_synthetic_cases.jsonl",
+    "parent_train.jsonl",
+    "parent_validation.jsonl",
+    "parent_test.jsonl",
+    "parent_regression_trusted.jsonl",
+    "parent_trusted_split_plan.jsonl",
+    "parent_inferred_cases.jsonl",
+    "parent_inference_dependencies.jsonl",
+    "parent_held_inference_outputs.jsonl",
+    "parent_synthetic_dependencies.jsonl",
+    "parent_derived_review_items.jsonl",
+    "parent_duplicate_families.jsonl",
+    "parent_held_derived_cases.jsonl",
+    "parent_review_decisions.jsonl",
+    "parent_review_finalizations.jsonl",
+)
+COMMON_PARENT_SNAPSHOT_FILES = _HISTORICAL_COMMON_PARENT_SNAPSHOT_FILES_V2
+_HISTORICAL_STATIC_SNAPSHOT_INPUTS_V1 = MappingProxyType(
+    {
+        "intent_clustering": ("parent_intent_inventory.jsonl",),
+        "coverage_decisions": ("parent_intent_matches.jsonl",),
+        "label_inference": (
+            "parent_intent_matches.jsonl",
+            "parent_inferred_cluster_rubrics.jsonl",
+        ),
+        "synthetic_coverage": (
+            "parent_intent_matches.jsonl",
+            "parent_synthetic_cases.jsonl",
+        ),
+        "dataset_splits": (
+            "parent_train.jsonl",
+            "parent_validation.jsonl",
+            "parent_test.jsonl",
+            "parent_regression_trusted.jsonl",
+        ),
+    }
+)
+_PRE_V3_STATIC_SNAPSHOT_INPUTS = MappingProxyType(
+    {
+        "prepared_inputs": ("parent_trusted_split_plan.jsonl",),
+        **_HISTORICAL_STATIC_SNAPSHOT_INPUTS_V1,
+    }
+)
+_HISTORICAL_STATIC_SNAPSHOT_INPUTS_V2 = MappingProxyType(
+    {
+        "prepared_inputs": ("parent_trusted_split_plan.jsonl",),
+        "intent_clustering": ("parent_intent_inventory.jsonl",),
+        "coverage_decisions": ("parent_intent_matches.jsonl",),
+        "label_inference": (
+            "parent_intent_matches.jsonl",
+            "parent_inferred_cluster_rubrics.jsonl",
+            "parent_inferred_cases.jsonl",
+            "parent_inference_dependencies.jsonl",
+            "parent_held_inference_outputs.jsonl",
+        ),
+        "synthetic_coverage": (
+            "parent_intent_matches.jsonl",
+            "parent_synthetic_cases.jsonl",
+            "parent_synthetic_dependencies.jsonl",
+            "parent_derived_review_items.jsonl",
+            "parent_duplicate_families.jsonl",
+            "parent_held_derived_cases.jsonl",
+        ),
+        "dataset_splits": (
+            "parent_train.jsonl",
+            "parent_validation.jsonl",
+            "parent_test.jsonl",
+            "parent_regression_trusted.jsonl",
+            "parent_review_decisions.jsonl",
+            "parent_review_finalizations.jsonl",
+        ),
+    }
+)
+_STATIC_SNAPSHOT_INPUTS = MappingProxyType(
+    {
+        "prepared_inputs": ("parent_trusted_split_plan.jsonl",),
+        "intent_clustering": ("parent_intent_inventory.jsonl",),
+        "coverage_decisions": ("parent_intent_matches.jsonl",),
+        "label_inference": (
+            "parent_intent_matches.jsonl",
+            "parent_inferred_cluster_rubrics.jsonl",
+            "parent_inferred_cases.jsonl",
+            "parent_inference_dependencies.jsonl",
+            "parent_held_inference_outputs.jsonl",
+        ),
+        "synthetic_coverage": (
+            "parent_intent_matches.jsonl",
+            "parent_synthetic_cases.jsonl",
+            "parent_synthetic_dependencies.jsonl",
+            "parent_derived_review_items.jsonl",
+            "parent_duplicate_families.jsonl",
+            "parent_held_derived_cases.jsonl",
+        ),
+        "dataset_splits": (
+            "parent_train.jsonl",
+            "parent_validation.jsonl",
+            "parent_test.jsonl",
+            "parent_regression_trusted.jsonl",
+            "parent_review_decisions.jsonl",
+            "parent_review_finalizations.jsonl",
+        ),
+    }
+)
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 _GENERATION_ID = re.compile(r"^sha256-[0-9a-f]{64}$")
 _PARENT_RELEASE_FIELDS = {
@@ -81,12 +203,90 @@ _PARENT_RELEASE_FIELDS = {
 
 
 @dataclass(frozen=True)
+class ExtensionPersistenceProfile:
+    """Frozen extension inventories selected by the persisted reuse schema."""
+
+    reuse_schema_version: str
+    snapshot_schema_version: str
+    native_stage_three_seeds: tuple[str, ...]
+    legacy_stage_three_seeds: tuple[str, ...]
+    stage_three_operation: str
+    common_parent_snapshot_files: tuple[str, ...]
+    static_snapshot_inputs: Mapping[str, tuple[str, ...]]
+
+
+_historical_extension_persistence_profiles = {
+    _HISTORICAL_REUSE_SCHEMA_VERSION_V1: ExtensionPersistenceProfile(
+        reuse_schema_version=_HISTORICAL_REUSE_SCHEMA_VERSION_V1,
+        snapshot_schema_version=_HISTORICAL_SNAPSHOT_SCHEMA_VERSION_V1,
+        native_stage_three_seeds=_HISTORICAL_NATIVE_STAGE_THREE_SEEDS_V1,
+        legacy_stage_three_seeds=_HISTORICAL_LEGACY_STAGE_THREE_SEEDS_V1,
+        stage_three_operation=APPEND_STAGE_THREE_EVIDENCE_OPERATION,
+        common_parent_snapshot_files=(
+            _HISTORICAL_COMMON_PARENT_SNAPSHOT_FILES_V1
+        ),
+        static_snapshot_inputs=_HISTORICAL_STATIC_SNAPSHOT_INPUTS_V1,
+    ),
+    _HISTORICAL_REUSE_SCHEMA_VERSION_V2: ExtensionPersistenceProfile(
+        reuse_schema_version=_HISTORICAL_REUSE_SCHEMA_VERSION_V2,
+        snapshot_schema_version=_HISTORICAL_SNAPSHOT_SCHEMA_VERSION_V2,
+        native_stage_three_seeds=_HISTORICAL_NATIVE_STAGE_THREE_SEEDS_V2,
+        legacy_stage_three_seeds=_HISTORICAL_LEGACY_STAGE_THREE_SEEDS_V2,
+        stage_three_operation=APPEND_STAGE_THREE_EVIDENCE_OPERATION,
+        common_parent_snapshot_files=(
+            _HISTORICAL_COMMON_PARENT_SNAPSHOT_FILES_V2
+        ),
+        static_snapshot_inputs=_HISTORICAL_STATIC_SNAPSHOT_INPUTS_V2,
+    ),
+}
+if REUSE_SCHEMA_VERSION not in _historical_extension_persistence_profiles:
+    _historical_extension_persistence_profiles[REUSE_SCHEMA_VERSION] = (
+        ExtensionPersistenceProfile(
+            reuse_schema_version=REUSE_SCHEMA_VERSION,
+            snapshot_schema_version=SNAPSHOT_SCHEMA_VERSION,
+            native_stage_three_seeds=NATIVE_STAGE_THREE_SEEDS,
+            legacy_stage_three_seeds=LEGACY_STAGE_THREE_SEEDS,
+            stage_three_operation=APPEND_STAGE_THREE_EVIDENCE_OPERATION,
+            common_parent_snapshot_files=COMMON_PARENT_SNAPSHOT_FILES,
+            static_snapshot_inputs=_STATIC_SNAPSHOT_INPUTS,
+        )
+    )
+_EXTENSION_PERSISTENCE_PROFILES = MappingProxyType(
+    dict(_historical_extension_persistence_profiles)
+)
+
+_PRE_V3_EXTENSION_PERSISTENCE_PROFILE = ExtensionPersistenceProfile(
+    reuse_schema_version=REUSE_SCHEMA_VERSION,
+    snapshot_schema_version=SNAPSHOT_SCHEMA_VERSION,
+    native_stage_three_seeds=(),
+    legacy_stage_three_seeds=(),
+    stage_three_operation=REBUILD_STAGE_THREE_WITHOUT_PARENT_SEEDS_OPERATION,
+    common_parent_snapshot_files=(
+        *_HISTORICAL_COMMON_PARENT_SNAPSHOT_FILES_V1,
+        "parent_trusted_split_plan.jsonl",
+    ),
+    static_snapshot_inputs=_PRE_V3_STATIC_SNAPSHOT_INPUTS,
+)
+
+
+def extension_persistence_profile(
+    reuse_schema_version: Any,
+) -> ExtensionPersistenceProfile:
+    """Return the immutable snapshot profile named by persisted reuse evidence."""
+    try:
+        return _EXTENSION_PERSISTENCE_PROFILES[str(reuse_schema_version)]
+    except (KeyError, TypeError) as exc:
+        raise ValueError("reuse schema is unsupported") from exc
+
+
+@dataclass(frozen=True)
 class ExtensionEvidence:
     """Validated extension metadata and its exact snapshot inventory."""
 
     lineage: dict[str, Any]
     reuse: dict[str, Any]
     stage_three_seeds: tuple[str, ...]
+    persistence_profile: ExtensionPersistenceProfile
 
 
 def validate_parent_release_evidence(value: Any) -> dict[str, str]:
@@ -152,6 +352,11 @@ def validate_extension_evidence(
     """Validate complete lineage/reuse schemas and all self-contained snapshots."""
     lineage = _json_object(layout, layout.lineage_path, artifact_overrides)
     reuse = _json_object(layout, layout.reuse_manifest_path, artifact_overrides)
+    persisted_profile = extension_persistence_profile(reuse.get("schema_version"))
+    if not historical and persisted_profile.reuse_schema_version != (
+        REUSE_SCHEMA_VERSION
+    ):
+        raise ValueError("reuse schema is unsupported")
     _exact_keys(
         lineage,
         {
@@ -212,7 +417,7 @@ def validate_extension_evidence(
         },
     )
     if (
-        reuse["schema_version"] != REUSE_SCHEMA_VERSION
+        reuse["schema_version"] != persisted_profile.reuse_schema_version
         or reuse["asset_id"] != layout.asset_id
         or reuse["parent_asset_id"] != lineage["parent_asset_id"]
         or _parent_release(reuse["parent_release"]) != parent_release
@@ -221,12 +426,22 @@ def validate_extension_evidence(
 
     seeded = _mapping(reuse["seeded_incremental_stage"])
     _exact_keys(seeded, {"stage", "artifacts", "operation"})
+    persistence_profile = (
+        _PRE_V3_EXTENSION_PERSISTENCE_PROFILE
+        if persisted_profile.reuse_schema_version == REUSE_SCHEMA_VERSION
+        and seeded.get("operation")
+        == REBUILD_STAGE_THREE_WITHOUT_PARENT_SEEDS_OPERATION
+        else persisted_profile
+    )
     stage_three_seeds = tuple(_identifier_list(seeded["artifacts"]))
     if (
         seeded["stage"] != "rubric_extraction"
-        or seeded["operation"] != "append_evidence_and_rebuild_guidelines"
+        or seeded["operation"] != persistence_profile.stage_three_operation
         or stage_three_seeds
-        not in {NATIVE_STAGE_THREE_SEEDS, LEGACY_STAGE_THREE_SEEDS}
+        not in {
+            persistence_profile.native_stage_three_seeds,
+            persistence_profile.legacy_stage_three_seeds,
+        }
     ):
         raise ValueError("seeded incremental stage is invalid")
 
@@ -257,14 +472,14 @@ def validate_extension_evidence(
     snapshot = _mapping(reuse["parent_snapshot"])
     _exact_keys(snapshot, {"schema_version", "path", "artifacts"})
     if (
-        snapshot["schema_version"] != SNAPSHOT_SCHEMA_VERSION
+        snapshot["schema_version"] != persistence_profile.snapshot_schema_version
         or snapshot["path"] != snapshot_root.relative_to(layout.root).as_posix()
         or not isinstance(snapshot["artifacts"], list)
     ):
         raise ValueError("parent snapshot descriptor is invalid")
     expected_names = {
         *(f"parent_{name}" for name in stage_three_seeds),
-        *COMMON_PARENT_SNAPSHOT_FILES,
+        *persistence_profile.common_parent_snapshot_files,
     }
     recorded_names: set[str] = set()
     for raw in snapshot["artifacts"]:
@@ -305,6 +520,7 @@ def validate_extension_evidence(
         lineage=lineage,
         reuse=reuse,
         stage_three_seeds=stage_three_seeds,
+        persistence_profile=persistence_profile,
     )
 
 
@@ -335,18 +551,16 @@ def extension_receipt_input_paths(
         artifact_overrides=artifact_overrides,
     )
     stage_value = stage.value
-    ordered = (
-        PERSISTED_STAGE_VALUES_V2
-        if historical
-        else tuple(item.value for item in PipelineStage)
-    )
-    if stage_value not in ordered[2:]:
-        return ()
-    snapshot_names = (
-        tuple(f"parent_{name}" for name in evidence.stage_three_seeds)
-        if stage_value == "rubric_extraction"
-        else _STATIC_SNAPSHOT_INPUTS.get(stage_value, ())
-    )
+    if stage_value == "rubric_extraction":
+        snapshot_names = tuple(
+            f"parent_{name}" for name in evidence.stage_three_seeds
+        )
+    else:
+        snapshot_names = evidence.persistence_profile.static_snapshot_inputs.get(
+            stage_value
+        )
+        if snapshot_names is None:
+            return ()
     return (
         layout.lineage_path,
         layout.reuse_manifest_path,

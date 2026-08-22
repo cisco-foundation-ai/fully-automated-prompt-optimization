@@ -22,8 +22,8 @@ from src.hephaestus.evaluation_assets.control_jsonl import (
     resolve_local_authority_file,
 )
 from src.hephaestus.evaluation_assets.journal_transitions import (
-    JOURNAL_SCHEMA_VERSION,
-    PERSISTED_CONFIG_STAGE_DEPENDENCIES_V2,
+    HISTORICAL_JOURNAL_SCHEMA_VERSION_V2,
+    HISTORICAL_JOURNAL_SCHEMA_VERSION_V3,
     PERSISTED_STAGE_VALUES_V2,
     append_jsonl_bytes,
     audit_descriptor,
@@ -31,10 +31,10 @@ from src.hephaestus.evaluation_assets.journal_transitions import (
     derive_rebuild_plan,
     derive_release_publication_plan,
     derive_revision_plan,
+    journal_transition_profile,
     normalized_legacy_completed_state_v1,
 )
 from src.hephaestus.evaluation_assets.models import (
-    CONFIG_STAGE_DEPENDENCIES,
     STAGE_COUNT_KEYS,
     STAGE_LABELS,
     STATE_SCHEMA_VERSION,
@@ -283,14 +283,15 @@ def _validate_recovery_journal(
     entries: Sequence[Mapping[str, Any]],
 ) -> ValidatedRecoveryJournal:
     """Validate the complete log and every uncommitted intermediate state."""
+    _validate_journal_schema_sequence(entries)
     prepared: dict[str, dict[str, Any]] = {}
     committed: dict[str, dict[str, Any]] = {}
     seen_operations: set[str] = set()
-    active: tuple[str, str] | None = None
+    active: tuple[str, str, str] | None = None
     for raw in entries:
         row = _mapping(raw)
-        if row.get("schema_version") != JOURNAL_SCHEMA_VERSION:
-            raise ValueError("journal schema is unsupported")
+        schema_version = str(row.get("schema_version"))
+        journal_transition_profile(schema_version)
         operation_id = row.get("operation_id")
         phase = row.get("phase")
         kind = row.get("kind")
@@ -307,10 +308,10 @@ def _validate_recovery_journal(
             _exact_keys(row, _PREPARED_FIELDS[str(kind)])
             _utc_timestamp(row.get("prepared_at"))
             seen_operations.add(operation_id)
-            active = (operation_id, str(kind))
+            active = (operation_id, str(kind), schema_version)
             prepared[operation_id] = row
         else:
-            if active != (operation_id, str(kind)):
+            if active != (operation_id, str(kind), schema_version):
                 raise ValueError("journal commit is not contiguous with its prepare")
             _exact_keys(row, _COMMITTED_FIELDS)
             committed_at = _utc_timestamp(row.get("committed_at"))
@@ -335,6 +336,7 @@ def _validate_recovery_journal(
             uncommitted=operation_id in outstanding,
             final_operation=index == len(prepared_rows) - 1,
             historical_profile=historical_profile,
+            journal_schema_version=str(row["schema_version"]),
         )
         if index:
             previous = prepared_rows[index - 1]
@@ -355,6 +357,38 @@ def _validate_recovery_journal(
         committed_operation_ids=frozenset(committed),
         outstanding=outstanding_row,
     )
+
+
+def _validate_journal_schema_sequence(
+    entries: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    """Require exact operation pairs and a monotonic v2-to-v3 upgrade."""
+    rank = {
+        HISTORICAL_JOURNAL_SCHEMA_VERSION_V2: 2,
+        HISTORICAL_JOURNAL_SCHEMA_VERSION_V3: 3,
+    }
+    highest = 0
+    active: tuple[str, str] | None = None
+    operation_schemas: list[str] = []
+    for raw in entries:
+        row = _mapping(raw)
+        schema_version = row.get("schema_version")
+        journal_transition_profile(schema_version)
+        schema = str(schema_version)
+        operation_id = row.get("operation_id")
+        phase = row.get("phase")
+        if phase == "prepared":
+            if rank[schema] < highest:
+                raise ValueError("journal schema sequence is not monotonic")
+            highest = rank[schema]
+            active = (str(operation_id), schema)
+            operation_schemas.append(schema)
+        elif phase == "committed" and active is not None:
+            if active[0] == str(operation_id) and active[1] != schema:
+                raise ValueError("journal prepare and commit schemas differ")
+            if active == (str(operation_id), schema):
+                active = None
+    return tuple(operation_schemas)
 
 
 def _frozen_journal_endpoint(layout: Any) -> bool:
@@ -398,6 +432,7 @@ def _validate_prepared(
     uncommitted: bool,
     final_operation: bool,
     historical_profile: bool,
+    journal_schema_version: str,
 ) -> None:
     operation_id = str(row["operation_id"])
     kind = str(row["kind"])
@@ -500,7 +535,7 @@ def _validate_prepared(
             operation_id=operation_id,
             prepared_at=str(row["prepared_at"]),
             revision=revision,
-            historical_profile=historical_profile,
+            journal_schema_version=journal_schema_version,
         )
         _require_exact_plan(row, plan)
         _validate_revision(
@@ -511,6 +546,7 @@ def _validate_prepared(
             before,
             operation_id,
             historical_profile=historical_profile,
+            journal_schema_version=journal_schema_version,
         )
     else:
         if target["config_sha256"] != before["config_sha256"]:
@@ -520,11 +556,9 @@ def _validate_prepared(
             _exact_keys(request, {"boundary"})
             try:
                 boundary = str(request["boundary"])
-                if historical_profile:
-                    if boundary not in PERSISTED_STAGE_VALUES_V2:
-                        raise ValueError
-                else:
-                    boundary = PipelineStage(boundary)
+                profile = journal_transition_profile(journal_schema_version)
+                if boundary not in profile.stage_values:
+                    raise ValueError
             except (TypeError, ValueError) as exc:
                 raise ValueError("checkpoint boundary request is invalid") from exc
             plan = derive_rebuild_plan(
@@ -533,7 +567,7 @@ def _validate_prepared(
                 boundary,
                 operation_id=operation_id,
                 prepared_at=str(row["prepared_at"]),
-                historical_profile=historical_profile,
+                journal_schema_version=journal_schema_version,
             )
             _require_exact_plan(row, plan)
             _validate_rebuild(
@@ -541,6 +575,7 @@ def _validate_prepared(
                 state,
                 operation_id,
                 historical_profile=historical_profile,
+                journal_schema_version=journal_schema_version,
             )
         elif kind == "legacy_adoption":
             request = _mapping(row["request"])
@@ -576,6 +611,7 @@ def _validate_prepared(
                 pointer,
                 operation_id=operation_id,
                 prepared_at=str(row["prepared_at"]),
+                journal_schema_version=journal_schema_version,
             )
             _require_exact_plan(row, plan)
             _validate_release_publication(
@@ -698,6 +734,7 @@ def _validate_revision(
     operation_id: str,
     *,
     historical_profile: bool,
+    journal_schema_version: str,
 ) -> None:
     invalidated = _stage_suffix(
         row["invalidated_stages"],
@@ -729,14 +766,8 @@ def _validate_revision(
     changed_fields = _mapping(result.get("changed_fields"))
     if history.get("changed_fields") != changed_fields or not changed_fields:
         raise ValueError("configuration revision changes are inconsistent")
-    dependencies = (
-        PERSISTED_CONFIG_STAGE_DEPENDENCIES_V2
-        if historical_profile
-        else {
-            name: stage.value
-            for name, stage in CONFIG_STAGE_DEPENDENCIES.items()
-        }
-    )
+    transition_profile = journal_transition_profile(journal_schema_version)
+    dependencies = transition_profile.config_stage_dependencies
     before_config = dict(target_config)
     for field, raw_change in changed_fields.items():
         if field not in dependencies:
@@ -752,11 +783,7 @@ def _validate_revision(
     EvaluationAssetConfig.from_dict(before_config)
     if _persisted_sha256(before_config) != before["config_sha256"]:
         raise ValueError("configuration revision prior config is inconsistent")
-    ordered = (
-        PERSISTED_STAGE_VALUES_V2
-        if historical_profile
-        else tuple(stage.value for stage in PipelineStage)
-    )
+    ordered = transition_profile.stage_values
     earliest = min(
         (dependencies[field] for field in changed_fields),
         key=ordered.index,
@@ -792,8 +819,10 @@ def _validate_rebuild(
     operation_id: str,
     *,
     historical_profile: bool,
+    journal_schema_version: str,
 ) -> None:
     del operation_id
+    journal_transition_profile(journal_schema_version)
     invalidated = _stage_suffix(
         row["invalidated_stages"],
         historical=historical_profile,

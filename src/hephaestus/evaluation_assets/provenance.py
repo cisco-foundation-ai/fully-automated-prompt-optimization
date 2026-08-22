@@ -41,6 +41,7 @@ SOURCE_FIXED_MEMBERS = (
     "src/hephaestus/datasets/rubric_providers.py",
     "src/hephaestus/evaluation_assets/__init__.py",
     "src/hephaestus/evaluation_assets/control_jsonl.py",
+    "src/hephaestus/evaluation_assets/dependencies.py",
     "src/hephaestus/evaluation_assets/durability.py",
     "src/hephaestus/evaluation_assets/input_contract.py",
     "src/hephaestus/evaluation_assets/journal_transitions.py",
@@ -51,8 +52,11 @@ SOURCE_FIXED_MEMBERS = (
     "src/hephaestus/evaluation_assets/pipeline.py",
     "src/hephaestus/evaluation_assets/provenance.py",
     "src/hephaestus/evaluation_assets/publication.py",
+    "src/hephaestus/evaluation_assets/review.py",
     "src/hephaestus/evaluation_assets/service.py",
+    "src/hephaestus/evaluation_assets/split_isolation.py",
     "src/hephaestus/evaluation_assets/stage_three_contract.py",
+    "src/hephaestus/evaluation_assets/trust_tiers.py",
     "src/hephaestus/evaluation_assets/workspace.py",
 )
 
@@ -80,9 +84,9 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GENERATION_ID = re.compile(r"^sha256-[0-9a-f]{64}$")
 
 PROVIDER_CALL_SCHEMA_VERSION = "fapo-provider-call-v2"
-STAGE_PROVENANCE_SCHEMA_VERSION = "fapo-stage-provenance-v2"
-BUILD_PROVENANCE_SCHEMA_VERSION = "fapo-evaluation-build-provenance-v2"
-BUILD_IDENTITY_SCHEMA_VERSION = "fapo-evaluation-build-identity-v2"
+STAGE_PROVENANCE_SCHEMA_VERSION = "fapo-stage-provenance-v3"
+BUILD_PROVENANCE_SCHEMA_VERSION = "fapo-evaluation-build-provenance-v3"
+BUILD_IDENTITY_SCHEMA_VERSION = "fapo-evaluation-build-identity-v3"
 PROVIDER_STAGE_ROLES = {
     "raw_inputs": (),
     "prepared_inputs": (),
@@ -122,6 +126,10 @@ HISTORICAL_PROVENANCE_PROFILE_V2 = "fapo-historical-provenance-profile-v2"
 HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2 = (
     "fapo-historical-legacy-provenance-profile-v2"
 )
+HISTORICAL_PROVENANCE_PROFILE_V3 = "fapo-historical-provenance-profile-v3"
+HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3 = (
+    "fapo-historical-legacy-provenance-profile-v3"
+)
 _HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V1 = "fapo-provider-call-v1"
 _HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V1 = "fapo-stage-provenance-v1"
 _HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V1 = (
@@ -134,6 +142,12 @@ _HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V2 = (
     "fapo-evaluation-build-provenance-v2"
 )
 _HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V2 = "fapo-evaluation-build-identity-v2"
+_HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V3 = "fapo-provider-call-v2"
+_HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V3 = "fapo-stage-provenance-v3"
+_HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V3 = (
+    "fapo-evaluation-build-provenance-v3"
+)
+_HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V3 = "fapo-evaluation-build-identity-v3"
 _HISTORICAL_SOURCE_FIXED_MEMBERS_V1 = (
     "pyproject.toml",
     "src/__init__.py",
@@ -160,6 +174,37 @@ _HISTORICAL_SOURCE_FIXED_MEMBERS_V1 = (
     "src/hephaestus/evaluation_assets/stage_three_contract.py",
     "src/hephaestus/evaluation_assets/workspace.py",
 )
+_HISTORICAL_SOURCE_FIXED_MEMBERS_V2 = _HISTORICAL_SOURCE_FIXED_MEMBERS_V1
+_HISTORICAL_SOURCE_FIXED_MEMBERS_V3 = (
+    "pyproject.toml",
+    "src/__init__.py",
+    "src/hephaestus/__init__.py",
+    "src/hephaestus/artifact_io.py",
+    "src/hephaestus/datasets/__init__.py",
+    "src/hephaestus/datasets/embedding_providers.py",
+    "src/hephaestus/datasets/evaluation_assets.py",
+    "src/hephaestus/datasets/intent_assets.py",
+    "src/hephaestus/datasets/rubric_providers.py",
+    "src/hephaestus/evaluation_assets/__init__.py",
+    "src/hephaestus/evaluation_assets/control_jsonl.py",
+    "src/hephaestus/evaluation_assets/dependencies.py",
+    "src/hephaestus/evaluation_assets/durability.py",
+    "src/hephaestus/evaluation_assets/input_contract.py",
+    "src/hephaestus/evaluation_assets/journal_transitions.py",
+    "src/hephaestus/evaluation_assets/journal_validation.py",
+    "src/hephaestus/evaluation_assets/legacy_validation.py",
+    "src/hephaestus/evaluation_assets/lineage_validation.py",
+    "src/hephaestus/evaluation_assets/models.py",
+    "src/hephaestus/evaluation_assets/pipeline.py",
+    "src/hephaestus/evaluation_assets/provenance.py",
+    "src/hephaestus/evaluation_assets/publication.py",
+    "src/hephaestus/evaluation_assets/review.py",
+    "src/hephaestus/evaluation_assets/service.py",
+    "src/hephaestus/evaluation_assets/split_isolation.py",
+    "src/hephaestus/evaluation_assets/stage_three_contract.py",
+    "src/hephaestus/evaluation_assets/trust_tiers.py",
+    "src/hephaestus/evaluation_assets/workspace.py",
+)
 _HISTORICAL_PROVIDER_STAGE_ROLES_V1 = (
     ("raw_inputs", ()),
     ("prepared_inputs", ()),
@@ -181,6 +226,35 @@ _HISTORICAL_STAGE_PROMPT_NAMES_V1 = (
     ("dataset_splits", ()),
 )
 _HISTORICAL_PROMPT_REVISIONS_V1 = (
+    ("evidence_extraction", "v1"),
+    ("guideline_synthesis", "v1"),
+    ("label_inference", "v1"),
+    ("synthetic_coverage", "v1"),
+)
+_HISTORICAL_PROVIDER_STAGE_ROLES_V2 = _HISTORICAL_PROVIDER_STAGE_ROLES_V1
+_HISTORICAL_PROVIDER_STAGE_ROLES_V3 = (
+    ("raw_inputs", ()),
+    ("prepared_inputs", ()),
+    ("rubric_extraction", ("rubric",)),
+    ("intent_clustering", ("embedding",)),
+    ("coverage_decisions", ("embedding",)),
+    ("label_inference", ("rubric",)),
+    ("synthetic_coverage", ("rubric",)),
+    ("dataset_splits", ()),
+)
+_HISTORICAL_STAGE_PROMPT_NAMES_V2 = _HISTORICAL_STAGE_PROMPT_NAMES_V1
+_HISTORICAL_STAGE_PROMPT_NAMES_V3 = (
+    ("raw_inputs", ()),
+    ("prepared_inputs", ()),
+    ("rubric_extraction", ("evidence_extraction", "guideline_synthesis")),
+    ("intent_clustering", ()),
+    ("coverage_decisions", ()),
+    ("label_inference", ("label_inference",)),
+    ("synthetic_coverage", ("synthetic_coverage",)),
+    ("dataset_splits", ()),
+)
+_HISTORICAL_PROMPT_REVISIONS_V2 = _HISTORICAL_PROMPT_REVISIONS_V1
+_HISTORICAL_PROMPT_REVISIONS_V3 = (
     ("evidence_extraction", "v1"),
     ("guideline_synthesis", "v1"),
     ("label_inference", "v1"),
@@ -213,6 +287,11 @@ def historical_stage_provenance_profile(payload: Mapping[str, Any]) -> str:
         == _HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V2
     ):
         return HISTORICAL_PROVENANCE_PROFILE_V2
+    if (
+        payload.get("schema_version")
+        == _HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V3
+    ):
+        return HISTORICAL_PROVENANCE_PROFILE_V3
     raise ValueError("historical stage provenance schema is unsupported")
 
 
@@ -221,11 +300,11 @@ def historical_legacy_stage_provenance_profile(
 ) -> str:
     """Select the immutable legacy profile from a persisted stage schema."""
     profile = historical_stage_provenance_profile(payload)
-    return (
-        HISTORICAL_LEGACY_PROVENANCE_PROFILE_V1
-        if profile == HISTORICAL_PROVENANCE_PROFILE_V1
-        else HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2
-    )
+    if profile == HISTORICAL_PROVENANCE_PROFILE_V1:
+        return HISTORICAL_LEGACY_PROVENANCE_PROFILE_V1
+    if profile == HISTORICAL_PROVENANCE_PROFILE_V2:
+        return HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2
+    return HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3
 
 
 def historical_build_provenance_profile(payload: Mapping[str, Any]) -> str:
@@ -247,19 +326,98 @@ def historical_build_provenance_profile(payload: Mapping[str, Any]) -> str:
         == _HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V2
     ):
         return HISTORICAL_PROVENANCE_PROFILE_V2
+    if (
+        payload.get("schema_version")
+        == _HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V3
+        and isinstance(identity, Mapping)
+        and identity.get("schema_version")
+        == _HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V3
+    ):
+        return HISTORICAL_PROVENANCE_PROFILE_V3
     raise ValueError("historical build provenance schema is unsupported")
 
 
 def historical_provider_call_stages(profile: str) -> tuple[str, ...]:
     """Return provider-backed stages declared by an immutable profile."""
-    if profile not in {
-        HISTORICAL_PROVENANCE_PROFILE_V1,
-        HISTORICAL_PROVENANCE_PROFILE_V2,
-    }:
+    if profile == HISTORICAL_PROVENANCE_PROFILE_V1:
+        rows = _HISTORICAL_PROVIDER_STAGE_ROLES_V1
+    elif profile == HISTORICAL_PROVENANCE_PROFILE_V2:
+        rows = _HISTORICAL_PROVIDER_STAGE_ROLES_V2
+    elif profile == HISTORICAL_PROVENANCE_PROFILE_V3:
+        rows = _HISTORICAL_PROVIDER_STAGE_ROLES_V3
+    else:
         raise ValueError("historical provider-call profile is unsupported")
-    return tuple(
-        stage for stage, roles in _HISTORICAL_PROVIDER_STAGE_ROLES_V1 if roles
-    )
+    return tuple(stage for stage, roles in rows if roles)
+
+
+def _provenance_profile_generation(profile: str) -> int:
+    """Return the registry generation selected by one validation profile."""
+    if profile in {
+        HISTORICAL_PROVENANCE_PROFILE_V1,
+        HISTORICAL_LEGACY_PROVENANCE_PROFILE_V1,
+    }:
+        return 1
+    if profile in {
+        HISTORICAL_PROVENANCE_PROFILE_V2,
+        HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2,
+    }:
+        return 2
+    if profile in {
+        "current",
+        "native",
+        "legacy",
+        HISTORICAL_PROVENANCE_PROFILE_V3,
+        HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3,
+    }:
+        return 3
+    raise ValueError("provenance validation profile is unsupported")
+
+
+def _profile_provider_stage_roles(profile: str) -> dict[str, tuple[str, ...]]:
+    if profile in {"current", "native", "legacy"}:
+        return dict(PROVIDER_STAGE_ROLES)
+    generation = _provenance_profile_generation(profile)
+    rows = {
+        1: _HISTORICAL_PROVIDER_STAGE_ROLES_V1,
+        2: _HISTORICAL_PROVIDER_STAGE_ROLES_V2,
+        3: _HISTORICAL_PROVIDER_STAGE_ROLES_V3,
+    }[generation]
+    return dict(rows)
+
+
+def _profile_stage_prompt_names(profile: str) -> dict[str, tuple[str, ...]]:
+    if profile in {"current", "native", "legacy"}:
+        return dict(STAGE_PROMPT_NAMES)
+    generation = _provenance_profile_generation(profile)
+    rows = {
+        1: _HISTORICAL_STAGE_PROMPT_NAMES_V1,
+        2: _HISTORICAL_STAGE_PROMPT_NAMES_V2,
+        3: _HISTORICAL_STAGE_PROMPT_NAMES_V3,
+    }[generation]
+    return dict(rows)
+
+
+def _profile_prompt_revisions(profile: str) -> dict[str, str]:
+    if profile in {"current", "native", "legacy"}:
+        return dict(PROMPT_REVISIONS)
+    generation = _provenance_profile_generation(profile)
+    rows = {
+        1: _HISTORICAL_PROMPT_REVISIONS_V1,
+        2: _HISTORICAL_PROMPT_REVISIONS_V2,
+        3: _HISTORICAL_PROMPT_REVISIONS_V3,
+    }[generation]
+    return dict(rows)
+
+
+def _profile_source_fixed_members(profile: str) -> tuple[str, ...]:
+    if profile in {"current", "native", "legacy"}:
+        return SOURCE_FIXED_MEMBERS
+    generation = _provenance_profile_generation(profile)
+    return {
+        1: _HISTORICAL_SOURCE_FIXED_MEMBERS_V1,
+        2: _HISTORICAL_SOURCE_FIXED_MEMBERS_V2,
+        3: _HISTORICAL_SOURCE_FIXED_MEMBERS_V3,
+    }[generation]
 
 
 def unavailable(reason: str) -> dict[str, str]:
@@ -629,16 +787,28 @@ def validate_provider_binding(
     return normalized
 
 
-def build_algorithm_inventory(
+def _algorithm_inventory_v3(
     config: Mapping[str, Any],
     *,
     extension: bool,
 ) -> dict[str, Any]:
-    """Return the exact generation-affecting algorithm inventory."""
+    """Return the frozen algorithm body introduced by provenance v3."""
     return {
         "raw_inputs": "fapo-evaluation-input-v1",
-        "prepared_inputs": "fapo-evaluation-canonical-preparation-v1",
-        "rubric_extraction": "fapo-evaluation-guideline-v1",
+        "prepared_inputs": {
+            "algorithm": "fapo-evaluation-canonical-preparation-v1",
+            "trusted_split_assignment": (
+                "connected-model-context-stable-hash-v1"
+            ),
+            "correctness_evidence_eligibility": (
+                "deterministic-explicit-correctness-evidence-v1"
+            ),
+        },
+        "rubric_extraction": {
+            "algorithm": "fapo-evaluation-guideline-v1",
+            "reusable_scope": "eligible_train_only",
+            "protected_scope": "split_group_group_route_local",
+        },
         "intent_clustering": {
             "algorithm": "deterministic-cosine-fixed-count-v1",
             "embedding": (
@@ -652,21 +822,81 @@ def build_algorithm_inventory(
         "coverage_decisions": {
             "algorithm": "route-constrained-cosine-v1",
             "labeling_queue": "deterministic-centroid-nearest-v1",
+            "queue_acquisition": {
+                "purpose": "correctness_label_acquisition",
+                "method": "deterministic_centroid_nearest",
+                "sampling_semantics": "non_probability",
+            },
             "sample_ratio": 0.1,
             "minimum_per_cluster": 1,
             "maximum_per_cluster": 3,
         },
-        "label_inference": "trusted-guideline-inference-v1",
-        "synthetic_coverage": "fapo-synthetic-filter-v1",
+        "label_inference": {
+            "algorithm": "trusted-guideline-inference-v1",
+            "dependency": "stage-six-dependency-v1",
+            "scoreability": "scoreable-rubric-or-hold-v1",
+            "extension_reuse": (
+                {"authorization": "exact-stage-six-dependency-match-v1"}
+                if extension
+                else {
+                    "status": "not_applicable",
+                    "reason": "native_asset_has_no_parent",
+                }
+            ),
+        },
+        "synthetic_coverage": {
+            "algorithm": "fapo-synthetic-filter-v1",
+            "dependency": "stage-seven-dependency-v1",
+            "scoreability": "scoreable-case-or-hold-v1",
+            "review_binding": (
+                "complete-case-dependency-provenance-review-fingerprint-v1"
+            ),
+            "duplicate_families": (
+                "exact-model-context-connected-family-v1"
+            ),
+            "decision_reuse": (
+                "exact-fingerprint-decision-inheritance-v1"
+            ),
+            "extension_reuse": (
+                {
+                    "authorization": (
+                        "exact-final-stage-seven-dependency-match-v1"
+                    ),
+                    "invalidation": "canonical-order-fixed-point-v1",
+                }
+                if extension
+                else {
+                    "status": "not_applicable",
+                    "reason": "native_asset_has_no_parent",
+                }
+            ),
+        },
         "dataset_splits": {
             "algorithm": (
-                "group-safe-stable-fraction-extension-v1"
+                "approved-exact-family-early-split-stable-extension-v1"
                 if extension
-                else "group-safe-random-v1"
+                else "approved-exact-family-early-split-v1"
             ),
+            "trusted_split_assignment": (
+                "connected-model-context-stable-hash-v1"
+            ),
+            "regression_selection": (
+                "deterministic-early-connected-group-hash-v1"
+            ),
+            "derived_inclusion": "approved-exact-fingerprint-only-v1",
+            "hold_policy": "exclude-held-cases-and-families-v1",
             "regression_fraction": 0.2,
         },
     }
+
+
+def build_algorithm_inventory(
+    config: Mapping[str, Any],
+    *,
+    extension: bool,
+) -> dict[str, Any]:
+    """Return the exact live generation-affecting algorithm inventory."""
+    return _algorithm_inventory_v3(config, extension=extension)
 
 
 def historical_algorithm_inventory_v1(
@@ -707,6 +937,24 @@ def historical_algorithm_inventory_v1(
             "regression_fraction": 0.2,
         },
     }
+
+
+def historical_algorithm_inventory_v2(
+    config: Mapping[str, Any],
+    *,
+    extension: bool,
+) -> dict[str, Any]:
+    """Return the immutable algorithm profile recorded by provenance v2."""
+    return historical_algorithm_inventory_v1(config, extension=extension)
+
+
+def historical_algorithm_inventory_v3(
+    config: Mapping[str, Any],
+    *,
+    extension: bool,
+) -> dict[str, Any]:
+    """Return the immutable algorithm profile recorded by provenance v3."""
+    return _algorithm_inventory_v3(config, extension=extension)
 
 
 def build_provider_call(
@@ -779,26 +1027,21 @@ def validate_provider_calls(
     profile: str = "current",
 ) -> list[dict[str, Any]]:
     """Strictly validate one complete ordered stage provider-call ledger."""
-    historical = profile in {
-        HISTORICAL_PROVENANCE_PROFILE_V1,
-        HISTORICAL_PROVENANCE_PROFILE_V2,
-    }
     if profile not in {
         "current",
         HISTORICAL_PROVENANCE_PROFILE_V1,
         HISTORICAL_PROVENANCE_PROFILE_V2,
+        HISTORICAL_PROVENANCE_PROFILE_V3,
     }:
         raise ValueError("provider call validation profile is unsupported")
-    provider_stage_roles = (
-        dict(_HISTORICAL_PROVIDER_STAGE_ROLES_V1)
-        if historical
-        else PROVIDER_STAGE_ROLES
-    )
+    provider_stage_roles = _profile_provider_stage_roles(profile)
     schema_version = (
         _HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V1
         if profile == HISTORICAL_PROVENANCE_PROFILE_V1
         else _HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V2
         if profile == HISTORICAL_PROVENANCE_PROFILE_V2
+        else _HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V3
+        if profile == HISTORICAL_PROVENANCE_PROFILE_V3
         else PROVIDER_CALL_SCHEMA_VERSION
     )
     if expected_stage not in provider_stage_roles:
@@ -1047,32 +1290,21 @@ def validate_stage_provenance(
     historical = profile in {
         HISTORICAL_PROVENANCE_PROFILE_V1,
         HISTORICAL_PROVENANCE_PROFILE_V2,
+        HISTORICAL_PROVENANCE_PROFILE_V3,
         HISTORICAL_LEGACY_PROVENANCE_PROFILE_V1,
         HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2,
+        HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3,
     }
     legacy = profile in {
         "legacy",
         HISTORICAL_LEGACY_PROVENANCE_PROFILE_V1,
         HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2,
+        HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3,
     }
-    provider_stage_roles = (
-        dict(_HISTORICAL_PROVIDER_STAGE_ROLES_V1)
-        if historical
-        else PROVIDER_STAGE_ROLES
-    )
-    stage_prompt_names = (
-        dict(_HISTORICAL_STAGE_PROMPT_NAMES_V1)
-        if historical
-        else STAGE_PROMPT_NAMES
-    )
-    prompt_revisions = (
-        dict(_HISTORICAL_PROMPT_REVISIONS_V1)
-        if historical
-        else PROMPT_REVISIONS
-    )
-    source_fixed_members = (
-        _HISTORICAL_SOURCE_FIXED_MEMBERS_V1 if historical else SOURCE_FIXED_MEMBERS
-    )
+    provider_stage_roles = _profile_provider_stage_roles(profile)
+    stage_prompt_names = _profile_stage_prompt_names(profile)
+    prompt_revisions = _profile_prompt_revisions(profile)
+    source_fixed_members = _profile_source_fixed_members(profile)
     schema_version = (
         _HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V1
         if profile in {
@@ -1083,6 +1315,11 @@ def validate_stage_provenance(
         if profile in {
             HISTORICAL_PROVENANCE_PROFILE_V2,
             HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2,
+        }
+        else _HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V3
+        if profile in {
+            HISTORICAL_PROVENANCE_PROFILE_V3,
+            HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3,
         }
         else STAGE_PROVENANCE_SCHEMA_VERSION
     )
@@ -1104,8 +1341,10 @@ def validate_stage_provenance(
             "legacy",
             HISTORICAL_PROVENANCE_PROFILE_V1,
             HISTORICAL_PROVENANCE_PROFILE_V2,
+            HISTORICAL_PROVENANCE_PROFILE_V3,
             HISTORICAL_LEGACY_PROVENANCE_PROFILE_V1,
             HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2,
+            HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3,
         }
         or not isinstance(payload, Mapping)
         or set(payload) != fields
@@ -1253,7 +1492,12 @@ def validate_stage_provenance(
         raise ValueError("native stage provenance source cross-link differs")
 
     seeds = payload.get("seeds")
-    if expected_stage == "dataset_splits":
+    split_seed_stage = (
+        "prepared_inputs"
+        if _provenance_profile_generation(profile) == 3
+        else "dataset_splits"
+    )
+    if expected_stage == split_seed_stage:
         valid_seed_profile = (
             isinstance(seeds, Mapping)
             and set(seeds) == {"split"}
@@ -1365,17 +1609,16 @@ def validate_build_provenance(
         "current",
         HISTORICAL_PROVENANCE_PROFILE_V1,
         HISTORICAL_PROVENANCE_PROFILE_V2,
+        HISTORICAL_PROVENANCE_PROFILE_V3,
     }:
         raise ValueError("build provenance validation profile is unsupported")
-    historical = profile in {
-        HISTORICAL_PROVENANCE_PROFILE_V1,
-        HISTORICAL_PROVENANCE_PROFILE_V2,
-    }
     build_schema_version = (
         _HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V1
         if profile == HISTORICAL_PROVENANCE_PROFILE_V1
         else _HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V2
         if profile == HISTORICAL_PROVENANCE_PROFILE_V2
+        else _HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V3
+        if profile == HISTORICAL_PROVENANCE_PROFILE_V3
         else BUILD_PROVENANCE_SCHEMA_VERSION
     )
     identity_schema_version = (
@@ -1383,13 +1626,11 @@ def validate_build_provenance(
         if profile == HISTORICAL_PROVENANCE_PROFILE_V1
         else _HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V2
         if profile == HISTORICAL_PROVENANCE_PROFILE_V2
+        else _HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V3
+        if profile == HISTORICAL_PROVENANCE_PROFILE_V3
         else BUILD_IDENTITY_SCHEMA_VERSION
     )
-    prompt_revisions = (
-        dict(_HISTORICAL_PROMPT_REVISIONS_V1)
-        if historical
-        else PROMPT_REVISIONS
-    )
+    prompt_revisions = _profile_prompt_revisions(profile)
     if set(payload) != {
         "schema_version",
         "identity",
@@ -1456,7 +1697,7 @@ def validate_build_provenance(
         _validate_native_build_profile(
             identity,
             payload["audit"],
-            historical=historical,
+            profile=profile,
         )
     created_at = payload.get("created_at")
     try:
@@ -1481,12 +1722,7 @@ def validate_build_provenance_call_ledgers(
 ) -> None:
     """Bind native build call projections to every authenticated stage ledger."""
     validate_build_provenance(payload, profile=profile)
-    roles_by_stage = (
-        dict(_HISTORICAL_PROVIDER_STAGE_ROLES_V1)
-        if profile
-        in {HISTORICAL_PROVENANCE_PROFILE_V1, HISTORICAL_PROVENANCE_PROFILE_V2}
-        else PROVIDER_STAGE_ROLES
-    )
+    roles_by_stage = _profile_provider_stage_roles(profile)
     required_stages = {stage for stage, roles in roles_by_stage.items() if roles}
     if set(stage_ledgers) != required_stages:
         raise ValueError("build provenance call ledger inventory is incomplete")
@@ -1778,6 +2014,8 @@ def _validate_call_evidence(
             if profile == HISTORICAL_PROVENANCE_PROFILE_V1
             else _HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V2
             if profile == HISTORICAL_PROVENANCE_PROFILE_V2
+            else _HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V3
+            if profile == HISTORICAL_PROVENANCE_PROFILE_V3
             else PROVIDER_CALL_SCHEMA_VERSION
         )
         reconstructed.append(
@@ -1891,26 +2129,24 @@ def _validate_native_build_profile(
     identity: Mapping[str, Any],
     audit: Mapping[str, Any],
     *,
-    historical: bool,
+    profile: str,
 ) -> None:
-    source_fixed_members = (
-        _HISTORICAL_SOURCE_FIXED_MEMBERS_V1 if historical else SOURCE_FIXED_MEMBERS
-    )
-    prompt_revisions = (
-        dict(_HISTORICAL_PROMPT_REVISIONS_V1)
-        if historical
-        else PROMPT_REVISIONS
-    )
+    generation = _provenance_profile_generation(profile)
+    historical = profile != "current"
+    source_fixed_members = _profile_source_fixed_members(profile)
+    prompt_revisions = _profile_prompt_revisions(profile)
     source = identity.get("source")
     source_members = source.get("members") if isinstance(source, Mapping) else None
     if not isinstance(source_members, list) or [
         member.get("path") for member in source_members if isinstance(member, Mapping)
     ] != sorted(source_fixed_members):
         raise ValueError("native build provenance source inventory is incomplete")
-    if set(_mapping_keys(identity.get("inputs"))) != {
-        "labeled_feedback",
-        "unlabeled",
-    } or set(_mapping_keys(identity.get("providers"))) != {
+    expected_inputs = {"labeled_feedback", "unlabeled"}
+    if generation >= 3:
+        expected_inputs.add("review_snapshot")
+    if set(_mapping_keys(identity.get("inputs"))) != expected_inputs or set(
+        _mapping_keys(identity.get("providers"))
+    ) != {
         "rubric",
         "embedding",
     }:
@@ -1964,6 +2200,10 @@ def _validate_native_build_profile(
     calls = identity.get("calls")
     expected_algorithms = (
         historical_algorithm_inventory_v1(config, extension=extension)
+        if generation == 1
+        else historical_algorithm_inventory_v2(config, extension=extension)
+        if generation == 2
+        else historical_algorithm_inventory_v3(config, extension=extension)
         if historical
         else build_algorithm_inventory(config, extension=extension)
     )

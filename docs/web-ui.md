@@ -87,6 +87,15 @@ counts before any guideline or embedding provider work starts. The complete
 Studio workspace and its checkpoints are local-only; the Studio does not
 persist them to GCS or another remote backend.
 
+Stage 2 assigns exact-context-connected trusted groups to train, validation,
+test, or regression before any guideline authoring. It also records the
+minimum correctness-evidence gate. The reusable Stage 3 guideline and
+trusted-intent views contain eligible training feedback only; held-out criteria
+are compiled in protected split/group-local artifacts. Their content previews,
+along with inferred/synthetic case and dependency bodies, are disabled in the
+Studio. Metadata-only audit artifacts are projected through a fixed safe-field
+allowlist.
+
 Selecting a tenant visualizes all eight preparation stages, live status,
 selected models, requested clusters, match threshold, synthetic settings,
 pipeline counts, and the eight numbered stage directories. Each stage is clickable
@@ -103,6 +112,34 @@ coverage configuration. The Studio shows which stage each setting affects;
 the core preserves earlier checkpoints and rebuilds the affected stage and all
 downstream artifacts.
 
+After Stage 7 completes, the asset pauses at `awaiting_review`; Stage 8 remains
+pending and no dataset generation is published. A dedicated review panel shows
+the current review-set and decision-set fingerprints, a bounded paged queue,
+and pending/approved/rejected/held counts. Pagination applies one offset and a
+1-through-100 limit to the deterministic combined eligible-plus-held
+projection, so `items.length + held.length` never exceeds the requested limit;
+`held` is also a supported status filter. Each eligible item has an exact
+fingerprint-bound approve or reject action. A decision sends the displayed
+review-set fingerprint. Finalization sends both displayed fingerprints, so it
+cannot freeze decisions that changed after the page was rendered. It warns
+that pending, rejected, and held derived cases remain unpublished; it never
+bulk-approves or implicitly approves them.
+
+Asset summaries expose a body-free `review_authority_revision` derived from
+the current decision-set fingerprint and current finalization identity. The
+Studio can therefore detect an approval, rejection, or finalization performed
+by another client and reload the review page without exposing protected case
+or dependency bodies. The public review payload also exposes the safe current
+`finalization` (`finalization_id`, `review_set_fingerprint`, and counts), or
+`null`; that projection remains available for a released asset.
+
+In Stage 7, **mechanically accepted** means only that a candidate passed the
+case schema, nonempty-context, substantive-scoreability, narrow
+literal-leakage, and token-overlap checks. The Studio does not present that
+status as proof of factual correctness, safety, domain consistency, tool
+feasibility, solvability, realism, privacy, or semantic equivalence; those
+questions remain for executable checks and human review.
+
 For a legacy asset with the exact top-level `completed` sentinel, the Studio
 shows **Adopt verified legacy asset**. Under the asset lock, adoption synchronously
 verifies every stage, source hash, manifest, catalog/config-history entry, then
@@ -115,14 +152,20 @@ fixed exception category, and a bounded causal summary, but not raw provider
 messages, payloads, credentials, or response bodies. Detailed provider
 diagnostics remain available only through the in-memory chained exception or
 protected operator logging. Each individual state, event/history, JSONL,
-copied, or Markdown artifact is atomically replaced; the UI does not claim an
-all-or-nothing transaction across an entire release.
+copied, or Markdown artifact is atomically replaced. Release publication uses
+the core's separate generation-wide transaction: a complete immutable
+four-file generation is installed before the sole `release.json` authority is
+atomically replaced.
 
-Completed versions can be extended from the tenant asset view. The extension
+Released versions can be extended from the tenant asset view. The extension
 wizard accepts additional labeled feedback and optional unlabeled records,
 offers **Keep original clustering** and **Rerun clustering**, and previews the
 eight-stage execution plan. Keep mode is restricted to labeled-only additions;
-entering an unlabeled path automatically selects refresh mode.
+entering an unlabeled path automatically selects refresh mode. Both modes
+preserve verified parent trusted-group assignments. Stage 6/7 output and a
+parent terminal review decision are reused only for an exact complete
+dependency/review fingerprint match; changed content or dependencies return the
+child item to pending.
 
 ### Tenant tabs
 
@@ -182,7 +225,8 @@ The UI has four small modules under `src/hephaestus/webui/`:
 
 - **`server.py`** — a stdlib `ThreadingHTTPServer` that serves Explorer at `/`,
   Evaluation Asset Studio at `/evaluation-assets/`, read APIs, and narrow
-  evaluation-asset start/extend/resume/adopt endpoints.
+  evaluation-asset start/extend/resume/adopt plus fingerprint-bound
+  list/approve/reject/finalize endpoints.
 - **`data.py`** — `TenantStore`, the constrained filesystem layer that walks the
   tenants root and surfaces artifacts. All paths are resolved relative to the
   tenants root and validated to stay inside it (and inside the expected
@@ -212,17 +256,22 @@ The frontend is backed by these read-only endpoints (useful for scripting too):
 | `GET /api/tenants/<t>/dataset?path=<rel>&offset=&limit=` | Dataset rows (paged) |
 | `GET /api/tenants/<t>/docs` | Doc files |
 | `GET /api/tenants/<t>/doc?path=<rel>` | Doc content (markdown) |
-| `GET /api/tenants/<t>/evaluation-assets` | Asset configuration, stage status, and directory summaries |
+| `GET /api/tenants/<t>/evaluation-assets` | Asset configuration, stage status, directory summaries, and safe `review_authority_revision` for polling |
 | `GET /api/evaluation-assets/input-contract` | Versioned canonical field, message, tool-call, and feedback requirements |
 | `GET /api/tenants/<t>/evaluation-assets/<a>/stages/<s>` | One stage's status, metrics, artifact list, and bounded example previews |
+| `GET /api/tenants/<t>/evaluation-assets/<a>/reviews?status=&offset=&limit=` | Current receipt-verified safe page; exposes both fingerprints, revision, and safe current finalization; filters `pending`, `approved`, `rejected`, or `held`, accepts a limit from 1 through 100, and returns at most that many combined eligible-plus-held rows |
 | `POST /api/evaluation-assets/start` | Copy inputs and start a core pipeline run |
 | `POST /api/evaluation-assets/extend` | Create and run an immutable child version with reused or refreshed clustering |
 | `POST /api/tenants/<t>/evaluation-assets/<a>/resume` | Optionally revise pipeline decisions, invalidate dependent stages, and resume an asset |
 | `POST /api/tenants/<t>/evaluation-assets/<a>/adopt` | Synchronously verify an exact legacy completion and return its terminal released `PipelineState`; HTTP `202` is retained compatibility semantics, stable asset/runtime rejections return `409`, and malformed input/filesystem-value errors return `400` |
+| `POST /api/tenants/<t>/evaluation-assets/<a>/reviews/<fingerprint>/approve` | Append one immutable approval for the exact current `case_id`, item fingerprint, and review-set fingerprint |
+| `POST /api/tenants/<t>/evaluation-assets/<a>/reviews/<fingerprint>/reject` | Append one immutable rejection for the exact current `case_id`, item fingerprint, and review-set fingerprint |
+| `POST /api/tenants/<t>/evaluation-assets/<a>/reviews/finalize` | Require `expected_review_set_fingerprint` and `expected_decision_set_fingerprint`, freeze that exact current authority, and start Stage 8; pending/rejected/held derived cases are excluded |
 
 ## Notes
 
-- **Narrow writes:** the UI only creates, extends, resumes, or adopts evaluation assets. All other
+- **Narrow writes:** the UI only creates, extends, resumes, adopts, decides
+  exact current review items, or finalizes evaluation assets. All other
   tenant views remain read-only. Inputs must be regular `.jsonl` files beneath
   the selected tenant's `source_artifacts/` or ordinary `datasets/` directory;
   generated evaluation-asset datasets and symlink escapes are rejected before
@@ -232,7 +281,19 @@ The frontend is backed by these read-only endpoints (useful for scripting too):
   embedding and clustering settings, trusted-coverage thresholds, synthetic
   settings, and the split seed. The failed-stage view shows only the parameters
   relevant to that stage. Revisions are recorded in `config_history.jsonl` and
-  `events.jsonl`.
+  `events.jsonl`. Because trusted assignment now precedes authoring, a split-seed
+  change rebuilds from Stage 2.
+- **Fingerprint-bound review:** list, approve, reject, and finalize operations
+  verify the current Stage 7 receipt, complete dependency authority, and
+  item/hold fingerprints while holding the same asset lock as pipeline
+  execution. Approve and reject require the optimistic review-set token;
+  finalization additionally requires the decision-set token over every resolved
+  eligible status and decision ID. Decisions and finalizations are append-only,
+  and an exact released-finalization replay is idempotent.
+- **Review polling:** asset summaries contain only the safe
+  `review_authority_revision`, not review bodies. It changes when the resolved
+  decisions or current finalization identity changes, telling the Studio to
+  fetch a fresh bounded review page.
 - **Loopback only:** the server rejects non-loopback bind hosts. Studio routes
   also require a loopback `Host`; mutation requests require an absent `Origin`
   or an HTTP origin matching `Host`. Studio HTML and JSON responses use

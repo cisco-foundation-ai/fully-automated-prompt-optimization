@@ -63,7 +63,7 @@ CONFIG_STAGE_DEPENDENCIES = {
     "max_unlabeled_to_trusted_ratio": PipelineStage.COVERAGE_DECISIONS,
     "synthetic_coverage_enabled": PipelineStage.SYNTHETIC_COVERAGE,
     "synthetic_cases_per_cluster": PipelineStage.SYNTHETIC_COVERAGE,
-    "split_seed": PipelineStage.DATASET_SPLITS,
+    "split_seed": PipelineStage.PREPARED_INPUTS,
 }
 
 STAGE_COUNT_KEYS = {

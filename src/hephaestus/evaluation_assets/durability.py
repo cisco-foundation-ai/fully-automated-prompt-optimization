@@ -10,7 +10,7 @@ import hashlib
 import json
 import re
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
@@ -27,12 +27,13 @@ from src.hephaestus.evaluation_assets.control_jsonl import (
 from src.hephaestus.evaluation_assets.input_contract import validate_input_records
 from src.hephaestus.evaluation_assets.journal_transitions import (
     _LEGACY_SAFE_ASSET_ID_V1,
-    JOURNAL_SCHEMA_VERSION,
+    HISTORICAL_JOURNAL_SCHEMA_VERSION_V2,
     PERSISTED_CONFIG_STAGE_DEPENDENCIES_V2,
     PERSISTED_STAGE_COUNT_KEYS_V2,
     PERSISTED_STAGE_VALUES_V2,
     _legacy_config_value,
     is_exact_legacy_event_row_v1,
+    journal_transition_profile,
     normalized_legacy_completed_state_v1,
 )
 from src.hephaestus.evaluation_assets.journal_validation import (
@@ -62,11 +63,15 @@ from src.hephaestus.evaluation_assets.models import (
 from src.hephaestus.evaluation_assets.provenance import (
     HISTORICAL_LEGACY_PROVENANCE_PROFILE_V1,
     HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2,
+    HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3,
     HISTORICAL_PROVENANCE_PROFILE_V1,
     HISTORICAL_PROVENANCE_PROFILE_V2,
+    HISTORICAL_PROVENANCE_PROFILE_V3,
     PROMPT_REVISIONS,
     build_algorithm_inventory,
     historical_algorithm_inventory_v1,
+    historical_algorithm_inventory_v2,
+    historical_algorithm_inventory_v3,
     historical_build_provenance_profile,
     historical_legacy_stage_provenance_profile,
     historical_provider_call_stages,
@@ -91,9 +96,10 @@ _RELEASE_AUTHORITY_SNAPSHOT: ContextVar[Mapping[Path, bytes] | None] = ContextVa
     default=None,
 )
 
-STAGE_RECEIPT_SCHEMA_VERSION = "fapo-stage-receipt-v2"
+STAGE_RECEIPT_SCHEMA_VERSION = "fapo-stage-receipt-v3"
 _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V1 = "fapo-stage-receipt-v1"
 _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V2 = "fapo-stage-receipt-v2"
+_HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V3 = "fapo-stage-receipt-v3"
 UNAVAILABLE_PROVENANCE = {
     "status": "unavailable",
     "reason": "provider_call_metadata_not_recorded",
@@ -104,30 +110,105 @@ LEGACY_UNAVAILABLE_PROVENANCE = {
 }
 _OPERATION_ID = re.compile(r"^[0-9a-f]{32}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_HISTORICAL_STAGE_RECEIPT_FIELDS_V1 = frozenset(
+_HISTORICAL_REVIEW_FINALIZATION_SCHEMA_VERSION_V1 = (
+    "fapo-review-finalization-v1"
+)
+_HISTORICAL_REVIEW_FINALIZATION_IDENTITY_SCHEMA_VERSION_V1 = (
+    "fapo-review-finalization-identity-v1"
+)
+_HISTORICAL_DERIVED_CASE_CONTENT_SCHEMA_VERSION_V1 = (
+    "fapo-derived-case-content-v1"
+)
+_HISTORICAL_REVIEW_FINALIZATION_FIELDS_V1 = frozenset(
     {
-    "schema_version",
-    "stage",
-    "stage_index",
-    "origin",
-    "artifact_profile",
-    "completed_at",
-    "inputs",
-    "upstream_receipts",
-    "outputs",
-    "resolved_config_sha256",
-    "dependency_config_sha256",
-    "prompt_set_sha256",
-    "provider_identity",
-    "provider_identity_sha256",
-    "provider_calls_sha256",
-    "code",
-    "code_sha256",
-    "counts",
+        "schema_version",
+        "finalization_id",
+        "review_set_fingerprint",
+        "stage7_receipt_sha256",
+        "reviewer",
+        "timestamp",
+        "note",
+        "items",
+        "held",
+        "counts",
     }
 )
-_STAGE_RECEIPT_FIELDS = set(_HISTORICAL_STAGE_RECEIPT_FIELDS_V1)
-_HISTORICAL_STAGE_RECEIPT_FIELDS_V2 = frozenset(_STAGE_RECEIPT_FIELDS)
+_HISTORICAL_REVIEW_FINALIZATION_ITEM_FIELDS_V1 = frozenset(
+    {"case_id", "fingerprint", "status", "decision_id"}
+)
+_HISTORICAL_REVIEW_FINALIZATION_HELD_FIELDS_V1 = frozenset(
+    {"case_id", "fingerprint", "reason"}
+)
+_HISTORICAL_REVIEW_FINALIZATION_COUNT_FIELDS_V1 = frozenset(
+    {"trusted", "approved", "pending", "rejected", "held"}
+)
+_HISTORICAL_STAGE_RECEIPT_FIELDS_V1 = frozenset(
+    {
+        "schema_version",
+        "stage",
+        "stage_index",
+        "origin",
+        "artifact_profile",
+        "completed_at",
+        "inputs",
+        "upstream_receipts",
+        "outputs",
+        "resolved_config_sha256",
+        "dependency_config_sha256",
+        "prompt_set_sha256",
+        "provider_identity",
+        "provider_identity_sha256",
+        "provider_calls_sha256",
+        "code",
+        "code_sha256",
+        "counts",
+    }
+)
+_HISTORICAL_STAGE_RECEIPT_FIELDS_V2 = frozenset(
+    {
+        "schema_version",
+        "stage",
+        "stage_index",
+        "origin",
+        "artifact_profile",
+        "completed_at",
+        "inputs",
+        "upstream_receipts",
+        "outputs",
+        "resolved_config_sha256",
+        "dependency_config_sha256",
+        "prompt_set_sha256",
+        "provider_identity",
+        "provider_identity_sha256",
+        "provider_calls_sha256",
+        "code",
+        "code_sha256",
+        "counts",
+    }
+)
+_HISTORICAL_STAGE_RECEIPT_FIELDS_V3 = frozenset(
+    {
+        "schema_version",
+        "stage",
+        "stage_index",
+        "origin",
+        "artifact_profile",
+        "completed_at",
+        "inputs",
+        "upstream_receipts",
+        "outputs",
+        "resolved_config_sha256",
+        "dependency_config_sha256",
+        "prompt_set_sha256",
+        "provider_identity",
+        "provider_identity_sha256",
+        "provider_calls_sha256",
+        "code",
+        "code_sha256",
+        "counts",
+    }
+)
+_STAGE_RECEIPT_FIELDS = set(_HISTORICAL_STAGE_RECEIPT_FIELDS_V3)
 _CREATED_HISTORY_FIELDS = {
     "timestamp",
     "revision",
@@ -172,6 +253,7 @@ class StageSpecification:
     config_fields: tuple[str, ...] = ()
     prompt_names: tuple[str, ...] = ()
     provider_roles: tuple[str, ...] = ()
+    required_asset_inputs: tuple[str, ...] = ()
     required_asset_outputs: tuple[str, ...] = ()
     required_catalog_outputs: tuple[str, ...] = ()
     legacy_required_outputs: tuple[str, ...] = ()
@@ -370,7 +452,206 @@ _HISTORICAL_STAGE_SPECIFICATIONS_V1 = MappingProxyType({
         required_asset_outputs=("asset_manifest.json", "build_provenance.json"),
     ),
 })
-STAGE_SPECIFICATIONS = dict(_HISTORICAL_STAGE_SPECIFICATIONS_V1)
+_HISTORICAL_STAGE_SPECIFICATIONS_V2 = MappingProxyType(
+    dict(_HISTORICAL_STAGE_SPECIFICATIONS_V1)
+)
+_stage_specifications_v3 = {
+    stage: replace(specification)
+    for stage, specification in _HISTORICAL_STAGE_SPECIFICATIONS_V1.items()
+}
+_stage_specifications_v3[_HistoricalPipelineStageV2.PREPARED_INPUTS] = replace(
+    _stage_specifications_v3[_HistoricalPipelineStageV2.PREPARED_INPUTS],
+    required_outputs=(
+        "normalized_feedback.jsonl",
+        "intent_records.jsonl",
+        "trusted_split_plan.jsonl",
+        "feedback_eligibility.jsonl",
+    ),
+    config_fields=("split_seed",),
+)
+_stage_specifications_v3[_HistoricalPipelineStageV2.RUBRIC_EXTRACTION] = replace(
+    _stage_specifications_v3[_HistoricalPipelineStageV2.RUBRIC_EXTRACTION],
+    required_outputs=(
+        *_stage_specifications_v3[
+            _HistoricalPipelineStageV2.RUBRIC_EXTRACTION
+        ].required_outputs,
+        "protected_feedback_evidence.jsonl",
+        "protected_candidate_guidelines.jsonl",
+        "protected_evaluation_guidelines.jsonl",
+        "protected_trusted_cases.jsonl",
+    ),
+    direct_inputs=(
+        *_stage_specifications_v3[
+            _HistoricalPipelineStageV2.RUBRIC_EXTRACTION
+        ].direct_inputs,
+        (
+            _HistoricalPipelineStageV2.PREPARED_INPUTS,
+            "trusted_split_plan.jsonl",
+        ),
+        (
+            _HistoricalPipelineStageV2.PREPARED_INPUTS,
+            "feedback_eligibility.jsonl",
+        ),
+    ),
+)
+_stage_specifications_v3[_HistoricalPipelineStageV2.LABEL_INFERENCE] = replace(
+    _stage_specifications_v3[_HistoricalPipelineStageV2.LABEL_INFERENCE],
+    required_outputs=(
+        *_stage_specifications_v3[
+            _HistoricalPipelineStageV2.LABEL_INFERENCE
+        ].required_outputs,
+        "inference_dependencies.jsonl",
+        "held_inference_outputs.jsonl",
+    ),
+)
+_stage_specifications_v3[_HistoricalPipelineStageV2.SYNTHETIC_COVERAGE] = (
+    replace(
+        _stage_specifications_v3[
+            _HistoricalPipelineStageV2.SYNTHETIC_COVERAGE
+        ],
+        required_outputs=(
+            *_stage_specifications_v3[
+                _HistoricalPipelineStageV2.SYNTHETIC_COVERAGE
+            ].required_outputs,
+            "synthetic_dependencies.jsonl",
+            "derived_review_items.jsonl",
+            "duplicate_families.jsonl",
+            "held_derived_cases.jsonl",
+        ),
+    )
+)
+_stage_specifications_v3[_HistoricalPipelineStageV2.DATASET_SPLITS] = replace(
+    _stage_specifications_v3[_HistoricalPipelineStageV2.DATASET_SPLITS],
+    required_outputs=(
+        *_stage_specifications_v3[
+            _HistoricalPipelineStageV2.DATASET_SPLITS
+        ].required_outputs,
+        "review_snapshot.json",
+    ),
+    direct_inputs=(
+        (_HistoricalPipelineStageV2.RAW_INPUTS, "input_manifest.json"),
+        (
+            _HistoricalPipelineStageV2.PREPARED_INPUTS,
+            "trusted_split_plan.jsonl",
+        ),
+        (_HistoricalPipelineStageV2.RUBRIC_EXTRACTION, "trusted_cases.jsonl"),
+        (
+            _HistoricalPipelineStageV2.RUBRIC_EXTRACTION,
+            "protected_trusted_cases.jsonl",
+        ),
+        (_HistoricalPipelineStageV2.LABEL_INFERENCE, "inferred_cases.jsonl"),
+        (
+            _HistoricalPipelineStageV2.LABEL_INFERENCE,
+            "inference_dependencies.jsonl",
+        ),
+        (
+            _HistoricalPipelineStageV2.LABEL_INFERENCE,
+            "held_inference_outputs.jsonl",
+        ),
+        (
+            _HistoricalPipelineStageV2.SYNTHETIC_COVERAGE,
+            "synthetic_cases.jsonl",
+        ),
+        (
+            _HistoricalPipelineStageV2.SYNTHETIC_COVERAGE,
+            "synthetic_dependencies.jsonl",
+        ),
+        (
+            _HistoricalPipelineStageV2.SYNTHETIC_COVERAGE,
+            "derived_review_items.jsonl",
+        ),
+        (
+            _HistoricalPipelineStageV2.SYNTHETIC_COVERAGE,
+            "duplicate_families.jsonl",
+        ),
+        (
+            _HistoricalPipelineStageV2.SYNTHETIC_COVERAGE,
+            "held_derived_cases.jsonl",
+        ),
+    ),
+    config_fields=(),
+    required_asset_inputs=(
+        "reviews/decisions.jsonl",
+        "reviews/finalizations.jsonl",
+    ),
+)
+_HISTORICAL_STAGE_SPECIFICATIONS_V3 = MappingProxyType(
+    dict(_stage_specifications_v3)
+)
+_live_stage_by_value = {stage.value: stage for stage in PipelineStage}
+if set(_live_stage_by_value) == set(PERSISTED_STAGE_VALUES_V2):
+    STAGE_SPECIFICATIONS = {
+        _live_stage_by_value[stage.value]: replace(
+            specification,
+            direct_inputs=tuple(
+                (_live_stage_by_value[input_stage.value], name)
+                for input_stage, name in specification.direct_inputs
+            ),
+            upstream_stages=tuple(
+                _live_stage_by_value[upstream.value]
+                for upstream in specification.upstream_stages
+            ),
+            legacy_direct_inputs=tuple(
+                (_live_stage_by_value[input_stage.value], name)
+                for input_stage, name in specification.legacy_direct_inputs
+            ),
+        )
+        for stage, specification in _stage_specifications_v3.items()
+    }
+else:
+    STAGE_SPECIFICATIONS = {}
+
+
+def stage_specification_for_receipt_schema(
+    schema_version: Any,
+    stage: PipelineStage | str,
+    *,
+    origin: str = "native",
+) -> StageSpecification:
+    """Select the immutable stage contract named by one receipt schema."""
+    stage_value = str(getattr(stage, "value", stage))
+    if schema_version == _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V1:
+        profile = _HISTORICAL_STAGE_SPECIFICATIONS_V1
+    elif schema_version == _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V2:
+        profile = _HISTORICAL_STAGE_SPECIFICATIONS_V2
+    elif schema_version == _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V3:
+        if origin == "legacy_adoption":
+            profile = _HISTORICAL_STAGE_SPECIFICATIONS_V2
+        else:
+            try:
+                return _HISTORICAL_STAGE_SPECIFICATIONS_V3[
+                    _HistoricalPipelineStageV2(stage_value)
+                ]
+            except (KeyError, ValueError) as exc:
+                raise ValueError("receipt stage is unsupported") from exc
+    else:
+        raise ValueError("receipt schema is unsupported")
+    try:
+        return profile[_HistoricalPipelineStageV2(stage_value)]
+    except (KeyError, ValueError) as exc:
+        raise ValueError("receipt stage is unsupported") from exc
+
+
+def stage_three_text_profile_for_receipt_schema(
+    schema_version: Any,
+    *,
+    origin: str = "native",
+) -> str:
+    """Select source-only v3 text or the frozen historical Stage 3 replay."""
+    if origin not in {"native", "legacy_adoption"}:
+        raise ValueError("receipt origin is unsupported")
+    if schema_version in {
+        _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V1,
+        _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V2,
+    } or (
+        schema_version == _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V3
+        and origin == "legacy_adoption"
+    ):
+        return "historical_v1"
+    if schema_version == _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V3:
+        return "current"
+    raise ValueError("receipt schema is unsupported")
+
 
 _HISTORICAL_STAGE_LABELS_V1 = MappingProxyType(
     {
@@ -463,11 +744,12 @@ _HISTORICAL_COMPLETED_COUNT_FIELDS_V1 = frozenset(
 )
 
 # Keep the config dependency map and receipt projections synchronized.
-for _config_field, _stage in CONFIG_STAGE_DEPENDENCIES.items():
-    if _config_field not in STAGE_SPECIFICATIONS[_stage].config_fields:
-        raise RuntimeError(
-            f"Missing receipt config dependency {_config_field} for {_stage.value}"
-        )
+if STAGE_SPECIFICATIONS:
+    for _config_field, _stage in CONFIG_STAGE_DEPENDENCIES.items():
+        if _config_field not in STAGE_SPECIFICATIONS[_stage].config_fields:
+            raise RuntimeError(
+                f"Missing receipt config dependency {_config_field} for {_stage.value}"
+            )
 
 
 def canonical_json_bytes(payload: Any) -> bytes:
@@ -1151,6 +1433,16 @@ def build_stage_receipt(
     inputs.extend(
         _file_record(
             layout,
+            layout.root / name,
+            scope="asset",
+            artifact_overrides=artifact_overrides,
+            closed_overrides=closed_legacy_snapshot,
+        )
+        for name in specification.required_asset_inputs
+    )
+    inputs.extend(
+        _file_record(
+            layout,
             path,
             scope="asset",
             artifact_overrides=artifact_overrides,
@@ -1667,6 +1959,15 @@ def _verify_completed_release_candidate(
         receipts = verify_receipt_chain(layout, state)
         if {receipt.get("origin") for receipt in receipts.values()} != {"native"}:
             raise ValueError("completed handoff receipt origin is invalid")
+        validate_recovery_journal(
+            layout,
+            _read_jsonl_objects(
+                layout,
+                layout.recovery_journal_path,
+                optional=True,
+            ),
+            artifact_overrides=_RELEASE_AUTHORITY_SNAPSHOT.get(),
+        )
         config_hashes = _replay_config_history(
             layout,
             config,
@@ -2430,6 +2731,7 @@ def _verify_build_provenance_authority_links(
     if not isinstance(identity, Mapping) or not isinstance(audit, Mapping):
         raise ValueError("build provenance authority is invalid")
     expected_config = config.to_dict()
+    legacy = identity.get("source") == LEGACY_UNAVAILABLE_PROVENANCE
     expected_config_sha256 = canonical_sha256(expected_config)
     resolved = identity.get("resolved_configuration")
     stage_eight = receipts.get(_HISTORICAL_PIPELINE_STAGES_V1[-1])
@@ -2486,6 +2788,25 @@ def _verify_build_provenance_authority_links(
             details.get("rows")
         ) != canonical_json_bytes(actual_rows):
             raise ValueError("build provenance inputs differ from authority")
+    if (
+        not legacy
+        and historical_build_provenance_profile(provenance)
+        == HISTORICAL_PROVENANCE_PROFILE_V3
+    ):
+        review_snapshot_path = layout.artifact_path(
+            _HISTORICAL_PIPELINE_STAGES_V1[-1],
+            "review_snapshot.json",
+        )
+        review_snapshot_bytes = _local_authority_bytes(
+            layout,
+            review_snapshot_path,
+        )
+        expected_inputs["review_snapshot"] = {
+            "path": review_snapshot_path.relative_to(layout.root).as_posix(),
+            "bytes": len(review_snapshot_bytes),
+            "rows": 1,
+            "sha256": hashlib.sha256(review_snapshot_bytes).hexdigest(),
+        }
     raw_receipt = receipts.get(_HISTORICAL_PIPELINE_STAGES_V1[0])
     expected_stage_counts = {
         "feedback_records": expected_inputs["labeled_feedback"]["rows"],
@@ -2540,7 +2861,6 @@ def _verify_build_provenance_authority_links(
     expected_lineage["parent_generation_id"] = lineage["parent_release"][
         "generation_id"
     ]
-    legacy = identity.get("source") == LEGACY_UNAVAILABLE_PROVENANCE
     if not legacy:
         dependencies = {
             "lineage_sha256": _local_authority_sha256(
@@ -2625,6 +2945,327 @@ def _verify_generation_content_links(
     }
     if dataset_manifest.get("published_datasets") != expected_published:
         raise ValueError("published dataset manifest is inconsistent")
+    _verify_review_manifest_links(layout, dataset_manifest, provenance)
+
+
+def _verify_review_manifest_links(
+    layout: Any,
+    dataset_manifest: Mapping[str, Any],
+    provenance: Mapping[str, Any],
+) -> None:
+    """Bind the current exact review inventory to its authenticated snapshot."""
+    identity = provenance.get("identity")
+    inputs = identity.get("inputs") if isinstance(identity, Mapping) else None
+    if not isinstance(inputs, Mapping) or "review_snapshot" not in inputs:
+        return
+    if (
+        historical_build_provenance_profile(provenance)
+        != HISTORICAL_PROVENANCE_PROFILE_V3
+    ):
+        raise ValueError("review snapshot provenance profile is unsupported")
+    snapshot_path = layout.artifact_path(
+        _HISTORICAL_PIPELINE_STAGES_V1[-1],
+        "review_snapshot.json",
+    )
+    snapshot = _parse_historical_review_finalization_v1(
+        _read_json_object(layout, snapshot_path)
+    )
+    held_ids = {str(row["case_id"]) for row in snapshot["held"]}
+    trusted: list[dict[str, Any]] = []
+    for name in ("trusted_cases.jsonl", "protected_trusted_cases.jsonl"):
+        trusted.extend(
+            _read_jsonl_objects(
+                layout,
+                layout.artifact_path(
+                    _HISTORICAL_PIPELINE_STAGES_V1[2],
+                    name,
+                ),
+            )
+        )
+    fingerprints = {
+        "trusted": sorted(
+            (
+                {
+                    "case_id": str(case["case_id"]),
+                    "fingerprint": _historical_review_v1_case_content_fingerprint(
+                        case
+                    ),
+                }
+                for case in trusted
+                if str(case["case_id"]) not in held_ids
+            ),
+            key=lambda row: (row["case_id"], row["fingerprint"]),
+        ),
+        **{
+            status: [
+                {
+                    "case_id": str(item["case_id"]),
+                    "fingerprint": str(item["fingerprint"]),
+                }
+                for item in snapshot["items"]
+                if item["status"] == status
+            ]
+            for status in ("approved", "pending", "rejected")
+        },
+        "held": [dict(item) for item in snapshot["held"]],
+    }
+    expected_review = {
+        "review_set_fingerprint": snapshot["review_set_fingerprint"],
+        "finalization_id": snapshot["finalization_id"],
+        "stage7_receipt_sha256": snapshot["stage7_receipt_sha256"],
+        "counts": dict(snapshot["counts"]),
+        "fingerprints": fingerprints,
+    }
+    if canonical_json_bytes(dataset_manifest.get("review")) != canonical_json_bytes(
+        expected_review
+    ):
+        raise ValueError("dataset review manifest differs from finalization authority")
+
+
+def _historical_review_v1_fingerprint_json(payload: Any) -> str:
+    """Reproduce the frozen prefixed JSON fingerprint used by review v1."""
+    return "sha256:" + hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+
+
+def _historical_review_v1_exact_mapping(
+    value: Any,
+    fields: frozenset[str],
+    label: str,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be an object")
+    output = dict(value)
+    if set(output) != fields:
+        raise ValueError(f"{label} schema is invalid")
+    canonical_json_bytes(output)
+    return output
+
+
+def _historical_review_v1_nonempty_string(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} must be a non-empty string")
+    return value
+
+
+def _historical_review_v1_sha256(value: Any, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.startswith("sha256:")
+        or _SHA256.fullmatch(value.removeprefix("sha256:")) is None
+    ):
+        raise ValueError(f"{label} must be a canonical sha256 fingerprint")
+    return value
+
+
+def _historical_review_v1_timestamp(value: Any, label: str) -> str:
+    timestamp = _historical_review_v1_nonempty_string(value, label)
+    iso_timestamp = (
+        f"{timestamp.removesuffix('Z')}+00:00"
+        if timestamp.endswith("Z")
+        else timestamp
+    )
+    try:
+        parsed = datetime.fromisoformat(iso_timestamp)
+    except ValueError as exc:
+        raise ValueError(f"{label} must be an ISO-8601 UTC timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise ValueError(f"{label} must be an ISO-8601 UTC timestamp")
+    return timestamp
+
+
+def _historical_review_v1_nonnegative_int(value: Any, label: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{label} must be a non-negative integer")
+    return value
+
+
+def _parse_historical_review_finalization_v1(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Parse the review snapshot contract persisted by native build v3."""
+    row = _historical_review_v1_exact_mapping(
+        value,
+        _HISTORICAL_REVIEW_FINALIZATION_FIELDS_V1,
+        "review finalization",
+    )
+    if row.get("schema_version") != (
+        _HISTORICAL_REVIEW_FINALIZATION_SCHEMA_VERSION_V1
+    ):
+        raise ValueError("review finalization schema_version is unsupported")
+    _historical_review_v1_sha256(
+        row.get("finalization_id"),
+        "review finalization_id",
+    )
+    _historical_review_v1_sha256(
+        row.get("review_set_fingerprint"),
+        "review finalization review_set_fingerprint",
+    )
+    _historical_review_v1_sha256(
+        row.get("stage7_receipt_sha256"),
+        "review finalization Stage 7 receipt",
+    )
+    _historical_review_v1_nonempty_string(
+        row.get("reviewer"),
+        "review finalization reviewer",
+    )
+    _historical_review_v1_timestamp(
+        row.get("timestamp"),
+        "review finalization timestamp",
+    )
+    note = row.get("note")
+    if note is not None and not isinstance(note, str):
+        raise ValueError("review finalization note must be a string or null")
+
+    raw_items = row.get("items")
+    if not isinstance(raw_items, list):
+        raise ValueError("review finalization items must be an array")
+    items: list[dict[str, Any]] = []
+    for raw_item in raw_items:
+        item = _historical_review_v1_exact_mapping(
+            raw_item,
+            _HISTORICAL_REVIEW_FINALIZATION_ITEM_FIELDS_V1,
+            "review finalization item",
+        )
+        _historical_review_v1_nonempty_string(
+            item.get("case_id"),
+            "review finalization case_id",
+        )
+        _historical_review_v1_sha256(
+            item.get("fingerprint"),
+            "review finalization fingerprint",
+        )
+        status = item.get("status")
+        if status not in {"pending", "approved", "rejected"}:
+            raise ValueError("review finalization item status is invalid")
+        decision_id = item.get("decision_id")
+        if status == "pending":
+            if decision_id is not None:
+                raise ValueError("pending finalization item has a decision_id")
+        else:
+            _historical_review_v1_sha256(
+                decision_id,
+                "review finalization decision_id",
+            )
+        items.append(item)
+    if items != sorted(
+        items,
+        key=lambda item: (item["case_id"], item["fingerprint"]),
+    ):
+        raise ValueError("review finalization items are not canonical")
+    if len({item["case_id"] for item in items}) != len(items):
+        raise ValueError("review finalization case_ids are not unique")
+    if len({item["fingerprint"] for item in items}) != len(items):
+        raise ValueError("review finalization fingerprints are not unique")
+
+    raw_held = row.get("held")
+    if not isinstance(raw_held, list):
+        raise ValueError("review finalization held must be an array")
+    held: list[dict[str, Any]] = []
+    for raw_item in raw_held:
+        item = _historical_review_v1_exact_mapping(
+            raw_item,
+            _HISTORICAL_REVIEW_FINALIZATION_HELD_FIELDS_V1,
+            "review finalization held item",
+        )
+        _historical_review_v1_nonempty_string(
+            item.get("case_id"),
+            "held review case_id",
+        )
+        _historical_review_v1_sha256(
+            item.get("fingerprint"),
+            "held review fingerprint",
+        )
+        _historical_review_v1_nonempty_string(
+            item.get("reason"),
+            "held review reason",
+        )
+        held.append(item)
+    if held != sorted(
+        held,
+        key=lambda item: (item["case_id"], item["fingerprint"]),
+    ):
+        raise ValueError("review finalization held items are not canonical")
+    if len({item["case_id"] for item in held}) != len(held):
+        raise ValueError("held review case_ids must be unique")
+    if len({item["fingerprint"] for item in held}) != len(held):
+        raise ValueError("held review fingerprints must be unique")
+
+    counts = _historical_review_v1_exact_mapping(
+        row.get("counts"),
+        _HISTORICAL_REVIEW_FINALIZATION_COUNT_FIELDS_V1,
+        "review finalization counts",
+    )
+    expected_counts = {
+        "trusted": _historical_review_v1_nonnegative_int(
+            counts.get("trusted"),
+            "trusted count",
+        ),
+        "approved": sum(item["status"] == "approved" for item in items),
+        "pending": sum(item["status"] == "pending" for item in items),
+        "rejected": sum(item["status"] == "rejected" for item in items),
+        "held": len(held),
+    }
+    if counts != expected_counts:
+        raise ValueError("review finalization counts do not match its snapshot")
+    identity = {
+        key: row[key]
+        for key in (
+            "review_set_fingerprint",
+            "stage7_receipt_sha256",
+            "items",
+            "held",
+            "counts",
+        )
+    }
+    expected_id = _historical_review_v1_fingerprint_json(
+        {
+            "schema_version": (
+                _HISTORICAL_REVIEW_FINALIZATION_IDENTITY_SCHEMA_VERSION_V1
+            ),
+            "snapshot": identity,
+        }
+    )
+    if row["finalization_id"] != expected_id:
+        raise ValueError("review finalization_id does not match its snapshot")
+    return row
+
+
+def _historical_review_v1_case_content_fingerprint(
+    case: Mapping[str, Any],
+) -> str:
+    """Reproduce the complete-case hash persisted by native build v3."""
+    if not isinstance(case, Mapping):
+        raise ValueError("case must be an object")
+    complete_case = dict(case)
+    missing = {
+        "case_id",
+        "task_type",
+        "context",
+        "expected",
+        "metadata",
+    } - set(complete_case)
+    if missing:
+        raise ValueError(f"case is missing fields {sorted(missing)}")
+    _historical_review_v1_nonempty_string(
+        complete_case.get("case_id"),
+        "case_id",
+    )
+    _historical_review_v1_nonempty_string(
+        complete_case.get("task_type"),
+        "task_type",
+    )
+    for field in ("context", "expected", "metadata"):
+        if not isinstance(complete_case.get(field), Mapping):
+            raise ValueError(f"case {field} must be an object")
+    canonical_json_bytes(complete_case)
+    return _historical_review_v1_fingerprint_json(
+        {
+            "schema_version": (
+                _HISTORICAL_DERIVED_CASE_CONTENT_SCHEMA_VERSION_V1
+            ),
+            "case": complete_case,
+        }
+    )
 
 
 def released_parent_evidence(
@@ -2738,8 +3379,16 @@ def _stage_seed_evidence(
     *,
     call_count: int,
     provider_backed: bool | None = None,
+    provenance_profile: str = "current",
 ) -> dict[str, Any]:
-    if stage.value == "dataset_splits":
+    frozen_v1_or_v2 = provenance_profile in {
+        HISTORICAL_PROVENANCE_PROFILE_V1,
+        HISTORICAL_PROVENANCE_PROFILE_V2,
+        HISTORICAL_LEGACY_PROVENANCE_PROFILE_V1,
+        HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2,
+    }
+    split_seed_stage = "dataset_splits" if frozen_v1_or_v2 else "prepared_inputs"
+    if stage.value == split_seed_stage:
         return {"split": config.split_seed}
     if (
         bool(STAGE_SPECIFICATIONS[stage].provider_roles)
@@ -2760,10 +3409,16 @@ def _stage_algorithm_evidence(
     stage: PipelineStage,
     config: EvaluationAssetConfig,
     *,
-    historical: bool = False,
+    provenance_profile: str = "current",
 ) -> dict[str, Any]:
     inventory_builder = (
-        historical_algorithm_inventory_v1 if historical else build_algorithm_inventory
+        historical_algorithm_inventory_v1
+        if provenance_profile == HISTORICAL_PROVENANCE_PROFILE_V1
+        else historical_algorithm_inventory_v2
+        if provenance_profile == HISTORICAL_PROVENANCE_PROFILE_V2
+        else historical_algorithm_inventory_v3
+        if provenance_profile == HISTORICAL_PROVENANCE_PROFILE_V3
+        else build_algorithm_inventory
     )
     inventory = inventory_builder(
         config.to_dict(),
@@ -2814,6 +3469,12 @@ def _require_receipt_stage_profile(
         HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2: (
             _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V2
         ),
+        HISTORICAL_PROVENANCE_PROFILE_V3: (
+            _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V3
+        ),
+        HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3: (
+            _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V3
+        ),
         "native": STAGE_RECEIPT_SCHEMA_VERSION,
         "legacy": STAGE_RECEIPT_SCHEMA_VERSION,
     }.get(stage_profile)
@@ -2847,6 +3508,8 @@ def _validate_stage_provenance_evidence(
                 HISTORICAL_LEGACY_PROVENANCE_PROFILE_V1
                 if build_profile == HISTORICAL_PROVENANCE_PROFILE_V1
                 else HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2
+                if build_profile == HISTORICAL_PROVENANCE_PROFILE_V2
+                else HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3
             )
             if profile != expected_profile:
                 raise ValueError("stage and build provenance profiles differ")
@@ -2866,6 +3529,8 @@ def _validate_stage_provenance_evidence(
             HISTORICAL_LEGACY_PROVENANCE_PROFILE_V1
             if build_profile == HISTORICAL_PROVENANCE_PROFILE_V1
             else HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2
+            if build_profile == HISTORICAL_PROVENANCE_PROFILE_V2
+            else HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3
         ) if receipt.get("origin") == "legacy_adoption" else build_profile
         actual_stage_profile = (
             historical_legacy_stage_provenance_profile(payload)
@@ -2948,7 +3613,7 @@ def _validate_stage_provenance_evidence(
             layout,
             stage,
             config,
-            historical=profile != "native",
+            provenance_profile=("current" if profile == "native" else profile),
         )
 
     if (
@@ -2977,6 +3642,7 @@ def _validate_stage_provenance_evidence(
             config,
             call_count=len(calls or []),
             provider_backed=has_provider_role,
+            provenance_profile=("current" if profile == "native" else profile),
         ),
         expected_algorithms=expected_algorithms,
     )
@@ -3014,6 +3680,10 @@ def verify_stage_receipt(
         _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V2
     ):
         expected_receipt_fields = _HISTORICAL_STAGE_RECEIPT_FIELDS_V2
+    elif historical and persisted_receipt_schema == (
+        _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V3
+    ):
+        expected_receipt_fields = _HISTORICAL_STAGE_RECEIPT_FIELDS_V3
     elif not historical and persisted_receipt_schema == (
         STAGE_RECEIPT_SCHEMA_VERSION
     ):
@@ -3115,13 +3785,20 @@ def verify_stage_receipt(
     ):
         raise _integrity(layout, stage, "receipt hash inventory is invalid")
 
-    specification = (
-        _HISTORICAL_STAGE_SPECIFICATIONS_V1[stage]
-        if historical
-        else STAGE_SPECIFICATIONS[stage]
-    )
     artifact_profile = receipt.get("artifact_profile", "native")
     origin = receipt.get("origin")
+    try:
+        specification = (
+            stage_specification_for_receipt_schema(
+                persisted_receipt_schema,
+                stage,
+                origin=str(origin),
+            )
+            if historical
+            else STAGE_SPECIFICATIONS[stage]
+        )
+    except ValueError as exc:
+        raise _integrity(layout, stage, "receipt schema is unsupported") from exc
     if (origin, artifact_profile) not in {
         ("native", "native"),
         ("legacy_adoption", "native"),
@@ -3218,6 +3895,9 @@ def verify_stage_receipt(
         )
         for input_stage, name in direct_inputs
     }
+    expected_inputs.update(
+        ("asset", name) for name in specification.required_asset_inputs
+    )
     try:
         expected_inputs.update(
             (
@@ -3482,6 +4162,28 @@ def _replay_config_history(
         for row in journal_rows
         if row.get("kind") == "configuration_revision"
     ]
+    journal_pairs: dict[str, tuple[Mapping[str, Any], Mapping[str, Any]]] = {}
+    if not allow_pre_wal_history:
+        if len(revision_journal_rows) % 2:
+            raise ValueError("configuration history journal authority is invalid")
+        for index in range(0, len(revision_journal_rows), 2):
+            prepared = revision_journal_rows[index]
+            committed = revision_journal_rows[index + 1]
+            operation_id = prepared.get("operation_id")
+            schema_version = prepared.get("schema_version")
+            if (
+                not isinstance(operation_id, str)
+                or not _OPERATION_ID.fullmatch(operation_id)
+                or prepared.get("phase") != "prepared"
+                or committed.get("phase") != "committed"
+                or committed.get("operation_id") != operation_id
+                or committed.get("schema_version") != schema_version
+            ):
+                raise ValueError("configuration history journal authority is invalid")
+            journal_transition_profile(schema_version)
+            if operation_id in journal_pairs:
+                raise ValueError("configuration history journal authority is invalid")
+            journal_pairs[operation_id] = (prepared, committed)
     snapshots = [canonical_sha256(replayed)]
     update_rows: list[Mapping[str, Any]] = []
     previous_timestamp = datetime.fromisoformat(str(first["timestamp"]))
@@ -3520,13 +4222,24 @@ def _replay_config_history(
                 raise ValueError("configuration history change is empty")
             updated[field] = change["new"]
         replayed = EvaluationAssetConfig.from_dict(updated).to_dict()
+        if allow_pre_wal_history:
+            transition_profile = journal_transition_profile(
+                HISTORICAL_JOURNAL_SCHEMA_VERSION_V2
+            )
+        else:
+            pair = journal_pairs.get(operation_id)
+            if pair is None or pair[0].get("history_entry") != row:
+                raise ValueError("configuration history journal authority is invalid")
+            transition_profile = journal_transition_profile(
+                pair[0].get("schema_version")
+            )
         try:
             earliest = min(
                 (
-                    PERSISTED_CONFIG_STAGE_DEPENDENCIES_V2[field]
+                    transition_profile.config_stage_dependencies[field]
                     for field in changes
                 ),
-                key=PERSISTED_STAGE_VALUES_V2.index,
+                key=transition_profile.stage_values.index,
             )
         except KeyError as exc:
             raise ValueError(
@@ -3541,19 +4254,14 @@ def _replay_config_history(
         update_rows.append(row)
         snapshots.append(canonical_sha256(replayed))
     if not allow_pre_wal_history:
-        if len(revision_journal_rows) != 2 * len(update_rows):
+        if len(journal_pairs) != len(update_rows):
             raise ValueError("configuration history journal authority is invalid")
-        for index, history_entry in enumerate(update_rows):
-            prepared = revision_journal_rows[2 * index]
-            committed = revision_journal_rows[2 * index + 1]
+        for history_entry in update_rows:
             operation_id = history_entry["operation_id"]
+            prepared, committed = journal_pairs[operation_id]
             if (
-                prepared.get("schema_version") != JOURNAL_SCHEMA_VERSION
-                or prepared.get("phase") != "prepared"
-                or prepared.get("operation_id") != operation_id
+                prepared.get("operation_id") != operation_id
                 or prepared.get("history_entry") != history_entry
-                or committed.get("schema_version") != JOURNAL_SCHEMA_VERSION
-                or committed.get("phase") != "committed"
                 or committed.get("operation_id") != operation_id
             ):
                 raise ValueError("configuration history journal authority is invalid")
@@ -3901,7 +4609,13 @@ def verify_raw_snapshot_floor(layout: Any, state: PipelineState) -> None:
     if (
         not isinstance(receipt, Mapping)
         or set(receipt) != _STAGE_RECEIPT_FIELDS
-        or receipt.get("schema_version") != STAGE_RECEIPT_SCHEMA_VERSION
+        or receipt.get("schema_version")
+        not in {
+            _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V1,
+            _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V2,
+            _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V3,
+            STAGE_RECEIPT_SCHEMA_VERSION,
+        }
         or receipt.get("stage") != raw_stage.value
         or receipt.get("stage_index") != 1
     ):

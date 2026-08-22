@@ -28,24 +28,32 @@ Routes:
     GET /api/tenants/<t>/doc?path=<rel>            -> doc content (markdown)
     GET /api/tenants/<t>/evaluation-assets         -> asset pipeline summaries
     GET /api/tenants/<t>/evaluation-assets/<a>/stages/<s> -> stage details
+    GET /api/tenants/<t>/evaluation-assets/<a>/reviews -> safe review queue
     POST /api/evaluation-assets/start              -> create and run an asset
     POST /api/evaluation-assets/extend             -> create an incremental version
     POST /api/tenants/<t>/evaluation-assets/<a>/resume -> revise and resume an asset
     POST /api/tenants/<t>/evaluation-assets/<a>/adopt -> adopt legacy completion
+    POST /api/tenants/<t>/evaluation-assets/<a>/reviews/... -> decide/finalize
 """
 
 from __future__ import annotations
 
 import ipaddress
 import json
+import re
 import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
+from src.hephaestus.evaluation_assets.durability import EvaluationAssetError
 from src.hephaestus.evaluation_assets.input_contract import input_contract_document
 from src.hephaestus.evaluation_assets.models import EvaluationAssetConfig
+from src.hephaestus.evaluation_assets.review import (
+    ReviewDecisionConflictError,
+    ReviewIntegrityError,
+)
 from src.hephaestus.evaluation_assets.service import EvaluationAssetRunManager
 from src.hephaestus.webui.data import TenantStore
 from src.hephaestus.webui.evaluation_assets_frontend import EVALUATION_ASSET_HTML
@@ -71,6 +79,7 @@ OPENAI_EMBEDDING_MODELS = {
     "text-embedding-3-large",
     "text-embedding-ada-002",
 }
+_CANONICAL_REVIEW_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class _ThreadingHTTPServerV6(ThreadingHTTPServer):
@@ -156,6 +165,22 @@ class _Handler(BaseHTTPRequestHandler):
         if params is not None:
             self._route_adopt_evaluation_asset(params)
             return
+        params = _match(
+            "/api/tenants/{tenant}/evaluation-assets/{asset}/reviews/finalize",
+            parsed.path,
+        )
+        if params is not None:
+            self._route_finalize_evaluation_asset_reviews(params)
+            return
+        for action in ("approve", "reject"):
+            params = _match(
+                "/api/tenants/{tenant}/evaluation-assets/{asset}/reviews/"
+                f"{{fingerprint}}/{action}",
+                parsed.path,
+            )
+            if params is not None:
+                self._route_decide_evaluation_asset_review(params, action)
+                return
         self._send_json({"error": "not found", "path": parsed.path}, status=404)
 
     # -- route table -----------------------------------------------------
@@ -183,6 +208,10 @@ class _Handler(BaseHTTPRequestHandler):
             (
                 "/api/tenants/{tenant}/evaluation-assets/{asset}/stages/{stage}",
                 _Handler._route_evaluation_asset_stage,
+            ),
+            (
+                "/api/tenants/{tenant}/evaluation-assets/{asset}/reviews",
+                _Handler._route_evaluation_asset_reviews,
             ),
         ]
 
@@ -304,6 +333,137 @@ class _Handler(BaseHTTPRequestHandler):
             params["stage"],
         )
         self._send_json_or_404(data)
+
+    def _route_evaluation_asset_reviews(
+        self,
+        params: Dict[str, str],
+        query: Dict[str, List[str]],
+    ) -> None:
+        try:
+            options = _validated_review_list_query(query)
+        except (TypeError, ValueError):
+            self._send_json({"error": "invalid review request"}, status=400)
+            return
+        try:
+            page = self.asset_manager.list_reviews(
+                params["tenant"],
+                params["asset"],
+                **options,
+            )
+        except (FileNotFoundError, KeyError):
+            self._send_json(
+                {"error": "evaluation asset review not found"},
+                status=404,
+            )
+            return
+        except (
+            EvaluationAssetError,
+            ReviewDecisionConflictError,
+            ReviewIntegrityError,
+            RuntimeError,
+            ValueError,
+            OSError,
+        ):
+            self._send_json(
+                {"error": "review request conflicts with current asset state"},
+                status=409,
+            )
+            return
+        self._send_json(page)
+
+    def _route_decide_evaluation_asset_review(
+        self,
+        params: Dict[str, str],
+        action: str,
+    ) -> None:
+        payload = self._read_json_body()
+        if payload is None:
+            return
+        try:
+            request = _validated_review_decision_payload(payload)
+            fingerprint = _canonical_review_fingerprint(params["fingerprint"])
+        except (KeyError, TypeError, ValueError):
+            self._send_json({"error": "invalid review request"}, status=400)
+            return
+        try:
+            decision = self.asset_manager.decide_review(
+                params["tenant"],
+                params["asset"],
+                request["case_id"],
+                fingerprint,
+                "approved" if action == "approve" else "rejected",
+                reviewer=request["reviewer"],
+                note=request.get("note"),
+                expected_review_set_fingerprint=(
+                    request["expected_review_set_fingerprint"]
+                ),
+            )
+        except (FileNotFoundError, KeyError):
+            self._send_json(
+                {"error": "evaluation asset review not found"},
+                status=404,
+            )
+            return
+        except (
+            EvaluationAssetError,
+            ReviewDecisionConflictError,
+            ReviewIntegrityError,
+            RuntimeError,
+            ValueError,
+            OSError,
+        ):
+            self._send_json(
+                {"error": "review request conflicts with current asset state"},
+                status=409,
+            )
+            return
+        self._send_json(decision)
+
+    def _route_finalize_evaluation_asset_reviews(
+        self,
+        params: Dict[str, str],
+    ) -> None:
+        payload = self._read_json_body()
+        if payload is None:
+            return
+        try:
+            request = _validated_review_finalization_payload(payload)
+        except (KeyError, TypeError, ValueError):
+            self._send_json({"error": "invalid review request"}, status=400)
+            return
+        try:
+            state = self.asset_manager.finalize_review(
+                params["tenant"],
+                params["asset"],
+                reviewer=request["reviewer"],
+                note=request.get("note"),
+                expected_review_set_fingerprint=(
+                    request["expected_review_set_fingerprint"]
+                ),
+                expected_decision_set_fingerprint=(
+                    request["expected_decision_set_fingerprint"]
+                ),
+            )
+        except (FileNotFoundError, KeyError):
+            self._send_json(
+                {"error": "evaluation asset review not found"},
+                status=404,
+            )
+            return
+        except (
+            EvaluationAssetError,
+            ReviewDecisionConflictError,
+            ReviewIntegrityError,
+            RuntimeError,
+            ValueError,
+            OSError,
+        ):
+            self._send_json(
+                {"error": "review request conflicts with current asset state"},
+                status=409,
+            )
+            return
+        self._send_json(state, status=202)
 
     def _route_start_evaluation_asset(self) -> None:
         payload = self._read_json_body()
@@ -645,6 +805,108 @@ def _validated_resume_updates(payload: Dict[str, Any]) -> Dict[str, Any]:
     if "split_seed" in payload:
         updates["split_seed"] = int(payload["split_seed"])
     return updates
+
+
+def _validated_review_list_query(
+    query: Dict[str, List[str]],
+) -> Dict[str, Any]:
+    unknown = set(query) - {"status", "offset", "limit"}
+    if unknown or any(len(values) != 1 for values in query.values()):
+        raise ValueError("review query is invalid")
+    status = (query.get("status") or [""])[0] or None
+    if status not in {None, "pending", "approved", "rejected", "held"}:
+        raise ValueError("review status is invalid")
+    offset = _strict_review_integer(query, "offset", default=0, minimum=0)
+    limit = _strict_review_integer(query, "limit", default=100, minimum=1)
+    if limit > 100:
+        raise ValueError("review limit is invalid")
+    return {"status": status, "offset": offset, "limit": limit}
+
+
+def _strict_review_integer(
+    query: Dict[str, List[str]],
+    name: str,
+    *,
+    default: int,
+    minimum: int,
+) -> int:
+    values = query.get(name)
+    if values is None:
+        return default
+    try:
+        value = int(values[0])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"review {name} is invalid") from exc
+    if value < minimum:
+        raise ValueError(f"review {name} is invalid")
+    return value
+
+
+def _validated_review_decision_payload(
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    allowed = {
+        "case_id",
+        "reviewer",
+        "note",
+        "expected_review_set_fingerprint",
+    }
+    if set(payload) - allowed:
+        raise ValueError("review decision payload has unsupported fields")
+    return {
+        "case_id": _nonempty_review_string(payload["case_id"]),
+        "reviewer": _nonempty_review_string(payload["reviewer"]),
+        "note": _optional_review_note(payload.get("note")),
+        "expected_review_set_fingerprint": _canonical_review_fingerprint(
+            payload["expected_review_set_fingerprint"]
+        ),
+    }
+
+
+def _validated_review_finalization_payload(
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    allowed = {
+        "reviewer",
+        "note",
+        "expected_review_set_fingerprint",
+        "expected_decision_set_fingerprint",
+    }
+    if set(payload) - allowed:
+        raise ValueError("review finalization payload has unsupported fields")
+    return {
+        "reviewer": _nonempty_review_string(payload["reviewer"]),
+        "note": _optional_review_note(payload.get("note")),
+        "expected_review_set_fingerprint": _canonical_review_fingerprint(
+            payload["expected_review_set_fingerprint"]
+        ),
+        "expected_decision_set_fingerprint": _canonical_review_fingerprint(
+            payload["expected_decision_set_fingerprint"]
+        ),
+    }
+
+
+def _nonempty_review_string(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("review identity must be non-empty")
+    return value
+
+
+def _optional_review_note(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("review note must be a string")
+    return value
+
+
+def _canonical_review_fingerprint(value: Any) -> str:
+    if (
+        not isinstance(value, str)
+        or _CANONICAL_REVIEW_SHA256.fullmatch(value) is None
+    ):
+        raise ValueError("review fingerprint is invalid")
+    return value
 
 
 def _parse_query(raw_query: str) -> Dict[str, List[str]]:

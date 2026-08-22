@@ -7,10 +7,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 SCHEMA_VERSION = "fapo-evaluation-input-v1"
 FEEDBACK_POLARITIES = frozenset({"positive", "negative", "mixed"})
+CORRECTNESS_SIGNAL_KINDS = frozenset({"deterministic", "executable"})
+CORRECTNESS_SIGNAL_REQUIRED_FIELDS = ("kind", "check_id", "passed")
+CORRECTNESS_SIGNAL_OPTIONAL_FIELDS = ("content",)
 
 COMMON_REQUIRED_FIELDS = (
     "schema_version",
@@ -111,7 +114,17 @@ def input_contract_document() -> Dict[str, Any]:
         "feedback": {
             "required": ["polarity", "rationale"],
             "types": {"polarity": "string", "rationale": "string"},
-            "optional": ["correction", "source"],
+            "optional": ["correction", "source", "correctness_signals"],
+        },
+        "correctness_signal": {
+            "required": list(CORRECTNESS_SIGNAL_REQUIRED_FIELDS),
+            "types": {
+                "kind": "string",
+                "check_id": "string",
+                "passed": "boolean",
+            },
+            "optional": list(CORRECTNESS_SIGNAL_OPTIONAL_FIELDS),
+            "kinds": sorted(CORRECTNESS_SIGNAL_KINDS),
         },
         "feedback_polarities": sorted(FEEDBACK_POLARITIES),
         "conversation_message": {
@@ -130,6 +143,22 @@ def input_contract_document() -> Dict[str, Any]:
             "unlabeled records must not contain feedback",
         ],
     }
+
+
+def redact_correctness_signals(
+    value: Sequence[Mapping[str, Any]],
+    *,
+    redact_content: Callable[[Any], Any],
+) -> list[dict[str, Any]]:
+    """Redact optional signal content while preserving audited structure."""
+    _validate_correctness_signals(value, "correctness_signals")
+    redacted = []
+    for signal in value:
+        item = dict(signal)
+        if "content" in item:
+            item["content"] = redact_content(item["content"])
+        redacted.append(item)
+    return redacted
 
 
 def _validate_messages(value: Any, location: str) -> None:
@@ -184,6 +213,53 @@ def _validate_feedback(value: Any, location: str) -> None:
         raise ValueError(f"{location}: 'feedback.rationale' must be a string")
     if "source" in value:
         _require_nonempty_string(value["source"], location, "feedback.source")
+    if "correctness_signals" in value:
+        _validate_correctness_signals(
+            value["correctness_signals"],
+            location,
+        )
+
+
+def _validate_correctness_signals(value: Any, location: str) -> None:
+    field = "feedback.correctness_signals"
+    if not isinstance(value, list):
+        raise ValueError(f"{location}: '{field}' must be an array")
+    allowed_fields = set(CORRECTNESS_SIGNAL_REQUIRED_FIELDS) | set(
+        CORRECTNESS_SIGNAL_OPTIONAL_FIELDS
+    )
+    for index, signal in enumerate(value):
+        item_field = f"{field}[{index}]"
+        if not isinstance(signal, Mapping):
+            raise ValueError(f"{location}: '{item_field}' must be an object")
+        for name in CORRECTNESS_SIGNAL_REQUIRED_FIELDS:
+            if name not in signal:
+                raise ValueError(
+                    f"{location}: '{item_field}.{name}' is required"
+                )
+        unexpected_fields = sorted(set(signal) - allowed_fields)
+        if unexpected_fields:
+            unexpected = ", ".join(str(name) for name in unexpected_fields)
+            raise ValueError(
+                f"{location}: '{item_field}' has unsupported field(s): "
+                f"{unexpected}"
+            )
+        if (
+            not isinstance(signal["kind"], str)
+            or signal["kind"] not in CORRECTNESS_SIGNAL_KINDS
+        ):
+            allowed = ", ".join(sorted(CORRECTNESS_SIGNAL_KINDS))
+            raise ValueError(
+                f"{location}: '{item_field}.kind' must be one of: {allowed}"
+            )
+        _require_nonempty_string(
+            signal["check_id"],
+            location,
+            f"{item_field}.check_id",
+        )
+        if not isinstance(signal["passed"], bool):
+            raise ValueError(
+                f"{location}: '{item_field}.passed' must be a boolean"
+            )
 
 
 def _require_nonempty_string(value: Any, location: str, field: str) -> None:

@@ -6,7 +6,45 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 from pathlib import Path
+
+_CANONICAL_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _nonempty_cli_value(value: str) -> str:
+    if not value.strip():
+        raise argparse.ArgumentTypeError("value must be non-empty")
+    return value
+
+
+def _review_fingerprint(value: str) -> str:
+    if _CANONICAL_SHA256.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError(
+            "value must be sha256: followed by 64 lowercase hexadecimal characters"
+        )
+    return value
+
+
+def _nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be non-negative")
+    return parsed
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("value must be positive")
+    return parsed
+
+
+def _review_page_limit(value: str) -> int:
+    parsed = _positive_int(value)
+    if parsed > 100:
+        raise argparse.ArgumentTypeError("value must be at most 100")
+    return parsed
 
 
 def _repository_base_for_cli(tenants_root: Path) -> Path:
@@ -178,6 +216,82 @@ def build_parser() -> argparse.ArgumentParser:
     status_asset_parser.add_argument("--asset-id", default="v1")
     status_asset_parser.add_argument("--tenants-root", default="tenants")
 
+    reviews_asset_parser = assets_subparsers.add_parser(
+        "reviews",
+        help="List and decide fingerprint-bound derived-case reviews",
+    )
+    reviews_subparsers = reviews_asset_parser.add_subparsers(
+        dest="reviews_command",
+        required=True,
+    )
+    list_reviews_parser = reviews_subparsers.add_parser("list")
+    list_reviews_parser.add_argument("--tenant", required=True)
+    list_reviews_parser.add_argument("--asset-id", default="v1")
+    list_reviews_parser.add_argument("--tenants-root", default="tenants")
+    list_reviews_parser.add_argument(
+        "--status",
+        choices=("pending", "approved", "rejected", "held"),
+    )
+    list_reviews_parser.add_argument("--offset", type=_nonnegative_int, default=0)
+    list_reviews_parser.add_argument("--limit", type=_review_page_limit, default=100)
+
+    for command in ("approve", "reject"):
+        decision_parser = reviews_subparsers.add_parser(command)
+        decision_parser.add_argument("--tenant", required=True)
+        decision_parser.add_argument("--asset-id", default="v1")
+        decision_parser.add_argument("--tenants-root", default="tenants")
+        decision_parser.add_argument(
+            "--case-id",
+            required=True,
+            type=_nonempty_cli_value,
+        )
+        decision_parser.add_argument(
+            "--fingerprint",
+            required=True,
+            type=_review_fingerprint,
+        )
+        decision_parser.add_argument(
+            "--reviewer",
+            required=True,
+            type=_nonempty_cli_value,
+        )
+        decision_parser.add_argument("--note")
+        decision_parser.add_argument(
+            "--review-set",
+            required=True,
+            dest="expected_review_set_fingerprint",
+            type=_review_fingerprint,
+        )
+
+    finalize_reviews_parser = reviews_subparsers.add_parser(
+        "finalize",
+        help=(
+            "Freeze this review set and build immutable datasets; "
+            "pending, rejected, and held derived cases are excluded"
+        ),
+    )
+    finalize_reviews_parser.add_argument("--tenant", required=True)
+    finalize_reviews_parser.add_argument("--asset-id", default="v1")
+    finalize_reviews_parser.add_argument("--tenants-root", default="tenants")
+    finalize_reviews_parser.add_argument(
+        "--reviewer",
+        required=True,
+        type=_nonempty_cli_value,
+    )
+    finalize_reviews_parser.add_argument("--note")
+    finalize_reviews_parser.add_argument(
+        "--review-set",
+        required=True,
+        dest="expected_review_set_fingerprint",
+        type=_review_fingerprint,
+    )
+    finalize_reviews_parser.add_argument(
+        "--decision-set",
+        required=True,
+        dest="expected_decision_set_fingerprint",
+        type=_review_fingerprint,
+    )
+
     return parser
 
 
@@ -282,6 +396,71 @@ def main() -> None:
         raise ValueError(f"Unsupported customer-data command: {args.customer_data_command}")
 
     if args.command == "assets":
+        if args.assets_command == "reviews":
+            import json as json_mod
+
+            from src.hephaestus.evaluation_assets.pipeline import (
+                EvaluationAssetPipeline,
+            )
+            from src.hephaestus.evaluation_assets.service import (
+                public_review_decision,
+                public_review_page,
+                public_review_state,
+            )
+            from src.hephaestus.evaluation_assets.workspace import (
+                EvaluationAssetLayout,
+            )
+
+            layout = EvaluationAssetLayout(
+                Path(args.tenants_root),
+                args.tenant,
+                args.asset_id,
+                repository_base=_repository_base_for_cli(Path(args.tenants_root)),
+            )
+            if args.reviews_command == "list":
+                payload = public_review_page(
+                    layout.list_review_items(
+                        status=args.status,
+                        offset=args.offset,
+                        limit=args.limit,
+                    )
+                )
+            elif args.reviews_command in {"approve", "reject"}:
+                payload = public_review_decision(
+                    layout.decide_review(
+                        args.case_id,
+                        args.fingerprint,
+                        (
+                            "approved"
+                            if args.reviews_command == "approve"
+                            else "rejected"
+                        ),
+                        reviewer=args.reviewer,
+                        note=args.note,
+                        expected_review_set_fingerprint=(
+                            args.expected_review_set_fingerprint
+                        ),
+                    )
+                )
+            elif args.reviews_command == "finalize":
+                state = EvaluationAssetPipeline(layout).finalize_review(
+                    reviewer=args.reviewer,
+                    note=args.note,
+                    expected_review_set_fingerprint=(
+                        args.expected_review_set_fingerprint
+                    ),
+                    expected_decision_set_fingerprint=(
+                        args.expected_decision_set_fingerprint
+                    ),
+                )
+                payload = public_review_state(state.to_dict())
+            else:
+                raise ValueError(
+                    f"Unsupported assets reviews command: {args.reviews_command}"
+                )
+            print(json_mod.dumps(payload, indent=2, sort_keys=True))
+            return
+
         if args.assets_command == "extend":
             import json as json_mod
 

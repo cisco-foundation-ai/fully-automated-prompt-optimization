@@ -33,6 +33,7 @@ from src.hephaestus.datasets.embedding_providers import (
 )
 from src.hephaestus.datasets.evaluation_assets import (
     filter_synthetic_cases,
+    has_scoreable_rubric,
     sha256_file,
     split_cases_by_group,
     validate_fapo_case,
@@ -60,6 +61,12 @@ from src.hephaestus.evaluation_assets.control_jsonl import (
     read_strict_jsonl_objects,
     resolve_local_authority_file,
 )
+from src.hephaestus.evaluation_assets.dependencies import (
+    build_stage_seven_dependency,
+    build_stage_six_dependency,
+    dependency_matches,
+    fingerprinted_members,
+)
 from src.hephaestus.evaluation_assets.durability import (
     STAGE_SPECIFICATIONS,
     EvaluationAssetImmutableError,
@@ -73,9 +80,11 @@ from src.hephaestus.evaluation_assets.durability import (
     verify_completed_release_candidate,
     verify_raw_snapshot_floor,
     verify_released_asset,
+    verify_stage_receipt,
 )
 from src.hephaestus.evaluation_assets.input_contract import (
     effective_route,
+    redact_correctness_signals,
     validate_input_records,
 )
 from src.hephaestus.evaluation_assets.models import (
@@ -84,6 +93,7 @@ from src.hephaestus.evaluation_assets.models import (
     PipelineState,
 )
 from src.hephaestus.evaluation_assets.provenance import (
+    PROMPT_REVISIONS,
     build_algorithm_inventory,
     build_provenance,
     build_provider_call,
@@ -101,6 +111,27 @@ from src.hephaestus.evaluation_assets.publication import (
     InstalledGeneration,
     install_generation,
     validate_historical_generation,
+)
+from src.hephaestus.evaluation_assets.review import (
+    ReviewIntegrityError,
+    build_duplicate_families,
+    build_review_finalization,
+    build_review_item,
+    case_content_fingerprint,
+    decision_set_fingerprint,
+    inherit_review_decision,
+    parse_review_finalization,
+    review_set_fingerprint,
+    validate_duplicate_family,
+    validate_review_finalization,
+)
+from src.hephaestus.evaluation_assets.split_isolation import (
+    assess_correctness_eligibility_records,
+    build_trusted_split_plan,
+    eligibility_by_record_id,
+    expand_trusted_split_plan,
+    model_visible_context,
+    parent_assignments_by_group_id,
 )
 from src.hephaestus.evaluation_assets.stage_three_contract import (
     compile_evaluation_guidelines as _compile_evaluation_guidelines,  # noqa: F401
@@ -129,6 +160,11 @@ from src.hephaestus.evaluation_assets.stage_three_contract import (
 from src.hephaestus.evaluation_assets.stage_three_contract import (
     validate_stage_three_identities as _validate_stage_three_identities,
 )
+from src.hephaestus.evaluation_assets.trust_tiers import (
+    INFERRED_FROM_TRUSTED_FEEDBACK,
+    SYNTHETIC_FROM_TRUSTED_RUBRIC,
+    TRUSTED_FEEDBACK,
+)
 from src.hephaestus.evaluation_assets.workspace import (
     EvaluationAssetLayout,
     utc_now,
@@ -136,6 +172,11 @@ from src.hephaestus.evaluation_assets.workspace import (
 
 LABELING_QUEUE_SAMPLE_RATIO = 0.1
 LABELING_QUEUE_MAX_PER_CLUSTER = 3
+LABELING_QUEUE_ACQUISITION = {
+    "purpose": "correctness_label_acquisition",
+    "method": "deterministic_centroid_nearest",
+    "sampling_semantics": "non_probability",
+}
 PUBLISHED_DATASET_SPLITS = (
     "train",
     "validation",
@@ -190,6 +231,7 @@ def _local_authority_sha256(
 ) -> str:
     """Hash the exact bytes returned by one bound pipeline authority read."""
     return hashlib.sha256(_local_authority_bytes(layout, path)).hexdigest()
+
 
 EVIDENCE_EXTRACTION_PROMPT = """\
 Extract atomic evaluation evidence from explicit user feedback. Return one JSON
@@ -340,25 +382,19 @@ class EvaluationAssetPipeline:
             )
             rubric_source = "default"
         else:
-            raise ValueError(
-                f"Unsupported rubric provider: {self.config.rubric_provider}"
-            )
+            raise ValueError(f"Unsupported rubric provider: {self.config.rubric_provider}")
 
         if self._injected_embedding_provider is not None:
             self.embedding_provider = self._injected_embedding_provider
             embedding_source = "injected"
         elif self.config.embedding_provider == "openai":
-            self.embedding_provider = OpenAIEmbeddingProvider(
-                model=self.config.embedding_model
-            )
+            self.embedding_provider = OpenAIEmbeddingProvider(model=self.config.embedding_model)
             embedding_source = "default"
         elif self.config.embedding_provider == "tfidf":
             self.embedding_provider = None
             embedding_source = "default"
         else:
-            raise ValueError(
-                f"Unsupported embedding provider: {self.config.embedding_provider}"
-            )
+            raise ValueError(f"Unsupported embedding provider: {self.config.embedding_provider}")
 
         self._provider_identities = {
             "rubric": self._actual_provider_identity(
@@ -401,9 +437,7 @@ class EvaluationAssetPipeline:
             provider_name = configured_provider.strip()
             model = configured_model.strip()
             if not provider_name or not model:
-                raise ValueError(
-                    "Default provider identity requires non-empty provider and model"
-                )
+                raise ValueError("Default provider identity requires non-empty provider and model")
             return {"provider": provider_name, "model": model, "source": source}
 
         declared = {
@@ -411,9 +445,7 @@ class EvaluationAssetPipeline:
             "model": getattr(provider, "model", None),
         }
         unavailable_fields = [
-            field
-            for field, value in declared.items()
-            if not isinstance(value, str) or not value.strip()
+            field for field, value in declared.items() if not isinstance(value, str) or not value.strip()
         ]
         if unavailable_fields:
             return {
@@ -423,9 +455,7 @@ class EvaluationAssetPipeline:
                     else "unavailable"
                 ),
                 "model": (
-                    str(declared["model"]).strip()
-                    if "model" not in unavailable_fields
-                    else "unavailable"
+                    str(declared["model"]).strip() if "model" not in unavailable_fields else "unavailable"
                 ),
                 "source": source,
                 "status": "unavailable",
@@ -463,8 +493,7 @@ class EvaluationAssetPipeline:
             if identity.get("status") == "unavailable":
                 missing = ", ".join(identity["unavailable_fields"])
                 raise ValueError(
-                    f"injected {role} provider identity is unavailable; "
-                    f"declare non-empty {missing}"
+                    f"injected {role} provider identity is unavailable; " f"declare non-empty {missing}"
                 )
             provider_settings(
                 provider,
@@ -593,9 +622,7 @@ class EvaluationAssetPipeline:
             tenants_root=tenants_root,
             tenant_id=config.tenant_id,
             asset_id=config.asset_id,
-            repository_base=(
-                repository_base if repository_base is not None else Path.cwd()
-            ),
+            repository_base=(repository_base if repository_base is not None else Path.cwd()),
         )
         layout.initialize(
             config,
@@ -624,14 +651,8 @@ class EvaluationAssetPipeline:
             handoff_control = load_completed_release_handoff_control(self.layout)
             recovered = self.layout._recover_locked()
             if recovered:
-                handoff_control = load_completed_release_handoff_control(
-                    self.layout
-                )
-            state = (
-                handoff_control[0]
-                if handoff_control is not None
-                else self.layout.load_state()
-            )
+                handoff_control = load_completed_release_handoff_control(self.layout)
+            state = handoff_control[0] if handoff_control is not None else self.layout.load_state()
             if state.status == "released":
                 verify_released_asset(self.layout, state)
                 if recovered:
@@ -660,11 +681,7 @@ class EvaluationAssetPipeline:
                     _preflight_accepted_callback,
                     completed_release_candidate=True,
                 )
-            self.config = (
-                handoff_control[1]
-                if handoff_control is not None
-                else self.layout.load_config()
-            )
+            self.config = handoff_control[1] if handoff_control is not None else self.layout.load_config()
             current_config = self.config
             prospective_config = (
                 self.layout._resolve_config_updates(current_config, config_updates)
@@ -677,9 +694,7 @@ class EvaluationAssetPipeline:
             finally:
                 self.config = current_config
             self.last_revision = (
-                self.layout._revise_config_locked(config_updates)
-                if config_updates is not None
-                else None
+                self.layout._revise_config_locked(config_updates) if config_updates is not None else None
             )
             self.config = self.layout.load_config()
             self.lineage = _optional_local_authority_json(
@@ -690,6 +705,87 @@ class EvaluationAssetPipeline:
             return self._run_locked(
                 _preflight_accepted_callback,
                 completed_release_candidate=False,
+                review_authorized=False,
+            )
+
+    def finalize_review(
+        self,
+        *,
+        reviewer: str,
+        expected_review_set_fingerprint: str,
+        expected_decision_set_fingerprint: str,
+        note: str | None = None,
+        lock_timeout: float = 0,
+        _lock_acquired_callback: Optional[Callable[[], None]] = None,
+        _preflight_accepted_callback: Optional[Callable[[], None]] = None,
+    ) -> PipelineState:
+        """Freeze the exact current review set and continue into Stage 8."""
+        with self.layout.asset_lock(lock_timeout):
+            if _lock_acquired_callback is not None:
+                _lock_acquired_callback()
+            self.layout._recover_locked()
+            state = self.layout.load_state()
+            if state.legacy_completed:
+                raise EvaluationAssetLegacyError(
+                    self.layout.tenant_id,
+                    self.layout.asset_id,
+                    "explicit verification and adoption are required",
+                )
+            if state.status == "released":
+                verify_released_asset(self.layout, state)
+            elif state.status not in {"awaiting_review", "failed"}:
+                raise ValueError("review finalization requires an awaiting-review asset")
+            self.config = self.layout.load_config()
+            self.lineage = _optional_local_authority_json(
+                self.layout,
+                self.layout.lineage_path,
+            )
+            self._configure_providers()
+            authority = self._current_review_authority(
+                state,
+                compare_current_dependencies=state.status != "released",
+            )
+            current_set = str(authority["review_set_fingerprint"])
+            if expected_review_set_fingerprint != current_set:
+                raise ReviewIntegrityError("review set changed before finalization")
+            current_decisions = str(authority["decision_set_fingerprint"])
+            if expected_decision_set_fingerprint != current_decisions:
+                raise ReviewIntegrityError("decision set changed before finalization")
+            finalization = self._current_review_finalization(authority)
+            if finalization is None:
+                if state.status == "released":
+                    raise ReviewIntegrityError("released review finalization authority is missing")
+                finalization = build_review_finalization(
+                    review_items=authority["review_items"],
+                    dependencies=authority["dependencies"],
+                    decisions=authority["decisions"],
+                    held_cases=authority["held_cases"],
+                    stage7_receipt_sha256=str(authority["stage7_receipt_sha256"]),
+                    trusted_count=int(authority["trusted_count"]),
+                    reviewer=reviewer,
+                    timestamp=utc_now(),
+                    note=note,
+                )
+                self.layout._append_jsonl_once(
+                    self.layout.review_finalizations_path,
+                    finalization,
+                    identity_fields=("finalization_id",),
+                )
+                authority = {
+                    **authority,
+                    "finalizations": [
+                        *authority["finalizations"],
+                        finalization,
+                    ],
+                }
+            if state.status == "released":
+                if _preflight_accepted_callback is not None:
+                    _preflight_accepted_callback()
+                return state
+            return self._run_locked(
+                _preflight_accepted_callback,
+                completed_release_candidate=False,
+                review_authorized=True,
             )
 
     def _run_locked(
@@ -697,6 +793,7 @@ class EvaluationAssetPipeline:
         preflight_accepted_callback: Optional[Callable[[], None]] = None,
         *,
         completed_release_candidate: bool,
+        review_authorized: bool = False,
     ) -> PipelineState:
         """Run while the caller holds the asset mutation lock."""
         if completed_release_candidate:
@@ -720,20 +817,36 @@ class EvaluationAssetPipeline:
                 state,
                 self.config,
                 STAGE_PROMPTS,
-                {
-                    stage: self._provider_identity_for_stage(stage)
-                    for stage in PipelineStage
-                },
+                {stage: self._provider_identity_for_stage(stage) for stage in PipelineStage},
             )
             state.schema_version = "fapo-evaluation-asset-state-v2"
         if boundary is not None:
             boundary_index = list(PipelineStage).index(boundary)
             suffix_states = state.stages[boundary_index:]
-            if any(
-                item.status != "pending" or item.receipt_sha256
-                for item in suffix_states
-            ):
+            if any(item.status != "pending" or item.receipt_sha256 for item in suffix_states):
                 state = self.layout._invalidate_checkpoints_locked(state, boundary)
+        if not review_authorized and boundary == PipelineStage.DATASET_SPLITS:
+            authority = self._current_review_authority(
+                state,
+                compare_current_dependencies=True,
+            )
+            finalization = self._current_review_finalization(authority)
+            if finalization is None:
+                if (
+                    state.status != "awaiting_review"
+                    or state.current_stage is not None
+                    or state.error is not None
+                ):
+                    state.status = "awaiting_review"
+                    state.current_stage = None
+                    state.error = None
+                    self.layout.save_state(state)
+                    self.layout.append_event(
+                        "review_required",
+                        {"stage": PipelineStage.SYNTHETIC_COVERAGE.value},
+                    )
+                return state
+            review_authorized = True
         state.status = "running"
         state.error = None
         self.layout.save_state(state)
@@ -800,6 +913,10 @@ class EvaluationAssetPipeline:
             stage_state.completed_at = completed_at
             stage_state.message = _stage_message(stage, counts)
             self.layout.save_state(state)
+            if stage == PipelineStage.SYNTHETIC_COVERAGE:
+                _publication_fault_point(
+                    "after_stage_7_receipt_state_complete"
+                )
             if stage == PipelineStage.DATASET_SPLITS:
                 self._pending_generation = verify_completed_release_candidate(
                     self.layout,
@@ -810,6 +927,16 @@ class EvaluationAssetPipeline:
                 "stage_completed",
                 {"stage": stage.value, "counts": counts},
             )
+            if stage == PipelineStage.SYNTHETIC_COVERAGE and not review_authorized:
+                state.status = "awaiting_review"
+                state.current_stage = None
+                state.error = None
+                self.layout.save_state(state)
+                self.layout.append_event(
+                    "review_required",
+                    {"stage": stage.value},
+                )
+                return state
 
         state.current_stage = None
         state.error = None
@@ -831,6 +958,106 @@ class EvaluationAssetPipeline:
                 trusted_root=self.layout.tenant_root,
             )
         return self.layout._publish_release_locked(state, generation)
+
+    def _current_review_authority(
+        self,
+        state: PipelineState,
+        *,
+        compare_current_dependencies: bool,
+    ) -> Dict[str, Any]:
+        """Load and authenticate the complete review authority for Stage 7."""
+        stage = PipelineStage.SYNTHETIC_COVERAGE
+        stage_state = next(item for item in state.stages if item.stage == stage.value)
+        if stage_state.status != "completed" or not stage_state.receipt_sha256:
+            raise ReviewIntegrityError("review authority requires a completed Stage 7 receipt")
+        verify_stage_receipt(
+            self.layout,
+            state,
+            stage,
+            self.config,
+            prompt_values=STAGE_PROMPTS[stage],
+            provider_identity=(
+                self._provider_identity_for_stage(stage) if compare_current_dependencies else None
+            ),
+            compare_current_dependencies=compare_current_dependencies,
+        )
+        review_items = _load_jsonl(self.layout.artifact_path(stage, "derived_review_items.jsonl"))
+        held_cases = _load_jsonl(self.layout.artifact_path(stage, "held_derived_cases.jsonl"))
+        dependencies = _review_dependencies_by_case(
+            self.layout,
+            review_items,
+        )
+        decisions = self.layout._read_control_log(self.layout.review_decisions_path)
+        finalizations = self.layout._read_control_log(self.layout.review_finalizations_path)
+        trusted_cases = [
+            *_load_jsonl(
+                self.layout.artifact_path(
+                    PipelineStage.RUBRIC_EXTRACTION,
+                    "trusted_cases.jsonl",
+                )
+            ),
+            *_load_jsonl(
+                self.layout.artifact_path(
+                    PipelineStage.RUBRIC_EXTRACTION,
+                    "protected_trusted_cases.jsonl",
+                )
+            ),
+        ]
+        held_ids = {str(row.get("case_id")) for row in held_cases}
+        trusted_count = sum(str(case["case_id"]) not in held_ids for case in trusted_cases)
+        receipt_sha256 = "sha256:" + stage_state.receipt_sha256
+        current_set = review_set_fingerprint(
+            stage7_receipt_sha256=receipt_sha256,
+            review_items=review_items,
+            held_cases=held_cases,
+            dependencies=dependencies,
+        )
+        current_decisions = decision_set_fingerprint(
+            review_set_fingerprint=current_set,
+            review_items=review_items,
+            dependencies=dependencies,
+            decisions=decisions,
+        )
+        return {
+            "review_items": review_items,
+            "held_cases": held_cases,
+            "dependencies": dependencies,
+            "decisions": decisions,
+            "finalizations": finalizations,
+            "stage7_receipt_sha256": receipt_sha256,
+            "trusted_count": trusted_count,
+            "review_set_fingerprint": current_set,
+            "decision_set_fingerprint": current_decisions,
+        }
+
+    @staticmethod
+    def _current_review_finalization(
+        authority: Mapping[str, Any],
+    ) -> Dict[str, Any] | None:
+        """Return the sole finalization matching every current authority input."""
+        current_set = str(authority["review_set_fingerprint"])
+        valid: List[Dict[str, Any]] = []
+        for raw in authority["finalizations"]:
+            parsed = parse_review_finalization(raw)
+            if parsed["review_set_fingerprint"] != current_set:
+                continue
+            try:
+                candidate = validate_review_finalization(
+                    parsed,
+                    review_items=authority["review_items"],
+                    dependencies=authority["dependencies"],
+                    decisions=authority["decisions"],
+                    held_cases=authority["held_cases"],
+                    stage7_receipt_sha256=str(authority["stage7_receipt_sha256"]),
+                )
+            except (ReviewIntegrityError, TypeError, ValueError):
+                continue
+            if candidate["counts"]["trusted"] != authority["trusted_count"]:
+                continue
+            valid.append(candidate)
+        if len(valid) > 1:
+            raise ReviewIntegrityError("multiple current review finalizations exist")
+        return valid[0] if valid else None
 
     def _run_stage(self, stage: PipelineStage) -> Dict[str, int]:
         handlers = {
@@ -928,6 +1155,20 @@ class EvaluationAssetPipeline:
                 "rows": details["rows"],
                 "sha256": details["sha256"],
             }
+        review_snapshot_path = self.layout.artifact_path(
+            PipelineStage.DATASET_SPLITS,
+            "review_snapshot.json",
+        )
+        review_snapshot_bytes = _local_authority_bytes(
+            self.layout,
+            review_snapshot_path,
+        )
+        copied_inputs["review_snapshot"] = {
+            "path": review_snapshot_path.relative_to(self.layout.root).as_posix(),
+            "bytes": len(review_snapshot_bytes),
+            "rows": 1,
+            "sha256": hashlib.sha256(review_snapshot_bytes).hexdigest(),
+        }
         lineage_files = None
         if self.lineage:
             lineage_files = {
@@ -936,15 +1177,12 @@ class EvaluationAssetPipeline:
                     self.layout.lineage_path,
                 ),
                 "reuse_manifest_sha256": _local_authority_sha256(
-                    self.layout,
-                    self.layout.reuse_manifest_path
+                    self.layout, self.layout.reuse_manifest_path
                 ),
                 "parent_release": dict(self.lineage.get("parent_release") or {}),
             }
         prompts = {
-            name: value
-            for stage_prompts in STAGE_PROMPTS.values()
-            for name, value in stage_prompts.items()
+            name: value for stage_prompts in STAGE_PROMPTS.values() for name, value in stage_prompts.items()
         }
         provenance = build_provenance(
             repository_root=Path(__file__).resolve().parents[3],
@@ -1022,13 +1260,9 @@ class EvaluationAssetPipeline:
             check_expected_write_data=True,
         )
         manifest = dict(self._stage_eight_manifest)
-        generation_directory = self.layout.repository_relative_path(
-            generation.generation_dir
-        )
+        generation_directory = self.layout.repository_relative_path(generation.generation_dir)
         manifest["published_datasets"] = {
-            "directory": self.layout.published_datasets.relative_to(
-                self.layout.tenant_root
-            ).as_posix(),
+            "directory": self.layout.published_datasets.relative_to(self.layout.tenant_root).as_posix(),
             "release_pointer": self.layout.release_pointer_path.relative_to(
                 self.layout.tenant_root
             ).as_posix(),
@@ -1036,10 +1270,7 @@ class EvaluationAssetPipeline:
             "generation_manifest_sha256": generation.generation_manifest_sha256,
             "build_provenance_sha256": build_provenance_sha256,
             "build_fingerprint": provenance["identity_sha256"],
-            "files": {
-                split: f"{generation_directory}/{split}.jsonl"
-                for split in PUBLISHED_DATASET_SPLITS
-            },
+            "files": {split: f"{generation_directory}/{split}.jsonl" for split in PUBLISHED_DATASET_SPLITS},
         }
         self.layout._write_authority_json(
             self.layout.artifact_path(
@@ -1054,12 +1285,8 @@ class EvaluationAssetPipeline:
     def _validate_raw_inputs(self) -> Dict[str, int]:
         if self.config is None:
             self.config = self.layout.load_config()
-        feedback, feedback_row_numbers = _load_jsonl_with_line_numbers(
-            self.layout.feedback_path
-        )
-        unlabeled, unlabeled_row_numbers = _load_jsonl_with_line_numbers(
-            self.layout.unlabeled_path
-        )
+        feedback, feedback_row_numbers = _load_jsonl_with_line_numbers(self.layout.feedback_path)
+        unlabeled, unlabeled_row_numbers = _load_jsonl_with_line_numbers(self.layout.unlabeled_path)
         if not feedback:
             raise ValueError("labeled feedback input is empty")
         if not unlabeled:
@@ -1098,12 +1325,8 @@ class EvaluationAssetPipeline:
         return {"feedback_records": len(feedback), "unlabeled_records": len(unlabeled)}
 
     def _prepare_inputs(self) -> Dict[str, int]:
-        feedback_rows, feedback_row_numbers = _load_jsonl_with_line_numbers(
-            self.layout.feedback_path
-        )
-        unlabeled_rows, unlabeled_row_numbers = _load_jsonl_with_line_numbers(
-            self.layout.unlabeled_path
-        )
+        feedback_rows, feedback_row_numbers = _load_jsonl_with_line_numbers(self.layout.feedback_path)
+        unlabeled_rows, unlabeled_row_numbers = _load_jsonl_with_line_numbers(self.layout.unlabeled_path)
         normalized = [_normalize_feedback(row) for row in feedback_rows]
         intents = [_normalize_intent(row) for row in unlabeled_rows]
         _validate_normalized_identity(
@@ -1118,6 +1341,29 @@ class EvaluationAssetPipeline:
             output_name="normalized unlabeled intent",
             row_numbers=unlabeled_row_numbers,
         )
+        parent_assignments = {}
+        parent_plan_path = self.layout.parent_snapshot / "parent_trusted_split_plan.jsonl"
+        if self.lineage and parent_plan_path.is_file():
+            parent_assignments = parent_assignments_by_group_id(_load_jsonl(parent_plan_path))
+        split_plan = build_trusted_split_plan(
+            normalized,
+            split_seed=self.config.split_seed,
+            parent_assignments=parent_assignments,
+        )
+        expanded_assignments = {
+            assignment.record_id: assignment for assignment in expand_trusted_split_plan(split_plan)
+        }
+        eligibility = assess_correctness_eligibility_records(normalized)
+        eligibility_by_id = eligibility_by_record_id(eligibility)
+        for row in normalized:
+            record_id = str(row["record_id"])
+            assignment = expanded_assignments[record_id]
+            decision = eligibility_by_id[record_id]
+            row["split_group_id"] = assignment.split_group_id
+            row["trusted_split"] = assignment.split
+            row["evidence_eligible"] = decision.eligible
+            if decision.hold_reason is not None:
+                row["hold_reason"] = decision.hold_reason
         write_jsonl(
             self.layout.artifact_path(
                 PipelineStage.PREPARED_INPUTS,
@@ -1132,6 +1378,27 @@ class EvaluationAssetPipeline:
             ),
             intents,
         )
+        write_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.PREPARED_INPUTS,
+                "trusted_split_plan.jsonl",
+            ),
+            [entry.to_dict() for entry in split_plan],
+        )
+        write_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.PREPARED_INPUTS,
+                "feedback_eligibility.jsonl",
+            ),
+            [
+                {
+                    **entry.to_dict(),
+                    "split_group_id": expanded_assignments[entry.record_id].split_group_id,
+                    "split": expanded_assignments[entry.record_id].split,
+                }
+                for entry in eligibility
+            ],
+        )
         return {"prepared_feedback": len(normalized), "prepared_intents": len(intents)}
 
     def _create_evaluation_guidelines(self) -> Dict[str, int]:
@@ -1141,10 +1408,17 @@ class EvaluationAssetPipeline:
                 "normalized_feedback.jsonl",
             )
         )
-        added_record_ids = {
-            str(value)
-            for value in self.lineage.get("added_labeled_record_ids", [])
-        }
+        normalized_by_id = _unique_rows_by_key(
+            normalized,
+            key="record_id",
+            source="normalized feedback",
+        )
+        eligible_training = [
+            row
+            for row in normalized
+            if row.get("evidence_eligible") is True and row.get("trusted_split") == "train"
+        ]
+        eligible_training_ids = {str(row["record_id"]) for row in eligible_training}
         evidence_path = self.layout.artifact_path(
             PipelineStage.RUBRIC_EXTRACTION,
             "feedback_evidence.jsonl",
@@ -1165,20 +1439,161 @@ class EvaluationAssetPipeline:
             PipelineStage.RUBRIC_EXTRACTION,
             "trusted_cases.jsonl",
         )
-        incremental = bool(self.lineage) and evidence_path.is_file()
-        existing_evidence = _load_jsonl(evidence_path) if incremental else []
-        pending = (
-            [
-                row
-                for row in normalized
-                if str(row["record_id"]) in added_record_ids
-            ]
-            if incremental
-            else normalized
+        existing_evidence = (
+            _load_jsonl(evidence_path) if (bool(self.lineage) and evidence_path.is_file()) else []
         )
-        new_evidence: List[Dict[str, Any]] = []
-        for batch in _batches(pending, self.config.batch_size):
-            new_evidence.extend(
+        existing_evidence_by_id = _unique_rows_by_key(
+            existing_evidence,
+            key="record_id",
+            source="seeded training feedback evidence",
+        )
+        unexpected_seeded_ids = sorted(set(existing_evidence_by_id) - eligible_training_ids)
+        if unexpected_seeded_ids:
+            raise ValueError(
+                "seeded Stage 3 evidence is not eligible training evidence: "
+                + ", ".join(unexpected_seeded_ids)
+            )
+        pending_training = [
+            row for row in eligible_training if str(row["record_id"]) not in existing_evidence_by_id
+        ]
+        new_evidence = self._extract_feedback_evidence(pending_training)
+        evidence = sorted(
+            _replace_by_key(existing_evidence, new_evidence, key="record_id"),
+            key=lambda item: str(item["record_id"]),
+        )
+        if {str(row["record_id"]) for row in evidence} != eligible_training_ids:
+            raise ValueError("training feedback evidence coverage is incomplete")
+        candidates, guidelines = self._synthesize_guidelines(
+            evidence,
+            normalized_by_id,
+        )
+        guideline_by_record = _guidelines_by_source_record(guidelines)
+        trusted_intents = [
+            _trusted_intent_from_guideline(guideline, normalized_by_id) for guideline in guidelines
+        ]
+        trusted_cases = [
+            _trusted_case_with_split_metadata(
+                row,
+                _rubric_from_guidelines(
+                    str(row["record_id"]),
+                    guideline_by_record[str(row["record_id"])],
+                    self._provider_identities["rubric"]["provider"],
+                    self._provider_identities["rubric"]["model"],
+                ),
+                self.config.asset_id,
+                correctness_visibility="reusable_training",
+            )
+            for row in eligible_training
+        ]
+        protected_evidence: List[Dict[str, Any]] = []
+        protected_candidates: List[Dict[str, Any]] = []
+        protected_guidelines: List[Dict[str, Any]] = []
+        protected_cases: List[Dict[str, Any]] = []
+        protected_units: Dict[tuple[str, str, str, str], List[Dict[str, Any]]] = {}
+        for row in normalized:
+            split = row.get("trusted_split")
+            if row.get("evidence_eligible") is not True or split == "train":
+                continue
+            if split not in {"validation", "test", "regression"}:
+                raise ValueError("eligible feedback has an unsupported trusted split")
+            unit = (
+                str(split),
+                str(row["split_group_id"]),
+                str(row["group_id"]),
+                str(row["route"]),
+            )
+            protected_units.setdefault(unit, []).append(row)
+
+        for unit in sorted(protected_units):
+            split, split_group_id, group_id, route = unit
+            unit_rows = sorted(protected_units[unit], key=lambda item: str(item["record_id"]))
+            unit_evidence = self._extract_feedback_evidence(unit_rows)
+            unit_candidates, unit_guidelines = self._synthesize_guidelines(
+                unit_evidence,
+                normalized_by_id,
+            )
+            scope = {
+                "protected_split": split,
+                "split_group_id": split_group_id,
+                "source_group_id": group_id,
+                "visibility": "protected_held_out",
+            }
+            protected_evidence.extend({**row, **scope} for row in unit_evidence)
+            protected_candidates.extend({**row, **scope} for row in unit_candidates)
+            protected_guidelines.extend({**row, **scope} for row in unit_guidelines)
+            protected_by_record = _guidelines_by_source_record(unit_guidelines)
+            protected_cases.extend(
+                _trusted_case_with_split_metadata(
+                    row,
+                    _rubric_from_guidelines(
+                        str(row["record_id"]),
+                        protected_by_record[str(row["record_id"])],
+                        self._provider_identities["rubric"]["provider"],
+                        self._provider_identities["rubric"]["model"],
+                    ),
+                    self.config.asset_id,
+                    correctness_visibility="protected_held_out",
+                )
+                for row in unit_rows
+            )
+
+        protected_evidence.sort(key=lambda item: str(item["record_id"]))
+        protected_candidates.sort(
+            key=lambda item: (
+                str(item["protected_split"]),
+                str(item["split_group_id"]),
+                str(item["source_group_id"]),
+                str(item["route"]),
+                json.dumps(item, sort_keys=True),
+            )
+        )
+        protected_guidelines.sort(key=lambda item: str(item["guideline_id"]))
+        protected_cases.sort(key=lambda item: str(item["case_id"]))
+        _validate_stage_three_identities(
+            candidates=[*candidates, *protected_candidates],
+            guidelines=[*guidelines, *protected_guidelines],
+            trusted_intents=trusted_intents,
+            trusted_cases=[*trusted_cases, *protected_cases],
+        )
+        write_jsonl(evidence_path, evidence)
+        write_jsonl(candidate_path, candidates)
+        write_jsonl(guideline_path, guidelines)
+        write_jsonl(
+            intent_path,
+            trusted_intents,
+        )
+        write_jsonl(
+            case_path,
+            trusted_cases,
+        )
+        for name, rows in (
+            ("protected_feedback_evidence.jsonl", protected_evidence),
+            ("protected_candidate_guidelines.jsonl", protected_candidates),
+            ("protected_evaluation_guidelines.jsonl", protected_guidelines),
+            ("protected_trusted_cases.jsonl", protected_cases),
+        ):
+            write_jsonl(
+                self.layout.artifact_path(
+                    PipelineStage.RUBRIC_EXTRACTION,
+                    name,
+                ),
+                rows,
+            )
+        return {
+            "feedback_evidence": len(evidence),
+            "candidate_guidelines": len(candidates),
+            "evaluation_guidelines": len(guidelines),
+            "trusted_cases": len(trusted_cases),
+        }
+
+    def _extract_feedback_evidence(
+        self,
+        rows: Sequence[Mapping[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Extract evidence from only the caller-provided visibility unit."""
+        evidence: List[Dict[str, Any]] = []
+        for batch in _batches(rows, self.config.batch_size):
+            evidence.extend(
                 self._call_rubric_provider(
                     PipelineStage.RUBRIC_EXTRACTION,
                     EVIDENCE_EXTRACTION_PROMPT,
@@ -1198,33 +1613,27 @@ class EvaluationAssetPipeline:
                     partial(
                         _normalize_feedback_evidence_response,
                         batch=batch,
-                        rubric_provider=self._provider_identities["rubric"][
-                            "provider"
-                        ],
+                        rubric_provider=self._provider_identities["rubric"]["provider"],
                         rubric_model=self._provider_identities["rubric"]["model"],
                     ),
                 )
             )
+        return sorted(evidence, key=lambda item: str(item["record_id"]))
 
-        evidence = _replace_by_key(
-            existing_evidence,
-            new_evidence,
-            key="record_id",
-        )
+    def _synthesize_guidelines(
+        self,
+        evidence: Sequence[Mapping[str, Any]],
+        normalized_by_id: Mapping[str, Mapping[str, Any]],
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Synthesize guidelines without crossing the supplied evidence boundary."""
         evidence_by_route: Dict[str, List[Dict[str, Any]]] = {}
-        normalized_by_id = {str(row["record_id"]): row for row in normalized}
         for item in evidence:
-            evidence_by_route.setdefault(str(item["route"]), []).append(item)
-
+            evidence_by_route.setdefault(str(item["route"]), []).append(dict(item))
         candidates: List[Dict[str, Any]] = []
         guidelines: List[Dict[str, Any]] = []
         for route in sorted(evidence_by_route):
-            route_evidence = sorted(
-                evidence_by_route[route], key=lambda item: str(item["record_id"])
-            )
-            source_records = [
-                normalized_by_id[str(item["record_id"])] for item in route_evidence
-            ]
+            route_evidence = sorted(evidence_by_route[route], key=lambda item: str(item["record_id"]))
+            source_records = [normalized_by_id[str(item["record_id"])] for item in route_evidence]
             route_candidates, route_guidelines = self._call_rubric_provider(
                 PipelineStage.RUBRIC_EXTRACTION,
                 GUIDELINE_SYNTHESIS_PROMPT,
@@ -1245,56 +1654,22 @@ class EvaluationAssetPipeline:
                     _normalize_guideline_response,
                     route=route,
                     evidence=route_evidence,
-                    rubric_provider=self._provider_identities["rubric"][
-                        "provider"
-                    ],
+                    rubric_provider=self._provider_identities["rubric"]["provider"],
                     rubric_model=self._provider_identities["rubric"]["model"],
+                    identity_profile="current_v2",
                 ),
             )
             candidates.extend(route_candidates)
             guidelines.extend(route_guidelines)
-        guidelines.sort(key=lambda item: str(item["guideline_id"]))
-        guideline_by_record = _guidelines_by_source_record(guidelines)
-        trusted_intents = [
-            _trusted_intent_from_guideline(guideline, normalized_by_id)
-            for guideline in guidelines
-        ]
-        trusted_cases = [
-            _trusted_case(
-                row,
-                _rubric_from_guidelines(
-                    str(row["record_id"]),
-                    guideline_by_record[str(row["record_id"])],
-                    self._provider_identities["rubric"]["provider"],
-                    self._provider_identities["rubric"]["model"],
-                ),
-                self.config.asset_id,
+        candidates.sort(
+            key=lambda item: (
+                str(item["route"]),
+                str(item["intent_label"]),
+                json.dumps(item, sort_keys=True),
             )
-            for row in normalized
-        ]
-        _validate_stage_three_identities(
-            candidates=candidates,
-            guidelines=guidelines,
-            trusted_intents=trusted_intents,
-            trusted_cases=trusted_cases,
         )
-        write_jsonl(evidence_path, evidence)
-        write_jsonl(candidate_path, candidates)
-        write_jsonl(guideline_path, guidelines)
-        write_jsonl(
-            intent_path,
-            trusted_intents,
-        )
-        write_jsonl(
-            case_path,
-            trusted_cases,
-        )
-        return {
-            "feedback_evidence": len(evidence),
-            "candidate_guidelines": len(candidates),
-            "evaluation_guidelines": len(guidelines),
-            "trusted_cases": len(trusted_cases),
-        }
+        guidelines.sort(key=lambda item: str(item["guideline_id"]))
+        return candidates, guidelines
 
     def _cluster_intents(self) -> Dict[str, int]:
         inventory_path = self.layout.artifact_path(
@@ -1384,9 +1759,7 @@ class EvaluationAssetPipeline:
         parent_asset_id = str(self.lineage.get("parent_asset_id") or "")
         if not parent_asset_id:
             return
-        parent_rows = _load_jsonl(
-            self.layout.parent_snapshot / "parent_intent_inventory.jsonl"
-        )
+        parent_rows = _load_jsonl(self.layout.parent_snapshot / "parent_intent_inventory.jsonl")
         previous = [_intent_cluster(row) for row in parent_rows]
         assert_unique_cluster_ids(previous)
         assert_unique_cluster_ids(clusters)
@@ -1405,27 +1778,18 @@ class EvaluationAssetPipeline:
     ) -> set[str]:
         if self.lineage.get("clustering_mode") != "keep":
             return {match.cluster_id for match in matches}
-        snapshot = (
-            self.layout.parent_snapshot / "parent_intent_matches.jsonl"
-        )
+        snapshot = self.layout.parent_snapshot / "parent_intent_matches.jsonl"
         if not snapshot.is_file():
             return {match.cluster_id for match in matches}
         previous = {
-            match.cluster_id: match
-            for match in (
-                _intent_match(row)
-                for row in _load_jsonl(
-                    snapshot
-                )
-            )
+            match.cluster_id: match for match in (_intent_match(row) for row in _load_jsonl(snapshot))
         }
         return {
             match.cluster_id
             for match in matches
             if match.cluster_id not in previous
             or previous[match.cluster_id].status != match.status
-            or previous[match.cluster_id].matched_intent_id
-            != match.matched_intent_id
+            or previous[match.cluster_id].matched_intent_id != match.matched_intent_id
         }
 
     def _decide_coverage(self) -> Dict[str, int]:
@@ -1456,8 +1820,7 @@ class EvaluationAssetPipeline:
             embedding_keys = list(match_texts)
             embeddings = validate_embedding_vectors(
                 self._call_embedding_provider(
-                    PipelineStage.COVERAGE_DECISIONS,
-                    [match_texts[key] for key in embedding_keys]
+                    PipelineStage.COVERAGE_DECISIONS, [match_texts[key] for key in embedding_keys]
                 ),
                 expected_count=len(embedding_keys),
                 source="embedding provider result",
@@ -1511,13 +1874,9 @@ class EvaluationAssetPipeline:
         statuses = Counter(match.status for match in matches)
         return {
             "matched_clusters": statuses["matched_trusted_intent"],
-            "needs_more_feedback_clusters": statuses[
-                "needs_more_trusted_examples"
-            ],
+            "needs_more_feedback_clusters": statuses["needs_more_trusted_examples"],
             "missing_label_clusters": statuses["missing_or_weak_labels"],
-            "labeling_queue_clusters": len(
-                {row["cluster_id"] for row in labeling_queue}
-            ),
+            "labeling_queue_clusters": len({row["cluster_id"] for row in labeling_queue}),
             "labeling_queue_traces": len(labeling_queue),
         }
 
@@ -1572,89 +1931,115 @@ class EvaluationAssetPipeline:
         ]
         row_by_id = {row["record_id"]: row for row in intent_rows}
         normalized_by_id = {row["record_id"]: row for row in normalized}
-        guideline_by_id = {
-            row["guideline_id"]: row for row in evaluation_guidelines
-        }
+        guideline_by_id = {row["guideline_id"]: row for row in evaluation_guidelines}
         match_by_cluster = {match.cluster_id: match for match in matches}
         matched = [
             cluster
             for cluster in clusters
-            if match_by_cluster[cluster.cluster_id].status
-            == "matched_trusted_intent"
+            if match_by_cluster[cluster.cluster_id].status == "matched_trusted_intent"
         ]
-        changed_cluster_ids = self._changed_cluster_ids(matches)
+        dependency_by_cluster = {
+            cluster.cluster_id: _stage_six_dependency(
+                cluster=cluster,
+                match=match_by_cluster[cluster.cluster_id],
+                guideline=guideline_by_id[str(match_by_cluster[cluster.cluster_id].matched_intent_id)],
+                intent_rows=row_by_id,
+                trusted_rows=normalized_by_id,
+                provider=self._provider_settings["rubric"],
+            )
+            for cluster in matched
+        }
+        dependency_rows = [
+            {
+                "cluster_id": cluster_id,
+                "dependency": dependency_by_cluster[cluster_id],
+            }
+            for cluster_id in sorted(dependency_by_cluster)
+        ]
         cluster_rubrics: List[Dict[str, Any]] = []
+        held_outputs: List[Dict[str, Any]] = []
         if (
             self.lineage.get("clustering_mode") == "keep"
-            and (
-                self.layout.parent_snapshot
-                / "parent_inferred_cluster_rubrics.jsonl"
-            ).is_file()
+            and (self.layout.parent_snapshot / "parent_inferred_cluster_rubrics.jsonl").is_file()
+            and (self.layout.parent_snapshot / "parent_inference_dependencies.jsonl").is_file()
         ):
-            cluster_rubrics = [
-                row
-                for row in _load_jsonl(
-                    self.layout.parent_snapshot
-                    / "parent_inferred_cluster_rubrics.jsonl"
-                )
-                if str(row["cluster_id"]) not in changed_cluster_ids
-                and str(row["cluster_id"]) in match_by_cluster
-                and match_by_cluster[str(row["cluster_id"])].status
-                == "matched_trusted_intent"
-            ]
-        changed_matched = [
-            cluster
-            for cluster in matched
-            if cluster.cluster_id in changed_cluster_ids
-        ]
-        for batch in _batches(changed_matched, self.config.batch_size):
-            cluster_rubrics.extend(
-                self._call_rubric_provider(
-                    PipelineStage.LABEL_INFERENCE,
-                    INFERENCE_PROMPT,
-                    {
-                        "clusters": [
-                            {
-                                "cluster_id": cluster.cluster_id,
-                                "route": cluster.route,
-                                "representative_requests": [
-                                    row_by_id[record_id]["user_input"]
-                                    for record_id in cluster.representative_ids
-                                ],
-                                "trusted_requests": [
-                                    normalized_by_id[record_id]["user_input"]
-                                    for record_id in guideline_by_id[
-                                        str(
-                                            match_by_cluster[
-                                                cluster.cluster_id
-                                            ].matched_intent_id
-                                        )
-                                    ]["source_record_ids"]
-                                ],
-                                "trusted_evaluation_guideline": guideline_by_id[
-                                    str(
-                                        match_by_cluster[
-                                            cluster.cluster_id
-                                        ].matched_intent_id
-                                    )
-                                ],
-                                "match_score": match_by_cluster[
-                                    cluster.cluster_id
-                                ].score,
-                            }
-                            for cluster in batch
-                        ]
-                    },
-                    partial(
-                        _normalize_inferred_rubric_response,
-                        batch=batch,
-                        rubric_provider=self._provider_identities["rubric"][
-                            "provider"
-                        ],
-                        rubric_model=self._provider_identities["rubric"]["model"],
-                    ),
-                )
+            parent_rubrics = _unique_rows_by_key(
+                _load_jsonl(self.layout.parent_snapshot / "parent_inferred_cluster_rubrics.jsonl"),
+                key="cluster_id",
+                source="parent inferred rubrics",
             )
+            parent_dependencies = _unique_rows_by_key(
+                _load_jsonl(self.layout.parent_snapshot / "parent_inference_dependencies.jsonl"),
+                key="cluster_id",
+                source="parent inference dependencies",
+            )
+            for cluster in matched:
+                cluster_id = cluster.cluster_id
+                rubric = parent_rubrics.get(cluster_id)
+                prior = parent_dependencies.get(cluster_id)
+                if (
+                    rubric is None
+                    or prior is None
+                    or not isinstance(prior.get("dependency"), Mapping)
+                    or not dependency_matches(
+                        prior["dependency"],
+                        dependency_by_cluster[cluster_id],
+                    )
+                    or rubric.get("dependency_sha256")
+                    != dependency_by_cluster[cluster_id]["dependency_sha256"]
+                    or not has_scoreable_rubric(rubric)
+                ):
+                    continue
+                cluster_rubrics.append(dict(rubric))
+        reused_cluster_ids = {str(rubric["cluster_id"]) for rubric in cluster_rubrics}
+        changed_matched = [cluster for cluster in matched if cluster.cluster_id not in reused_cluster_ids]
+        for batch in _batches(changed_matched, self.config.batch_size):
+            generated_rubrics = self._call_rubric_provider(
+                PipelineStage.LABEL_INFERENCE,
+                INFERENCE_PROMPT,
+                {
+                    "clusters": [
+                        {
+                            "cluster_id": cluster.cluster_id,
+                            "route": cluster.route,
+                            "representative_requests": [
+                                row_by_id[record_id]["user_input"] for record_id in cluster.representative_ids
+                            ],
+                            "trusted_requests": [
+                                normalized_by_id[record_id]["user_input"]
+                                for record_id in guideline_by_id[
+                                    str(match_by_cluster[cluster.cluster_id].matched_intent_id)
+                                ]["source_record_ids"]
+                            ],
+                            "trusted_evaluation_guideline": guideline_by_id[
+                                str(match_by_cluster[cluster.cluster_id].matched_intent_id)
+                            ],
+                            "match_score": match_by_cluster[cluster.cluster_id].score,
+                        }
+                        for cluster in batch
+                    ]
+                },
+                partial(
+                    _normalize_inferred_rubric_response,
+                    batch=batch,
+                    rubric_provider=self._provider_identities["rubric"]["provider"],
+                    rubric_model=self._provider_identities["rubric"]["model"],
+                ),
+            )
+            for rubric in generated_rubrics:
+                cluster_id = str(rubric["cluster_id"])
+                rubric["dependency_sha256"] = dependency_by_cluster[cluster_id]["dependency_sha256"]
+                if has_scoreable_rubric(rubric):
+                    cluster_rubrics.append(rubric)
+                else:
+                    held_outputs.append(
+                        {
+                            "cluster_id": cluster_id,
+                            "hold_reason": "unscoreable_rubric",
+                            "dependency_sha256": dependency_by_cluster[cluster_id]["dependency_sha256"],
+                            "rubric": rubric,
+                        }
+                    )
 
         labels, inferred_cases = _inferred_cases(
             clusters,
@@ -1664,25 +2049,55 @@ class EvaluationAssetPipeline:
             cluster_rubrics,
             self.config,
         )
-        trusted_record_ids = {
-            str(row["record_id"]) for row in normalized
-        }
-        labels = [
-            row for row in labels if str(row["record_id"]) not in trusted_record_ids
-        ]
+        trusted_record_ids = {str(row["record_id"]) for row in normalized}
+        labels = [row for row in labels if str(row["record_id"]) not in trusted_record_ids]
         inferred_cases = [
             row
             for row in inferred_cases
-            if str(row["case_id"]).removeprefix("inferred-")
-            not in trusted_record_ids
+            if str(row["case_id"]).removeprefix("inferred-") not in trusted_record_ids
         ]
         missing = _missing_clusters(clusters, matches, row_by_id)
+        cluster_by_id = {cluster.cluster_id: cluster for cluster in clusters}
+        for held in held_outputs:
+            cluster = cluster_by_id[str(held["cluster_id"])]
+            missing.append(
+                {
+                    "cluster_id": cluster.cluster_id,
+                    "route": cluster.route,
+                    "size": cluster.size,
+                    "status": "held_unscoreable_rubric",
+                    "reason": "inferred rubric contains no scoreable rule",
+                    "best_candidate_intent_id": match_by_cluster[cluster.cluster_id].matched_intent_id,
+                    "match_score": match_by_cluster[cluster.cluster_id].score,
+                    "representative_examples": [
+                        {
+                            "record_id": record_id,
+                            "user_input": row_by_id[record_id]["user_input"],
+                        }
+                        for record_id in cluster.representative_ids
+                    ],
+                }
+            )
         write_jsonl(
             self.layout.artifact_path(
                 PipelineStage.LABEL_INFERENCE,
                 "inferred_unlabeled_cluster_rubrics.jsonl",
             ),
             cluster_rubrics,
+        )
+        write_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.LABEL_INFERENCE,
+                "inference_dependencies.jsonl",
+            ),
+            dependency_rows,
+        )
+        write_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.LABEL_INFERENCE,
+                "held_inference_outputs.jsonl",
+            ),
+            held_outputs,
         )
         write_jsonl(
             self.layout.artifact_path(
@@ -1718,39 +2133,56 @@ class EvaluationAssetPipeline:
         }
 
     def _build_splits(self) -> Dict[str, int]:
-        trusted = _load_jsonl(
-            self.layout.artifact_path(
-                PipelineStage.RUBRIC_EXTRACTION,
-                "trusted_cases.jsonl",
-            )
+        state = self.layout.load_state()
+        authority = self._current_review_authority(
+            state,
+            compare_current_dependencies=True,
         )
-        inferred = _load_jsonl(
-            self.layout.artifact_path(
-                PipelineStage.LABEL_INFERENCE,
-                "inferred_cases.jsonl",
+        finalization = self._current_review_finalization(authority)
+        if finalization is None:
+            raise ReviewIntegrityError("Stage 8 requires an explicit current review finalization")
+        trusted = [
+            *_load_jsonl(
+                self.layout.artifact_path(
+                    PipelineStage.RUBRIC_EXTRACTION,
+                    "trusted_cases.jsonl",
+                )
+            ),
+            *_load_jsonl(
+                self.layout.artifact_path(
+                    PipelineStage.RUBRIC_EXTRACTION,
+                    "protected_trusted_cases.jsonl",
+                )
+            ),
+        ]
+        review_items = {str(item["case_id"]): item for item in authority["review_items"]}
+        approved_decisions = {
+            str(item["case_id"]): str(item["decision_id"])
+            for item in finalization["items"]
+            if item["status"] == "approved"
+        }
+        approved = [
+            _approved_case_for_release(
+                review_items[case_id]["case"],
+                asset_id=self.config.asset_id,
+                decision_id=decision_id,
             )
-        )
-        synthetic = _load_jsonl(
+            for case_id, decision_id in sorted(approved_decisions.items())
+        ]
+        families = _load_jsonl(
             self.layout.artifact_path(
                 PipelineStage.SYNTHETIC_COVERAGE,
-                "synthetic_cases.jsonl",
+                "duplicate_families.jsonl",
             )
         )
-        if self.lineage:
-            payloads = _incremental_split_payloads(
-                self.layout,
-                trusted,
-                inferred,
-                synthetic,
-                seed=self.config.split_seed,
-            )
-        else:
-            payloads = _default_split_payloads(
-                trusted,
-                inferred,
-                synthetic,
-                seed=self.config.split_seed,
-            )
+        payloads = _review_split_payloads(
+            trusted=trusted,
+            approved=approved,
+            held=authority["held_cases"],
+            families=families,
+            asset_id=self.config.asset_id,
+            seed=self.config.split_seed,
+        )
         for name, rows in payloads.items():
             write_jsonl(
                 self.layout.artifact_path(
@@ -1759,6 +2191,13 @@ class EvaluationAssetPipeline:
                 ),
                 rows,
             )
+        self.layout._write_authority_json(
+            self.layout.artifact_path(
+                PipelineStage.DATASET_SPLITS,
+                "review_snapshot.json",
+            ),
+            finalization,
+        )
         input_manifest = _local_authority_json(
             self.layout,
             self.layout.artifact_path(
@@ -1770,18 +2209,46 @@ class EvaluationAssetPipeline:
             PipelineStage.RUBRIC_EXTRACTION,
             "evaluation_guidelines.jsonl",
         )
-        guideline_count = (
-            len(_load_jsonl(guideline_path)) if guideline_path.is_file() else 0
-        )
+        guideline_count = len(_load_jsonl(guideline_path)) if guideline_path.is_file() else 0
+        held_case_ids = {str(row["case_id"]) for row in finalization["held"]}
+        review_fingerprints = {
+            "trusted": sorted(
+                (
+                    {
+                        "case_id": str(case["case_id"]),
+                        "fingerprint": case_content_fingerprint(case),
+                    }
+                    for case in trusted
+                    if str(case["case_id"]) not in held_case_ids
+                ),
+                key=lambda row: (row["case_id"], row["fingerprint"]),
+            ),
+            **{
+                status: [
+                    {
+                        "case_id": str(item["case_id"]),
+                        "fingerprint": str(item["fingerprint"]),
+                    }
+                    for item in finalization["items"]
+                    if item["status"] == status
+                ]
+                for status in ("approved", "pending", "rejected")
+            },
+            "held": [dict(item) for item in finalization["held"]],
+        }
+        if {
+            status: len(rows) for status, rows in review_fingerprints.items()
+        } != finalization["counts"]:
+            raise ReviewIntegrityError(
+                "review fingerprint inventory differs from finalization counts"
+            )
         manifest = {
             "asset_id": self.config.asset_id,
             "tenant_id": self.config.tenant_id,
             "providers": {
                 "rubric_provider": self._provider_identities["rubric"]["provider"],
                 "rubric_model": self._provider_identities["rubric"]["model"],
-                "embedding_provider": self._provider_identities["embedding"][
-                    "provider"
-                ],
+                "embedding_provider": self._provider_identities["embedding"]["provider"],
                 "embedding_model": self._provider_identities["embedding"]["model"],
             },
             "evaluation_guidelines": {
@@ -1792,13 +2259,9 @@ class EvaluationAssetPipeline:
                 ),
                 "count": guideline_count,
                 "activation_status": (
-                    "active_from_trusted_evidence"
-                    if guideline_path.is_file()
-                    else "legacy_compatibility"
+                    "active_from_trusted_evidence" if guideline_path.is_file() else "legacy_compatibility"
                 ),
-                "calibration_status": (
-                    "uncalibrated" if guideline_path.is_file() else "unavailable"
-                ),
+                "calibration_status": ("uncalibrated" if guideline_path.is_file() else "unavailable"),
             },
             "clustering": {
                 "algorithm": "deterministic_cosine_fixed_count_v1",
@@ -1808,9 +2271,7 @@ class EvaluationAssetPipeline:
                 "match_threshold": self.config.match_threshold,
                 "min_trusted_examples": self.config.min_trusted_examples,
                 "min_trusted_groups": self.config.min_trusted_groups,
-                "max_unlabeled_to_trusted_ratio": (
-                    self.config.max_unlabeled_to_trusted_ratio
-                ),
+                "max_unlabeled_to_trusted_ratio": (self.config.max_unlabeled_to_trusted_ratio),
                 "labeling_queue": {
                     "statuses": [
                         "needs_more_trusted_examples",
@@ -1820,6 +2281,7 @@ class EvaluationAssetPipeline:
                     "minimum_per_cluster": 1,
                     "maximum_per_cluster": LABELING_QUEUE_MAX_PER_CLUSTER,
                     "selection": "deterministic_centroid_nearest",
+                    "acquisition": dict(LABELING_QUEUE_ACQUISITION),
                 },
             },
             "synthetic_coverage": {
@@ -1829,34 +2291,44 @@ class EvaluationAssetPipeline:
             "regression_gate": {
                 "source": "trusted_feedback",
                 "fraction": DEFAULT_REGRESSION_FRACTION,
-                "selection": "deterministic_group_safe_random",
+                "selection": "deterministic_early_connected_group_hash",
                 "seed": self.config.split_seed,
             },
-            "source_hashes": {
-                name: details["sha256"]
-                for name, details in input_manifest["inputs"].items()
-            },
+            "source_hashes": {name: details["sha256"] for name, details in input_manifest["inputs"].items()},
             "published_datasets": {
-                "directory": self.layout.published_datasets.relative_to(
-                    self.layout.tenant_root
-                ).as_posix(),
+                "directory": self.layout.published_datasets.relative_to(self.layout.tenant_root).as_posix(),
                 "files": {},
             },
             "split_counts": {name: len(rows) for name, rows in payloads.items()},
             "review_policy": {
                 "evaluation_guidelines": "active_from_trusted_evidence",
                 "guideline_calibration": "uncalibrated",
-                "inferred_labels": "review_required",
+                "derived_cases": "approved_only",
                 "coverage_labeling_queue": "human_label_required",
-                "regression_gate": "automatic_trusted_feedback_holdout",
-                "regression_group_conflicts": "triage_hold",
+                "trusted_split_assignment": "before_guideline_authoring",
+                "exact_duplicate_conflicts": "triage_hold",
+            },
+            "review": {
+                "review_set_fingerprint": finalization["review_set_fingerprint"],
+                "finalization_id": finalization["finalization_id"],
+                "stage7_receipt_sha256": finalization["stage7_receipt_sha256"],
+                "counts": dict(finalization["counts"]),
+                "fingerprints": review_fingerprints,
             },
         }
         if self.lineage:
             manifest["lineage"] = dict(self.lineage)
         self._stage_eight_manifest = manifest
         return {
-            "dataset_cases": len(trusted) + len(inferred) + len(synthetic),
+            "dataset_cases": sum(
+                len(payloads[name])
+                for name in (
+                    "train",
+                    "validation",
+                    "test",
+                    "regression_trusted",
+                )
+            ),
             "train_cases": len(payloads["train"]),
             "validation_cases": len(payloads["validation"]),
             "test_cases": len(payloads["test"]),
@@ -1866,34 +2338,21 @@ class EvaluationAssetPipeline:
 
     def _generate_synthetic_coverage(self) -> Dict[str, int]:
         if not self.config.synthetic_coverage_enabled:
-            write_jsonl(
-                self.layout.artifact_path(
-                    PipelineStage.SYNTHETIC_COVERAGE,
-                    "synthetic_candidates.jsonl",
-                ),
-                [],
-            )
-            write_jsonl(
-                self.layout.artifact_path(
-                    PipelineStage.SYNTHETIC_COVERAGE,
-                    "rejected_synthetic.jsonl",
-                ),
-                [],
-            )
-            write_jsonl(
-                self.layout.artifact_path(
-                    PipelineStage.SYNTHETIC_COVERAGE,
-                    "synthetic_filter_issues.jsonl",
-                ),
-                [],
-            )
-            write_jsonl(
-                self.layout.artifact_path(
-                    PipelineStage.SYNTHETIC_COVERAGE,
-                    "synthetic_cases.jsonl",
-                ),
-                [],
-            )
+            for name in (
+                "synthetic_candidates.jsonl",
+                "rejected_synthetic.jsonl",
+                "synthetic_filter_issues.jsonl",
+                "synthetic_cases.jsonl",
+                "synthetic_dependencies.jsonl",
+            ):
+                write_jsonl(
+                    self.layout.artifact_path(
+                        PipelineStage.SYNTHETIC_COVERAGE,
+                        name,
+                    ),
+                    [],
+                )
+            self._write_review_artifacts()
             return {
                 "synthetic_cases": 0,
                 "rejected_synthetic_cases": 0,
@@ -1921,73 +2380,17 @@ class EvaluationAssetPipeline:
         assert_unique_cluster_ids(clusters)
         row_by_id = {row["record_id"]: row for row in intent_rows}
         rubric_by_cluster = {row["cluster_id"]: row for row in rubric_rows}
-        matched = [
-            cluster for cluster in clusters if cluster.cluster_id in rubric_by_cluster
-        ]
-        existing_synthetic: List[Dict[str, Any]] = []
-        if (
-            self.lineage.get("clustering_mode") == "keep"
-            and (
-                self.layout.parent_snapshot / "parent_synthetic_cases.jsonl"
-            ).is_file()
-        ):
-            matches = [
-                _intent_match(row)
-                for row in _load_jsonl(
-                    self.layout.artifact_path(
-                        PipelineStage.COVERAGE_DECISIONS,
-                        "intent_matches.jsonl",
-                    )
+        matched = [cluster for cluster in clusters if cluster.cluster_id in rubric_by_cluster]
+        inference_dependencies = _unique_rows_by_key(
+            _load_jsonl(
+                self.layout.artifact_path(
+                    PipelineStage.LABEL_INFERENCE,
+                    "inference_dependencies.jsonl",
                 )
-            ]
-            changed_cluster_ids = self._changed_cluster_ids(matches)
-            existing_synthetic = [
-                _case_for_asset(row, self.config.asset_id)
-                for row in _load_jsonl(
-                    self.layout.parent_snapshot
-                    / "parent_synthetic_cases.jsonl"
-                )
-                if str((row.get("metadata") or {}).get("source_cluster"))
-                not in changed_cluster_ids
-                and str((row.get("metadata") or {}).get("source_cluster"))
-                in rubric_by_cluster
-            ]
-            matched = [
-                cluster
-                for cluster in matched
-                if cluster.cluster_id in changed_cluster_ids
-            ]
-        candidates: List[Dict[str, Any]] = []
-        for batch in _batches(matched, self.config.batch_size):
-            candidates.extend(
-                self._call_rubric_provider(
-                    PipelineStage.SYNTHETIC_COVERAGE,
-                    SYNTHETIC_PROMPT,
-                    {
-                        "clusters": [
-                            {
-                                "cluster_id": cluster.cluster_id,
-                                "route": cluster.route,
-                                "representatives": [
-                                    row_by_id[record_id]["user_input"]
-                                    for record_id in cluster.representative_ids
-                                ],
-                                "rubric": rubric_by_cluster[cluster.cluster_id],
-                                "case_count": (
-                                    self.config.synthetic_cases_per_cluster
-                                ),
-                            }
-                            for cluster in batch
-                        ]
-                    },
-                    partial(
-                        _normalize_synthetic_response,
-                        batch=batch,
-                        rubric_by_cluster=rubric_by_cluster,
-                        config=self.config,
-                    ),
-                )
-            )
+            ),
+            key="cluster_id",
+            source="inference dependencies",
+        )
         trusted = _load_jsonl(
             self.layout.artifact_path(
                 PipelineStage.RUBRIC_EXTRACTION,
@@ -2000,10 +2403,183 @@ class EvaluationAssetPipeline:
                 "inferred_cases.jsonl",
             )
         )
-        filtered = filter_synthetic_cases(
-            candidates,
-            existing_cases=trusted + inferred + existing_synthetic,
-        )
+        generation_set = {
+            cluster.cluster_id: str(
+                inference_dependencies[cluster.cluster_id]["dependency"]["dependency_sha256"]
+            )
+            for cluster in matched
+        }
+        parent_synthetic: List[Dict[str, Any]] = []
+        parent_dependencies: Dict[str, Dict[str, Any]] = {}
+        if self.lineage.get("clustering_mode") == "keep":
+            parent_cases_path = self.layout.parent_snapshot / "parent_synthetic_cases.jsonl"
+            parent_dependencies_path = self.layout.parent_snapshot / "parent_synthetic_dependencies.jsonl"
+            if parent_cases_path.is_file() and parent_dependencies_path.is_file():
+                parent_synthetic = _load_jsonl(parent_cases_path)
+                parent_dependencies = _unique_rows_by_key(
+                    _load_jsonl(parent_dependencies_path),
+                    key="cluster_id",
+                    source="parent synthetic dependencies",
+                )
+        preliminary_dependencies = {
+            cluster.cluster_id: _stage_seven_dependency(
+                cluster=cluster,
+                rubric=rubric_by_cluster[cluster.cluster_id],
+                stage_six_dependency=inference_dependencies[cluster.cluster_id]["dependency"],
+                comparison_cases=[
+                    *trusted,
+                    *inferred,
+                    *[
+                        case
+                        for case in parent_synthetic
+                        if str((case.get("metadata") or {}).get("source_cluster")) != cluster.cluster_id
+                    ],
+                ],
+                provider=self._provider_settings["rubric"],
+                config=self.config,
+                generation_set=generation_set,
+            )
+            for cluster in matched
+        }
+        parent_cases_by_cluster: Dict[str, List[Dict[str, Any]]] = {}
+        reused_cluster_ids: set[str] = set()
+        for cluster in matched:
+            prior = parent_dependencies.get(cluster.cluster_id)
+            if (
+                prior is None
+                or not isinstance(prior.get("dependency"), Mapping)
+                or not dependency_matches(
+                    prior["dependency"],
+                    preliminary_dependencies[cluster.cluster_id],
+                )
+            ):
+                continue
+            cluster_cases = [
+                _case_for_asset(case, self.config.asset_id)
+                for case in parent_synthetic
+                if str((case.get("metadata") or {}).get("source_cluster")) == cluster.cluster_id
+            ]
+            if not cluster_cases:
+                continue
+            parent_cases_by_cluster[cluster.cluster_id] = cluster_cases
+            reused_cluster_ids.add(cluster.cluster_id)
+        generated_by_cluster: Dict[str, List[Dict[str, Any]]] = {}
+        pending_generation = [
+            cluster for cluster in matched if cluster.cluster_id not in reused_cluster_ids
+        ]
+        while True:
+            for batch in _batches(pending_generation, self.config.batch_size):
+                generated = self._call_rubric_provider(
+                    PipelineStage.SYNTHETIC_COVERAGE,
+                    SYNTHETIC_PROMPT,
+                    {
+                        "clusters": [
+                            {
+                                "cluster_id": cluster.cluster_id,
+                                "route": cluster.route,
+                                "representatives": [
+                                    row_by_id[record_id]["user_input"]
+                                    for record_id in cluster.representative_ids
+                                ],
+                                "rubric": rubric_by_cluster[cluster.cluster_id],
+                                "case_count": self.config.synthetic_cases_per_cluster,
+                            }
+                            for cluster in batch
+                        ]
+                    },
+                    partial(
+                        _normalize_synthetic_response,
+                        batch=batch,
+                        rubric_by_cluster=rubric_by_cluster,
+                        config=self.config,
+                    ),
+                )
+                for case in generated:
+                    cluster_id = str((case.get("metadata") or {}).get("source_cluster"))
+                    generated_by_cluster.setdefault(cluster_id, []).append(case)
+
+            candidates = [
+                case
+                for cluster in matched
+                if cluster.cluster_id not in reused_cluster_ids
+                for case in generated_by_cluster[cluster.cluster_id]
+            ]
+            ordered_synthetic = [
+                case
+                for cluster in matched
+                for case in (
+                    parent_cases_by_cluster[cluster.cluster_id]
+                    if cluster.cluster_id in reused_cluster_ids
+                    else generated_by_cluster[cluster.cluster_id]
+                )
+            ]
+            filtered = filter_synthetic_cases(
+                ordered_synthetic,
+                existing_cases=trusted + inferred,
+            )
+            synthetic_cases = filtered.accepted
+            final_dependencies = {
+                cluster.cluster_id: _stage_seven_dependency(
+                    cluster=cluster,
+                    rubric=rubric_by_cluster[cluster.cluster_id],
+                    stage_six_dependency=(
+                        inference_dependencies[cluster.cluster_id]["dependency"]
+                    ),
+                    comparison_cases=[
+                        *trusted,
+                        *inferred,
+                        *[
+                            case
+                            for case in synthetic_cases
+                            if str(
+                                (case.get("metadata") or {}).get("source_cluster")
+                            )
+                            != cluster.cluster_id
+                        ],
+                    ],
+                    provider=self._provider_settings["rubric"],
+                    config=self.config,
+                    generation_set=generation_set,
+                )
+                for cluster in [
+                    item for item in clusters if item.cluster_id in rubric_by_cluster
+                ]
+            }
+            accepted_identities = {
+                (
+                    str((case.get("metadata") or {}).get("source_cluster")),
+                    str(case.get("case_id")),
+                )
+                for case in synthetic_cases
+            }
+            invalidated = []
+            for cluster in matched:
+                if cluster.cluster_id not in reused_cluster_ids:
+                    continue
+                prior_cases_survived = all(
+                    (cluster.cluster_id, str(case.get("case_id")))
+                    in accepted_identities
+                    for case in parent_cases_by_cluster[cluster.cluster_id]
+                )
+                prior_dependency = parent_dependencies[cluster.cluster_id][
+                    "dependency"
+                ]
+                if not prior_cases_survived or not dependency_matches(
+                    prior_dependency,
+                    final_dependencies[cluster.cluster_id],
+                ):
+                    invalidated.append(cluster)
+            if not invalidated:
+                break
+            reused_cluster_ids.difference_update(
+                cluster.cluster_id for cluster in invalidated
+            )
+            pending_generation = invalidated
+        for case in synthetic_cases:
+            metadata = dict(case.get("metadata") or {})
+            cluster_id = str(metadata.get("source_cluster"))
+            metadata["dependency_sha256"] = final_dependencies[cluster_id]["dependency_sha256"]
+            case["metadata"] = metadata
         write_jsonl(
             self.layout.artifact_path(
                 PipelineStage.SYNTHETIC_COVERAGE,
@@ -2037,12 +2613,222 @@ class EvaluationAssetPipeline:
                 PipelineStage.SYNTHETIC_COVERAGE,
                 "synthetic_cases.jsonl",
             ),
-            existing_synthetic + filtered.accepted,
+            synthetic_cases,
         )
+        write_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.SYNTHETIC_COVERAGE,
+                "synthetic_dependencies.jsonl",
+            ),
+            [
+                {
+                    "cluster_id": cluster_id,
+                    "dependency": final_dependencies[cluster_id],
+                }
+                for cluster_id in sorted(final_dependencies)
+            ],
+        )
+        self._write_review_artifacts()
         return {
-            "synthetic_cases": len(existing_synthetic) + len(filtered.accepted),
+            "synthetic_cases": len(synthetic_cases),
             "rejected_synthetic_cases": len(filtered.rejected),
         }
+
+    def _write_review_artifacts(self) -> None:
+        """Build the exact Stage 7 queue, duplicate families, and triage holds."""
+        stage = PipelineStage.SYNTHETIC_COVERAGE
+        trusted_cases = [
+            *_load_jsonl(
+                self.layout.artifact_path(
+                    PipelineStage.RUBRIC_EXTRACTION,
+                    "trusted_cases.jsonl",
+                )
+            ),
+            *_load_jsonl(
+                self.layout.artifact_path(
+                    PipelineStage.RUBRIC_EXTRACTION,
+                    "protected_trusted_cases.jsonl",
+                )
+            ),
+        ]
+        inferred_cases = _load_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.LABEL_INFERENCE,
+                "inferred_cases.jsonl",
+            )
+        )
+        synthetic_cases = _load_jsonl(self.layout.artifact_path(stage, "synthetic_cases.jsonl"))
+        inference_dependencies = _dependency_rows_by_cluster(
+            _load_jsonl(
+                self.layout.artifact_path(
+                    PipelineStage.LABEL_INFERENCE,
+                    "inference_dependencies.jsonl",
+                )
+            ),
+            source="inference dependencies",
+        )
+        synthetic_dependencies = _dependency_rows_by_cluster(
+            _load_jsonl(self.layout.artifact_path(stage, "synthetic_dependencies.jsonl")),
+            source="synthetic dependencies",
+        )
+        timestamp = utc_now()
+        derived: List[Dict[str, Any]] = []
+        review_items_by_case: Dict[str, Dict[str, Any]] = {}
+        scoreable_by_case: Dict[str, bool] = {}
+        for case in [*inferred_cases, *synthetic_cases]:
+            review_case = _case_for_review(case)
+            metadata = dict(review_case["metadata"])
+            cluster_id = str(metadata.get("source_cluster") or "")
+            trust_tier = str(metadata.get("trust_tier") or "")
+            if trust_tier == INFERRED_FROM_TRUSTED_FEEDBACK:
+                dependency = inference_dependencies.get(cluster_id)
+            elif trust_tier == SYNTHETIC_FROM_TRUSTED_RUBRIC:
+                dependency = synthetic_dependencies.get(cluster_id)
+            else:
+                dependency = None
+            if dependency is None:
+                raise ReviewIntegrityError(
+                    f"derived case {review_case['case_id']} lacks dependency authority"
+                )
+            item = build_review_item(
+                case=review_case,
+                dependency=dependency,
+                source_provenance=_review_source_provenance(
+                    review_case,
+                    dependency,
+                ),
+                reviewer="fapo_pipeline",
+                timestamp=timestamp,
+            )
+            case_id = str(review_case["case_id"])
+            if case_id in review_items_by_case:
+                raise ValueError(f"duplicate derived review case_id {case_id!r}")
+            derived.append(review_case)
+            review_items_by_case[case_id] = item
+            scoreable_by_case[case_id] = _has_scoreable_expected(review_case["expected"])
+
+        families = build_duplicate_families([*trusted_cases, *derived])
+        held: Dict[str, Dict[str, Any]] = {}
+        cases_by_id = {str(case["case_id"]): case for case in [*trusted_cases, *derived]}
+        if len(cases_by_id) != len(trusted_cases) + len(derived):
+            raise ValueError("review family case_ids must be globally unique")
+
+        def hold(case_id: str, reason: str, family_id: str | None) -> None:
+            case = cases_by_id[case_id]
+            review_item = review_items_by_case.get(case_id)
+            fingerprint = (
+                str(review_item["fingerprint"]) if review_item is not None else case_content_fingerprint(case)
+            )
+            row = {
+                "case_id": case_id,
+                "fingerprint": fingerprint,
+                "case_content_sha256": case_content_fingerprint(case),
+                "trust_tier": str(case["metadata"]["trust_tier"]),
+                "status": "held",
+                "reason": reason,
+                "hold_reason": reason,
+                "family_id": family_id,
+                "case": case,
+            }
+            previous = held.get(case_id)
+            if previous is not None and previous["reason"] != reason:
+                reasons = sorted({str(previous["reason"]), reason})
+                row["reason"] = "+".join(reasons)
+                row["hold_reason"] = row["reason"]
+            held[case_id] = row
+
+        for family in families:
+            family_id = str(family["family_id"])
+            members = list(family["members"])
+            if family["hold_reasons"]:
+                reason = "+".join(str(item) for item in family["hold_reasons"])
+                for member in members:
+                    hold(str(member["case_id"]), reason, family_id)
+                continue
+            regression_member = any(
+                member["trust_tier"] == TRUSTED_FEEDBACK and member["early_split"] == "regression"
+                for member in members
+            )
+            if regression_member:
+                for member in members:
+                    if member["trust_tier"] != TRUSTED_FEEDBACK:
+                        hold(
+                            str(member["case_id"]),
+                            "derived_attached_to_regression",
+                            family_id,
+                        )
+        for case_id, scoreable in scoreable_by_case.items():
+            if not scoreable:
+                family_id = next(
+                    (
+                        str(family["family_id"])
+                        for family in families
+                        if any(str(member["case_id"]) == case_id for member in family["members"])
+                    ),
+                    None,
+                )
+                hold(case_id, "unscoreable_expected", family_id)
+
+        queue = sorted(
+            (item for case_id, item in review_items_by_case.items() if case_id not in held),
+            key=lambda item: (str(item["case_id"]), str(item["fingerprint"])),
+        )
+        held_rows = sorted(
+            held.values(),
+            key=lambda row: (str(row["case_id"]), str(row["fingerprint"])),
+        )
+        write_jsonl(
+            self.layout.artifact_path(stage, "derived_review_items.jsonl"),
+            queue,
+        )
+        write_jsonl(
+            self.layout.artifact_path(stage, "duplicate_families.jsonl"),
+            families,
+        )
+        write_jsonl(
+            self.layout.artifact_path(stage, "held_derived_cases.jsonl"),
+            held_rows,
+        )
+        self._inherit_parent_review_decisions(queue, timestamp=timestamp)
+
+    def _inherit_parent_review_decisions(
+        self,
+        review_items: Sequence[Mapping[str, Any]],
+        *,
+        timestamp: str,
+    ) -> None:
+        """Inherit only byte-identical parent review identities."""
+        if not self.lineage:
+            return
+        parent_items_path = self.layout.parent_snapshot / "parent_derived_review_items.jsonl"
+        parent_decisions_path = self.layout.parent_snapshot / "parent_review_decisions.jsonl"
+        if not parent_items_path.is_file() or not parent_decisions_path.is_file():
+            return
+        parent_items = _unique_rows_by_key(
+            _load_jsonl(parent_items_path),
+            key="case_id",
+            source="parent review items",
+        )
+        parent_decisions = _load_jsonl(parent_decisions_path)
+        parent_asset_id = str(self.lineage.get("parent_asset_id") or "")
+        for item in review_items:
+            parent_item = parent_items.get(str(item["case_id"]))
+            if parent_item is None:
+                continue
+            inherited = inherit_review_decision(
+                parent_item=parent_item,
+                child_item=item,
+                parent_decisions=parent_decisions,
+                parent_asset_id=parent_asset_id,
+                reviewer="fapo_pipeline",
+                timestamp=timestamp,
+            )
+            if inherited is not None:
+                self.layout._append_jsonl_once(
+                    self.layout.review_decisions_path,
+                    inherited,
+                    identity_fields=("decision_id",),
+                )
 
 
 def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
@@ -2061,9 +2847,7 @@ def _load_jsonl_with_line_numbers(
         try:
             row = json.loads(line)
         except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"{path}:{line_number}: invalid JSON: {exc.msg}"
-            ) from exc
+            raise ValueError(f"{path}:{line_number}: invalid JSON: {exc.msg}") from exc
         if not isinstance(row, dict):
             raise ValueError(f"Expected JSON object at {path}:{line_number}")
         rows.append(row)
@@ -2079,11 +2863,7 @@ def _replace_by_key(
 ) -> List[Dict[str, Any]]:
     """Return a stable union where additions replace matching existing rows."""
     added_keys = {str(row[key]) for row in additions}
-    rows = [
-        dict(row)
-        for row in existing
-        if str(row[key]) not in added_keys
-    ]
+    rows = [dict(row) for row in existing if str(row[key]) not in added_keys]
     rows.extend(dict(row) for row in additions)
     return rows
 
@@ -2099,14 +2879,195 @@ def _case_for_asset(
     return copied
 
 
+def _case_for_review(case: Mapping[str, Any]) -> Dict[str, Any]:
+    """Remove release-local fields before fingerprint-bound human review."""
+    copied = dict(case)
+    metadata = dict(copied.get("metadata") or {})
+    for field in (
+        "dataset_version",
+        "decision_id",
+        "generation_id",
+        "release_generation_id",
+        "review_decision_id",
+        "review_status",
+        "split",
+        "split_group_id",
+    ):
+        metadata.pop(field, None)
+    copied["metadata"] = metadata
+    validate_fapo_case(copied)
+    return copied
+
+
+def _dependency_rows_by_cluster(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    source: str,
+) -> Dict[str, Dict[str, Any]]:
+    """Index authentic dependency descriptors by their persisted cluster key."""
+    indexed = _unique_rows_by_key(rows, key="cluster_id", source=source)
+    dependencies: Dict[str, Dict[str, Any]] = {}
+    for cluster_id, row in indexed.items():
+        dependency = row.get("dependency")
+        if not isinstance(dependency, Mapping) or not dependency_matches(
+            dependency,
+            dependency,
+        ):
+            raise ReviewIntegrityError(f"{source} has unauthentic dependency for {cluster_id!r}")
+        dependencies[cluster_id] = dict(dependency)
+    return dependencies
+
+
+def _review_dependencies_by_case(
+    layout: EvaluationAssetLayout,
+    review_items: Sequence[Mapping[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Resolve every queued case to its complete current Stage 6/7 dependency."""
+    inference = _dependency_rows_by_cluster(
+        _load_jsonl(
+            layout.artifact_path(
+                PipelineStage.LABEL_INFERENCE,
+                "inference_dependencies.jsonl",
+            )
+        ),
+        source="inference dependencies",
+    )
+    synthetic = _dependency_rows_by_cluster(
+        _load_jsonl(
+            layout.artifact_path(
+                PipelineStage.SYNTHETIC_COVERAGE,
+                "synthetic_dependencies.jsonl",
+            )
+        ),
+        source="synthetic dependencies",
+    )
+    resolved: Dict[str, Dict[str, Any]] = {}
+    for item in review_items:
+        case_id = str(item.get("case_id") or "")
+        case = item.get("case")
+        metadata = case.get("metadata") if isinstance(case, Mapping) else None
+        if not case_id or not isinstance(metadata, Mapping):
+            raise ReviewIntegrityError("review item case authority is malformed")
+        cluster_id = str(metadata.get("source_cluster") or "")
+        trust_tier = str(metadata.get("trust_tier") or "")
+        dependencies = (
+            inference
+            if trust_tier == INFERRED_FROM_TRUSTED_FEEDBACK
+            else synthetic
+            if trust_tier == SYNTHETIC_FROM_TRUSTED_RUBRIC
+            else None
+        )
+        dependency = dependencies.get(cluster_id) if dependencies is not None else None
+        if dependency is None or case_id in resolved:
+            raise ReviewIntegrityError(f"review item {case_id!r} has no unique current dependency")
+        resolved[case_id] = dependency
+    return resolved
+
+
+def _review_source_provenance(
+    case: Mapping[str, Any],
+    dependency: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Project exact source member identities from one authentic dependency."""
+    descriptor = dependency.get("descriptor")
+    metadata = case.get("metadata")
+    if not isinstance(descriptor, Mapping) or not isinstance(metadata, Mapping):
+        raise ReviewIntegrityError("review source dependency is malformed")
+    schema_version = dependency.get("schema_version")
+    if schema_version == "fapo-stage-six-dependency-v1":
+        record_ids = [str(case["case_id"]).removeprefix("inferred-")]
+        members = descriptor.get("source_members")
+        match = descriptor.get("match")
+    elif schema_version == "fapo-stage-seven-dependency-v1":
+        cluster = descriptor.get("cluster")
+        nested = descriptor.get("stage_six_dependency")
+        nested_descriptor = nested.get("descriptor") if isinstance(nested, Mapping) else None
+        if not isinstance(cluster, Mapping) or not isinstance(
+            nested_descriptor,
+            Mapping,
+        ):
+            raise ReviewIntegrityError("synthetic review dependency is malformed")
+        record_ids = [str(value) for value in cluster.get("representative_ids", [])]
+        members = nested_descriptor.get("source_members")
+        match = nested_descriptor.get("match")
+    else:
+        raise ReviewIntegrityError("review dependency schema is unsupported")
+    if (
+        not record_ids
+        or not isinstance(members, list)
+        or not isinstance(
+            match,
+            Mapping,
+        )
+    ):
+        raise ReviewIntegrityError("review source provenance is incomplete")
+    hashes_by_id: Dict[str, str] = {}
+    for member in members:
+        if not isinstance(member, Mapping):
+            raise ReviewIntegrityError("review source member is malformed")
+        identity = str(member.get("identity") or "")
+        digest = str(member.get("content_sha256") or "")
+        if identity.startswith("unlabeled:"):
+            hashes_by_id[identity.removeprefix("unlabeled:")] = digest
+    try:
+        source_hashes = ["sha256:" + hashes_by_id[record_id] for record_id in record_ids]
+    except KeyError as exc:
+        raise ReviewIntegrityError("review source record is absent from dependency authority") from exc
+    matched_intent_id = str(metadata.get("matched_intent_id") or match.get("matched_intent_id") or "")
+    source_cluster = str(metadata.get("source_cluster") or "")
+    if not matched_intent_id or not source_cluster:
+        raise ReviewIntegrityError("review source identity is incomplete")
+    return {
+        "source_record_ids": record_ids,
+        "source_record_sha256s": source_hashes,
+        "source_cluster": source_cluster,
+        "matched_intent_id": matched_intent_id,
+    }
+
+
+def _has_scoreable_expected(expected: Mapping[str, Any]) -> bool:
+    """Recognize nested rubrics plus top-level deterministic scoring oracles."""
+    rubric = expected.get("rubric")
+    return (isinstance(rubric, Mapping) and has_scoreable_rubric(rubric)) or has_scoreable_rubric(expected)
+
+
+def _trusted_case_with_split_metadata(
+    row: Mapping[str, Any],
+    rubric: Mapping[str, Any],
+    asset_id: str,
+    *,
+    correctness_visibility: str,
+) -> Dict[str, Any]:
+    """Build a trusted case bound to its immutable early split decision."""
+    split = row.get("trusted_split")
+    split_group_id = row.get("split_group_id")
+    if split not in {"train", "validation", "test", "regression"}:
+        raise ValueError("trusted feedback is missing its early split assignment")
+    if not isinstance(split_group_id, str) or not split_group_id:
+        raise ValueError("trusted feedback is missing its split_group_id")
+    if row.get("evidence_eligible") is not True:
+        raise ValueError("ineligible feedback cannot become a trusted case")
+    case = _trusted_case(row, rubric, asset_id)
+    metadata = dict(case["metadata"])
+    metadata.update(
+        {
+            "split_group_id": split_group_id,
+            "trusted_split": split,
+            "evidence_eligible": True,
+            "correctness_visibility": correctness_visibility,
+        }
+    )
+    case["metadata"] = metadata
+    validate_fapo_case(case)
+    return case
+
+
 def _cluster_lineage(
     previous: Sequence[IntentCluster],
     current: Sequence[IntentCluster],
 ) -> List[Dict[str, Any]]:
     """Describe cluster continuity using deterministic member overlap."""
-    previous_members = {
-        cluster.cluster_id: set(cluster.record_ids) for cluster in previous
-    }
+    previous_members = {cluster.cluster_id: set(cluster.record_ids) for cluster in previous}
     provisional: List[Dict[str, Any]] = []
     matched_previous: Counter[str] = Counter()
     for cluster in current:
@@ -2148,11 +3109,7 @@ def _cluster_lineage(
         previous_id = row["previous_cluster_id"]
         if previous_id and matched_previous[previous_id] > 1:
             row["relationship"] = "split"
-    represented = {
-        str(row["previous_cluster_id"])
-        for row in provisional
-        if row["previous_cluster_id"]
-    }
+    represented = {str(row["previous_cluster_id"]) for row in provisional if row["previous_cluster_id"]}
     provisional.extend(
         {
             "previous_cluster_id": cluster.cluster_id,
@@ -2207,14 +3164,8 @@ def _validate_normalized_identity(
     if row_numbers is not None and len(row_numbers) != len(source_rows):
         raise ValueError("row_numbers must identify every source record")
     seen: Dict[str, tuple[int, str]] = {}
-    for logical_index, (normalized, source) in enumerate(
-        zip(normalized_rows, source_rows)
-    ):
-        row_number = (
-            row_numbers[logical_index]
-            if row_numbers is not None
-            else logical_index + 1
-        )
+    for logical_index, (normalized, source) in enumerate(zip(normalized_rows, source_rows)):
+        row_number = row_numbers[logical_index] if row_numbers is not None else logical_index + 1
         record_id = normalized.get("record_id")
         source_id = source.get("record_id", "<missing>")
         if record_id in seen:
@@ -2234,10 +3185,7 @@ def _validate_stage_one_feasibility(
     """Reject fixed-count route allocations that the data cannot satisfy."""
     record_count = len(unlabeled_rows)
     if cluster_count > record_count:
-        raise ValueError(
-            "cluster_count cannot exceed the number of unlabeled records "
-            f"({record_count})"
-        )
+        raise ValueError("cluster_count cannot exceed the number of unlabeled records " f"({record_count})")
     routes = {effective_route(row) for row in unlabeled_rows}
     if cluster_count < len(routes):
         raise ValueError(
@@ -2259,12 +3207,9 @@ def _normalize_feedback_evidence(
         observations.append(
             {
                 "claim": _string(item["claim"]),
-                "evidence_type": _string(item.get("evidence_type"))
-                or "explicit_feedback",
-                "evidence_pointer": _string(item.get("evidence_pointer"))
-                or "feedback.rationale",
-                "polarity": _string(item.get("polarity"))
-                or _string(source["feedback"].get("polarity")),
+                "evidence_type": _string(item.get("evidence_type")) or "explicit_feedback",
+                "evidence_pointer": _string(item.get("evidence_pointer")) or "feedback.rationale",
+                "polarity": _string(item.get("polarity")) or _string(source["feedback"].get("polarity")),
             }
         )
     return {
@@ -2316,9 +3261,7 @@ def _legacy_guideline_from_rubric(rubric: Mapping[str, Any]) -> Dict[str, Any]:
         ("preferred", "should"),
     ):
         for statement in _string_list(rubric.get(field)):
-            digest = hashlib.sha256(
-                f"legacy:{record_id}:{kind}:{statement}".encode("utf-8")
-            ).hexdigest()[:10]
+            digest = hashlib.sha256(f"legacy:{record_id}:{kind}:{statement}".encode("utf-8")).hexdigest()[:10]
             criteria.append(
                 {
                     "criterion_id": f"criterion-{digest}",
@@ -2343,9 +3286,7 @@ def _legacy_guideline_from_rubric(rubric: Mapping[str, Any]) -> Dict[str, Any]:
         "confidence": rubric.get("confidence", 0.5),
         "source_record_ids": [record_id],
         "criteria": criteria,
-        "tool_expectations": _normalize_tool_expectations(
-            rubric.get("tool_expectations")
-        ),
+        "tool_expectations": _normalize_tool_expectations(rubric.get("tool_expectations")),
         "reference_output": rubric.get("reference_output"),
         "calibration_status": "legacy_unavailable",
     }
@@ -2372,13 +3313,9 @@ def _normalize_rubric(
         "must_not": _string_list(raw.get("must_not")),
         "should": _string_list(raw.get("should")),
         "deterministic_checks": list(raw.get("deterministic_checks") or []),
-        "tool_expectations": _normalize_tool_expectations(
-            raw.get("tool_expectations")
-        ),
+        "tool_expectations": _normalize_tool_expectations(raw.get("tool_expectations")),
         "reference_output": (
-            _string(raw.get("reference_output"))
-            if raw.get("reference_output") is not None
-            else None
+            _string(raw.get("reference_output")) if raw.get("reference_output") is not None else None
         ),
         "label_source": label_source,
         "rubric_provider": rubric_provider,
@@ -2401,9 +3338,7 @@ def _normalize_inferred_rubric_response(
     rubrics: List[Dict[str, Any]] = []
     for cluster in batch:
         if cluster.cluster_id not in returned:
-            raise ValueError(
-                f"Inferred rubric response omitted {cluster.cluster_id}"
-            )
+            raise ValueError(f"Inferred rubric response omitted {cluster.cluster_id}")
         rubrics.append(
             _normalize_rubric(
                 returned[cluster.cluster_id],
@@ -2427,9 +3362,7 @@ def _synthetic_case(
     user_input = _redact_text(_string(generated.get("user_input")))
     if not user_input:
         raise ValueError(f"Synthetic response has empty user_input for {cluster.cluster_id}")
-    digest = hashlib.sha256(
-        f"{cluster.cluster_id}:{candidate_index}".encode("utf-8")
-    ).hexdigest()[:10]
+    digest = hashlib.sha256(f"{cluster.cluster_id}:{candidate_index}".encode("utf-8")).hexdigest()[:10]
     expected = _expected(rubric)
     expected["label_source"] = "synthetic_from_trusted_rubric"
     case = {
@@ -2504,7 +3437,9 @@ def _inferred_cases(
         match = match_by_cluster[cluster.cluster_id]
         if match.status != "matched_trusted_intent":
             continue
-        rubric = rubric_by_cluster[cluster.cluster_id]
+        rubric = rubric_by_cluster.get(cluster.cluster_id)
+        if rubric is None:
+            continue
         for record_id in cluster.record_ids:
             intent = intent_by_id[record_id]
             raw = raw_by_id[record_id]
@@ -2580,9 +3515,7 @@ def _build_labeling_queue(
         for rank, record_id in enumerate(selected_ids, start=1):
             trace = row_by_id.get(record_id)
             if trace is None:
-                raise ValueError(
-                    f"Cluster {cluster.cluster_id} references unknown record {record_id}"
-                )
+                raise ValueError(f"Cluster {cluster.cluster_id} references unknown record {record_id}")
             queue.append(
                 {
                     "queue_id": f"{cluster.cluster_id}:{record_id}",
@@ -2596,6 +3529,7 @@ def _build_labeling_queue(
                     "sample_ratio": sample_ratio,
                     "sample_rank": rank,
                     "samples_from_cluster": len(selected_ids),
+                    "acquisition": dict(LABELING_QUEUE_ACQUISITION),
                     "trace": dict(trace),
                 }
             )
@@ -2661,14 +3595,10 @@ def _stage_seeds(
     *,
     call_count: int = 0,
 ) -> dict[str, Any]:
-    if stage == PipelineStage.DATASET_SPLITS:
+    if stage == PipelineStage.PREPARED_INPUTS:
         return {"split": config.split_seed}
     if STAGE_SPECIFICATIONS[stage].provider_roles:
-        reason = (
-            "provider_does_not_use_sampling"
-            if call_count
-            else "stage_made_no_provider_calls"
-        )
+        reason = "provider_does_not_use_sampling" if call_count else "stage_made_no_provider_calls"
         return {"sampling": not_applicable(reason)}
     return {"sampling": not_applicable("stage_has_no_provider_role")}
 
@@ -2760,12 +3690,8 @@ def _intent_match(row: Mapping[str, Any]) -> IntentMatch:
         cluster_id=str(row["cluster_id"]),
         status=str(row["status"]),
         score=float(row["score"]),
-        matched_intent_id=(
-            str(row["matched_intent_id"]) if row.get("matched_intent_id") else None
-        ),
-        matched_label=(
-            str(row["matched_label"]) if row.get("matched_label") else None
-        ),
+        matched_intent_id=(str(row["matched_intent_id"]) if row.get("matched_intent_id") else None),
+        matched_label=(str(row["matched_label"]) if row.get("matched_label") else None),
         cluster_size=int(row.get("cluster_size") or 0),
         trusted_example_count=int(row.get("trusted_example_count") or 0),
         trusted_group_count=int(row.get("trusted_group_count") or 0),
@@ -2778,15 +3704,108 @@ def _intent_match(row: Mapping[str, Any]) -> IntentMatch:
     )
 
 
+def _stage_six_dependency(
+    *,
+    cluster: IntentCluster,
+    match: IntentMatch,
+    guideline: Mapping[str, Any],
+    intent_rows: Mapping[str, Mapping[str, Any]],
+    trusted_rows: Mapping[str, Mapping[str, Any]],
+    provider: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the complete, content-bound identity for one inferred rubric."""
+    members: list[dict[str, Any]] = []
+    for record_id in sorted(cluster.record_ids):
+        source = dict(intent_rows[record_id])
+        source["dependency_identity"] = f"unlabeled:{record_id}"
+        members.append(source)
+    for record_id in sorted(str(item) for item in guideline["source_record_ids"]):
+        source = dict(trusted_rows[record_id])
+        source["dependency_identity"] = f"trusted:{record_id}"
+        members.append(source)
+    return build_stage_six_dependency(
+        cluster=cluster_to_dict(cluster),
+        match=match_to_dict(match),
+        guideline=guideline,
+        source_members=fingerprinted_members(
+            members,
+            identity_key="dependency_identity",
+        ),
+        provider=provider,
+        prompt={
+            "revision": PROMPT_REVISIONS["label_inference"],
+            "sha256": hashlib.sha256(INFERENCE_PROMPT.encode("utf-8")).hexdigest(),
+        },
+        algorithm_revision="stage-six-dependency-v1",
+    )
+
+
+def _stage_seven_dependency(
+    *,
+    cluster: IntentCluster,
+    rubric: Mapping[str, Any],
+    stage_six_dependency: Mapping[str, Any],
+    comparison_cases: Sequence[Mapping[str, Any]],
+    provider: Mapping[str, Any],
+    config: EvaluationAssetConfig,
+    generation_set: Mapping[str, str],
+) -> dict[str, Any]:
+    """Build the exact reuse identity for one synthetic generation unit."""
+    members = []
+    for case in comparison_cases:
+        dependency_case = {
+            "dependency_identity": str(case["case_id"]),
+            "case_id": case["case_id"],
+            "task_type": case["task_type"],
+            "context": case["context"],
+            "expected": case["expected"],
+            "metadata": {
+                key: value
+                for key, value in dict(case.get("metadata") or {}).items()
+                if key
+                in {
+                    "source",
+                    "source_cluster",
+                    "matched_intent_id",
+                    "group_id",
+                    "split_group_id",
+                    "trust_tier",
+                }
+            },
+        }
+        members.append(dependency_case)
+    return build_stage_seven_dependency(
+        cluster=cluster_to_dict(cluster),
+        rubric=rubric,
+        stage_six_dependency=stage_six_dependency,
+        comparison_members=fingerprinted_members(
+            members,
+            identity_key="dependency_identity",
+        ),
+        provider=provider,
+        prompt={
+            "revision": PROMPT_REVISIONS["synthetic_coverage"],
+            "sha256": hashlib.sha256(SYNTHETIC_PROMPT.encode("utf-8")).hexdigest(),
+        },
+        settings={
+            "candidate_count": config.synthetic_cases_per_cluster,
+            "literal_leakage_min_length": 24,
+            "token_overlap_threshold": 0.95,
+            "generation_set": dict(sorted(generation_set.items())),
+        },
+        algorithm_revision="stage-seven-dependency-v1",
+    )
+
+
 def _context(user_input: Any, prior: Any, tools: Any, runtime: Any) -> Dict[str, str]:
-    messages = list(_redact_messages(prior) or []) + [
-        {"role": "user", "content": _redact_text(_string(user_input))}
-    ]
-    return {
-        "messages_json": json.dumps(messages, sort_keys=True),
-        "tool_context_json": json.dumps(_redact_tool_calls(tools), sort_keys=True),
-        "runtime_json": json.dumps(_redact_named_content(runtime), sort_keys=True),
-    }
+    return model_visible_context(
+        {
+            "user_input": _redact_text(_string(user_input)),
+            "conversation_context": list(_redact_messages(prior) or []),
+            "tool_calls": _redact_tool_calls(tools),
+            "runtime": _redact_named_content(runtime),
+        }
+    )
 
 
 def _case_group_id(case: Mapping[str, Any]) -> str:
@@ -2796,6 +3815,149 @@ def _case_group_id(case: Mapping[str, Any]) -> str:
         if group_id:
             return group_id
     return _string(case.get("case_id"))
+
+
+def _approved_case_for_release(
+    case: Mapping[str, Any],
+    *,
+    asset_id: str,
+    decision_id: str,
+) -> Dict[str, Any]:
+    """Attach release-local metadata to one explicitly approved derived case."""
+    copied = dict(case)
+    metadata = dict(copied.get("metadata") or {})
+    metadata.update(
+        {
+            "dataset_version": asset_id,
+            "review_status": "approved",
+            "decision_id": decision_id,
+        }
+    )
+    copied["metadata"] = metadata
+    validate_fapo_case(copied)
+    return copied
+
+
+def _review_split_payloads(
+    *,
+    trusted: Sequence[Mapping[str, Any]],
+    approved: Sequence[Mapping[str, Any]],
+    held: Sequence[Mapping[str, Any]],
+    families: Sequence[Mapping[str, Any]],
+    asset_id: str,
+    seed: int,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Publish trusted plus approved cases without crossing exact families."""
+    validated_families = [validate_duplicate_family(row) for row in families]
+    family_by_case: Dict[str, Dict[str, Any]] = {}
+    for family in validated_families:
+        for member in family["members"]:
+            case_id = str(member["case_id"])
+            if case_id in family_by_case:
+                raise ReviewIntegrityError(f"case {case_id!r} appears in multiple duplicate families")
+            family_by_case[case_id] = family
+    all_cases = [*trusted, *approved]
+    all_ids = [str(case["case_id"]) for case in all_cases]
+    if len(set(all_ids)) != len(all_ids):
+        raise ReviewIntegrityError("publication case_ids are not unique")
+    if set(all_ids) - set(family_by_case):
+        raise ReviewIntegrityError("publication case is absent from duplicate-family authority")
+    held_ids = {str(row.get("case_id") or "") for row in held}
+    standard: Dict[str, List[Dict[str, Any]]] = {
+        "train": [],
+        "validation": [],
+        "test": [],
+    }
+    regression: List[Dict[str, Any]] = []
+    published_family_splits: Dict[str, str] = {}
+
+    def publish(case: Mapping[str, Any], split: str) -> Dict[str, Any]:
+        copied = dict(case)
+        metadata = dict(copied.get("metadata") or {})
+        family = family_by_case[str(copied["case_id"])]
+        family_id = str(family["family_id"])
+        previous = published_family_splits.setdefault(family_id, split)
+        if previous != split:
+            raise ReviewIntegrityError(f"duplicate family {family_id!r} crosses dataset splits")
+        metadata.update(
+            {
+                "dataset_version": asset_id,
+                "split": split,
+                "split_group_id": str(family["split_group_id"]),
+            }
+        )
+        copied["metadata"] = metadata
+        validate_fapo_case(copied)
+        return copied
+
+    trusted_published: List[Dict[str, Any]] = []
+    for case in trusted:
+        case_id = str(case["case_id"])
+        if case_id in held_ids:
+            continue
+        metadata = case.get("metadata")
+        split = metadata.get("trusted_split") if isinstance(metadata, Mapping) else None
+        if split not in {"train", "validation", "test", "regression"}:
+            raise ReviewIntegrityError(f"trusted case {case_id!r} lacks an early split")
+        published = publish(case, str(split))
+        trusted_published.append(published)
+        if split == "regression":
+            regression.append(published)
+        else:
+            standard[str(split)].append(published)
+
+    inferred_published: List[Dict[str, Any]] = []
+    synthetic_published: List[Dict[str, Any]] = []
+    for case in approved:
+        case_id = str(case["case_id"])
+        if case_id in held_ids:
+            raise ReviewIntegrityError(f"held case {case_id!r} cannot be approved for publication")
+        family = family_by_case[case_id]
+        split = family["assigned_early_split"]
+        if split == "regression":
+            raise ReviewIntegrityError("a derived case attached to regression authority was not held")
+        if split is None:
+            value = _stable_fraction(str(family["split_group_id"]), seed)
+            split = "train" if value < 0.6 else "validation" if value < 0.8 else "test"
+        if split not in standard:
+            raise ReviewIntegrityError("derived duplicate family split is invalid")
+        published = publish(case, str(split))
+        standard[str(split)].append(published)
+        trust_tier = str(published["metadata"].get("trust_tier") or "")
+        if trust_tier == INFERRED_FROM_TRUSTED_FEEDBACK:
+            inferred_published.append(published)
+        elif trust_tier == SYNTHETIC_FROM_TRUSTED_RUBRIC:
+            synthetic_published.append(published)
+        else:
+            raise ReviewIntegrityError(f"approved case {case_id!r} has an unsupported trust tier")
+    for rows in standard.values():
+        rows.sort(key=lambda row: str(row["case_id"]))
+    payloads = _provenance_split_payloads(
+        standard,
+        trusted_published,
+        inferred_published,
+        synthetic_published,
+    )
+    payloads["regression_trusted"] = sorted(
+        regression,
+        key=lambda row: str(row["case_id"]),
+    )
+    triage: List[Dict[str, Any]] = []
+    for row in held:
+        case = row.get("case")
+        if not isinstance(case, Mapping):
+            raise ReviewIntegrityError("held review case body is missing")
+        copied = dict(case)
+        metadata = dict(copied.get("metadata") or {})
+        metadata["hold_reason"] = str(row.get("reason") or row.get("hold_reason") or "")
+        copied["metadata"] = metadata
+        validate_fapo_case(copied)
+        triage.append(copied)
+    payloads["triage_hold"] = sorted(
+        triage,
+        key=lambda row: str(row["case_id"]),
+    )
+    return payloads
 
 
 def _default_split_payloads(
@@ -2815,9 +3977,7 @@ def _default_split_payloads(
     )
     trusted_standard = trusted_partition["train"]
     regression_trusted = trusted_partition["test"]
-    regression_groups = {
-        _case_group_id(case) for case in regression_trusted
-    }
+    regression_groups = {_case_group_id(case) for case in regression_trusted}
     inferred_standard, held_inferred = _hold_regression_group_conflicts(
         inferred,
         regression_groups,
@@ -2857,9 +4017,7 @@ def _incremental_split_payloads(
             parent_assignments[_case_group_id(case)] = split
     parent_regression = {
         _case_group_id(case)
-        for case in _load_jsonl(
-            layout.parent_snapshot / "parent_regression_trusted.jsonl"
-        )
+        for case in _load_jsonl(layout.parent_snapshot / "parent_regression_trusted.jsonl")
     }
 
     regression_trusted: List[Dict[str, Any]] = []
@@ -2873,9 +4031,7 @@ def _incremental_split_payloads(
             regression_trusted.append(dict(case))
         else:
             trusted_standard.append(dict(case))
-    regression_groups = parent_regression | {
-        _case_group_id(case) for case in regression_trusted
-    }
+    regression_groups = parent_regression | {_case_group_id(case) for case in regression_trusted}
     inferred_standard, held_inferred = _hold_regression_group_conflicts(
         inferred,
         regression_groups,
@@ -2895,13 +4051,7 @@ def _incremental_split_payloads(
         split = parent_assignments.get(group_id)
         if split is None:
             value = _stable_fraction(group_id, seed)
-            split = (
-                "train"
-                if value < 0.6
-                else "validation"
-                if value < 0.8
-                else "test"
-            )
+            split = "train" if value < 0.6 else "validation" if value < 0.8 else "test"
         standard_splits[split].append(dict(case))
     for rows in standard_splits.values():
         rows.sort(key=lambda row: str(row["case_id"]))
@@ -2935,15 +4085,9 @@ def _provenance_split_payloads(
     payloads: Dict[str, List[Dict[str, Any]]] = {}
     for split in ("train", "validation", "test"):
         rows = [dict(row) for row in standard_splits[split]]
-        payloads[f"{split}_trusted"] = [
-            row for row in rows if str(row["case_id"]) in trusted_ids
-        ]
-        payloads[f"{split}_inferred"] = [
-            row for row in rows if str(row["case_id"]) in inferred_ids
-        ]
-        payloads[f"{split}_synthetic"] = [
-            row for row in rows if str(row["case_id"]) in synthetic_ids
-        ]
+        payloads[f"{split}_trusted"] = [row for row in rows if str(row["case_id"]) in trusted_ids]
+        payloads[f"{split}_inferred"] = [row for row in rows if str(row["case_id"]) in inferred_ids]
+        payloads[f"{split}_synthetic"] = [row for row in rows if str(row["case_id"]) in synthetic_ids]
         payloads[split] = rows
     return payloads
 
@@ -2979,11 +4123,43 @@ def _indexed_items(
     items = raw.get(array_key)
     if not isinstance(items, list):
         raise ValueError(f"Rubric response missing {array_key} array")
-    return {
-        str(item[identity_key]): dict(item)
-        for item in items
-        if isinstance(item, Mapping) and item.get(identity_key)
-    }
+    indexed: Dict[str, Dict[str, Any]] = {}
+    positions: Dict[str, int] = {}
+    for position, item in enumerate(items, start=1):
+        if not isinstance(item, Mapping) or not item.get(identity_key):
+            continue
+        identity = str(item[identity_key])
+        if identity in indexed:
+            raise ValueError(
+                f"Rubric response has duplicate {identity_key} {identity!r} "
+                f"at item {positions[identity]} and item {position}"
+            )
+        indexed[identity] = dict(item)
+        positions[identity] = position
+    return indexed
+
+
+def _unique_rows_by_key(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    key: str,
+    source: str,
+) -> Dict[str, Dict[str, Any]]:
+    """Index persisted rows without permitting silent identity overwrite."""
+    indexed: Dict[str, Dict[str, Any]] = {}
+    positions: Dict[str, int] = {}
+    for position, row in enumerate(rows, start=1):
+        identity = _string(row.get(key))
+        if not identity:
+            raise ValueError(f"{source} item {position} is missing {key}")
+        if identity in indexed:
+            raise ValueError(
+                f"{source} has duplicate {key} {identity!r} at item "
+                f"{positions[identity]} and item {position}"
+            )
+        indexed[identity] = dict(row)
+        positions[identity] = position
+    return indexed
 
 
 def _grouped_items(
@@ -3041,9 +4217,7 @@ def _normalize_tool_expectations(value: Any) -> Dict[str, Any]:
             if text:
                 requirements.append(text)
     else:
-        raise ValueError(
-            "rubric tool_expectations must be a JSON object, array, string, or null"
-        )
+        raise ValueError("rubric tool_expectations must be a JSON object, array, string, or null")
     return {"requirements": requirements}
 
 
@@ -3142,9 +4316,7 @@ PRESERVED_NAMED_FIELDS = frozenset(
         "version",
     }
 )
-MESSAGE_STRUCTURE_FIELDS = frozenset(
-    {"conversation_context", "message", "messages"}
-)
+MESSAGE_STRUCTURE_FIELDS = frozenset({"conversation_context", "message", "messages"})
 STRUCTURAL_DESCRIPTOR_FIELDS = frozenset(
     {
         "application",
@@ -3181,9 +4353,7 @@ def _redact_record(row: Mapping[str, Any]) -> Dict[str, Any]:
         if field in prepared:
             prepared[field] = _redact_value(prepared[field])
     if "conversation_context" in prepared:
-        prepared["conversation_context"] = _redact_messages(
-            prepared["conversation_context"]
-        )
+        prepared["conversation_context"] = _redact_messages(prepared["conversation_context"])
     if "tool_calls" in prepared:
         prepared["tool_calls"] = _redact_tool_calls(prepared["tool_calls"])
     for field in ("runtime", "metadata"):
@@ -3213,9 +4383,7 @@ def _redact_messages(value: Any) -> Any:
         message = dict(item)
         for key, nested in tuple(message.items()):
             field = str(key).lower()
-            if (
-                key == "role" or field in PRESERVED_NAMED_FIELDS
-            ) and not _is_composite_value(nested):
+            if (key == "role" or field in PRESERVED_NAMED_FIELDS) and not _is_composite_value(nested):
                 continue
             if key in CONTENT_FIELD_NAMES:
                 message[key] = _redact_value(nested)
@@ -3250,9 +4418,9 @@ def _redact_tool_calls(value: Any) -> Any:
             if field in TOOL_STRUCTURE_FIELDS:
                 call[key] = _redact_tool_calls(nested)
                 continue
-            if (
-                key in {"name", "tool"} or field in PRESERVED_NAMED_FIELDS
-            ) and not _is_composite_value(nested):
+            if (key in {"name", "tool"} or field in PRESERVED_NAMED_FIELDS) and not _is_composite_value(
+                nested
+            ):
                 continue
             if key in {"arguments", "result", "error"}:
                 call[key] = _redact_value(nested)
@@ -3272,6 +4440,11 @@ def _redact_feedback(value: Any) -> Any:
     for key, nested in tuple(feedback.items()):
         if key in {"rationale", "correction"}:
             feedback[key] = _redact_value(nested)
+        elif key == "correctness_signals" and isinstance(nested, list):
+            feedback[key] = redact_correctness_signals(
+                nested,
+                redact_content=_redact_value,
+            )
         elif key not in {"polarity", "source"}:
             feedback[key] = _redact_named_content(nested)
     return feedback
@@ -3303,20 +4476,14 @@ def _redact_named_content(
                 redacted[key] = _redact_tool_calls(item)
             elif field in CONTENT_FIELD_NAMES:
                 redacted[key] = _redact_value(item)
-            elif (
-                field == "name"
-                and structural_descriptor
-                and not _is_composite_value(item)
-            ):
+            elif field == "name" and structural_descriptor and not _is_composite_value(item):
                 redacted[key] = item
             elif field in PRESERVED_NAMED_FIELDS and not _is_composite_value(item):
                 redacted[key] = item
             else:
                 redacted[key] = _redact_named_content(
                     item,
-                    structural_descriptor=(
-                        field in STRUCTURAL_DESCRIPTOR_FIELDS
-                    ),
+                    structural_descriptor=(field in STRUCTURAL_DESCRIPTOR_FIELDS),
                 )
         return redacted
     return value

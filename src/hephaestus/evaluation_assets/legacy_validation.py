@@ -22,6 +22,8 @@ from src.hephaestus.evaluation_assets.input_contract import (
     validate_input_records,
 )
 from src.hephaestus.evaluation_assets.stage_three_contract import (
+    GuidelineIdentityProfile,
+    TrustedIntentTextProfile,
     replay_legacy_stage_three,
     replay_native_stage_three,
     validate_native_guideline_rows,
@@ -61,6 +63,8 @@ def validate_legacy_stage_semantics(
     artifact_profiles: Mapping[Any, str],
     *,
     artifact_snapshot: Mapping[Path, bytes],
+    native_stage_three_identity_profile: GuidelineIdentityProfile = "historical_v1",
+    native_stage_three_text_profile: TrustedIntentTextProfile = "historical_v1",
 ) -> None:
     """Cross-validate the full historical stage graph before adoption writes."""
     feedback = _rows(
@@ -121,6 +125,8 @@ def validate_legacy_stage_semantics(
         stage_three_profile,
         normalized_by_id,
         artifact_snapshot,
+        identity_profile=native_stage_three_identity_profile,
+        text_profile=native_stage_three_text_profile,
     )
     clusters = _validate_clusters(layout, intents_by_id, artifact_snapshot)
     matches = _validate_matches(
@@ -206,6 +212,9 @@ def _validate_stage_three(
     profile: str,
     feedback_by_id: Mapping[str, Mapping[str, Any]],
     artifact_snapshot: Mapping[Path, bytes],
+    *,
+    identity_profile: GuidelineIdentityProfile,
+    text_profile: TrustedIntentTextProfile,
 ) -> tuple[dict[str, Mapping[str, Any]], list[dict[str, Any]]]:
     stage = "rubric_extraction"
     trusted_intent_rows = _rows(
@@ -438,6 +447,8 @@ def _validate_stage_three(
         evidence_rows,
         candidate_rows,
         asset_id=layout.asset_id,
+        identity_profile=identity_profile,
+        text_profile=text_profile,
     )
     if (
         candidate_rows != replayed["candidates"]
