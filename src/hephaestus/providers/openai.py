@@ -222,6 +222,10 @@ def build_openai_client(settings: Dict[str, object]) -> OpenAIClient:
             settings.get("retry_backoff_seconds", DEFAULT_RETRY_BACKOFF_SECONDS)
         ),
         temperature=float(settings.get("temperature", 0.0)),
-        top_p=float(settings["top_p"]) if "top_p" in settings else None,
+        top_p=(
+            float(settings["top_p"])
+            if settings.get("top_p") is not None
+            else None
+        ),
         max_tokens=int(settings.get("max_tokens", 16000)),
     )

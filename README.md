@@ -42,7 +42,7 @@ When the two are compared, both start from the same pipeline and the same baseli
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 
-# For MCP support (agentic workflows with tool calling)
+# MCP support is included in the core dependency set; this extra is currently empty.
 pip install -e ".[mcp]"
 ```
 
@@ -700,6 +700,15 @@ The core workflow is an **optimization loop**. Each pass runs the same six stage
 
 You wire the dataset, chain, and scorer together with a **config file** and run `python -m hephaestus.cli eval --config <config>.json` to perform a single **Evaluate** stage. The remaining stages are driven by the Claude Code optimizer (see [Optimization loop](#optimization-loop)). A separate reviewer checks every proposed change before it is re-evaluated, and accepted variants are compared on aggregate validation scores only.
 
+## Runtime and Agent Responsibilities
+
+The [canonical enforcement boundary](docs/processes/prompt-iteration-loop.md#enforcement-boundary)
+distinguishes runtime-enforced controls from bypassable agent protocol and
+recommended conventions. Tenant directories organize tenant-specific code and
+data, but they are not an operating-system sandbox. The runtime’s file and
+bundle checks do not confine an arbitrary process that already has filesystem
+access to the checkout.
+
 ---
 
 ## Concepts
@@ -799,7 +808,12 @@ Context: ${steps.retrieve.output}
 
 **Skills** are reusable units of procedural knowledge for **agentic** (tool-using) tenants — e.g. "how to handle a ranking question" or "how to sequence these tools". They live as markdown files at `tenants/<tenant_id>/skills/<skill-name>/variant-NNN.md`, each with YAML frontmatter (`name`, `description`) and a body of instructions, and are optimized exactly like prompts (clone-to-new-variant, eval, attribution, review).
 
-A skill is **loaded at the agentic layer**: the chain node injects the configured skills into the conversation as a distinct `<available_skills>` context message right after the system prompt — mimicking an agent that discovered and loaded skills into its environment, rather than inlining them into the authored prompt template. The skills stay fully in context for every model call (deterministic), keeping the base prompt lean while the reusable know-how is factored out and iterated independently.
+A skill is **loaded at the agentic layer** only when the tenant chain does the
+work: `skill_paths` does not itself inject a skill into a tenant chain. The
+factory must call `render_skills_block(config["skill_paths"])` and pass the
+result as `skills_text` to `make_agentic_node` (or `make_llm_node`). That node
+then injects one ordered `<available_skills>` context message right after the
+system prompt, rather than inlining skills into the authored template.
 
 Skills are opt-in per tenant via two `chain.config` fields:
 
@@ -818,7 +832,9 @@ Skills are opt-in per tenant via two `chain.config` fields:
 }
 ```
 
-- **`skill_paths`** — the skill files to load (injected in order). Omit it and the tenant behaves exactly as before; skills are a no-op.
+- **`skill_paths`** — the ordered skill files available for an explicit
+  tenant-chain render/pass. Omit it and the tenant behaves exactly as before;
+  a factory that never renders/passes the paths also receives no skill message.
 - **`optimization_target`** — `"prompt"`, `"skill"`, or `"both"` (default `"both"`). Selects which textual artifacts the optimizer iterates. When set to `"skill"` or `"both"`, the tenant must be agentic (an `mcp` section configured); the eval runner validates this.
 
 Prompt and skill are **co-equal textual levels**: when both are available the optimizer treats them as one textual surface, routing each failure cluster to whichever artifact owns it (broad scaffold/format → base prompt; reusable task-specific procedure → a skill). See `tenants/skill_example/` for a complete worked example. In the **FAPO Explorer** UI, skills appear under the **Prompts** tab in their own section.
@@ -956,22 +972,33 @@ You can also run evals and optimization steps manually via the CLI (see [CLI ref
 
 Prompt and **skill** are co-equal *textual* levels — both edit instruction text and carry the same cost. Skills apply only to agentic (tool-using) tenants; see [Skills](#skills) below.
 
-The system follows a **prompt-first policy**: it prefers textual changes (prompt and/or skill) when the evidence is ambiguous, and escalates to parameters or structure only after textual search has exposed a bottleneck that text can't fix. This is the "prefer the smallest useful change" principle — cheaper levels first, and a higher level only when attribution justifies it.
+The **prompt-first convention is recommended, not runtime-enforced**: prefer textual changes (prompt and/or skill) when the evidence is ambiguous, and escalate to parameters or structure only after textual search has exposed a bottleneck that text cannot fix. This is the "prefer the smallest useful change" principle — cheaper levels first, and a higher level only when attribution justifies it.
 
 ### Step attribution (failure analysis)
 
-After an eval run, step attribution classifies each failure by root cause. It runs in **two phases**: first a fast, deterministic pass of rule-based heuristics over the recorded `step_outputs`, then deeper LLM analysis on the cases the heuristics can't classify confidently. The heuristics cover categories such as:
+After an eval run, the runtime can perform deterministic, rule-based runtime
+attribution over recorded step outputs, tool history, execution status, and
+caller-supplied in-memory case context and expected-answer evidence. It does not
+persist that joined protected evidence or make a semantic LLM judgment. A later
+agent semantic analysis may use the authenticated run evidence under the tenant
+protocol; that analysis is separate from the deterministic runtime result. The
+heuristics cover categories such as:
 
 - **Retrieval failures** — a retrieval step returned empty content, or its output overlaps the query too little (scored as hit / partial / miss)
 - **Cascading failures** — an early step produced empty output, causing everything downstream to fail
 - **Format failures** — the correct answer is in the output but surrounded by extra text the scorer can't parse
-- **Reasoning failures** — all inputs were good but the model reached the wrong conclusion
+- **Final-step fallback** — no earlier rule explained a low-scoring case, so the runtime assigns a low-confidence final-step fallback; this does not prove that the inputs were good or that reasoning was the cause
 
 Each failure is also tagged by which optimization level can address it:
-- Format and reasoning failures → **textual** (prompt-addressable, and skill-addressable on agentic tenants)
+- Format failures and low-confidence final-step fallbacks → **textual** (prompt-addressable, and skill-addressable on agentic tenants)
 - Retrieval and cascade failures → **structural-addressable**
 
-This partition tells the optimizer (and you) where to focus before writing new variants — and it is what signals when a level is exhausted and escalation is warranted. The deterministic table appears automatically in each run's `summary.md`.
+This partition is a bounded diagnostic hint, not proof that an optimization
+level is exhausted. The deterministic table appears in `summary.md` only when
+the run has step outputs and at least one failure, and only when attribution
+produces a non-infrastructure step entry. A later tenant-governed semantic
+analysis decides whether the evidence justifies a prompt, skill, parameter, or
+structural change.
 
 ### Prompt variants
 
@@ -1024,14 +1051,19 @@ Together these prevent rework (you won't re-try something that already failed) a
 
 ### Guardrails
 
-Autonomous optimization can overfit or drift out of scope, so FAPO bounds every loop with four guardrails:
+Autonomous optimization can overfit or drift out of scope, so FAPO documents four
+agent procedures. **All four are agent-enforced / bypassable**, not runtime
+barriers:
 
-1. **Split access controls** — the optimizer sees individual *training* cases; validation and test expose **aggregate scores only**. Candidates are accepted on validation, never by inspecting test cases.
+1. **Training/held-out workflow** — the optimizer sees individual *training* cases; validation and test expose **aggregate scores only**. Candidates are accepted on validation, never by inspecting test cases.
 2. **Scope constraints** — the tenant's `iteration-playbook.md` defines which optimization levels are allowed and which are forbidden. The optimizer and the variant-reviewer enforce this **independently**.
 3. **Iteration memory** — a structured log of variants, scores, and exhaustion reasons (see [Tracking what you tried](#tracking-what-you-tried) above).
 4. **Variant immutability** — every attempt, accepted or rejected, becomes a new numbered file; structural variants are cloned, never edited in place.
 
-This isolation is a **workspace boundary** — enforced by directory layout, config-local paths, and independent reviewer validation — not an operating-system sandbox.
+Tenant directory layout and config-local paths are organizational only, not a
+runtime-enforced isolation boundary. This workspace boundary is not an
+operating-system sandbox; the four procedures above depend on the optimizer and
+reviewer following the tenant protocol.
 
 ### Example: optimizing a multi-hop QA chain
 
@@ -1061,9 +1093,17 @@ Runs the chain on every case in the dataset, scores each output, and writes resu
 | File | Contents |
 |------|----------|
 | `summary.md` | Human-readable score summary with breakdowns and step timings |
-| `results.jsonl` | Per-case results (input, output, scores, diagnostics) |
-| `run_config.json` | Snapshot of the config used for this run |
+| `results.jsonl` | Per-case results, including output, scores, diagnostics, and agentic tool history when present. The schema does not persist raw dataset `context` or `expected` fields by default, but outputs, step outputs, diagnostics, tool arguments, and tool results can repeat tenant data; it is not a privacy boundary. |
+| `run_config.json` | Safe, resolved projection of the configuration used for this run |
+| `run_identity.json` | Privacy-safe comparison identity and permanent-control fingerprints |
 | `progress.json` | Real-time progress (useful for long-running evals) |
+| `run_manifest.json` | Final authority for the terminal bundle, including hashes for every terminal artifact |
+
+For the exact lifecycle and authority rule, see [Eval output paths](docs/references/eval_paths.md).
+An authenticated terminal bundle has status `completed`, `degraded`, or
+`failed`; each result row has its own execution status, and score aggregates use
+successful rows only. Do not treat a loose `results.jsonl` directory as an
+authenticated run.
 
 ### `eval-progress` — Check a running evaluation
 

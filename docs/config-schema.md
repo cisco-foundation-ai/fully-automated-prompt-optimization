@@ -66,15 +66,41 @@ def build_chain(provider: ProviderClient, config: Dict[str, Any]) -> CompiledGra
 | Key | Type | Description |
 |---|---|---|
 | `prompt_paths` | object | Maps each chain step name to its prompt variant file |
-| `skill_paths` | array | Skill files to load for an **agentic** tenant. Their bodies are injected at the agentic layer as a runtime `<available_skills>` context message (not inlined into the prompt). Omit for non-skill tenants. |
-| `optimization_target` | string | `"prompt"`, `"skill"`, or `"both"` (default `"both"`). Selects which textual artifacts the optimizer iterates. `"skill"`/`"both"` with `skill_paths` set requires an `mcp` section (validated at config load). |
+| `skill_paths` | array | Ordered skill files available to an **agentic** tenant. This setting does not itself inject a skill into a tenant chain: the factory must call `render_skills_block` and pass its result as `skills_text` to a node. That node injects one runtime `<available_skills>` message rather than inlining the body into the authored prompt. Omit for non-skill tenants. |
+| `optimization_target` | string | `"prompt"`, `"skill"`, or `"both"` (default `"both"`). Selects which textual artifacts the optimizer iterates. `"skill"`/`"both"` with `skill_paths` set requires an `mcp` section when `run_evaluation` calls its path/preflight validation, not by `load_eval_config`. |
 
 ### Validation rules
 
 - `chain` is required — configs without it raise `ValueError`
 - `chain.path` must be non-empty
 - every `chain.config.prompt_paths` / `chain.config.skill_paths` file must exist
-- `optimization_target` must be one of `prompt` / `skill` / `both`; using `skill` / `both` with `skill_paths` requires a configured `mcp` server (skills are agentic-only)
+- `optimization_target` must be one of `prompt` / `skill` / `both`; using `skill` / `both` with `skill_paths` requires a configured `mcp` server when `run_evaluation` calls its path/preflight validation (skills are agentic-only), not when `load_eval_config` parses the file
+
+### `comparison.variant_dimensions`
+
+`comparison.variant_dimensions`, when supplied, is an array without duplicates.
+It may contain only these eight dimension names:
+
+| Dimension | Meaning |
+|---|---|
+| `prompts` | Prompt-artifact identity may vary. |
+| `skills` | Tenant-owned runtime skill artifacts may vary. |
+| `chain_parameters` | Non-prompt/non-skill chain config may vary. |
+| `chain_structure` | Chain factory and source identity may vary. |
+| `provider` | Provider identity may vary. |
+| `model` | Resolved model identity may vary. |
+| `sampling` | Sampling settings may vary. |
+| `mcp_capabilities` | Configured/discovered MCP capability identity may vary. |
+
+`provider`, `model`, and `sampling` are independent dimensions: declaring a
+model-only or sampling-only comparison does not require also declaring
+`provider`. Each undeclared dimension remains a comparison control.
+
+The ordered dataset membership, split membership, scorer, and metric are not
+variant dimensions: dataset, split, scorer, and metric are permanent controls.
+The run identity records the declared variation and fingerprints of those
+controls for comparison auditability; it does not guarantee that a rerun
+reproduces the same output.
 
 ## Provider Settings
 
@@ -83,6 +109,26 @@ def build_chain(provider: ProviderClient, config: Dict[str, Any]) -> CompiledGra
 - `baseten` / `base10`: `base_url`, `model`, plus shared sampling/retry settings above.
 - `sagemaker`: `api_url`, `api_key_env` (default `X_API_KEY`), plus shared sampling/retry settings above.
 - `openai`: `model` (default `gpt-4o`), plus shared sampling/retry settings (`timeout_seconds`, `max_retries`, `retry_backoff_seconds`, `temperature`, `top_p`, `max_tokens`). Requires `OPENAI_API_KEY` environment variable.
+
+### Tool-calling matrix
+
+Tool support is determined by the provider implementation, not by an arbitrary
+`provider_settings.supports_tools` flag. OpenAI non-reasoning models forward
+tool schemas to the OpenAI client. `o1`, `o3`, `o4`, `gpt-5`, and `gpt5` are
+text-only in the current implementation: a tool request falls back to normal
+text generation. Baseten and SageMaker are text-only because they use the base
+provider tool method, which also falls back to text generation.
+
+### Persisted provenance limits
+
+The safe run configuration records resolved provider/model/sampling facts and
+fingerprints supported local inputs. It deliberately does not invent upstream
+deployment facts. Its current provider facts set `provider_revision`,
+`model_revision`, `api_revision`, `provider_request_id`, and
+`provider_response_id` to `{"status": "unavailable"}`; its MCP facts likewise
+set `implementation_revision` to `{"status": "unavailable"}`. Endpoint values
+are fingerprinted rather than serialized. This audit record identifies the
+local run configuration; it is not a remote-provider replay guarantee.
 
 ## General Notes
 

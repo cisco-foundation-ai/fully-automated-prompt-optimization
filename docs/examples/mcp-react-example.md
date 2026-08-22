@@ -31,7 +31,6 @@ tenants/web_agent/
 │   └── scorers/
 │       └── task_scorer.py
 ├── configs/
-│   ├── mcp_servers.json
 │   └── eval.json
 └── docs/
     └── iteration-playbook.md
@@ -44,24 +43,26 @@ tenants/web_agent/
 **`tenants/web_agent/datasets/web_research_tasks.jsonl`**
 
 ```json
-{"case_id": "1", "task_type": "research", "context": {"task": "What is the current population of Tokyo?"}, "expected": {"answer": "approximately 14 million", "tools_used": ["web_search"]}, "metadata": {"difficulty": "easy"}}
-{"case_id": "2", "task_type": "research", "context": {"task": "Find the latest stable version of Python and save it to info.txt"}, "expected": {"answer_contains": "Python 3.", "tools_used": ["web_search", "write_file"]}, "metadata": {"difficulty": "medium"}}
-{"case_id": "3", "task_type": "research", "context": {"task": "Compare the GDP of USA vs China in 2024 and create a summary file"}, "expected": {"tools_used": ["web_search", "write_file"]}, "metadata": {"difficulty": "hard"}}
+{"case_id": "1", "task_type": "research", "context": {"task": "What is the current population of Tokyo?"}, "expected": {"answer": "approximately 14 million", "tools_used": ["brave_web_search"]}, "metadata": {"difficulty": "easy"}}
+{"case_id": "2", "task_type": "research", "context": {"task": "Find the latest stable version of Python and save it to info.txt"}, "expected": {"answer_contains": "Python 3.", "tools_used": ["brave_web_search", "write_file"]}, "metadata": {"difficulty": "medium"}}
+{"case_id": "3", "task_type": "research", "context": {"task": "Compare the GDP of USA vs China in 2024 and create a summary file"}, "expected": {"answer_contains": "summary", "tools_used": ["brave_web_search", "write_file"]}, "metadata": {"difficulty": "hard"}}
 ```
 
 ---
 
 ## 2. MCP Server Configuration
 
-**`tenants/web_agent/configs/mcp_servers.json`**
+The current config loader reads servers and tool execution settings directly
+from the eval config; it does not load an MCP `config_path` indirection.
+The following `mcp` object is embedded in `eval.json` below:
 
 ```json
 {
   "servers": [
     {
       "name": "brave_search",
-      "command": "python",
-      "args": ["-m", "mcp_server_brave_search"],
+      "command": "npx",
+      "args": ["-y", "@brave/brave-search-mcp-server", "--transport", "stdio"],
       "env": {
         "BRAVE_API_KEY": "${BRAVE_API_KEY}"
       },
@@ -85,6 +86,10 @@ tenants/web_agent/
 }
 ```
 
+This uses Brave's current official stdio package and tool naming:
+[`@brave/brave-search-mcp-server` exposes `brave_web_search`](https://github.com/brave/brave-search-mcp-server/blob/main/README.md).
+Install a current Node.js/npm runtime so `npx` is available.
+
 ---
 
 ## 3. Eval Configuration
@@ -98,11 +103,32 @@ tenants/web_agent/
   "provider_settings": {
     "model": "gpt-4o",
     "temperature": 0.0,
-    "max_tokens": 4096,
-    "supports_tools": true
+    "max_tokens": 4096
   },
   "mcp": {
-    "config_path": "tenants/web_agent/configs/mcp_servers.json"
+    "servers": [
+      {
+        "name": "brave_search",
+        "command": "npx",
+        "args": ["-y", "@brave/brave-search-mcp-server", "--transport", "stdio"],
+        "env": {"BRAVE_API_KEY": "${BRAVE_API_KEY}"},
+        "enabled": true,
+        "timeout_seconds": 30
+      },
+      {
+        "name": "filesystem",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/agent_workspace"],
+        "env": {},
+        "enabled": true,
+        "timeout_seconds": 30
+      }
+    ],
+    "tool_execution": {
+      "max_iterations": 15,
+      "max_tool_calls_per_iteration": 5,
+      "timeout_seconds": 60
+    }
   },
   "dataset": {
     "path": "tenants/web_agent/datasets/web_research_tasks.jsonl"
@@ -113,6 +139,10 @@ tenants/web_agent/
     "config": {
       "prompt_paths": {
         "agent": "tenants/web_agent/prompts/modules/agent/variant-001.md"
+      },
+      "agent_limits": {
+        "max_iterations": 15,
+        "max_tool_calls_per_iteration": 5
       }
     }
   },
@@ -127,6 +157,10 @@ tenants/web_agent/
 }
 ```
 
+`mcp.tool_execution` is parsed and recorded, but is not automatically wired
+into this tenant chain. `agent_limits` below is the explicit node configuration
+that controls this example's ReAct limit.
+
 ---
 
 ## 4. ReAct Chain
@@ -140,11 +174,14 @@ tenants/web_agent/
 """ReAct agent chain with MCP tool access."""
 
 from __future__ import annotations
-from typing import Any, Dict
+
 from pathlib import Path
+
 from langgraph.graph import END, StateGraph
-from src.hephaestus.chains.types import ChainState
+
 from src.hephaestus.chains.agentic_nodes import make_agentic_node
+from src.hephaestus.chains.types import ChainState
+
 
 def build_chain(provider, config, mcp_manager=None):
     """Build a single-node ReAct agent with access to web search and filesystem tools.
@@ -162,6 +199,7 @@ def build_chain(provider, config, mcp_manager=None):
         )
     
     prompt_path = Path(config["prompt_paths"]["agent"])
+    limits = config["agent_limits"]
     graph = StateGraph(ChainState)
     
     graph.add_node(
@@ -171,8 +209,8 @@ def build_chain(provider, config, mcp_manager=None):
             prompt_template_path=prompt_path,
             mcp_manager=mcp_manager,
             output_key="answer",
-            max_iterations=15,  # Allow up to 15 thought-action cycles
-            max_tool_calls_per_iteration=5,
+            max_iterations=limits["max_iterations"],
+            max_tool_calls_per_iteration=limits["max_tool_calls_per_iteration"],
         )
     )
     
@@ -198,7 +236,7 @@ Follow the ReAct (Reasoning + Acting) pattern:
 4. Repeat until you can answer the question
 
 Available tools:
-- **brave_search**: Search the web for current information
+- **brave_web_search**: Search the web for current information
 - **write_file**: Save information to a file
 - **read_file**: Read contents of a file
 - **list_directory**: List files in a directory
@@ -231,52 +269,37 @@ class TaskScorer(BaseScorer):
     def validate_case(self, case, scoring_profile):
         """Verify case has required fields."""
         assert "task" in case.context, f"Case {case.case_id}: missing 'task'"
-        assert "expected" in case.expected, f"Case {case.case_id}: missing 'expected'"
+        assert "answer" in case.expected or "answer_contains" in case.expected
+        tools_used = case.expected.get("tools_used", [])
+        assert isinstance(tools_used, list) and all(isinstance(name, str) for name in tools_used)
     
     def score_case(self, case, output_text, scoring_profile):
-        """Score based on answer quality and tool usage.
-        
-        Metrics:
-        - answer_present: Did agent provide a final answer? (0-100)
-        - answer_quality: Does answer match expected content? (0-100)
-        - tool_usage: Did agent use expected tools? (0-100)
-        - efficiency: Was the agent efficient? (0-100, based on tool call count)
-        """
-        expected = case.expected
-        output_lower = output_text.lower()
-        
-        # Check if answer is present (looks for "answer:" marker)
+        """Fallback for non-agentic use; no tool trajectory is available."""
+        return self._score(case.expected, output_text.lower(), [])
+
+    def score_pipeline_case(
+        self, case, step_outputs, scoring_profile, output_text=None, tool_call_history=None
+    ):
+        output_lower = (output_text or "").lower()
+        return self._score(case.expected, output_lower, tool_call_history or [])
+
+    def _score(self, expected, output_lower, tool_call_history):
         answer_present = 100.0 if "answer:" in output_lower else 0.0
-        
-        # Check answer quality
         answer_quality = 0.0
-        if "answer" in expected:
-            expected_answer = expected["answer"].lower()
-            if expected_answer in output_lower:
-                answer_quality = 100.0
-            elif any(word in output_lower for word in expected_answer.split()):
-                answer_quality = 50.0
-        
-        if "answer_contains" in expected:
-            if expected["answer_contains"].lower() in output_lower:
-                answer_quality = 100.0
-        
-        # Check tool usage (from case metadata)
-        tool_usage_score = 100.0  # Default to pass if no tool requirement
-        if "tools_used" in expected:
-            expected_tools = set(expected["tools_used"])
-            # Tool usage info available in diagnostics or step_outputs
-            # For now, assume correct tool usage if answer quality is good
-            if answer_quality >= 50.0:
-                tool_usage_score = 100.0
-            else:
-                tool_usage_score = 50.0
-        
-        # Efficiency: penalize excessive tool calls
-        # This would be read from tool_call_history in full implementation
-        efficiency = 100.0  # Placeholder - would calculate from actual tool call count
-        
-        # Composite score: weighted average
+        if "answer" in expected and expected["answer"].lower() in output_lower:
+            answer_quality = 100.0
+        elif "answer_contains" in expected and expected["answer_contains"].lower() in output_lower:
+            answer_quality = 100.0
+
+        actual_tools = {item["tool"] for item in tool_call_history if not item.get("error")}
+        required_tools = set(expected.get("tools_used", []))
+        tool_usage_score = (
+            100.0 if required_tools <= actual_tools else 0.0
+        )
+        efficiency = max(0.0, 100.0 - 10.0 * max(0, len(tool_call_history) - len(required_tools)))
+
+        # This scorer does not assume tool usage from answer quality; it reads
+        # the actual recorded trajectory supplied by score_pipeline_case.
         composite = (
             0.2 * answer_present +
             0.5 * answer_quality +
@@ -324,20 +347,21 @@ cat tenants/web_agent/evals/run-001/summary.md
 {
   "case_id": "1",
   "task_type": "research",
-  "output_text": "Thought: I need to search for Tokyo's current population.\n\nAction: brave_search(query=\"Tokyo population 2024\")\n\nObservation: Tokyo has a population of approximately 14 million in the metropolitan area...\n\nAnswer: The current population of Tokyo is approximately 14 million people in the city proper.",
+  "output_text": "Answer: The current population of Tokyo is approximately 14 million people in the city proper.",
   "step_outputs": {
-    "answer": "The current population of Tokyo is approximately 14 million people in the city proper."
+    "answer": "Answer: The current population of Tokyo is approximately 14 million people in the city proper."
   },
-  "composite_score": 95.0,
+  "composite_score": 100.0,
+  "execution_status": "succeeded",
   "score_breakdown": {
     "answer_present": 100.0,
     "answer_quality": 100.0,
     "tool_usage": 100.0,
-    "efficiency": 90.0
+    "efficiency": 100.0
   },
   "tool_call_history": [
     {
-      "tool": "brave_search",
+      "tool": "brave_web_search",
       "arguments": {"query": "Tokyo population 2024"},
       "result_length": 1523,
       "error": null,
@@ -347,10 +371,15 @@ cat tenants/web_agent/evals/run-001/summary.md
   "total_tool_calls": 1,
   "failed_tool_calls": 0,
   "diagnostics": [
-    "Agentic node answer: 2 iterations, 1 tool calls"
+    "Agentic node 'answer': 2 iterations, 1 tool calls total"
   ]
 }
 ```
+
+The standard agentic node stores the final model response in both
+`output_text` and `step_outputs["answer"]`. Earlier reasoning and observations
+remain available in `tool_call_history`; the node does not concatenate them
+into the final response.
 
 ---
 
@@ -409,19 +438,22 @@ def build_chain(provider, config, mcp_manager):
 
 ### Tool-Specific Nodes
 
+`make_agentic_node` currently exposes all tools discovered through its supplied
+MCP manager. It does not accept an `allowed_tools` argument. Use separate MCP
+manager/configuration instances or implement a chain-level policy before
+constructing a node when a tenant needs tool restriction.
+
 ```python
 def build_chain(provider, config, mcp_manager):
     graph = StateGraph(ChainState)
     
-    # Separate nodes for different tool categories
+    # Separate nodes can use separately configured MCP managers.
     graph.add_node("web_research", make_agentic_node(
-        ..., 
-        allowed_tools=["brave_search", "read_url"]
+        ...
     ))
     
     graph.add_node("file_operations", make_agentic_node(
-        ..., 
-        allowed_tools=["read_file", "write_file", "list_directory"]
+        ...
     ))
     
     graph.add_node("synthesize", make_llm_node(...))
