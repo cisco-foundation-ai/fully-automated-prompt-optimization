@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -73,6 +74,93 @@ def test_openai_embedding_provider_rejects_cross_batch_dimension_drift() -> None
 
     with pytest.raises(ValueError, match="consistent dimension"):
         provider.embed_texts(["first", "second"])
+
+
+def test_openai_embedding_metadata_preserves_ordered_batch_transports() -> None:
+    """Each successful SDK batch retains one ordered allowlisted metadata row."""
+    responses = [
+        SimpleNamespace(
+            _request_id="request-1",
+            model="embedding-revision",
+            usage=SimpleNamespace(prompt_tokens=2, total_tokens=2),
+            data=[SimpleNamespace(index=0, embedding=[1.0, 0.0])],
+            headers={"authorization": "sk-not-persisted"},
+        ),
+        {
+            "_request_id": "request-2",
+            "model": "embedding-revision",
+            "usage": {"prompt_tokens": 3, "total_tokens": 3},
+            "data": [{"index": 0, "embedding": [0.0, 1.0]}],
+            "secret": "sk-not-persisted",
+        },
+    ]
+    create = MagicMock(side_effect=responses)
+    client = SimpleNamespace(embeddings=SimpleNamespace(create=create))
+    provider = OpenAIEmbeddingProvider(client=client, batch_size=1)
+
+    assert provider.embed_texts(["first", "second"]) == [
+        [1.0, 0.0],
+        [0.0, 1.0],
+    ]
+    assert provider.drain_call_metadata() == [
+        {
+            "transport_ordinal": 1,
+            "response_id": {
+                "status": "unavailable",
+                "reason": "provider_does_not_expose_field",
+            },
+            "request_id": "request-1",
+            "model": "embedding-revision",
+            "system_fingerprint": {
+                "status": "unavailable",
+                "reason": "provider_does_not_expose_field",
+            },
+            "usage": {
+                "input_tokens": 2,
+                "output_tokens": {
+                    "status": "not_applicable",
+                    "reason": "provider_does_not_expose_field",
+                },
+                "total_tokens": 2,
+            },
+            "retry_count": 0,
+        },
+        {
+            "transport_ordinal": 2,
+            "response_id": {
+                "status": "unavailable",
+                "reason": "provider_does_not_expose_field",
+            },
+            "request_id": "request-2",
+            "model": "embedding-revision",
+            "system_fingerprint": {
+                "status": "unavailable",
+                "reason": "provider_does_not_expose_field",
+            },
+            "usage": {
+                "input_tokens": 3,
+                "output_tokens": {
+                    "status": "not_applicable",
+                    "reason": "provider_does_not_expose_field",
+                },
+                "total_tokens": 3,
+            },
+            "retry_count": 0,
+        },
+    ]
+    assert provider.drain_call_metadata() == []
+
+
+def test_embedding_metadata_drain_returns_nested_defensive_copy() -> None:
+    """Caller mutation cannot alter the nested provider metadata record."""
+    provider = OpenAIEmbeddingProvider(client=object())
+    buffered = {"transport_ordinal": 1, "usage": {"input_tokens": 3}}
+    provider._call_metadata = [buffered]
+
+    drained = provider.drain_call_metadata()
+    drained[0]["usage"]["input_tokens"] = 999
+
+    assert buffered["usage"]["input_tokens"] == 3
 
 
 def test_openai_embedding_provider_requires_api_key_without_client(monkeypatch: pytest.MonkeyPatch):

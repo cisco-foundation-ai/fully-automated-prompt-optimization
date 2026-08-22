@@ -10,6 +10,7 @@ import json
 import os
 import re
 import time
+from copy import deepcopy
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 DEFAULT_OPENAI_RUBRIC_MODEL = "gpt-5.5"
@@ -21,6 +22,8 @@ DEFAULT_MAX_OUTPUT_TOKENS = 4096
 
 class OpenAIRubricProvider:
     """OpenAI JSON generator for guideline creation and inferred-label rubrics."""
+
+    provider_name = "openai"
 
     def __init__(
         self,
@@ -37,8 +40,16 @@ class OpenAIRubricProvider:
         self.max_retries = max_retries
         self.retry_backoff_seconds = retry_backoff_seconds
         self.max_output_tokens = max_output_tokens
+        self.temperature = (
+            not_applicable("provider_does_not_use_sampling")
+            if _is_reasoning_model(model)
+            else 0.0
+        )
+        self.response_format = "json_object"
+        self.seed = not_applicable("provider_does_not_use_sampling")
         self._client = client
         self._sleep_fn = sleep_fn
+        self._call_metadata: List[Dict[str, Any]] = []
 
     def generate_json(
         self,
@@ -46,6 +57,7 @@ class OpenAIRubricProvider:
         payload: Mapping[str, Any],
     ) -> Dict[str, Any]:
         """Generate one JSON object from a system prompt and JSON payload."""
+        self._call_metadata.clear()
         client = self._get_client()
         messages = [
             {"role": "system", "content": system_prompt},
@@ -55,13 +67,31 @@ class OpenAIRubricProvider:
         for attempt in range(self.max_retries + 1):
             try:
                 response = client.chat.completions.create(**self._completion_kwargs(messages))
-                return _extract_json_object(_extract_response_text(response))
+                from src.hephaestus.evaluation_assets.provenance import (
+                    provider_response_metadata,
+                )
+
+                metadata = provider_response_metadata(
+                    response,
+                    transport_ordinal=1,
+                    retry_count=attempt,
+                    output_tokens_not_applicable=False,
+                )
+                result = _extract_json_object(_extract_response_text(response))
+                self._call_metadata.append(metadata)
+                return result
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 if attempt >= self.max_retries:
                     break
                 self._sleep_fn(self.retry_backoff_seconds)
         raise RuntimeError("OpenAI rubric generation failed after retries") from last_error
+
+    def drain_call_metadata(self) -> List[Dict[str, Any]]:
+        """Return successful SDK-call metadata once and clear the buffer."""
+        rows = deepcopy(self._call_metadata)
+        self._call_metadata.clear()
+        return rows
 
     def _completion_kwargs(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
         kwargs: Dict[str, Any] = {
@@ -73,7 +103,7 @@ class OpenAIRubricProvider:
             kwargs["max_completion_tokens"] = self.max_output_tokens
         else:
             kwargs["max_tokens"] = self.max_output_tokens
-            kwargs["temperature"] = 0.0
+            kwargs["temperature"] = self.temperature
         return kwargs
 
     def _create_client(self) -> Any:
@@ -103,6 +133,11 @@ def _is_reasoning_model(model: str) -> bool:
     if any(model_lower.startswith(prefix) for prefix in ("o1", "o3", "o4")):
         return True
     return any(model_lower.startswith(prefix) for prefix in ("gpt-5", "gpt5"))
+
+
+def not_applicable(reason: str) -> Dict[str, str]:
+    """Avoid importing Studio provenance during provider module import."""
+    return {"status": "not_applicable", "reason": reason}
 
 
 def _extract_response_text(response: Any) -> str:

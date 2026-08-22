@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from src.hephaestus import local_authority_io
 from src.hephaestus.datasets.evaluation_assets import (
     RubricOracle,
     assemble_dataset_bundle,
@@ -216,10 +217,16 @@ def test_layout_writers_preserve_previous_artifact_when_replace_fails(
     original = b'{"original":true}\n'
     path.write_bytes(original)
 
-    def fail_replace(source, destination):
+    def fail_exchange(
+        directory_descriptor: int,
+        source: str,
+        destination: str,
+        **kwargs: object,
+    ) -> local_authority_io.OwnedNode:
+        del directory_descriptor, source, destination, kwargs
         raise OSError("replace failed")
 
-    monkeypatch.setattr(os, "replace", fail_replace)
+    monkeypatch.setattr(local_authority_io, "replace_with_backup", fail_exchange)
     with pytest.raises(OSError, match="replace failed"):
         if artifact == "state":
             layout.save_state(state)
@@ -229,7 +236,8 @@ def test_layout_writers_preserve_previous_artifact_when_replace_fails(
             layout._append_config_revision({"event": "new_revision"})
 
     assert path.read_bytes() == original
-    assert list(path.parent.glob(f".{path.name}.*.tmp")) == []
+    retained = list(path.parent.glob(f".{path.name}.*.tmp"))
+    assert retained == []
 
 
 @pytest.mark.parametrize("report_kind", ["coverage", "missing"])
@@ -266,7 +274,8 @@ def test_copy_writer_preserves_previous_artifact_when_replace_fails(
     original = b'{"original":true}\n'
     destination.write_bytes(original)
 
-    def fail_replace(source_path, destination_path):
+    def fail_replace(source_path, destination_path, *args, **kwargs):
+        del source_path, destination_path, args, kwargs
         raise OSError("replace failed")
 
     monkeypatch.setattr(os, "replace", fail_replace)

@@ -16,6 +16,12 @@ from pathlib import Path
 import pytest
 
 import src.hephaestus.webui.server as server_module
+from src.hephaestus.evaluation_assets.publication import (
+    LOGICAL_SPLITS,
+    build_release_pointer,
+    install_generation,
+    write_release_pointer,
+)
 from src.hephaestus.webui.data import TenantStore
 from src.hephaestus.webui.server import (
     _Handler,
@@ -50,7 +56,13 @@ def test_start_evaluation_asset_endpoint_returns_accepted(tmp_path: Path) -> Non
     handler = type(
         "_TestHandler",
         (_Handler,),
-        {"store": TenantStore(tmp_path / "tenants"), "asset_manager": manager},
+        {
+            "store": TenantStore(
+                tmp_path / "tenants",
+                repository_base=tmp_path,
+            ),
+            "asset_manager": manager,
+        },
     )
     instance = object.__new__(handler)
     payload = {
@@ -94,7 +106,13 @@ def test_start_evaluation_asset_accepts_tfidf_fallback(tmp_path: Path) -> None:
     handler = type(
         "_TestHandler",
         (_Handler,),
-        {"store": TenantStore(tmp_path / "tenants"), "asset_manager": manager},
+        {
+            "store": TenantStore(
+                tmp_path / "tenants",
+                repository_base=tmp_path,
+            ),
+            "asset_manager": manager,
+        },
     )
     instance = object.__new__(handler)
     instance._read_json_body = lambda: {
@@ -134,7 +152,13 @@ def test_resume_evaluation_asset_accepts_decision_updates(tmp_path: Path) -> Non
     handler = type(
         "_TestHandler",
         (_Handler,),
-        {"store": TenantStore(tmp_path / "tenants"), "asset_manager": manager},
+        {
+            "store": TenantStore(
+                tmp_path / "tenants",
+                repository_base=tmp_path,
+            ),
+            "asset_manager": manager,
+        },
     )
     instance = object.__new__(handler)
     instance._read_json_body = lambda: {
@@ -193,7 +217,13 @@ def test_extend_evaluation_asset_endpoint_accepts_refresh_plan(
     handler = type(
         "_TestHandler",
         (_Handler,),
-        {"store": TenantStore(tmp_path / "tenants"), "asset_manager": manager},
+        {
+            "store": TenantStore(
+                tmp_path / "tenants",
+                repository_base=tmp_path,
+            ),
+            "asset_manager": manager,
+        },
     )
     instance = object.__new__(handler)
     instance._read_json_body = lambda: {
@@ -230,6 +260,45 @@ def test_extend_evaluation_asset_endpoint_accepts_refresh_plan(
     )
 
 
+def test_adopt_evaluation_asset_endpoint_uses_thin_service_api(
+    tmp_path: Path,
+) -> None:
+    class FakeManager:
+        received = None
+
+        def adopt(self, tenant_id, asset_id):
+            self.received = (tenant_id, asset_id)
+            return {"status": "released", "asset_id": asset_id}
+
+    manager = FakeManager()
+    handler = type(
+        "_TestHandler",
+        (_Handler,),
+        {
+            "store": TenantStore(
+                tmp_path / "tenants",
+                repository_base=tmp_path,
+            ),
+            "asset_manager": manager,
+        },
+    )
+    instance = object.__new__(handler)
+    sent = {}
+    instance._send_json = lambda body, status=200: sent.update(
+        {"body": body, "status": status}
+    )
+
+    instance._route_adopt_evaluation_asset(
+        {"tenant": "tenant_a", "asset": "legacy-v1"}
+    )
+
+    assert manager.received == ("tenant_a", "legacy-v1")
+    assert sent == {
+        "body": {"status": "released", "asset_id": "legacy-v1"},
+        "status": 202,
+    }
+
+
 def test_serve_rejects_non_loopback_bind_before_server_start(
     tmp_path: Path,
     monkeypatch,
@@ -248,7 +317,12 @@ def test_serve_rejects_non_loopback_bind_before_server_start(
     monkeypatch.setattr(server_module, "ThreadingHTTPServer", NoOpServer)
 
     with pytest.raises(ValueError, match="loopback"):
-        serve(tmp_path / "tenants", host="0.0.0.0", port=8765)
+        serve(
+            tmp_path / "tenants",
+            host="0.0.0.0",
+            port=8765,
+            repository_base=tmp_path,
+        )
 
 
 def test_serve_binds_ipv6_loopback_and_prints_bracketed_url(
@@ -274,7 +348,12 @@ def test_serve_binds_ipv6_loopback_and_prints_bracketed_url(
 
     monkeypatch.setattr(ThreadingHTTPServer, "serve_forever", serve_once)
 
-    serve(tmp_path / "tenants", host="::1", port=0)
+    serve(
+        tmp_path / "tenants",
+        host="::1",
+        port=0,
+        repository_base=tmp_path,
+    )
 
     assert address_families == [socket.AF_INET6]
     assert "http://[::1]:" in capsys.readouterr().out
@@ -297,7 +376,10 @@ def test_studio_http_policy_and_cache_headers(tmp_path: Path) -> None:
         "_TestHTTPHandler",
         (_Handler,),
         {
-            "store": TenantStore(tmp_path / "tenants"),
+            "store": TenantStore(
+                tmp_path / "tenants",
+                repository_base=tmp_path,
+            ),
             "asset_manager": FakeManager(),
         },
     )
@@ -419,24 +501,43 @@ def test_published_studio_datasets_inherit_studio_http_boundary(
     tenants_root = tmp_path / "tenants"
     tenant = tenants_root / "tenant_a"
     ordinary = tenant / "datasets" / "ordinary.jsonl"
-    published = (
-        tenant
-        / "datasets"
-        / "evaluation_assets"
-        / "v1"
-        / "train.jsonl"
-    )
     run_dir = tenant / "evals" / "run-1"
     ordinary.parent.mkdir(parents=True)
-    published.parent.mkdir(parents=True)
     run_dir.mkdir(parents=True)
     (tenant / "__init__.py").write_text("", encoding="utf-8")
     ordinary.write_text('{"case_id":"ordinary"}\n', encoding="utf-8")
-    published.write_text(
-        '{"case_id":"studio-case","context":{"input":"private"},'
-        '"expected":{"answer":"protected"}}\n',
-        encoding="utf-8",
+    split_sources = {}
+    for split in LOGICAL_SPLITS:
+        source = tenant / "workspace" / f"{split}.jsonl"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(
+            (
+                '{"case_id":"studio-case","context":{"input":"private"},'
+                '"expected":{"answer":"protected"}}\n'
+            ),
+            encoding="utf-8",
+        )
+        split_sources[split] = source
+    catalog = tenant / "datasets" / "evaluation_assets" / "v1"
+    generation = install_generation(
+        catalog,
+        tenant_id="tenant_a",
+        asset_id="v1",
+        split_paths=split_sources,
+        build_fingerprint="a" * 64,
     )
+    write_release_pointer(
+        catalog,
+        build_release_pointer(
+            tenant_id="tenant_a",
+            asset_id="v1",
+            generation=generation,
+            stage_8_receipt_sha256="b" * 64,
+            build_provenance_sha256="c" * 64,
+            published_at="2026-08-20T00:00:00+00:00",
+        ),
+    )
+    published_rel = generation.files["train"].relative_to(tenant).as_posix()
     (run_dir / "results.jsonl").write_text(
         '{"case_id":"studio-case","composite_score":1.0}\n',
         encoding="utf-8",
@@ -444,10 +545,9 @@ def test_published_studio_datasets_inherit_studio_http_boundary(
     (run_dir / "run_config.json").write_text(
         json.dumps(
             {
-                "dataset_path": (
-                    "tenants/tenant_a/datasets/"
-                    "evaluation_assets/v1/train.jsonl"
-                )
+                    "dataset_path": (
+                        f"tenants/tenant_a/{published_rel}"
+                    )
             }
         )
         + "\n",
@@ -457,7 +557,10 @@ def test_published_studio_datasets_inherit_studio_http_boundary(
     handler = type(
         "_TestPublishedDatasetHTTPHandler",
         (_Handler,),
-        {"store": TenantStore(tenants_root), "asset_manager": object()},
+        {
+            "store": TenantStore(tenants_root, repository_base=tmp_path),
+            "asset_manager": object(),
+        },
     )
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -469,9 +572,9 @@ def test_published_studio_datasets_inherit_studio_http_boundary(
         for path in (
             "/api/tenants/tenant_a/datasets",
             (
-                "/api/tenants/tenant_a/dataset?path="
-                "datasets/evaluation_assets/v1/train.jsonl"
-            ),
+                    "/api/tenants/tenant_a/dataset?path="
+                    f"{published_rel}"
+                ),
             "/api/tenants/tenant_a/runs/evals%2Frun-1/cases/0",
         ):
             status, headers = _http_request(
@@ -506,6 +609,105 @@ def test_published_studio_datasets_inherit_studio_http_boundary(
         thread.join(timeout=2)
 
 
+def test_dataset_routes_use_one_data_and_policy_snapshot() -> None:
+    """A pointer appearing between policy and data reads cannot bypass auth."""
+    order = []
+
+    class FakeStore:
+        def prepare_dataset_listing(self, tenant_id):
+            assert tenant_id == "tenant_a"
+            order.append("prepare-list")
+            return (("list-snapshot",), True)
+
+        def materialize_dataset_listing(self, snapshot):
+            assert snapshot == ("list-snapshot",)
+            order.append("read-list")
+            return [{"path": "studio.jsonl"}]
+
+        def prepare_dataset(self, tenant_id, dataset_rel):
+            assert (tenant_id, dataset_rel) == (
+                "tenant_a",
+                "studio.jsonl",
+            )
+            order.append("prepare-dataset")
+            return ("dataset-snapshot", True)
+
+        def materialize_dataset(self, snapshot, offset, limit):
+            assert (snapshot, offset, limit) == ("dataset-snapshot", 0, 100)
+            order.append("read-dataset")
+            return {"rows": [{"case_id": "private"}]}
+
+    handler = type("_SnapshotHandler", (_Handler,), {"store": FakeStore()})
+    instance = object.__new__(handler)
+    authorized = []
+    sent = []
+    instance._authorize_studio_request = lambda no_store: authorized.append(
+        no_store
+    ) or order.append("authorize") or True
+    instance._send_json = lambda body, no_store=False: sent.append(
+        (body, no_store)
+    )
+    instance._send_json_or_404 = lambda body, no_store=False: sent.append(
+        (body, no_store)
+    )
+
+    instance._route_datasets({"tenant": "tenant_a"}, {})
+    instance._route_dataset(
+        {"tenant": "tenant_a"},
+        {"path": ["studio.jsonl"]},
+    )
+
+    assert authorized == [True, True]
+    assert order == [
+        "prepare-list",
+        "authorize",
+        "read-list",
+        "prepare-dataset",
+        "authorize",
+        "read-dataset",
+    ]
+    assert sent == [
+        ([{"path": "studio.jsonl"}], True),
+        ({"rows": [{"case_id": "private"}]}, True),
+    ]
+
+
+def test_case_route_uses_one_joined_data_and_policy_snapshot() -> None:
+    """Joined case details and their Studio classification share one read."""
+    order = []
+
+    class FakeStore:
+        def prepare_case(self, tenant_id, run_rel, index):
+            assert (tenant_id, run_rel, index) == ("tenant_a", "evals/run", 0)
+            order.append("prepare")
+            return ("case-snapshot", True)
+
+        def materialize_case(self, snapshot):
+            assert snapshot == "case-snapshot"
+            order.append("read")
+            return {"ground_truth": {"expected": "private"}}
+
+    handler = type("_CaseSnapshotHandler", (_Handler,), {"store": FakeStore()})
+    instance = object.__new__(handler)
+    authorized = []
+    sent = []
+    instance._authorize_studio_request = lambda no_store: authorized.append(
+        no_store
+    ) or order.append("authorize") or True
+    instance._send_json_or_404 = lambda body, no_store=False: sent.append(
+        (body, no_store)
+    )
+
+    instance._route_case(
+        {"tenant": "tenant_a", "run": "evals%2Frun", "index": "0"},
+        {},
+    )
+
+    assert authorized == [True]
+    assert order == ["prepare", "authorize", "read"]
+    assert sent == [({"ground_truth": {"expected": "private"}}, True)]
+
+
 def test_ordinary_dataset_catalog_remains_available_to_explorer_hosts(
     tmp_path: Path,
 ) -> None:
@@ -520,7 +722,10 @@ def test_ordinary_dataset_catalog_remains_available_to_explorer_hosts(
     handler = type(
         "_TestOrdinaryDatasetHTTPHandler",
         (_Handler,),
-        {"store": TenantStore(tenants_root), "asset_manager": object()},
+        {
+            "store": TenantStore(tenants_root, repository_base=tmp_path),
+            "asset_manager": object(),
+        },
     )
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)

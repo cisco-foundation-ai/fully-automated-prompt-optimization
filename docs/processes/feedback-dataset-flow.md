@@ -31,7 +31,7 @@ The workflow has three entry points backed by the same persisted state:
 | Entry point | Use |
 |---|---|
 | Evaluation Asset Studio at `/evaluation-assets/` | Create assets, choose models, cluster count, and match threshold, inspect every pipeline stage, preview artifacts, monitor progress, and resume failures |
-| `python -m hephaestus.cli assets ...` | Scriptable create, run, status, and resume-compatible execution |
+| `python -m hephaestus.cli assets ...` | Scriptable create, run/resume, status, verified extension, and explicit legacy adoption |
 | Evaluation Asset Assistant (`.claude/agents/` or `.codex/agents/`) | Trigger the core workflow, poll state, validate artifacts, diagnose failures, and explain human review decisions |
 
 FAPO Explorer remains at `/`. It shows a read-only evaluation-asset summary and
@@ -102,24 +102,165 @@ canonical folder, and behavior are **Evaluation guideline creation**. Existing
 legacy contract.
 
 Every stage persists `pending`, `running`, `completed`, or `failed`, timestamps,
-a human-readable message, and cumulative counts. `events.jsonl` provides an
-append-only operational history. A failure preserves completed checkpoints;
-after its cause is corrected, rerunning resumes from the first incomplete
-stage.
+a human-readable message, cumulative counts, and the hash of its atomic receipt
+commit marker. The top-level asset lifecycle is separately restricted to
+`draft`, `queued`, `running`, `awaiting_review`, `released`, or `failed`.
+`completed` is accepted only as a visible pre-v2 legacy sentinel and is never
+written for a new build or silently treated as released. `events.jsonl`
+provides append-only operational history. A mutable resume verifies the
+completed receipt prefix and rebuilds from the first incomplete or invalid
+stage; a released asset is immutable and fails closed on any receipt or
+artifact mismatch. Released verification also authenticates the exact v2
+control state and identities, replays configuration history to justify every
+receipt's full resolved-config hash, requires each native configuration update
+to have exactly one earlier byte-equivalent version 2 prepare and one later
+matching commit in revision order, and
+binds Stage 8 to the exact persisted configuration-history bytes and current
+configuration without requiring the current checkout to equal historical code.
+Before Stage 1 has ever claimed receipt or completion authority, coherent
+pending, failed, and process-interrupted running states use the copied raw files
+as the resumable floor. Once a completed-stage status, state receipt hash,
+receipt file, or completion event claims authority, revision and resume require
+completed state, an exact state-to-receipt hash match, and a strict receipt
+inventory authenticating both copied raw files. Missing, malformed, incomplete,
+or stale evidence—and rewritten raw/receipt bytes that no longer match the
+recorded state hash—fails before revision writes or provider construction.
 
 Provider transport plus semantic response validation and normalization share
 one sanitized boundary. Failures retain their original exception as an
 in-memory chained cause, but persisted state, stage messages, and events contain
-only the stage, configured provider and model, fixed exception category, and an
+only the stage, actual provider and model, fixed exception category, and an
 allowlisted causal summary. Raw provider messages, request/response bodies,
 credentials, and arbitrary payload text are never persisted.
 
+Injected providers remain injected. Default providers are constructed lazily
+under the asset lock only after recovery, lifecycle and immutable raw-snapshot
+integrity checks, optional revision, and configuration reload. An injected
+rubric or embedding provider must pass the strict provider/model/settings
+allowlists and secret-shaped-value rejection before calls or mutable writes;
+the configured identity is never substituted for missing observed identity.
+The complete prospective call rows, stage provenance, and receipts validate in
+memory. The actual identity is shared by safe errors, receipts, Stage 3/6/7
+metadata, and the asset manifest, so a revision cannot call an old provider
+while claiming a new one.
+
 Individual Studio JSON, JSONL, Markdown/text, copied, event, and configuration
-history files use same-directory temporary files, flush and `fsync`, and
-`os.replace`. A failed producer, serializer, copy, or replacement leaves the
-previous single file intact and removes its temporary file. This is a
-single-file guarantee; generation-wide publication, state/pointer agreement,
-locking, and multi-file recovery remain separate lifecycle work.
+history files use same-directory temporary files and an identity-bound native
+CAS adapter. POSIX uses no-follow descriptors, file and parent `fsync`, and
+flagged rename; Windows uses reparse-rejecting handles, `FlushFileBuffers`,
+`FileRenameInfo`/`ReplaceFileW`, and has no directory-`fsync` equivalent. A
+failed producer, serializer, copy, or pre-replacement write leaves the previous
+single file intact. Exact operation-owned temporary, displaced, and quarantined
+nodes are reclaimed after success, ordinary Python exceptions, and recoverable
+retry paths; raced foreign nodes and ambiguous failures are retained and fail
+closed. Hard process termination can leave unproven hidden debris for explicit
+inspection, and later processes do not scavenge it by name. One deterministic
+collection-level hard file
+lock per asset protects every high-level mutation across processes. `filelock`
+supplies bounded acquisition over the exact POSIX `flock` or Windows
+`LockFileEx` handle, never a soft-lock fallback. Process-global
+exact-identity ownership permits only same-thread recursion when threads share
+a native handle. Bound handles record their opening process and reject use
+after `fork`; child work must reopen and revalidate the literal path. Configuration
+revision, checkpoint rebuild, native release publication, and legacy adoption
+use an append-only recovery journal whose prepared payload rolls forward
+idempotently.
+
+Directory creation has an explicit local concurrency boundary. Every
+Evaluation Asset Studio authority-root, authority-ancestor, stage, receipt,
+publication-catalog, generation, and generation-staging directory creator
+reached through repository, CLI, or Studio entry points uses the same
+bound-directory adapter while holding a same-thread-reentrant exclusive POSIX
+parent lock or identity-keyed Windows mutex. That lock spans complete
+single-file observe/create/CAS/sync/reclaim and generation
+collision/stage/install/sync/reclaim transactions. POSIX opens
+descriptor-relative nodes without following symlinks; Windows retains the
+complete no-share-delete, reparse-checked ancestor handle chain until the bound
+directory closes. Darwin and Windows reject Unicode-normalized case-fold
+aliases in authority names. Movable Windows private directories close their
+leaf handle immediately before exact-identity rename, then reopen the installed
+name with stable no-share-delete guards. The finite production guard rejects other `Path.mkdir`,
+`os.mkdir`, and `os.makedirs` spellings, including literal persistence
+attributes constructed through `operator.attrgetter` or
+`operator.methodcaller`; unresolved dynamic attribute names are outside this
+finite claim. It admits only the audited native operations in
+`local_authority_io`, the generic parent bootstraps in
+`_atomic_write_text` and `_atomic_write_binary`, and the deprecated non-Studio
+`assemble_dataset_bundle`; a live complete-release assertion proves that the
+compatibility bootstraps do not create any directory in the authority or
+generation boundary. Private names, no-follow opens, complete
+parent-inventory checks, exact inode/type rechecks, and no-replace installation
+fail closed for preexisting, linked, wrong-type, detectably substituted, or
+competing cooperating-writer entries. POSIX neither atomically returns a
+descriptor from `mkdirat` nor conditionally removes an inode by handle, so the
+creation and reclamation guarantees apply to cooperating Studio writers that
+honor the same parent lock. They are not a claim of safety against an arbitrary
+noncooperating process running as the same OS identity that mutates the parent
+namespace between identity check and mutation. Deployments must keep the
+Studio workspace writable only by the Studio's trusted OS identity and must not
+run unaudited same-identity filesystem writers concurrently.
+When a repository/invocation base is explicit, every existing component from
+that base through the tenants root is opened and type-checked before mutation;
+an intermediate symlink cannot turn a lexically relative root into an external
+write target. Persisted generation paths remain literal repository-relative
+paths.
+
+Before roll-forward, recovery validates the complete version 2 journal schema,
+unique operation identity, authenticated raw pre-operation config/state,
+tenant/asset-bound target config and state, exact nested request/result/history/
+event schemas, changed-field and stage-suffix semantics, before/target hashes,
+strict contiguous prepare/commit ordering, and byte-exact before/target prefix
+descriptors for both append-only audit logs. Only writer-reachable on-disk
+control and audit phases are accepted. Every later operation is chained to the
+prior target mutation/config identity and audit chronology; ordinary pipeline
+stage events may extend the event prefix between mutations. Native publication
+admits only the reachable pointer/state/event phases: all before; pointer
+target; pointer and state target; or pointer, state, and event target. A
+committed release requires the exact pointer, configuration, configuration
+history, released state, event prefix, commit, and no successor. A committed
+legacy adoption is likewise terminal and requires exact target config/state,
+every target receipt, pointer and generation/provenance link, exact audit
+prefixes, and its commit. Standalone candidate
+and persisted release verification call this same complete validator. With no
+outstanding operation, a final committed configuration revision or checkpoint
+rebuild requires its exact target configuration and complete target
+configuration history; state and events may continue through normal pipeline
+lifecycle and stage progress after commit. Legacy
+history compatibility is authorized only by the final validated adoption
+prepare—committed or the one legitimate outstanding crash state—whose target
+receipt hashes match the verified receipts. The authenticated adoption
+before-state is then replayed through the full native or historical semantic
+validator; receipt origin labels alone convey no compatibility. Version 1 or
+mixed-version journals require explicit repair because they do not contain
+enough before-state evidence for safe automatic recovery. A parseable,
+rehashed, but inconsistent journal therefore fails before any authority write.
+
+Stage 8 installs the four consumer files in one immutable content-addressed
+generation. It validates and syncs a same-filesystem hidden temporary directory
+before native no-replace installation, reuses only exact existing content, and never overwrites a
+collision. `release.json` is the sole mutable catalog authority and changes by
+one atomic replacement only after the generation, manifests, build provenance,
+and Stage 8 receipt agree. The journal then installs released state, appends
+the event, and commits. Readers capture the pointer once and return a frozen,
+fully validated snapshot, so they see the complete old or complete new
+generation. Old immutable generations and the pointer survive invalidation and
+have no garbage collection. Exact operation-owned staging/quarantine debris is
+reclaimed on success, ordinary exceptions, and recoverable retry paths. Raced
+foreign nodes, hard-termination debris without durable ownership proof, and
+other ambiguous failures remain visible so closed-tree verification fails
+rather than hiding them.
+
+Stages 3–7 always write receipt-backed `provider_calls.jsonl`, including an
+empty ledger for zero calls. Resume aggregates authenticated earlier ledgers
+instead of rerunning providers. Stage-local provenance records provider
+identity, prompt hashes/revisions, code inventory, calls, seeds, and algorithms.
+`build_provenance.json` separates deterministic identity/fingerprint from
+audit-only timestamp, Git commit/tree and dirt, request IDs, usage, and retries.
+Identity covers every declared source member, resolved defaults, runtime
+dependencies, copied input hashes, lineage, provider/model/settings, prompts,
+seeds, and algorithms. Strict allowlists and explicit unavailable or
+not-applicable markers exclude protected prompt/request/response bodies,
+headers, secrets, and exceptions.
 
 ### Updating decisions on resume
 
@@ -129,12 +270,16 @@ set of decisions. The Studio's **Edit decisions & resume** form and optional
 
 1. Validate the requested settings and compare them with `config.json`.
 2. Select the earliest stage affected by an actual change.
-3. Preserve every earlier completed checkpoint.
-4. Reset the affected stage and all downstream stages to `pending`.
-5. Remove their stale artifacts and the stale final manifest.
+3. Verify and preserve every earlier receipt-backed checkpoint.
+4. Durably append a prepared recovery operation containing the complete target
+   configuration, state, audit rows, and cleanup boundary.
+5. Replace the configuration and state, marking the affected suffix `pending`
+   and clearing its receipt references.
 6. Append the old and new values plus the restart stage to
    `config_history.jsonl` and `events.jsonl`.
-7. Resume the normal core runner.
+7. Remove stale suffix artifacts and receipts, then commit the journal operation.
+8. Resume the normal core runner. An interruption first rolls the prepared
+   operation forward without duplicating history or events.
 
 | Changed decision | Earliest stage rebuilt |
 |---|---|
@@ -149,25 +294,39 @@ rejected while the same asset has an active background runner. If the pipeline
 already has an incomplete stage earlier than the decision's dependency, the
 audit records both boundaries and execution resumes at that earlier stage.
 
-### Extending a completed asset
+### Extending a released asset
 
 Extension creates a complete new asset version without modifying or rerunning
-the parent version. The child records `lineage.json`, `reuse_manifest.json`,
-and the parent asset ID. The small parent artifacts required for incremental
-comparison are copied into `stages/01_raw_inputs/parent_snapshot/` with hashes,
-so the child has no runtime dependency on the parent directory.
+the parent version. Under parent and child locks acquired by sorted absolute
+lock path, the core first requires `released` and verifies the complete parent
+receipt chain, raw source hashes, lineage/reuse metadata, and every artifact to
+be copied. A legacy `completed` parent points to explicit adoption; corruption
+leaves the child root absent. The child records `lineage.json`,
+`reuse_manifest.json`, the parent Stage 8 receipt hash, released-state hash, and
+source-lineage hash. Parent snapshot artifacts are copied into
+`stages/01_raw_inputs/parent_snapshot/` with hashes, so the child has no runtime
+dependency on the parent directory. Lineage and reuse documents use strict
+schemas and must agree field-for-field on parent release evidence, seeded and
+reused stages, counts, and the exact snapshot inventory. Stages 3–8 receipt the
+lineage/reuse files and every snapshot they consume; Stage 8 also inventories
+the two control documents as required outputs.
 
 The Studio and `assets extend` CLI expose two modes:
 
 | Mode | Allowed additions | Stage behavior |
 |---|---|---|
-| `keep` | Labeled feedback only | Merge and validate full inputs; prepare canonical inputs; extract evidence only for added feedback; rebuild guidelines across the complete evidence pool; reuse the exact Stage 4 inventory; recalculate Stages 5–8 |
+| `keep` | Labeled feedback only | Merge and validate full inputs; prepare canonical inputs; extract evidence only for added feedback; rebuild guidelines across the complete evidence pool; restore the exact Stage 4 inventory from the verified child snapshot on every run or rebuild; recalculate Stages 5–8 without reclustering |
 | `refresh` | Labeled feedback, unlabeled records, or both | Merge and validate full inputs; extract only added feedback evidence; rebuild guidelines; rerun Stage 4 over the combined unlabeled pool; recalculate Stages 5–8 |
 
-Keep mode requires the parent's embedding provider, embedding model, cluster
-count, and guideline model. Refresh mode may select a new embedding model and
-cluster count but retains the guideline model so the trusted pool does not mix
-guideline-generation versions.
+Keep mode requires the parent's producing embedding provider/model, cluster
+count, and guideline provider/model. Refresh retains the producing guideline
+identity but may select a complete new embedding provider/model pair and cluster
+count. These comparisons use verified receipt evidence, not potentially stale
+configured defaults. If producing embedding evidence differs from configuration,
+refresh omission or a partial pair fails before the child root is created;
+keep must explicitly select the producing pair. When legacy adoption records a
+producing identity as historically unavailable, either mode requires a complete
+explicit provider/model identity.
 
 Feedback collected for a Stage 5 queue item may use the same `record_id` as its
 original unlabeled trace. The trace remains in the intent inventory so traffic
@@ -420,20 +579,29 @@ Each new asset contains:
 | `stages/06_label_inference/` | Inferred labels and cases plus unsupported-cluster reports |
 | `stages/07_synthetic_coverage/` | Candidate, accepted, rejected, and filter-audit synthetic artifacts |
 | `stages/08_dataset_splits/` | Authoritative component and combined train, validation, test, regression, and triage files |
-| `datasets/evaluation_assets/<asset_id>/` | Stage 8 copies of `train.jsonl`, `validation.jsonl`, `test.jsonl`, and `regression_trusted.jsonl` for evaluation consumers |
+| `datasets/evaluation_assets/<asset_id>/release.json` | Sole mutable pointer to the current verified consumer generation |
+| `datasets/evaluation_assets/<asset_id>/generations/sha256-<hash>/` | Immutable generation manifest and combined `train`, `validation`, `test`, and `regression_trusted` JSONL files |
 
 The complete `evaluation_assets/<asset_id>/` runtime tree—including copied
 inputs, checkpoints, state, events, and stage artifacts—is local-only and has
-no Studio-managed remote backend. Stage 8 also writes local consumer copies
-under the ordinary tenant `datasets/` catalog. The Studio never uploads those
-copies; they participate in a separate `customer-data --scope derived` sync
+no Studio-managed remote backend. Stage 8 also writes local immutable consumer
+generations under the ordinary tenant `datasets/` catalog. The Studio never
+uploads them; they participate in a separate `customer-data --scope derived` sync
 only when the tenant storage configuration places `datasets/` inside its
 `derived_local` tree.
 
-Assets created before the stage-oriented layout remain readable and resumable
-through the compatibility mapper. They keep their existing `raw_inputs/`,
+Assets created before the stage-oriented layout remain readable through the
+compatibility mapper. Mutable legacy work rebuilds status-only checkpoints
+because no receipt exists. A pre-v2 top-level `completed` asset is not usable as
+a release until explicit adoption validates all eight stages, source hashes,
+manifests, and current catalog copies, creates historical-unavailable
+provenance, and publishes one immutable generation as its single terminal WAL
+operation. Old catalog copies remain only as nonauthoritative historical bytes.
+An interim v2 released asset without `release.json` is unpublished and must be
+repaired from a verified backup or rebuilt as a new version; adoption is not a
+migration. Existing `raw_inputs/`,
 `prepared_inputs/`, `decision_assets/`, `review_queues/`, and
-`dataset_splits/` directories and are not migrated automatically.
+`dataset_splits/` directories are not moved.
 
 ## CLI Workflow
 
@@ -490,8 +658,28 @@ python -m hephaestus.cli assets status \
 ```
 
 The Explorer UI calls the same core service. Completed stages are persisted and
-skipped on resume; model settings and the fixed cluster count are recorded in
-the asset manifest.
+skipped only when their receipts verify on resume; model settings and the fixed
+cluster count are recorded in the asset manifest.
+
+Explicitly verify and adopt a legacy top-level `completed` asset:
+
+```bash
+python -m hephaestus.cli assets adopt \
+  --tenant <tenant_id> \
+  --asset-id <legacy_asset_id>
+```
+
+Successful adoption writes historical receipts with unavailable provenance for
+facts the old build did not record, materializes a generation, and installs the
+pointer, released state, event, and commit as one terminal operation. Before
+preparing the WAL it strictly validates canonical source/prepared identity,
+guidelines or legacy rubrics, clusters, coverage references,
+inferred/synthetic provenance,
+case schemas, finite numeric domains, exact deterministic synthetic
+accepted/rejected/issue outputs (including an empty candidate set), group-safe
+split partitions, trusted-only regression data, manifests, counts, and the four
+catalog copies. Invalid adoption changes no authority; a valid prepared crash
+rolls forward idempotently. The Studio exposes the same locked core operation.
 
 Pass optional decision flags to revise and resume in one command:
 
@@ -593,6 +781,23 @@ Stage 3 deliberately separates evidence from generalization:
    guideline level. `trusted_cases.jsonl` embeds the applicable guideline IDs
    and complete guideline snapshots so split files remain independently
    usable.
+
+The live writer and legacy-adoption verifier share this transformation
+contract. Candidate criteria accept only `required`, `prohibited`, or
+`preferred`; severities accept `critical`, `major`, or `minor`; evaluator type
+and fallback accept `state_check`, `deterministic_check`,
+`semantic_trajectory`, `llm_judge`, or `human_review`. Scoring remains a
+nonempty producer-defined string, applicability is a string or JSON mapping,
+and tool expectations are a finite JSON mapping. Adoption deterministically
+replays candidate compilation and every derived guideline, trusted-intent, and
+trusted-case field. Genuine pre-guideline rubric layouts are replayed against
+their historical trusted intent/case writer rather than being coerced into the
+native schema. The shared identity contract rejects exact duplicate canonical
+candidates and duplicate or colliding guideline, criterion, trusted-intent, or
+trusted-case IDs; it never silently deduplicates. The live writer performs this
+check before any Stage 3 artifact or receipt write, and native/historical replay
+uses the same check. Any mismatch fails before receipts, journal, state,
+history, events, or catalog authority changes.
 
 Evaluator plans use this preference order:
 
@@ -717,8 +922,9 @@ Recommended score keys:
 
 ## Downstream Use and Refresh
 
-The eight-stage pipeline ends when the evaluation asset and its dataset splits
-are complete. FAPO can then consume the asset in a separate lifecycle:
+The eight-stage pipeline ends when the evaluation asset and its verified
+dataset splits are `released`. FAPO can then consume the asset in a separate
+lifecycle:
 
 1. Run baseline evaluations against the new dataset version.
 2. Optimize prompts or skills using its training split.

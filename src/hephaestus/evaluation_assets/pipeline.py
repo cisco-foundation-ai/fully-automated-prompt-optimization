@@ -54,6 +54,26 @@ from src.hephaestus.datasets.intent_assets import (
     match_to_dict,
 )
 from src.hephaestus.datasets.rubric_providers import OpenAIRubricProvider
+from src.hephaestus.evaluation_assets import workspace as workspace_module
+from src.hephaestus.evaluation_assets.control_jsonl import (
+    parse_strict_json_object,
+    read_strict_jsonl_objects,
+    resolve_local_authority_file,
+)
+from src.hephaestus.evaluation_assets.durability import (
+    STAGE_SPECIFICATIONS,
+    EvaluationAssetImmutableError,
+    EvaluationAssetIntegrityError,
+    EvaluationAssetLegacyError,
+    build_stage_receipt,
+    load_completed_release_handoff_control,
+    mutable_rebuild_boundary,
+    persisted_json_sha256,
+    validate_stage_receipt_payload,
+    verify_completed_release_candidate,
+    verify_raw_snapshot_floor,
+    verify_released_asset,
+)
 from src.hephaestus.evaluation_assets.input_contract import (
     effective_route,
     validate_input_records,
@@ -63,9 +83,54 @@ from src.hephaestus.evaluation_assets.models import (
     PipelineStage,
     PipelineState,
 )
+from src.hephaestus.evaluation_assets.provenance import (
+    build_algorithm_inventory,
+    build_provenance,
+    build_provider_call,
+    build_stage_provenance,
+    not_applicable,
+    provider_settings,
+    sanitize_call_metadata,
+    unavailable,
+    validate_build_provenance,
+    validate_current_stage_provenance,
+    working_source_identity,
+    write_provider_call_ledger,
+)
+from src.hephaestus.evaluation_assets.publication import (
+    InstalledGeneration,
+    install_generation,
+    validate_historical_generation,
+)
+from src.hephaestus.evaluation_assets.stage_three_contract import (
+    compile_evaluation_guidelines as _compile_evaluation_guidelines,  # noqa: F401
+)
+from src.hephaestus.evaluation_assets.stage_three_contract import (
+    expected_from_rubric as _expected,
+)
+from src.hephaestus.evaluation_assets.stage_three_contract import (
+    guidelines_by_source_record as _guidelines_by_source_record,
+)
+from src.hephaestus.evaluation_assets.stage_three_contract import (
+    normalize_guideline_criteria as _normalize_guideline_criteria,  # noqa: F401
+)
+from src.hephaestus.evaluation_assets.stage_three_contract import (
+    normalize_guideline_response as _normalize_guideline_response,
+)
+from src.hephaestus.evaluation_assets.stage_three_contract import (
+    rubric_from_guidelines as _rubric_from_guidelines,
+)
+from src.hephaestus.evaluation_assets.stage_three_contract import (
+    trusted_case as _trusted_case,
+)
+from src.hephaestus.evaluation_assets.stage_three_contract import (
+    trusted_intent_from_guideline as _trusted_intent_from_guideline,
+)
+from src.hephaestus.evaluation_assets.stage_three_contract import (
+    validate_stage_three_identities as _validate_stage_three_identities,
+)
 from src.hephaestus.evaluation_assets.workspace import (
     EvaluationAssetLayout,
-    atomic_write_json,
     utc_now,
 )
 
@@ -77,6 +142,54 @@ PUBLISHED_DATASET_SPLITS = (
     "test",
     "regression_trusted",
 )
+
+
+def _local_authority_bytes(
+    layout: EvaluationAssetLayout,
+    path: Path,
+) -> bytes:
+    """Read one exact pipeline authority file through its bound local handle."""
+    authority = resolve_local_authority_file(
+        path,
+        layout.tenants_root,
+        access="read",
+    )
+    if authority.data is None:
+        raise ValueError("pipeline authority read did not return bytes")
+    return authority.data
+
+
+def _optional_local_authority_json(
+    layout: EvaluationAssetLayout,
+    path: Path,
+) -> dict[str, Any]:
+    """Read one optional strict control object without split presence probes."""
+    authority = resolve_local_authority_file(
+        path,
+        layout.tenants_root,
+        access="read_optional",
+    )
+    if not authority.exists:
+        return {}
+    if authority.data is None:
+        raise ValueError("optional pipeline authority read did not return bytes")
+    return parse_strict_json_object(authority.data)
+
+
+def _local_authority_json(
+    layout: EvaluationAssetLayout,
+    path: Path,
+) -> dict[str, Any]:
+    """Parse one required strict pipeline control object from bound bytes."""
+    return parse_strict_json_object(_local_authority_bytes(layout, path))
+
+
+def _local_authority_sha256(
+    layout: EvaluationAssetLayout,
+    path: Path,
+) -> str:
+    """Hash the exact bytes returned by one bound pipeline authority read."""
+    return hashlib.sha256(_local_authority_bytes(layout, path)).hexdigest()
 
 EVIDENCE_EXTRACTION_PROMPT = """\
 Extract atomic evaluation evidence from explicit user feedback. Return one JSON
@@ -132,6 +245,15 @@ representatives. Do not include an answer, rubric, feedback rationale, private
 identifier, secret, or invented tool result.
 """
 
+STAGE_PROMPTS = {
+    PipelineStage.RUBRIC_EXTRACTION: {
+        "evidence_extraction": EVIDENCE_EXTRACTION_PROMPT,
+        "guideline_synthesis": GUIDELINE_SYNTHESIS_PROMPT,
+    },
+    PipelineStage.LABEL_INFERENCE: {"label_inference": INFERENCE_PROMPT},
+    PipelineStage.SYNTHETIC_COVERAGE: {"synthetic_coverage": SYNTHETIC_PROMPT},
+}
+
 EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
 IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 DEFAULT_REGRESSION_FRACTION = 0.2
@@ -141,6 +263,7 @@ RubricResponseT = TypeVar("RubricResponseT")
 class RubricProvider(Protocol):
     """JSON generation interface used by the pipeline."""
 
+    provider_name: str
     model: str
 
     def generate_json(
@@ -154,6 +277,7 @@ class RubricProvider(Protocol):
 class EmbeddingProvider(Protocol):
     """Embedding interface used by clustering and coverage."""
 
+    provider_name: str
     model: str
 
     def embed_texts(self, texts: Sequence[str]) -> Sequence[Sequence[float]]:
@@ -190,34 +314,175 @@ class EvaluationAssetPipeline:
         embedding_provider: Optional[EmbeddingProvider] = None,
     ) -> None:
         self.layout = layout
-        self.config = layout.load_config()
-        self.lineage = (
-            json.loads(layout.lineage_path.read_text(encoding="utf-8"))
-            if layout.lineage_path.is_file()
-            else {}
-        )
-        if self.config.rubric_provider != "openai" and rubric_provider is None:
-            raise ValueError(f"Unsupported rubric provider: {self.config.rubric_provider}")
-        if (
-            self.config.embedding_provider not in {"openai", "tfidf"}
-            and embedding_provider is None
-        ):
-            raise ValueError(
-                f"Unsupported embedding provider: {self.config.embedding_provider}"
-            )
-        self.rubric_provider = rubric_provider or OpenAIRubricProvider(
-            model=self.config.rubric_model,
-            # Reasoning models (e.g. gpt-5.x) count reasoning tokens against this
-            # budget before any JSON is emitted. 8192 could be exhausted by a long
-            # reasoning trace, yielding a 400 / empty response that fails the whole
-            # rubric_extraction stage. Give reasoning ample headroom over the output.
-            max_output_tokens=16384,
-        )
+        self.config: EvaluationAssetConfig | None = None
+        self.lineage: dict[str, Any] = {}
+        self._injected_rubric_provider = rubric_provider
+        self._injected_embedding_provider = embedding_provider
+        self.rubric_provider = rubric_provider
         self.embedding_provider = embedding_provider
-        if self.embedding_provider is None and self.config.embedding_provider == "openai":
+        self._provider_identities: dict[str, dict[str, Any]] = {}
+        self._provider_settings: dict[str, dict[str, Any]] = {}
+        self._stage_call_rows: list[dict[str, Any]] = []
+        self._stage_eight_manifest: dict[str, Any] = {}
+        self._pending_generation: InstalledGeneration | None = None
+        self.last_revision: Optional[Dict[str, Any]] = None
+
+    def _configure_providers(self) -> None:
+        """Resolve providers from the recovered, revised configuration under lock."""
+        if self._injected_rubric_provider is not None:
+            self.rubric_provider = self._injected_rubric_provider
+            rubric_source = "injected"
+        elif self.config.rubric_provider == "openai":
+            self.rubric_provider = OpenAIRubricProvider(
+                model=self.config.rubric_model,
+                # Reasoning models consume reasoning tokens before emitting JSON.
+                max_output_tokens=16384,
+            )
+            rubric_source = "default"
+        else:
+            raise ValueError(
+                f"Unsupported rubric provider: {self.config.rubric_provider}"
+            )
+
+        if self._injected_embedding_provider is not None:
+            self.embedding_provider = self._injected_embedding_provider
+            embedding_source = "injected"
+        elif self.config.embedding_provider == "openai":
             self.embedding_provider = OpenAIEmbeddingProvider(
                 model=self.config.embedding_model
             )
+            embedding_source = "default"
+        elif self.config.embedding_provider == "tfidf":
+            self.embedding_provider = None
+            embedding_source = "default"
+        else:
+            raise ValueError(
+                f"Unsupported embedding provider: {self.config.embedding_provider}"
+            )
+
+        self._provider_identities = {
+            "rubric": self._actual_provider_identity(
+                self.rubric_provider,
+                configured_provider=self.config.rubric_provider,
+                configured_model=self.config.rubric_model,
+                source=rubric_source,
+            ),
+            "embedding": self._actual_provider_identity(
+                self.embedding_provider,
+                configured_provider=self.config.embedding_provider,
+                configured_model=self.config.embedding_model,
+                source=embedding_source,
+            ),
+        }
+        self._provider_settings = {
+            "rubric": provider_settings(
+                self.rubric_provider,
+                role="rubric",
+                identity=self._provider_identities["rubric"],
+                pipeline_batch_size=self.config.batch_size,
+            ),
+            "embedding": provider_settings(
+                self.embedding_provider,
+                role="embedding",
+                identity=self._provider_identities["embedding"],
+                pipeline_batch_size=self.config.batch_size,
+            ),
+        }
+
+    @staticmethod
+    def _actual_provider_identity(
+        provider: Any,
+        *,
+        configured_provider: str,
+        configured_model: str,
+        source: str,
+    ) -> dict[str, Any]:
+        if source == "default":
+            provider_name = configured_provider.strip()
+            model = configured_model.strip()
+            if not provider_name or not model:
+                raise ValueError(
+                    "Default provider identity requires non-empty provider and model"
+                )
+            return {"provider": provider_name, "model": model, "source": source}
+
+        declared = {
+            "provider_name": getattr(provider, "provider_name", None),
+            "model": getattr(provider, "model", None),
+        }
+        unavailable_fields = [
+            field
+            for field, value in declared.items()
+            if not isinstance(value, str) or not value.strip()
+        ]
+        if unavailable_fields:
+            return {
+                "provider": (
+                    str(declared["provider_name"]).strip()
+                    if "provider_name" not in unavailable_fields
+                    else "unavailable"
+                ),
+                "model": (
+                    str(declared["model"]).strip()
+                    if "model" not in unavailable_fields
+                    else "unavailable"
+                ),
+                "source": source,
+                "status": "unavailable",
+                "unavailable_fields": unavailable_fields,
+            }
+        return {
+            "provider": str(declared["provider_name"]).strip(),
+            "model": str(declared["model"]).strip(),
+            "source": source,
+        }
+
+    def _validate_injected_provider_identities(self) -> None:
+        """Validate complete injected bindings before any authority mutation."""
+        injected = {
+            "rubric": (
+                self._injected_rubric_provider,
+                self.config.rubric_provider,
+                self.config.rubric_model,
+            ),
+            "embedding": (
+                self._injected_embedding_provider,
+                self.config.embedding_provider,
+                self.config.embedding_model,
+            ),
+        }
+        for role, (provider, configured_provider, configured_model) in injected.items():
+            if provider is None:
+                continue
+            identity = self._actual_provider_identity(
+                provider,
+                configured_provider=configured_provider,
+                configured_model=configured_model,
+                source="injected",
+            )
+            if identity.get("status") == "unavailable":
+                missing = ", ".join(identity["unavailable_fields"])
+                raise ValueError(
+                    f"injected {role} provider identity is unavailable; "
+                    f"declare non-empty {missing}"
+                )
+            provider_settings(
+                provider,
+                role=role,
+                identity=identity,
+                pipeline_batch_size=self.config.batch_size,
+            )
+
+    def _provider_identity_for_stage(
+        self,
+        stage: PipelineStage,
+    ) -> dict[str, Any]:
+        roles = STAGE_SPECIFICATIONS[stage].provider_roles
+        return (
+            {role: dict(self._provider_settings[role]) for role in roles}
+            if roles
+            else {"status": "not_applicable"}
+        )
 
     def _call_rubric_provider(
         self,
@@ -226,16 +491,42 @@ class EvaluationAssetPipeline:
         payload: Mapping[str, Any],
         normalize: Callable[[Mapping[str, Any]], RubricResponseT],
     ) -> RubricResponseT:
+        if self.rubric_provider is None:
+            raise RuntimeError("Rubric provider is not configured")
         try:
+            _discard_provider_metadata(self.rubric_provider)
             response = self.rubric_provider.generate_json(system_prompt, payload)
+            metadata = _drain_provider_metadata(self.rubric_provider)
             if not isinstance(response, Mapping):
                 raise ValueError("Rubric provider response must be a JSON object")
-            return normalize(response)
+            normalized = normalize(response)
+            identity = self._provider_identities["rubric"]
+            settings = self._provider_settings["rubric"]["settings"]
+            self._stage_call_rows.append(
+                build_provider_call(
+                    stage=stage.value,
+                    ordinal=len(self._stage_call_rows) + 1,
+                    provider_role="rubric",
+                    provider=identity["provider"],
+                    model=identity["model"],
+                    request={
+                        "interface": "generate_json-v1",
+                        "system_prompt": system_prompt,
+                        "payload": dict(payload),
+                        "provider": identity["provider"],
+                        "model": identity["model"],
+                        "settings": settings,
+                    },
+                    response=dict(response),
+                    metadata=metadata,
+                )
+            )
+            return normalized
         except Exception as exc:
             raise ProviderCallError(
                 stage=stage,
-                provider=self.config.rubric_provider,
-                model=self.config.rubric_model,
+                provider=self._provider_identities["rubric"]["provider"],
+                model=self._provider_identities["rubric"]["model"],
                 cause=exc,
             ) from exc
 
@@ -247,14 +538,42 @@ class EvaluationAssetPipeline:
         if self.embedding_provider is None:
             return []
         try:
-            return self.embedding_provider.embed_texts(texts)
+            _discard_provider_metadata(self.embedding_provider)
+            response = self.embedding_provider.embed_texts(texts)
+            metadata = _drain_provider_metadata(self.embedding_provider)
         except Exception as exc:
             raise ProviderCallError(
                 stage=stage,
-                provider=self.config.embedding_provider,
-                model=self.config.embedding_model,
+                provider=self._provider_identities["embedding"]["provider"],
+                model=self._provider_identities["embedding"]["model"],
                 cause=exc,
             ) from exc
+        normalized = validate_embedding_vectors(
+            response,
+            expected_count=len(texts),
+            source="embedding provider result",
+        )
+        identity = self._provider_identities["embedding"]
+        settings = self._provider_settings["embedding"]["settings"]
+        self._stage_call_rows.append(
+            build_provider_call(
+                stage=stage.value,
+                ordinal=len(self._stage_call_rows) + 1,
+                provider_role="embedding",
+                provider=identity["provider"],
+                model=identity["model"],
+                request={
+                    "interface": "embed_texts-v1",
+                    "texts": [str(text) for text in texts],
+                    "provider": identity["provider"],
+                    "model": identity["model"],
+                    "settings": settings,
+                },
+                response=normalized,
+                metadata=metadata,
+            )
+        )
+        return normalized
 
     @classmethod
     def create(
@@ -265,23 +584,162 @@ class EvaluationAssetPipeline:
         unlabeled_source: Path,
         rubric_provider: Optional[RubricProvider] = None,
         embedding_provider: Optional[EmbeddingProvider] = None,
+        initial_status: str = "draft",
+        *,
+        repository_base: Path | None = None,
     ) -> "EvaluationAssetPipeline":
         """Create a self-contained workspace by copying both source files."""
         layout = EvaluationAssetLayout(
             tenants_root=tenants_root,
             tenant_id=config.tenant_id,
             asset_id=config.asset_id,
+            repository_base=(
+                repository_base if repository_base is not None else Path.cwd()
+            ),
         )
-        layout.initialize(config, feedback_source, unlabeled_source)
-        return cls(layout, rubric_provider=rubric_provider, embedding_provider=embedding_provider)
+        layout.initialize(
+            config,
+            feedback_source,
+            unlabeled_source,
+            initial_status=initial_status,
+        )
+        return cls(
+            layout,
+            rubric_provider=rubric_provider,
+            embedding_provider=embedding_provider,
+        )
 
-    def run(self) -> PipelineState:
+    def run(
+        self,
+        *,
+        config_updates: Optional[Mapping[str, Any]] = None,
+        lock_timeout: float = 0,
+        _lock_acquired_callback: Optional[Callable[[], None]] = None,
+        _preflight_accepted_callback: Optional[Callable[[], None]] = None,
+    ) -> PipelineState:
         """Run or resume all incomplete stages."""
-        state = self.layout.load_state()
+        with self.layout.asset_lock(lock_timeout):
+            if _lock_acquired_callback is not None:
+                _lock_acquired_callback()
+            handoff_control = load_completed_release_handoff_control(self.layout)
+            recovered = self.layout._recover_locked()
+            if recovered:
+                handoff_control = load_completed_release_handoff_control(
+                    self.layout
+                )
+            state = (
+                handoff_control[0]
+                if handoff_control is not None
+                else self.layout.load_state()
+            )
+            if state.status == "released":
+                verify_released_asset(self.layout, state)
+                if recovered:
+                    if _preflight_accepted_callback is not None:
+                        _preflight_accepted_callback()
+                    return state
+                raise EvaluationAssetImmutableError(
+                    self.layout.tenant_id,
+                    self.layout.asset_id,
+                )
+            if state.legacy_completed:
+                raise EvaluationAssetLegacyError(
+                    self.layout.tenant_id,
+                    self.layout.asset_id,
+                    "explicit verification and adoption are required",
+                )
+            if handoff_control is None:
+                verify_raw_snapshot_floor(self.layout, state)
+            if handoff_control is not None and not config_updates:
+                self.config = handoff_control[1]
+                self.lineage = _optional_local_authority_json(
+                    self.layout,
+                    self.layout.lineage_path,
+                )
+                return self._run_locked(
+                    _preflight_accepted_callback,
+                    completed_release_candidate=True,
+                )
+            self.config = (
+                handoff_control[1]
+                if handoff_control is not None
+                else self.layout.load_config()
+            )
+            current_config = self.config
+            prospective_config = (
+                self.layout._resolve_config_updates(current_config, config_updates)
+                if config_updates is not None
+                else current_config
+            )
+            self.config = prospective_config
+            try:
+                self._validate_injected_provider_identities()
+            finally:
+                self.config = current_config
+            self.last_revision = (
+                self.layout._revise_config_locked(config_updates)
+                if config_updates is not None
+                else None
+            )
+            self.config = self.layout.load_config()
+            self.lineage = _optional_local_authority_json(
+                self.layout,
+                self.layout.lineage_path,
+            )
+            self._configure_providers()
+            return self._run_locked(
+                _preflight_accepted_callback,
+                completed_release_candidate=False,
+            )
+
+    def _run_locked(
+        self,
+        preflight_accepted_callback: Optional[Callable[[], None]] = None,
+        *,
+        completed_release_candidate: bool,
+    ) -> PipelineState:
+        """Run while the caller holds the asset mutation lock."""
+        if completed_release_candidate:
+            handoff_control = load_completed_release_handoff_control(self.layout)
+            if handoff_control is None:
+                raise EvaluationAssetIntegrityError(
+                    self.layout.tenant_id,
+                    self.layout.asset_id,
+                    "completed release candidate control disappeared under lock",
+                )
+            state = handoff_control[0]
+            self._pending_generation = verify_completed_release_candidate(
+                self.layout,
+                state,
+            )
+            boundary = None
+        else:
+            state = self.layout.load_state()
+            boundary = mutable_rebuild_boundary(
+                self.layout,
+                state,
+                self.config,
+                STAGE_PROMPTS,
+                {
+                    stage: self._provider_identity_for_stage(stage)
+                    for stage in PipelineStage
+                },
+            )
+            state.schema_version = "fapo-evaluation-asset-state-v2"
+        if boundary is not None:
+            boundary_index = list(PipelineStage).index(boundary)
+            suffix_states = state.stages[boundary_index:]
+            if any(
+                item.status != "pending" or item.receipt_sha256
+                for item in suffix_states
+            ):
+                state = self.layout._invalidate_checkpoints_locked(state, boundary)
         state.status = "running"
         state.error = None
         self.layout.save_state(state)
         self.layout.append_event("pipeline_started")
+        if preflight_accepted_callback is not None:
+            preflight_accepted_callback()
 
         for stage in PipelineStage:
             stage_state = next(item for item in state.stages if item.stage == stage.value)
@@ -294,8 +752,10 @@ class EvaluationAssetPipeline:
             stage_state.message = ""
             self.layout.save_state(state)
             self.layout.append_event("stage_started", {"stage": stage.value})
+            self._stage_call_rows = []
             try:
                 counts = self._run_stage(stage)
+                self._finalize_stage_outputs(stage)
             except Exception as exc:
                 stage_state.status = "failed"
                 stage_state.message = str(exc)
@@ -308,21 +768,69 @@ class EvaluationAssetPipeline:
                 )
                 raise
             state.counts.update(counts)
+            completed_at = utc_now()
+            receipt = build_stage_receipt(
+                self.layout,
+                stage,
+                self.config,
+                counts,
+                completed_at=completed_at,
+                prompt_values=STAGE_PROMPTS.get(stage, {}),
+                provider_identity=self._provider_identity_for_stage(stage),
+            )
+            validate_stage_receipt_payload(
+                receipt,
+                expected_stage=stage,
+                expected_origin="native",
+                expected_counts=counts,
+                expected_provider_identity=self._provider_identity_for_stage(stage),
+            )
+            self.layout._write_authority_json(
+                self.layout.receipt_path(stage),
+                receipt,
+            )
+            receipt_sha256 = _local_authority_sha256(
+                self.layout,
+                self.layout.receipt_path(stage),
+            )
+            if receipt_sha256 != persisted_json_sha256(receipt):
+                raise ValueError("persisted stage receipt authority is inconsistent")
+            stage_state.receipt_sha256 = receipt_sha256
             stage_state.status = "completed"
-            stage_state.completed_at = utc_now()
+            stage_state.completed_at = completed_at
             stage_state.message = _stage_message(stage, counts)
             self.layout.save_state(state)
+            if stage == PipelineStage.DATASET_SPLITS:
+                self._pending_generation = verify_completed_release_candidate(
+                    self.layout,
+                    state,
+                )
+                _publication_fault_point("after_stage_8_receipt_state_complete")
             self.layout.append_event(
                 "stage_completed",
                 {"stage": stage.value, "counts": counts},
             )
 
-        state.status = "completed"
         state.current_stage = None
         state.error = None
         self.layout.save_state(state)
-        self.layout.append_event("pipeline_completed", {"counts": state.counts})
-        return state
+        generation = self._pending_generation
+        if generation is None:
+            manifest = _local_authority_json(
+                self.layout,
+                self.layout.artifact_path(
+                    PipelineStage.DATASET_SPLITS,
+                    "generation_manifest.json",
+                ),
+            )
+            generation_id = str(manifest.get("generation_id") or "")
+            generation = validate_historical_generation(
+                self.layout.generations_root / generation_id,
+                expected_tenant_id=self.layout.tenant_id,
+                expected_asset_id=self.layout.asset_id,
+                trusted_root=self.layout.tenant_root,
+            )
+        return self.layout._publish_release_locked(state, generation)
 
     def _run_stage(self, stage: PipelineStage) -> Dict[str, int]:
         handlers = {
@@ -337,7 +845,215 @@ class EvaluationAssetPipeline:
         }
         return handlers[stage]()
 
+    def _finalize_stage_outputs(self, stage: PipelineStage) -> None:
+        """Persist stage-local provenance and complete Stage 8 release inputs."""
+        specification = STAGE_SPECIFICATIONS[stage]
+        calls: Sequence[Mapping[str, Any]] | None = None
+        if specification.provider_roles:
+            calls = list(self._stage_call_rows)
+            write_provider_call_ledger(
+                self.layout.artifact_path(stage, "provider_calls.jsonl"),
+                calls,
+                stage=stage.value,
+                trusted_root=self.layout.tenants_root,
+            )
+        provider_identity = self._provider_identity_for_stage(stage)
+        prompt_values = STAGE_PROMPTS.get(stage, {})
+        code = working_source_identity(Path(__file__).resolve().parents[3])
+        seeds = _stage_seeds(
+            stage,
+            self.config,
+            call_count=len(calls or []),
+        )
+        algorithms = _stage_algorithms(
+            stage,
+            self.config,
+            extension=bool(self.lineage),
+        )
+        stage_provenance = build_stage_provenance(
+            stage=stage.value,
+            provider_identity=provider_identity,
+            prompt_values=prompt_values,
+            calls=calls,
+            code=code,
+            seeds=seeds,
+            algorithms=algorithms,
+        )
+        validate_current_stage_provenance(
+            stage_provenance,
+            stage=stage.value,
+            provider_identity=provider_identity,
+            prompt_values=prompt_values,
+            calls=calls,
+            code=code,
+            seeds=seeds,
+            algorithms=algorithms,
+        )
+        self.layout._write_authority_json(
+            self.layout.stage_provenance_path(stage),
+            stage_provenance,
+        )
+        if stage == PipelineStage.DATASET_SPLITS:
+            self._finalize_stage_eight_artifacts()
+
+    def _finalize_stage_eight_artifacts(self) -> None:
+        """Build provenance, install a generation, and write immutable paths."""
+        calls: list[dict[str, Any]] = []
+        for stage in tuple(PipelineStage)[2:7]:
+            calls.extend(
+                read_strict_jsonl_objects(
+                    self.layout.artifact_path(stage, "provider_calls.jsonl"),
+                    trusted_root=self.layout.tenants_root,
+                )
+            )
+        input_manifest = _local_authority_json(
+            self.layout,
+            self.layout.artifact_path(
+                PipelineStage.RAW_INPUTS,
+                "input_manifest.json",
+            ),
+        )
+        copied_inputs = {}
+        for name, path in (
+            ("labeled_feedback", self.layout.feedback_path),
+            ("unlabeled", self.layout.unlabeled_path),
+        ):
+            details = input_manifest["inputs"][name]
+            source_bytes = _local_authority_bytes(self.layout, path)
+            if hashlib.sha256(source_bytes).hexdigest() != details["sha256"]:
+                raise ValueError("copied input authority changed after validation")
+            copied_inputs[name] = {
+                "path": path.relative_to(self.layout.root).as_posix(),
+                "bytes": len(source_bytes),
+                "rows": details["rows"],
+                "sha256": details["sha256"],
+            }
+        lineage_files = None
+        if self.lineage:
+            lineage_files = {
+                "lineage_sha256": _local_authority_sha256(
+                    self.layout,
+                    self.layout.lineage_path,
+                ),
+                "reuse_manifest_sha256": _local_authority_sha256(
+                    self.layout,
+                    self.layout.reuse_manifest_path
+                ),
+                "parent_release": dict(self.lineage.get("parent_release") or {}),
+            }
+        prompts = {
+            name: value
+            for stage_prompts in STAGE_PROMPTS.values()
+            for name, value in stage_prompts.items()
+        }
+        provenance = build_provenance(
+            repository_root=Path(__file__).resolve().parents[3],
+            resolved_configuration=self.config.to_dict(),
+            copied_inputs=copied_inputs,
+            lineage=self.lineage,
+            providers=self._provider_settings,
+            prompt_values=prompts,
+            calls=calls,
+            seeds={
+                "split": self.config.split_seed,
+                "rubric_sampling": {
+                    "status": "not_applicable",
+                    "reason": "provider_does_not_use_sampling",
+                },
+                "embedding_sampling": {
+                    "status": "not_applicable",
+                    "reason": "provider_does_not_use_sampling",
+                },
+            },
+            algorithms=_build_algorithms(self.config, bool(self.lineage)),
+            lineage_files=lineage_files,
+            created_at=utc_now(),
+        )
+        validate_build_provenance(provenance)
+        self.layout._write_authority_json(
+            self.layout.build_provenance_path,
+            provenance,
+        )
+        build_provenance_sha256 = _local_authority_sha256(
+            self.layout,
+            self.layout.build_provenance_path,
+        )
+        if build_provenance_sha256 != persisted_json_sha256(provenance):
+            raise ValueError("persisted build provenance authority is inconsistent")
+        split_paths = {
+            split: self.layout.artifact_path(
+                PipelineStage.DATASET_SPLITS,
+                f"{split}.jsonl",
+            )
+            for split in PUBLISHED_DATASET_SPLITS
+        }
+        generation = install_generation(
+            self.layout.published_datasets,
+            tenant_id=self.layout.tenant_id,
+            asset_id=self.layout.asset_id,
+            split_paths=split_paths,
+            build_fingerprint=provenance["identity_sha256"],
+            fault_hook=_publication_fault_point,
+            trusted_root=self.layout.tenant_root,
+        )
+        self._pending_generation = generation
+        generation_manifest = resolve_local_authority_file(
+            generation.generation_dir / "generation_manifest.json",
+            self.layout.tenants_root,
+            access="read",
+        )
+        if generation_manifest.data is None:
+            raise ValueError("generation manifest authority bytes are missing")
+        workspace_generation_manifest = self.layout.artifact_path(
+            PipelineStage.DATASET_SPLITS,
+            "generation_manifest.json",
+        )
+        expected_workspace_manifest = resolve_local_authority_file(
+            workspace_generation_manifest,
+            self.layout.tenants_root,
+            access="read_optional",
+        )
+        resolve_local_authority_file(
+            workspace_generation_manifest,
+            self.layout.tenants_root,
+            access="write",
+            write_data=generation_manifest.data,
+            expected_write_data=expected_workspace_manifest.data,
+            check_expected_write_data=True,
+        )
+        manifest = dict(self._stage_eight_manifest)
+        generation_directory = self.layout.repository_relative_path(
+            generation.generation_dir
+        )
+        manifest["published_datasets"] = {
+            "directory": self.layout.published_datasets.relative_to(
+                self.layout.tenant_root
+            ).as_posix(),
+            "release_pointer": self.layout.release_pointer_path.relative_to(
+                self.layout.tenant_root
+            ).as_posix(),
+            "generation_id": generation.generation_id,
+            "generation_manifest_sha256": generation.generation_manifest_sha256,
+            "build_provenance_sha256": build_provenance_sha256,
+            "build_fingerprint": provenance["identity_sha256"],
+            "files": {
+                split: f"{generation_directory}/{split}.jsonl"
+                for split in PUBLISHED_DATASET_SPLITS
+            },
+        }
+        self.layout._write_authority_json(
+            self.layout.artifact_path(
+                PipelineStage.DATASET_SPLITS,
+                "dataset_manifest.json",
+            ),
+            manifest,
+        )
+        self.layout._write_authority_json(self.layout.manifest_path, manifest)
+        _publication_fault_point("after_stage_8_outputs_validated")
+
     def _validate_raw_inputs(self) -> Dict[str, int]:
+        if self.config is None:
+            self.config = self.layout.load_config()
         feedback, feedback_row_numbers = _load_jsonl_with_line_numbers(
             self.layout.feedback_path
         )
@@ -375,7 +1091,7 @@ class EvaluationAssetPipeline:
                 },
             }
         }
-        atomic_write_json(
+        self.layout._write_authority_json(
             self.layout.artifact_path(PipelineStage.RAW_INPUTS, "input_manifest.json"),
             manifest,
         )
@@ -482,7 +1198,10 @@ class EvaluationAssetPipeline:
                     partial(
                         _normalize_feedback_evidence_response,
                         batch=batch,
-                        rubric_model=self.config.rubric_model,
+                        rubric_provider=self._provider_identities["rubric"][
+                            "provider"
+                        ],
+                        rubric_model=self._provider_identities["rubric"]["model"],
                     ),
                 )
             )
@@ -526,7 +1245,10 @@ class EvaluationAssetPipeline:
                     _normalize_guideline_response,
                     route=route,
                     evidence=route_evidence,
-                    rubric_model=self.config.rubric_model,
+                    rubric_provider=self._provider_identities["rubric"][
+                        "provider"
+                    ],
+                    rubric_model=self._provider_identities["rubric"]["model"],
                 ),
             )
             candidates.extend(route_candidates)
@@ -543,12 +1265,19 @@ class EvaluationAssetPipeline:
                 _rubric_from_guidelines(
                     str(row["record_id"]),
                     guideline_by_record[str(row["record_id"])],
-                    self.config.rubric_model,
+                    self._provider_identities["rubric"]["provider"],
+                    self._provider_identities["rubric"]["model"],
                 ),
                 self.config.asset_id,
             )
             for row in normalized
         ]
+        _validate_stage_three_identities(
+            candidates=candidates,
+            guidelines=guidelines,
+            trusted_intents=trusted_intents,
+            trusted_cases=trusted_cases,
+        )
         write_jsonl(evidence_path, evidence)
         write_jsonl(candidate_path, candidates)
         write_jsonl(guideline_path, guidelines)
@@ -568,6 +1297,51 @@ class EvaluationAssetPipeline:
         }
 
     def _cluster_intents(self) -> Dict[str, int]:
+        inventory_path = self.layout.artifact_path(
+            PipelineStage.INTENT_CLUSTERING,
+            "intent_inventory.jsonl",
+        )
+        lineage_path = self.layout.artifact_path(
+            PipelineStage.INTENT_CLUSTERING,
+            "cluster_lineage.jsonl",
+        )
+        if self.lineage.get("clustering_mode") == "keep":
+            snapshot = self.layout.parent_snapshot / "parent_intent_inventory.jsonl"
+            snapshot_authority = resolve_local_authority_file(
+                snapshot,
+                self.layout.tenants_root,
+                access="read",
+            )
+            if snapshot_authority.data is None:
+                raise ValueError("parent snapshot authority bytes are missing")
+            expected_inventory = resolve_local_authority_file(
+                inventory_path,
+                self.layout.tenants_root,
+                access="read_optional",
+            )
+            resolve_local_authority_file(
+                inventory_path,
+                self.layout.tenants_root,
+                access="write",
+                write_data=snapshot_authority.data,
+                expected_write_data=expected_inventory.data,
+                check_expected_write_data=True,
+            )
+            clusters = [_intent_cluster(row) for row in _load_jsonl(inventory_path)]
+            assert_unique_cluster_ids(clusters)
+            write_jsonl(
+                lineage_path,
+                [
+                    {
+                        "previous_cluster_id": cluster.cluster_id,
+                        "new_cluster_id": cluster.cluster_id,
+                        "member_overlap": 1.0,
+                        "relationship": "reused",
+                    }
+                    for cluster in clusters
+                ],
+            )
+            return {"intent_clusters": len(clusters)}
         rows = _load_jsonl(
             self.layout.artifact_path(
                 PipelineStage.PREPARED_INPUTS,
@@ -596,10 +1370,7 @@ class EvaluationAssetPipeline:
             vectors=vectors,
         )
         write_jsonl(
-            self.layout.artifact_path(
-                PipelineStage.INTENT_CLUSTERING,
-                "intent_inventory.jsonl",
-            ),
+            inventory_path,
             [cluster_to_dict(cluster) for cluster in clusters],
         )
         if self.lineage:
@@ -730,7 +1501,7 @@ class EvaluationAssetPipeline:
             sample_ratio=LABELING_QUEUE_SAMPLE_RATIO,
             max_per_cluster=LABELING_QUEUE_MAX_PER_CLUSTER,
         )
-        write_jsonl(
+        self.layout._write_authority_jsonl(
             self.layout.artifact_path(
                 PipelineStage.COVERAGE_DECISIONS,
                 "review_queue/labeling_queue.jsonl",
@@ -877,7 +1648,10 @@ class EvaluationAssetPipeline:
                     partial(
                         _normalize_inferred_rubric_response,
                         batch=batch,
-                        rubric_model=self.config.rubric_model,
+                        rubric_provider=self._provider_identities["rubric"][
+                            "provider"
+                        ],
+                        rubric_model=self._provider_identities["rubric"]["model"],
                     ),
                 )
             )
@@ -985,15 +1759,12 @@ class EvaluationAssetPipeline:
                 ),
                 rows,
             )
-        published_datasets = self.layout.publish_dataset_splits(
-            PUBLISHED_DATASET_SPLITS
-        )
-
-        input_manifest = json.loads(
+        input_manifest = _local_authority_json(
+            self.layout,
             self.layout.artifact_path(
                 PipelineStage.RAW_INPUTS,
                 "input_manifest.json",
-            ).read_text(encoding="utf-8")
+            ),
         )
         guideline_path = self.layout.artifact_path(
             PipelineStage.RUBRIC_EXTRACTION,
@@ -1006,10 +1777,12 @@ class EvaluationAssetPipeline:
             "asset_id": self.config.asset_id,
             "tenant_id": self.config.tenant_id,
             "providers": {
-                "rubric_provider": self.config.rubric_provider,
-                "rubric_model": self.config.rubric_model,
-                "embedding_provider": self.config.embedding_provider,
-                "embedding_model": self.config.embedding_model,
+                "rubric_provider": self._provider_identities["rubric"]["provider"],
+                "rubric_model": self._provider_identities["rubric"]["model"],
+                "embedding_provider": self._provider_identities["embedding"][
+                    "provider"
+                ],
+                "embedding_model": self._provider_identities["embedding"]["model"],
             },
             "evaluation_guidelines": {
                 "schema_version": (
@@ -1067,7 +1840,7 @@ class EvaluationAssetPipeline:
                 "directory": self.layout.published_datasets.relative_to(
                     self.layout.tenant_root
                 ).as_posix(),
-                "files": published_datasets,
+                "files": {},
             },
             "split_counts": {name: len(rows) for name, rows in payloads.items()},
             "review_policy": {
@@ -1081,14 +1854,7 @@ class EvaluationAssetPipeline:
         }
         if self.lineage:
             manifest["lineage"] = dict(self.lineage)
-        atomic_write_json(
-            self.layout.artifact_path(
-                PipelineStage.DATASET_SPLITS,
-                "dataset_manifest.json",
-            ),
-            manifest,
-        )
-        atomic_write_json(self.layout.manifest_path, manifest)
+        self._stage_eight_manifest = manifest
         return {
             "dataset_cases": len(trusted) + len(inferred) + len(synthetic),
             "train_cases": len(payloads["train"]),
@@ -1483,6 +2249,7 @@ def _validate_stage_one_feasibility(
 def _normalize_feedback_evidence(
     raw: Mapping[str, Any],
     source: Mapping[str, Any],
+    rubric_provider: str,
     rubric_model: str,
 ) -> Dict[str, Any]:
     observations = []
@@ -1511,7 +2278,7 @@ def _normalize_feedback_evidence(
         "requested_corrections": _string_list(raw.get("requested_corrections")),
         "uncertainties": _string_list(raw.get("uncertainties")),
         "evidence_source": "trusted_feedback",
-        "guideline_provider": "openai",
+        "guideline_provider": rubric_provider,
         "guideline_model": rubric_model,
     }
 
@@ -1520,6 +2287,7 @@ def _normalize_feedback_evidence_response(
     response: Mapping[str, Any],
     *,
     batch: Sequence[Mapping[str, Any]],
+    rubric_provider: str,
     rubric_model: str,
 ) -> List[Dict[str, Any]]:
     returned = _indexed_items(response, "evidence", "record_id")
@@ -1532,324 +2300,11 @@ def _normalize_feedback_evidence_response(
             _normalize_feedback_evidence(
                 returned[record_id],
                 row,
+                rubric_provider,
                 rubric_model,
             )
         )
     return evidence
-
-
-def _normalize_guideline_response(
-    response: Mapping[str, Any],
-    *,
-    route: str,
-    evidence: Sequence[Mapping[str, Any]],
-    rubric_model: str,
-) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    items = response.get("guidelines")
-    if not isinstance(items, list):
-        raise ValueError("Guideline response missing guidelines array")
-    candidates = [
-        {**dict(item), "route": route}
-        for item in items
-        if isinstance(item, Mapping)
-    ]
-    guidelines = _compile_evaluation_guidelines(
-        candidates,
-        evidence,
-        rubric_model,
-    )
-    return candidates, guidelines
-
-
-def _compile_evaluation_guidelines(
-    candidates: Sequence[Mapping[str, Any]],
-    evidence: Sequence[Mapping[str, Any]],
-    rubric_model: str,
-) -> List[Dict[str, Any]]:
-    evidence_by_id = {str(item["record_id"]): item for item in evidence}
-    represented: set[str] = set()
-    provisional: List[Dict[str, Any]] = []
-    for raw in candidates:
-        route = effective_route(raw)
-        source_ids = sorted(
-            {
-                value
-                for value in _string_list(raw.get("source_record_ids"))
-                if value in evidence_by_id
-                and str(evidence_by_id[value]["route"]) == route
-            }
-        )
-        if not source_ids:
-            continue
-        represented.update(source_ids)
-        intent_label = _string(raw.get("intent_label")) or "unclassified"
-        criteria = _normalize_guideline_criteria(
-            raw.get("criteria"), route, source_ids
-        )
-        if not criteria:
-            raise ValueError(
-                f"Evaluation guideline for route '{route}' has no scoreable criteria"
-            )
-        identity = json.dumps(
-            {
-                "route": route,
-                "intent_label": intent_label,
-                "criteria": [item["statement"] for item in criteria],
-            },
-            sort_keys=True,
-        )
-        guideline_id = (
-            f"guideline-{_slug(route)}-"
-            f"{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:10]}"
-        )
-        groups = {
-            str(evidence_by_id[record_id].get("group_id") or record_id)
-            for record_id in source_ids
-        }
-        corrections = {
-            correction
-            for record_id in source_ids
-            for correction in _string_list(
-                evidence_by_id[record_id].get("requested_corrections")
-            )
-        }
-        provisional.append(
-            {
-                "guideline_id": guideline_id,
-                "route": route,
-                "intent_label": intent_label,
-                "description": _string(raw.get("description")) or intent_label,
-                "confidence": _confidence(raw.get("confidence")),
-                "source_record_ids": source_ids,
-                "support": {
-                    "trusted_example_count": len(source_ids),
-                    "trusted_group_count": len(groups),
-                },
-                "criteria": criteria,
-                "conflicts": _string_list(raw.get("conflicts")),
-                "uncertainties": sorted(
-                    {
-                        *(
-                            uncertainty
-                            for record_id in source_ids
-                            for uncertainty in _string_list(
-                                evidence_by_id[record_id].get("uncertainties")
-                            )
-                        ),
-                        *_string_list(raw.get("uncertainties")),
-                    }
-                ),
-                "tool_expectations": _normalize_tool_expectations(
-                    raw.get("tool_expectations")
-                ),
-                "reference_output": (
-                    next(iter(corrections)) if len(corrections) == 1 else None
-                ),
-                "unknown_policy": "needs_review",
-                "activation_status": "active_from_trusted_evidence",
-                "calibration_status": "uncalibrated",
-                "guideline_provider": "openai",
-                "guideline_model": rubric_model,
-                "oracle_version": "fapo-evaluation-guideline-v1",
-            }
-        )
-    missing = sorted(set(evidence_by_id) - represented)
-    if missing:
-        raise ValueError(
-            "Evaluation guideline response omitted trusted evidence records: "
-            + ", ".join(missing)
-        )
-    return sorted(provisional, key=lambda item: str(item["guideline_id"]))
-
-
-def _normalize_guideline_criteria(
-    value: Any,
-    route: str,
-    guideline_source_ids: Sequence[str],
-) -> List[Dict[str, Any]]:
-    allowed_kinds = {"required", "prohibited", "preferred"}
-    allowed_severities = {"critical", "major", "minor"}
-    allowed_evaluators = {
-        "state_check",
-        "deterministic_check",
-        "semantic_trajectory",
-        "llm_judge",
-        "human_review",
-    }
-    criteria = []
-    for index, raw in enumerate(list(value or []), start=1):
-        if not isinstance(raw, Mapping):
-            continue
-        statement = _string(raw.get("statement"))
-        if not statement:
-            continue
-        kind = _string(raw.get("kind"))
-        severity = _string(raw.get("severity"))
-        evaluator = raw.get("evaluator")
-        evaluator = dict(evaluator) if isinstance(evaluator, Mapping) else {}
-        evaluator_type = _string(evaluator.get("type"))
-        fallback = _string(evaluator.get("fallback")) or "human_review"
-        digest = hashlib.sha256(
-            f"{route}:{kind}:{statement}".encode("utf-8")
-        ).hexdigest()[:10]
-        applicability = raw.get("applicability")
-        if not isinstance(applicability, (Mapping, str)):
-            applicability = "always"
-        criterion_source_ids = sorted(
-            set(_string_list(raw.get("source_record_ids")))
-            & set(guideline_source_ids)
-        ) or list(guideline_source_ids)
-        criteria.append(
-            {
-                "criterion_id": f"criterion-{digest}",
-                "kind": kind if kind in allowed_kinds else "required",
-                "statement": statement,
-                "source_record_ids": criterion_source_ids,
-                "dimension": _string(raw.get("dimension")) or "task_success",
-                "severity": (
-                    severity if severity in allowed_severities else "major"
-                ),
-                "applicability": (
-                    dict(applicability)
-                    if isinstance(applicability, Mapping)
-                    else applicability
-                ),
-                "scoring": _string(raw.get("scoring")) or "binary",
-                "evidence_required": bool(raw.get("evidence_required", False)),
-                "evaluator": {
-                    "type": (
-                        evaluator_type
-                        if evaluator_type in allowed_evaluators
-                        else "llm_judge"
-                    ),
-                    "fallback": (
-                        fallback
-                        if fallback in allowed_evaluators
-                        else "human_review"
-                    ),
-                },
-                "order": index,
-            }
-        )
-    return criteria
-
-
-def _guidelines_by_source_record(
-    guidelines: Sequence[Mapping[str, Any]],
-) -> Dict[str, List[Mapping[str, Any]]]:
-    grouped: Dict[str, List[Mapping[str, Any]]] = {}
-    for guideline in guidelines:
-        for record_id in guideline["source_record_ids"]:
-            grouped.setdefault(str(record_id), []).append(guideline)
-    return grouped
-
-
-def _rubric_from_guidelines(
-    record_id: str,
-    guidelines: Sequence[Mapping[str, Any]],
-    rubric_model: str,
-) -> Dict[str, Any]:
-    criteria = [
-        criterion
-        for guideline in guidelines
-        for criterion in list(guideline["criteria"])
-    ]
-    deterministic_checks = [
-        {
-            "criterion_id": criterion["criterion_id"],
-            "statement": criterion["statement"],
-            "applicability": criterion["applicability"],
-            "evaluator": criterion["evaluator"],
-        }
-        for criterion in criteria
-        if criterion["evaluator"]["type"]
-        in {"state_check", "deterministic_check"}
-    ]
-    semantic_trajectory = [
-        criterion["statement"]
-        for criterion in criteria
-        if criterion["evaluator"]["type"] == "semantic_trajectory"
-    ]
-    tool_expectations = {
-        "guidelines": [
-            dict(guideline["tool_expectations"])
-            for guideline in guidelines
-            if guideline["tool_expectations"]
-        ]
-    }
-    if semantic_trajectory:
-        tool_expectations["semantic_trajectory"] = semantic_trajectory
-    references = {
-        str(guideline["reference_output"])
-        for guideline in guidelines
-        if guideline.get("reference_output")
-    }
-    return {
-        "record_id": record_id,
-        "intent_label": " / ".join(
-            sorted({str(guideline["intent_label"]) for guideline in guidelines})
-        ),
-        "confidence": min(float(guideline["confidence"]) for guideline in guidelines),
-        "must": [
-            criterion["statement"]
-            for criterion in criteria
-            if criterion["kind"] == "required"
-        ],
-        "must_not": [
-            criterion["statement"]
-            for criterion in criteria
-            if criterion["kind"] == "prohibited"
-        ],
-        "should": [
-            criterion["statement"]
-            for criterion in criteria
-            if criterion["kind"] == "preferred"
-        ],
-        "deterministic_checks": deterministic_checks,
-        "tool_expectations": tool_expectations,
-        "reference_output": next(iter(references)) if len(references) == 1 else None,
-        "evaluation_guideline_ids": [
-            str(guideline["guideline_id"]) for guideline in guidelines
-        ],
-        "evaluation_guidelines": [dict(guideline) for guideline in guidelines],
-        "label_source": "evaluation_guideline_from_trusted_feedback",
-        "rubric_provider": "openai",
-        "rubric_model": rubric_model,
-        "oracle_version": "fapo-evaluation-guideline-v1",
-    }
-
-
-def _trusted_intent_from_guideline(
-    guideline: Mapping[str, Any],
-    normalized_by_id: Mapping[str, Mapping[str, Any]],
-) -> Dict[str, Any]:
-    source_ids = [str(value) for value in guideline["source_record_ids"]]
-    groups = {
-        str(normalized_by_id[record_id]["group_id"]) for record_id in source_ids
-    }
-    polarities = sorted(
-        {
-            str(normalized_by_id[record_id]["feedback"]["polarity"])
-            for record_id in source_ids
-        }
-    )
-    return {
-        "intent_id": guideline["guideline_id"],
-        "label": guideline["intent_label"],
-        "texts": [
-            str(guideline["description"]),
-            *(str(item["statement"]) for item in guideline["criteria"]),
-            *(str(normalized_by_id[record_id]["user_input"]) for record_id in source_ids),
-        ],
-        "route": guideline["route"],
-        "metadata": {
-            "trusted_example_count": len(source_ids),
-            "trusted_group_count": len(groups),
-            "feedback_polarities": polarities,
-            "evaluation_guideline_id": guideline["guideline_id"],
-            "source_record_ids": source_ids,
-        },
-    }
 
 
 def _legacy_guideline_from_rubric(rubric: Mapping[str, Any]) -> Dict[str, Any]:
@@ -1900,15 +2355,12 @@ def _confidence(value: Any) -> float:
     return max(0.0, min(1.0, float(value or 0.5)))
 
 
-def _slug(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "general"
-
-
 def _normalize_rubric(
     raw: Mapping[str, Any],
     identity_key: str,
     identity: str,
     label_source: str,
+    rubric_provider: str,
     rubric_model: str,
     review_status: Optional[str] = "review_required",
 ) -> Dict[str, Any]:
@@ -1929,7 +2381,7 @@ def _normalize_rubric(
             else None
         ),
         "label_source": label_source,
-        "rubric_provider": "openai",
+        "rubric_provider": rubric_provider,
         "rubric_model": rubric_model,
         "oracle_version": "fapo-evaluation-asset-v1",
     }
@@ -1942,6 +2394,7 @@ def _normalize_inferred_rubric_response(
     response: Mapping[str, Any],
     *,
     batch: Sequence[IntentCluster],
+    rubric_provider: str,
     rubric_model: str,
 ) -> List[Dict[str, Any]]:
     returned = _indexed_items(response, "rubrics", "cluster_id")
@@ -1957,63 +2410,11 @@ def _normalize_inferred_rubric_response(
                 "cluster_id",
                 cluster.cluster_id,
                 "inferred_from_trusted_feedback",
+                rubric_provider,
                 rubric_model,
             )
         )
     return rubrics
-
-
-def _expected(rubric: Mapping[str, Any]) -> Dict[str, Any]:
-    expected = {
-        "label_source": rubric["label_source"],
-        "confidence": rubric["confidence"],
-        "rubric": {
-            "must": list(rubric["must"]),
-            "must_not": list(rubric["must_not"]),
-            "should": list(rubric["should"]),
-        },
-        "deterministic_checks": list(rubric["deterministic_checks"]),
-        "tool_expectations": dict(rubric["tool_expectations"]),
-        "reference_output": rubric["reference_output"],
-    }
-    if rubric.get("evaluation_guideline_ids"):
-        expected["evaluation_guideline_ids"] = list(
-            rubric["evaluation_guideline_ids"]
-        )
-        expected["evaluation_guidelines"] = list(
-            rubric.get("evaluation_guidelines") or []
-        )
-    return expected
-
-
-def _trusted_case(
-    row: Mapping[str, Any],
-    rubric: Mapping[str, Any],
-    asset_id: str,
-) -> Dict[str, Any]:
-    case = {
-        "case_id": f"feedback-{row['record_id']}",
-        "task_type": row["task_type"],
-        "context": _context(
-            row["user_input"],
-            row["conversation_context"],
-            row["tool_calls"],
-            row["runtime"],
-        ),
-        "expected": {
-            **_expected(rubric),
-            "feedback_polarity": row["feedback"]["polarity"],
-        },
-        "metadata": {
-            "source": "feedback_trace",
-            "dataset_version": asset_id,
-            "group_id": row["group_id"],
-            "request_id": row["request_id"],
-            "trust_tier": "trusted_feedback",
-        },
-    }
-    validate_fapo_case(case)
-    return case
 
 
 def _synthetic_case(
@@ -2231,6 +2632,66 @@ def _missing_clusters(
             }
         )
     return output
+
+
+def _discard_provider_metadata(provider: Any) -> None:
+    """Discard stale optional metadata without expanding the provider contract."""
+    drain = getattr(provider, "drain_call_metadata", None)
+    if callable(drain):
+        try:
+            drain()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _drain_provider_metadata(provider: Any) -> Any:
+    """Return sanitized optional metadata or one explicit unavailable marker."""
+    drain = getattr(provider, "drain_call_metadata", None)
+    if not callable(drain):
+        return None
+    try:
+        return sanitize_call_metadata(drain())
+    except Exception:  # noqa: BLE001
+        return unavailable("metadata_failed_validation")
+
+
+def _stage_seeds(
+    stage: PipelineStage,
+    config: EvaluationAssetConfig,
+    *,
+    call_count: int = 0,
+) -> dict[str, Any]:
+    if stage == PipelineStage.DATASET_SPLITS:
+        return {"split": config.split_seed}
+    if STAGE_SPECIFICATIONS[stage].provider_roles:
+        reason = (
+            "provider_does_not_use_sampling"
+            if call_count
+            else "stage_made_no_provider_calls"
+        )
+        return {"sampling": not_applicable(reason)}
+    return {"sampling": not_applicable("stage_has_no_provider_role")}
+
+
+def _stage_algorithms(
+    stage: PipelineStage,
+    config: EvaluationAssetConfig,
+    *,
+    extension: bool = False,
+) -> dict[str, Any]:
+    algorithms = _build_algorithms(config, extension)
+    return {"stage": stage.value, "revision": algorithms[stage.value]}
+
+
+def _build_algorithms(
+    config: EvaluationAssetConfig,
+    extension: bool,
+) -> dict[str, Any]:
+    return build_algorithm_inventory(config.to_dict(), extension=extension)
+
+
+def _publication_fault_point(name: str) -> None:
+    workspace_module._fault_point(name)
 
 
 def _write_missing_report(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:

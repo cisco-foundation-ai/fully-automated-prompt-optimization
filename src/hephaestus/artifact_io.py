@@ -6,21 +6,531 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import json
 import os
 import shutil
+import stat
+import sys
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Iterable, Mapping, TextIO, Union
 
+from src.hephaestus import local_authority_io as authority_io
+
 TextContent = Union[str, Iterable[str]]
+_UNSPECIFIED_TARGET = object()
+_UNSPECIFIED_TARGET_CONTENT = object()
+
+
+def _descriptor_bytes(descriptor: int) -> bytes:
+    """Read an opened regular file from its stable descriptor identity."""
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _rename_with_flags_at(
+    directory_descriptor: int,
+    source: str,
+    destination: str,
+    *,
+    darwin_flags: int,
+    linux_flags: int,
+) -> bool:
+    """Rename through one directory descriptor with native atomic flags."""
+    library = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    if sys.platform == "darwin":
+        rename = library.renameatx_np
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename.restype = ctypes.c_int
+        result = rename(
+            directory_descriptor,
+            source_bytes,
+            directory_descriptor,
+            destination_bytes,
+            darwin_flags,
+        )
+    elif sys.platform.startswith("linux") and hasattr(library, "renameat2"):
+        rename = library.renameat2
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename.restype = ctypes.c_int
+        result = rename(
+            directory_descriptor,
+            source_bytes,
+            directory_descriptor,
+            destination_bytes,
+            linux_flags,
+        )
+    else:
+        raise OSError("atomic flagged rename is unsupported")
+    if result == 0:
+        return True
+    error = ctypes.get_errno()
+    if error in {errno.EEXIST, errno.ENOTEMPTY}:
+        return False
+    raise OSError(error, os.strerror(error), destination)
+
+
+def rename_noreplace_at(
+    directory_descriptor: int,
+    source: str,
+    destination: str,
+    *,
+    expected_source: tuple[int, int, int] | None = None,
+    restore_source_on_mismatch: bool = False,
+) -> bool:
+    """Atomically rename only when the destination name is absent.
+
+    A post-syscall source-identity mismatch is recovered according to the
+    caller's namespace contract.  Installs restore the destination to absent;
+    quarantine moves restore the raced node to the authoritative source name.
+    """
+    if isinstance(directory_descriptor, authority_io.BoundDirectory) or os.name == "nt":
+        return authority_io.rename_noreplace(
+            directory_descriptor,
+            source,
+            destination,
+            expected_source=expected_source,
+            restore_source_on_mismatch=restore_source_on_mismatch,
+        )
+    if expected_source is not None:
+        source_details = os.stat(
+            source,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            source_details.st_dev,
+            source_details.st_ino,
+            stat.S_IFMT(source_details.st_mode),
+        ) != expected_source:
+            raise ValueError("rename source is not the expected identity")
+    installed = _rename_with_flags_at(
+        directory_descriptor,
+        source,
+        destination,
+        darwin_flags=0x00000004,
+        linux_flags=1,
+    )
+    if not installed or expected_source is None:
+        return installed
+    destination_details = os.stat(
+        destination,
+        dir_fd=directory_descriptor,
+        follow_symlinks=False,
+    )
+    destination_identity = (
+        destination_details.st_dev,
+        destination_details.st_ino,
+        stat.S_IFMT(destination_details.st_mode),
+    )
+    if destination_identity == expected_source:
+        return True
+
+    # The source name changed after the identity check but before the native
+    # no-replace syscall.  Quarantine callers must put that exact raced node
+    # back at the authoritative source name; installs instead restore the
+    # authoritative destination to its pre-call absent state.
+    if restore_source_on_mismatch:
+        if not _rename_with_flags_at(
+            directory_descriptor,
+            destination,
+            source,
+            darwin_flags=0x00000004,
+            linux_flags=1,
+        ):
+            raise OSError("raced rename source could not be restored")
+        restored_details = os.stat(
+            source,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        restored_identity = (
+            restored_details.st_dev,
+            restored_details.st_ino,
+            stat.S_IFMT(restored_details.st_mode),
+        )
+        try:
+            os.stat(
+                destination,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            destination_absent = True
+        else:
+            destination_absent = False
+        if restored_identity != destination_identity or not destination_absent:
+            raise OSError("raced rename source recovery could not be verified")
+        os.fsync(directory_descriptor)
+        raise ValueError("rename source changed during quarantine")
+
+    rejected_name = f".{destination}.{uuid.uuid4().hex}.rejected"
+    if not _rename_with_flags_at(
+        directory_descriptor,
+        destination,
+        rejected_name,
+        darwin_flags=0x00000004,
+        linux_flags=1,
+    ):
+        raise OSError("raced rename source could not be quarantined")
+    rejected_details = os.stat(
+        rejected_name,
+        dir_fd=directory_descriptor,
+        follow_symlinks=False,
+    )
+    rejected_identity = (
+        rejected_details.st_dev,
+        rejected_details.st_ino,
+        stat.S_IFMT(rejected_details.st_mode),
+    )
+    try:
+        os.stat(
+            destination,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        destination_absent = True
+    else:
+        destination_absent = False
+    if rejected_identity != destination_identity or not destination_absent:
+        raise OSError("raced rename source recovery could not be verified")
+    os.fsync(directory_descriptor)
+    raise ValueError("rename source changed during installation")
+
+
+def rename_exchange_at(
+    directory_descriptor: int,
+    source: str,
+    destination: str,
+    *,
+    expected_source: tuple[int, int, int] | None = None,
+    expected_destination: tuple[int, int, int] | None = None,
+) -> None:
+    """Atomically exchange two names beneath one stable directory descriptor."""
+    for name, expected in (
+        (source, expected_source),
+        (destination, expected_destination),
+    ):
+        if expected is None:
+            continue
+        details = os.stat(
+            name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            details.st_dev,
+            details.st_ino,
+            stat.S_IFMT(details.st_mode),
+        ) != expected:
+            raise ValueError("rename exchange node is not the expected identity")
+    if not _rename_with_flags_at(
+        directory_descriptor,
+        source,
+        destination,
+        darwin_flags=0x00000002,
+        linux_flags=2,
+    ):
+        raise OSError("atomic exchange unexpectedly found a competing target")
+    source_after = os.stat(
+        source,
+        dir_fd=directory_descriptor,
+        follow_symlinks=False,
+    )
+    destination_after = os.stat(
+        destination,
+        dir_fd=directory_descriptor,
+        follow_symlinks=False,
+    )
+    source_after_identity = (
+        source_after.st_dev,
+        source_after.st_ino,
+        stat.S_IFMT(source_after.st_mode),
+    )
+    destination_after_identity = (
+        destination_after.st_dev,
+        destination_after.st_ino,
+        stat.S_IFMT(destination_after.st_mode),
+    )
+    source_mismatch = (
+        expected_source is not None
+        and destination_after_identity != expected_source
+    )
+    destination_mismatch = (
+        expected_destination is not None
+        and source_after_identity != expected_destination
+    )
+    if not source_mismatch and not destination_mismatch:
+        return
+
+    # Reverse this operation's exact exchange before reporting the failed
+    # compare-and-swap.  This makes the pre-syscall concurrent target live
+    # again and retains this operation's source under its private name.
+    if not _rename_with_flags_at(
+        directory_descriptor,
+        source,
+        destination,
+        darwin_flags=0x00000002,
+        linux_flags=2,
+    ):
+        raise OSError("raced rename exchange could not be reversed")
+    restored_source = os.stat(
+        source,
+        dir_fd=directory_descriptor,
+        follow_symlinks=False,
+    )
+    restored_destination = os.stat(
+        destination,
+        dir_fd=directory_descriptor,
+        follow_symlinks=False,
+    )
+    if (
+        restored_source.st_dev,
+        restored_source.st_ino,
+        stat.S_IFMT(restored_source.st_mode),
+    ) != destination_after_identity or (
+        restored_destination.st_dev,
+        restored_destination.st_ino,
+        stat.S_IFMT(restored_destination.st_mode),
+    ) != source_after_identity:
+        raise OSError("raced rename exchange recovery could not be verified")
+    os.fsync(directory_descriptor)
+    if source_mismatch:
+        raise ValueError("rename source changed during exchange")
+    raise ValueError("rename destination changed during exchange")
+
+
+def atomic_write_bytes_at(
+    directory_descriptor: authority_io.DirectoryLike,
+    filename: str,
+    content: bytes,
+    *,
+    expected_target: tuple[int, int, int] | None | object = _UNSPECIFIED_TARGET,
+    expected_target_content: bytes | object = _UNSPECIFIED_TARGET_CONTENT,
+) -> tuple[int, int, int]:
+    """Atomically replace one file relative to an already verified directory."""
+    if not filename or Path(filename).name != filename:
+        raise ValueError("descriptor-relative filename must be one path component")
+    temporary_name = f".{filename}.{uuid.uuid4().hex}.tmp"
+    temporary_file: authority_io.BoundFile | None = None
+    owned: authority_io.OwnedNode | None = None
+    reclaim_owned_during_error = True
+    installed_identity: tuple[int, int, int] | None = None
+    namespace_lock = authority_io.exclusive_parent_namespace_lock(
+        directory_descriptor
+    )
+    namespace_lock.__enter__()
+    try:
+        if expected_target is _UNSPECIFIED_TARGET:
+            current = authority_io.optional_stat_child(
+                directory_descriptor,
+                filename,
+            )
+            if current is None:
+                expected_target = None
+            else:
+                expected_target = current.identity
+        temporary_file = authority_io.open_child_file(
+            directory_descriptor,
+            temporary_name,
+            writable=True,
+            create_exclusive=True,
+            mode=0o600,
+            delete_access=True,
+        )
+        temporary_identity = temporary_file.identity
+        owned = authority_io.OwnedNode(
+            temporary_name,
+            temporary_identity,
+            "file",
+        )
+        authority_io.write_bound_file(temporary_file, content)
+        authority_io.sync_bound_file(temporary_file)
+        named_temporary = authority_io.stat_child(
+            directory_descriptor,
+            temporary_name,
+        )
+        if named_temporary.identity != temporary_identity:
+            raise ValueError("authority temporary source changed before installation")
+        if authority_io.read_bound_file(temporary_file) != content:
+            raise ValueError("authority temporary source content changed before installation")
+        if expected_target is None:
+            if not rename_noreplace_at(
+                directory_descriptor,
+                temporary_name,
+                filename,
+                expected_source=temporary_identity,
+            ):
+                raise ValueError("authority target appeared before installation")
+            installed = authority_io.stat_child(
+                directory_descriptor,
+                filename,
+            )
+            installed_identity = installed.identity
+            if installed_identity != temporary_identity:
+                raise ValueError("authority temporary source changed during installation")
+            owned = None
+            if authority_io.read_bound_file(temporary_file) != content:
+                rejected_name = f".{filename}.{uuid.uuid4().hex}.rejected"
+                if not rename_noreplace_at(
+                    directory_descriptor,
+                    filename,
+                    rejected_name,
+                    expected_source=temporary_identity,
+                    restore_source_on_mismatch=True,
+                ):
+                    raise OSError(
+                        "raced authority installation could not be quarantined"
+                    )
+                owned = authority_io.OwnedNode(
+                    rejected_name,
+                    temporary_identity,
+                    "file",
+                )
+                raise ValueError(
+                    "authority temporary source content changed during installation"
+                )
+        else:
+            current = authority_io.stat_child(
+                directory_descriptor,
+                filename,
+            )
+            current_identity = current.identity
+            if current_identity != expected_target:
+                raise ValueError("authority target changed before replacement")
+            authority_io.prepare_file_source_replace(temporary_file)
+            owned = authority_io.replace_with_backup(
+                directory_descriptor,
+                temporary_name,
+                filename,
+                expected_source=temporary_identity,
+                expected_destination=expected_target,
+            )
+            reclaim_owned_during_error = False
+            temporary_file = authority_io.bind_replaced_file(
+                directory_descriptor,
+                filename,
+                expected=temporary_identity,
+                previous=temporary_file,
+            )
+            authority_io.sync_bound_file(temporary_file)
+            installed = authority_io.stat_child(
+                directory_descriptor,
+                filename,
+            )
+            installed_identity = installed.identity
+            displaced = authority_io.stat_child(
+                directory_descriptor,
+                owned.name,
+            )
+            displaced_identity = displaced.identity
+            if (
+                installed_identity != temporary_identity
+                or displaced_identity != expected_target
+            ):
+                if installed_identity != temporary_identity:
+                    raise ValueError(
+                        "authority temporary source changed during replacement"
+                    )
+                raise ValueError("authority target changed during replacement")
+            if expected_target_content is not _UNSPECIFIED_TARGET_CONTENT:
+                displaced_file = authority_io.open_child_file(
+                    directory_descriptor,
+                    owned.name,
+                )
+                try:
+                    if displaced_file.identity != expected_target:
+                        raise ValueError(
+                            "authority target changed during replacement"
+                        )
+                    displaced_content = authority_io.read_bound_file(displaced_file)
+                finally:
+                    displaced_file.close()
+                if displaced_content != expected_target_content:
+                    owned = authority_io.replace_with_backup(
+                        directory_descriptor,
+                        owned.name,
+                        filename,
+                        expected_source=expected_target,
+                        expected_destination=temporary_identity,
+                    )
+                    reclaim_owned_during_error = True
+                    raise ValueError(
+                        "authority target bytes changed during replacement"
+                    )
+            if authority_io.read_bound_file(temporary_file) != content:
+                owned = authority_io.replace_with_backup(
+                    directory_descriptor,
+                    owned.name,
+                    filename,
+                    expected_source=expected_target,
+                    expected_destination=temporary_identity,
+                )
+                reclaim_owned_during_error = True
+                raise ValueError(
+                    "authority temporary source content changed during replacement"
+                )
+        authority_io.sync_bound_directory(directory_descriptor)
+        if owned is not None:
+            if not authority_io.reclaim_owned_leaf(directory_descriptor, owned):
+                raise ValueError(
+                    "owned authority node changed before reclamation"
+                )
+            owned = None
+        if installed_identity is None:
+            raise ValueError("authority installation identity is unavailable")
+        return installed_identity
+    finally:
+        try:
+            active_error = sys.exc_info()[0] is not None
+            if temporary_file is not None:
+                temporary_file.close()
+            if owned is not None and (
+                not active_error or reclaim_owned_during_error
+            ):
+                try:
+                    authority_io.reclaim_owned_leaf(directory_descriptor, owned)
+                except OSError:
+                    if not active_error:
+                        raise
+        finally:
+            namespace_lock.__exit__(*sys.exc_info())
 
 
 def atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
     """Atomically replace one JSON file after durable serialization."""
 
     def produce(handle: TextIO) -> None:
-        json.dump(dict(payload), handle, indent=2, sort_keys=True)
+        json.dump(
+            dict(payload),
+            handle,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
         handle.write("\n")
 
     _atomic_write_text(path, produce)
@@ -34,7 +544,9 @@ def atomic_write_jsonl(
 
     def produce(handle: TextIO) -> None:
         for row in rows:
-            handle.write(json.dumps(dict(row), sort_keys=True) + "\n")
+            handle.write(
+                json.dumps(dict(row), sort_keys=True, allow_nan=False) + "\n"
+            )
 
     _atomic_write_text(path, produce)
 
@@ -78,7 +590,7 @@ def atomic_append_jsonl(path: Path, payload: Mapping[str, Any]) -> None:
                     needs_newline = source_handle.read(1) != b"\n"
         if needs_newline:
             handle.write(b"\n")
-        serialized = json.dumps(dict(payload), sort_keys=True) + "\n"
+        serialized = json.dumps(dict(payload), sort_keys=True, allow_nan=False) + "\n"
         handle.write(serialized.encode("utf-8"))
 
     _atomic_write_binary(path, produce)
@@ -94,6 +606,7 @@ def _atomic_write_text(
         with tempfile.NamedTemporaryFile(
             "w",
             encoding="utf-8",
+            newline="\n",
             dir=path.parent,
             prefix=f".{path.name}.",
             suffix=".tmp",
@@ -104,6 +617,7 @@ def _atomic_write_text(
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_path, path)
+        sync_directory(path.parent)
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
@@ -128,6 +642,19 @@ def _atomic_write_binary(
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_path, path)
+        sync_directory(path.parent)
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
+
+
+def sync_directory(directory: Path) -> None:
+    """Persist a successful rename in directory metadata on POSIX systems."""
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)

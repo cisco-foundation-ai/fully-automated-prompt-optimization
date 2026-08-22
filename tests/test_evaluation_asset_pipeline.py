@@ -9,12 +9,19 @@ from pathlib import Path
 
 import pytest
 
+from src.hephaestus import artifact_io
 from src.hephaestus.datasets.intent_assets import IntentCluster, IntentMatch
+from src.hephaestus.datasets.jsonl_loader import load_cases
 from src.hephaestus.evaluation_assets import pipeline as pipeline_module
+from src.hephaestus.evaluation_assets.durability import (
+    build_stage_receipt,
+    file_sha256,
+)
 from src.hephaestus.evaluation_assets.models import (
     STAGE_COUNT_KEYS,
     EvaluationAssetConfig,
     PipelineStage,
+    PipelineState,
 )
 from src.hephaestus.evaluation_assets.pipeline import (
     GUIDELINE_SYNTHESIS_PROMPT,
@@ -26,11 +33,18 @@ from src.hephaestus.evaluation_assets.pipeline import (
     _normalize_rubric,
     _rubric_from_guidelines,
 )
+from src.hephaestus.evaluation_assets.publication import (
+    resolve_evaluation_asset_release,
+)
 from src.hephaestus.evaluation_assets.service import EvaluationAssetRunManager
-from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
+from src.hephaestus.evaluation_assets.workspace import (
+    EvaluationAssetLayout,
+    utc_now,
+)
 
 
 class FakeEmbeddingProvider:
+    provider_name = "fake"
     model = "fake-embedding"
 
     def __init__(self):
@@ -61,6 +75,7 @@ class SecretFailingEmbeddingProvider(FakeEmbeddingProvider):
 
 
 class FakeRubricProvider:
+    provider_name = "fake"
     model = "fake-rubric"
 
     def __init__(self):
@@ -808,6 +823,7 @@ def test_prepare_inputs_rejects_normalized_duplicate_with_both_sources(
         EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=FakeRubricProvider(),
         embedding_provider=FakeEmbeddingProvider(),
     )
@@ -861,6 +877,7 @@ def test_stage_one_rejects_infeasible_clustering_before_provider_calls(
         ),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=rubric_provider,
         embedding_provider=embedding_provider,
     )
@@ -886,6 +903,7 @@ def test_stage_one_accepts_one_cluster_per_record_and_effective_route(
         EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=2),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=FakeRubricProvider(),
         embedding_provider=FakeEmbeddingProvider(),
     )
@@ -919,6 +937,7 @@ def test_stage_one_treats_present_whitespace_routes_as_exact_bytes(
         EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=rubric_provider,
         embedding_provider=embedding_provider,
     )
@@ -957,6 +976,7 @@ def test_stage_one_revalidates_each_copied_input_before_provider_calls(
         EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=rubric_provider,
         embedding_provider=embedding_provider,
     )
@@ -1011,6 +1031,7 @@ def test_pipeline_validates_injected_embedding_batches_at_every_stage(
         EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=FakeRubricProvider(),
         embedding_provider=embedding_provider,
     )
@@ -1058,6 +1079,7 @@ def test_provider_failure_persists_only_sanitized_causal_summary(
         ),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=rubric_provider,
         embedding_provider=embedding_provider,
     )
@@ -1073,8 +1095,8 @@ def test_provider_failure_persists_only_sanitized_causal_summary(
         + pipeline.layout.events_path.read_text(encoding="utf-8")
     )
     assert expected_stage.value in persisted
-    assert "provider=openai" in persisted
-    assert "model=safe-" in persisted
+    assert "provider=fake" in persisted
+    assert "model=fake-" in persisted
     assert "cause=RuntimeError" in persisted
     assert "summary=provider operation failed" in persisted
     assert "sk-live-secret-token" not in persisted
@@ -1109,6 +1131,7 @@ def test_malformed_rubric_responses_never_persist_provider_content(
         ),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=SecretMalformedRubricProvider(malformed_response),
         embedding_provider=FakeEmbeddingProvider(),
     )
@@ -1147,6 +1170,7 @@ def test_provider_failure_never_persists_dynamic_exception_class_name(
         EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=DynamicFailureProvider(),
         embedding_provider=FakeEmbeddingProvider(),
     )
@@ -1183,6 +1207,7 @@ def test_rubric_normalization_accepts_list_form_tool_expectations() -> None:
         "record_id",
         "feedback-1",
         "human_feedback",
+        "fake",
         "gpt-5.5",
     )
 
@@ -1233,9 +1258,15 @@ def test_guideline_compilation_preserves_provenance_and_evaluator_plan() -> None
     guidelines = _compile_evaluation_guidelines(
         candidates,
         evidence,
+        "fake",
         "gpt-5.5",
     )
-    rubric = _rubric_from_guidelines("feedback-1", guidelines, "gpt-5.5")
+    rubric = _rubric_from_guidelines(
+        "feedback-1",
+        guidelines,
+        "fake",
+        "gpt-5.5",
+    )
 
     assert guidelines[0]["criteria"][0]["source_record_ids"] == ["feedback-1"]
     assert guidelines[0]["criteria"][0]["evaluator"]["type"] == "state_check"
@@ -1436,6 +1467,7 @@ def test_stage_one_contract_error_uses_copied_input_physical_row(
         EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=rubric_provider,
         embedding_provider=embedding_provider,
     )
@@ -1513,13 +1545,11 @@ def test_extension_rejects_unauthorized_addition_before_initializing_child(
     tenants_root = tmp_path / "tenants"
     feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
     parent = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
-    state = parent.initialize(
+    parent.initialize(
         EvaluationAssetConfig(tenant_id="tenant_a"),
         feedback,
         unlabeled,
     )
-    state.status = "completed"
-    parent.save_state(state)
     other_feedback = (
         tenants_root / "tenant_b" / "source_artifacts" / "feedback.jsonl"
     )
@@ -1550,7 +1580,10 @@ def test_service_create_and_extend_share_tenant_source_boundary(
     )
     other_source.parent.mkdir(parents=True)
     other_source.write_text('{"record_id":"other"}\n', encoding="utf-8")
-    manager = EvaluationAssetRunManager(tenants_root)
+    manager = EvaluationAssetRunManager(
+        tenants_root,
+        repository_base=workspace,
+    )
 
     with pytest.raises(ValueError, match="selected tenant"):
         manager.start(
@@ -1568,13 +1601,11 @@ def test_service_create_and_extend_share_tenant_source_boundary(
     ).exists()
 
     parent = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
-    state = parent.initialize(
+    parent.initialize(
         EvaluationAssetConfig(tenant_id="tenant_a"),
         feedback,
         unlabeled,
     )
-    state.status = "completed"
-    parent.save_state(state)
     with pytest.raises(ValueError, match="selected tenant"):
         manager.extend(
             "tenant_a",
@@ -1627,6 +1658,36 @@ def test_layout_resolves_previous_stage_three_directory(tmp_path: Path) -> None:
     ) == previous / "feedback_rubrics.jsonl"
 
 
+def _add_genuine_stage_one_receipt(
+    layout: EvaluationAssetLayout,
+    state: PipelineState,
+) -> None:
+    pipeline = EvaluationAssetPipeline(
+        layout,
+        rubric_provider=FakeRubricProvider(),
+        embedding_provider=FakeEmbeddingProvider(),
+    )
+    counts = pipeline._validate_raw_inputs()
+    pipeline._finalize_stage_outputs(PipelineStage.RAW_INPUTS)
+    completed_at = utc_now()
+    receipt = build_stage_receipt(
+        layout,
+        PipelineStage.RAW_INPUTS,
+        layout.load_config(),
+        counts,
+        completed_at=completed_at,
+        prompt_values={},
+    )
+    receipt_path = layout.receipt_path(PipelineStage.RAW_INPUTS)
+    artifact_io.atomic_write_json(receipt_path, receipt)
+    stage_one = state.stages[0]
+    stage_one.status = "completed"
+    stage_one.started_at = stage_one.started_at or completed_at
+    stage_one.completed_at = completed_at
+    stage_one.receipt_sha256 = file_sha256(receipt_path)
+    state.counts.update(counts)
+
+
 def test_revise_config_invalidates_only_dependent_stages(tmp_path: Path) -> None:
     tenants_root = tmp_path / "tenants"
     feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
@@ -1634,7 +1695,7 @@ def test_revise_config_invalidates_only_dependent_stages(tmp_path: Path) -> None
     state = layout.initialize(
         EvaluationAssetConfig(
             tenant_id="tenant_a",
-            cluster_count=5,
+            cluster_count=1,
             match_threshold=0.6,
         ),
         feedback,
@@ -1643,13 +1704,14 @@ def test_revise_config_invalidates_only_dependent_stages(tmp_path: Path) -> None
     for stage_state in state.stages:
         stage_state.status = "completed"
         stage_state.message = "done"
-        stage_state.started_at = "start"
-        stage_state.completed_at = "end"
+        stage_state.started_at = "2026-08-20T00:00:00+00:00"
+        stage_state.completed_at = "2026-08-20T00:00:01+00:00"
     state.status = "failed"
     state.error = "stopped"
     state.counts = {
         key: 1 for keys in STAGE_COUNT_KEYS.values() for key in keys
     }
+    _add_genuine_stage_one_receipt(layout, state)
     layout.save_state(state)
     stage_four_artifact = layout.artifact_path(
         PipelineStage.INTENT_CLUSTERING,
@@ -1662,9 +1724,13 @@ def test_revise_config_invalidates_only_dependent_stages(tmp_path: Path) -> None
     stage_four_artifact.write_text("{}\n", encoding="utf-8")
     stage_five_artifact.write_text("{}\n", encoding="utf-8")
     layout.manifest_path.write_text("{}\n", encoding="utf-8")
-    published_split = layout.published_datasets / "train.jsonl"
-    published_split.parent.mkdir(parents=True)
-    published_split.write_text("{}\n", encoding="utf-8")
+    release_pointer = layout.release_pointer_path
+    generation_split = (
+        layout.generations_root / f"sha256-{'0' * 64}" / "train.jsonl"
+    )
+    generation_split.parent.mkdir(parents=True)
+    release_pointer.write_text("{}\n", encoding="utf-8")
+    generation_split.write_text("{}\n", encoding="utf-8")
 
     revision = layout.revise_config({"match_threshold": 0.2})
 
@@ -1678,7 +1744,8 @@ def test_revise_config_invalidates_only_dependent_stages(tmp_path: Path) -> None
     assert stage_four_artifact.exists()
     assert not stage_five_artifact.exists()
     assert not layout.manifest_path.exists()
-    assert not layout.published_datasets.exists()
+    assert release_pointer.read_text(encoding="utf-8") == "{}\n"
+    assert generation_split.read_text(encoding="utf-8") == "{}\n"
     assert [
         item.status for item in revised_state.stages[:4]
     ] == ["completed"] * 4
@@ -1708,12 +1775,13 @@ def test_revise_config_derives_embedding_provider_and_restarts_stage_four(
     feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
     layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
     state = layout.initialize(
-        EvaluationAssetConfig(tenant_id="tenant_a"),
+        EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
         feedback,
         unlabeled,
     )
     for stage_state in state.stages[:3]:
         stage_state.status = "completed"
+    _add_genuine_stage_one_receipt(layout, state)
     layout.save_state(state)
 
     revision = layout.revise_config({"embedding_model": "tfidf"})
@@ -1732,11 +1800,11 @@ def test_revise_config_with_unchanged_values_preserves_checkpoints(
     feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
     layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
     state = layout.initialize(
-        EvaluationAssetConfig(tenant_id="tenant_a"),
+        EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
         feedback,
         unlabeled,
     )
-    state.stages[0].status = "completed"
+    _add_genuine_stage_one_receipt(layout, state)
     layout.save_state(state)
 
     revision = layout.revise_config({"match_threshold": 0.6})
@@ -1757,7 +1825,7 @@ def test_revise_config_resumes_an_earlier_incomplete_stage(
     feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
     layout = EvaluationAssetLayout(tenants_root, "tenant_a", "v1")
     state = layout.initialize(
-        EvaluationAssetConfig(tenant_id="tenant_a"),
+        EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
         feedback,
         unlabeled,
     )
@@ -1766,6 +1834,7 @@ def test_revise_config_resumes_an_earlier_incomplete_stage(
     state.stages[4].status = "failed"
     state.status = "failed"
     state.current_stage = "coverage_decisions"
+    _add_genuine_stage_one_receipt(layout, state)
     layout.save_state(state)
 
     revision = layout.revise_config({"synthetic_coverage_enabled": True})
@@ -1794,9 +1863,14 @@ def test_extend_asset_keeps_clustering_and_extracts_only_new_rubrics(
             tenant_id="tenant_a",
             cluster_count=1,
             synthetic_coverage_enabled=False,
+            rubric_provider="fake",
+            rubric_model="fake-rubric",
+            embedding_provider="fake",
+            embedding_model="fake-embedding",
         ),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=FakeRubricProvider(),
         embedding_provider=FakeEmbeddingProvider(),
     )
@@ -1822,7 +1896,7 @@ def test_extend_asset_keeps_clustering_and_extracts_only_new_rubrics(
         embedding_provider=FakeEmbeddingProvider(),
     ).run()
 
-    assert child_state.status == "completed"
+    assert child_state.status == "released"
     assert child_provider.feedback_record_ids == ["u1"]
     assert child_layout.artifact_path(
         PipelineStage.INTENT_CLUSTERING,
@@ -1868,9 +1942,17 @@ def test_extend_asset_refreshes_clustering_for_new_unlabeled_records(
     _write_extension_unlabeled(added_unlabeled, ["u3"])
     parent = EvaluationAssetPipeline.create(
         tenants_root,
-        EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
+        EvaluationAssetConfig(
+            tenant_id="tenant_a",
+            cluster_count=1,
+            rubric_provider="fake",
+            rubric_model="fake-rubric",
+            embedding_provider="fake",
+            embedding_model="fake-embedding",
+        ),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=FakeRubricProvider(),
         embedding_provider=FakeEmbeddingProvider(),
     )
@@ -1892,7 +1974,7 @@ def test_extend_asset_refreshes_clustering_for_new_unlabeled_records(
         embedding_provider=FakeEmbeddingProvider(),
     ).run()
 
-    assert state.status == "completed"
+    assert state.status == "released"
     assert child_provider.feedback_record_ids == []
     assert state.counts["unlabeled_records"] == 3
     assert state.counts["intent_clusters"] == 2
@@ -1922,9 +2004,17 @@ def test_extend_asset_rejects_unlabeled_additions_when_clustering_is_kept(
     _write_extension_unlabeled(added_unlabeled, ["u2"])
     parent = EvaluationAssetPipeline.create(
         tenants_root,
-        EvaluationAssetConfig(tenant_id="tenant_a", cluster_count=1),
+        EvaluationAssetConfig(
+            tenant_id="tenant_a",
+            cluster_count=1,
+            rubric_provider="fake",
+            rubric_model="fake-rubric",
+            embedding_provider="fake",
+            embedding_model="fake-embedding",
+        ),
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=FakeRubricProvider(),
         embedding_provider=FakeEmbeddingProvider(),
     )
@@ -2002,6 +2092,7 @@ def test_labeling_queue_samples_only_clusters_needing_trusted_labels() -> None:
 )
 def test_pipeline_is_self_contained_and_writes_canonical_layout(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     synthetic_coverage_enabled: bool,
     synthetic_cases_per_cluster: int,
     expected_synthetic_cases: int,
@@ -2068,7 +2159,9 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
         tenant_id="new_tenant",
         asset_id="v1",
         cluster_count=1,
+        rubric_provider="fake",
         rubric_model="fake-rubric",
+        embedding_provider="fake",
         embedding_model="fake-embedding",
         synthetic_coverage_enabled=synthetic_coverage_enabled,
         synthetic_cases_per_cluster=synthetic_cases_per_cluster,
@@ -2079,6 +2172,7 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
         config,
         feedback,
         unlabeled,
+        repository_base=tmp_path,
         rubric_provider=rubric_provider,
         embedding_provider=FakeEmbeddingProvider(),
     )
@@ -2088,7 +2182,7 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
     state = pipeline.run()
     layout = pipeline.layout
 
-    assert state.status == "completed"
+    assert state.status == "released"
     assert all(stage.status == "completed" for stage in state.stages)
     assert layout.feedback_path.exists()
     assert layout.unlabeled_path.exists()
@@ -2106,6 +2200,7 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
     ).exists()
     assert layout.artifact_path("dataset_splits", "train.jsonl").exists()
     assert layout.manifest_path.exists()
+    release = resolve_evaluation_asset_release(layout.published_datasets)
     for split_name in (
         "train",
         "validation",
@@ -2116,8 +2211,9 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
             "dataset_splits",
             f"{split_name}.jsonl",
         )
-        published_split = layout.published_datasets / f"{split_name}.jsonl"
+        published_split = release.files[split_name]
         assert published_split.read_bytes() == stage_split.read_bytes()
+        assert not (layout.published_datasets / f"{split_name}.jsonl").exists()
     assert (layout.root / "stages" / "01_raw_inputs").is_dir()
     assert (layout.root / "stages" / "03_evaluation_guidelines").is_dir()
     assert not (layout.root / "stages" / "03_rubric_extraction").exists()
@@ -2236,15 +2332,19 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
         "selection": "deterministic_group_safe_random",
         "seed": 42,
     }
+    generation_directory = release.generation_dir.relative_to(
+        layout.tenants_root.parent
+    ).as_posix()
     assert dataset_manifest["published_datasets"] == {
         "directory": "datasets/evaluation_assets/v1",
+        "release_pointer": "datasets/evaluation_assets/v1/release.json",
+        "generation_id": release.generation_id,
+        "generation_manifest_sha256": release.generation_manifest_sha256,
+        "build_provenance_sha256": release.build_provenance_sha256,
+        "build_fingerprint": release.build_fingerprint,
         "files": {
-            "train": "datasets/evaluation_assets/v1/train.jsonl",
-            "validation": "datasets/evaluation_assets/v1/validation.jsonl",
-            "test": "datasets/evaluation_assets/v1/test.jsonl",
-            "regression_trusted": (
-                "datasets/evaluation_assets/v1/regression_trusted.jsonl"
-            ),
+            split: f"{generation_directory}/{split}.jsonl"
+            for split in ("train", "validation", "test", "regression_trusted")
         },
     }
     assert (
@@ -2361,6 +2461,10 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
         else:
             assert inferred_location == trusted_location
     assert state.counts["triage_hold_cases"] == len(triage_cases)
+    monkeypatch.chdir(layout.tenants_root.parent)
+    assert load_cases(
+        Path(dataset_manifest["published_datasets"]["files"]["train"])
+    )
 
 
 def test_layout_rejects_unsafe_tenant_and_asset_names(tmp_path: Path) -> None:

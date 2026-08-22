@@ -70,6 +70,18 @@ def test_asset_studio_owns_creation_controls() -> None:
     assert "Guideline creation model" in EVALUATION_ASSET_HTML
     assert "Create guidelines" in EVALUATION_ASSET_HTML
     assert "Extract only new evidence and rebuild guidelines" in EVALUATION_ASSET_HTML
+    for status in (
+        "draft",
+        "queued",
+        "running",
+        "awaiting_review",
+        "released",
+        "failed",
+    ):
+        assert f"status-{status}" in EVALUATION_ASSET_HTML
+    assert "state.status === 'released'" in EVALUATION_ASSET_HTML
+    assert "/adopt" in EVALUATION_ASSET_HTML
+    assert "Adopt verified legacy asset" in EVALUATION_ASSET_HTML
 
 
 def test_explorer_links_to_studio_without_asset_form() -> None:

@@ -9,12 +9,272 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+from src.hephaestus.evaluation_assets.publication import (
+    LOGICAL_SPLITS,
+    build_release_pointer,
+    install_generation,
+    write_release_pointer,
+)
+from src.hephaestus.webui import data as webui_data_module
 from src.hephaestus.webui.data import TenantStore
 
 
 def _write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _publish_generation(
+    tenant: Path,
+    *,
+    asset_id: str,
+    suffix: str,
+    fingerprint: str,
+):
+    sources: dict[str, Path] = {}
+    for split in LOGICAL_SPLITS:
+        path = tenant / "workspace" / suffix / f"{split}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"case_id": f"{suffix}-{split}"}) + "\n",
+            encoding="utf-8",
+        )
+        sources[split] = path
+    catalog = tenant / "datasets" / "evaluation_assets" / asset_id
+    generation = install_generation(
+        catalog,
+        tenant_id=tenant.name,
+        asset_id=asset_id,
+        split_paths=sources,
+        build_fingerprint=fingerprint,
+    )
+    pointer = build_release_pointer(
+        tenant_id=tenant.name,
+        asset_id=asset_id,
+        generation=generation,
+        stage_8_receipt_sha256="a" * 64,
+        build_provenance_sha256="b" * 64,
+        published_at="2026-08-20T00:00:00+00:00",
+    )
+    write_release_pointer(catalog, pointer)
+    return generation
+
+
+def test_dataset_catalog_lists_only_pointer_current_studio_splits(
+    tmp_path: Path,
+) -> None:
+    """Studio discovery omits generations, temps, and legacy catalog copies."""
+    tenants = tmp_path / "tenants"
+    tenant = tenants / "demo"
+    tenant.mkdir(parents=True)
+    (tenant / "__init__.py").write_text("", encoding="utf-8")
+    ordinary = tenant / "datasets" / "ordinary.jsonl"
+    ordinary.parent.mkdir(parents=True)
+    ordinary.write_text('{"case_id":"ordinary"}\n', encoding="utf-8")
+    historical = _publish_generation(
+        tenant,
+        asset_id="asset",
+        suffix="historical",
+        fingerprint="c" * 64,
+    )
+    current = _publish_generation(
+        tenant,
+        asset_id="asset",
+        suffix="current",
+        fingerprint="d" * 64,
+    )
+    catalog = tenant / "datasets" / "evaluation_assets" / "asset"
+    (catalog / "train.jsonl").write_text("legacy\n", encoding="utf-8")
+    temporary = catalog / "generations" / ".unfinished.tmp"
+    temporary.mkdir()
+    (temporary / "train.jsonl").write_text("partial\n", encoding="utf-8")
+
+    store = TenantStore(tenants, repository_base=tmp_path)
+    listed = store.list_datasets("demo")
+    listed_paths = {row["path"] for row in listed}
+
+    expected_current = {
+        path.relative_to(tenant).as_posix() for path in current.files.values()
+    }
+    assert listed_paths == {"datasets/ordinary.jsonl", *expected_current}
+    assert store.has_evaluation_asset_datasets("demo") is True
+    current_train = current.files["train"].relative_to(tenant).as_posix()
+    assert store.get_dataset("demo", current_train)["rows"] == [
+        {"case_id": "current-train"}
+    ]
+    historical_train = historical.files["train"].relative_to(tenant).as_posix()
+    assert store.get_dataset("demo", historical_train)["rows"] == [
+        {"case_id": "historical-train"}
+    ]
+    assert store.get_dataset(
+        "demo", "datasets/evaluation_assets/asset/train.jsonl"
+    ) is None
+
+    (historical.generation_dir / "generation_manifest.json").write_text(
+        "{}\n", encoding="utf-8"
+    )
+    assert store.get_dataset("demo", historical_train) is None
+
+
+def test_corrupt_studio_pointer_fails_closed_without_hiding_ordinary_data(
+    tmp_path: Path,
+) -> None:
+    """A corrupt release pointer never causes raw generation recursion."""
+    tenants = tmp_path / "tenants"
+    tenant = tenants / "demo"
+    tenant.mkdir(parents=True)
+    (tenant / "__init__.py").write_text("", encoding="utf-8")
+    ordinary = tenant / "datasets" / "ordinary.jsonl"
+    ordinary.parent.mkdir(parents=True)
+    ordinary.write_text('{"case_id":"ordinary"}\n', encoding="utf-8")
+    _publish_generation(
+        tenant,
+        asset_id="asset",
+        suffix="current",
+        fingerprint="e" * 64,
+    )
+    pointer = tenant / "datasets" / "evaluation_assets" / "asset" / "release.json"
+    pointer.write_text("{}\n", encoding="utf-8")
+
+    store = TenantStore(tenants, repository_base=tmp_path)
+
+    assert [row["path"] for row in store.list_datasets("demo")] == [
+        "datasets/ordinary.jsonl"
+    ]
+    assert store.has_evaluation_asset_datasets("demo") is False
+
+
+def test_ordinary_symlink_alias_into_studio_is_protected_and_unreadable(
+    tmp_path: Path,
+) -> None:
+    """An ordinary-looking alias cannot bypass immutable Studio validation."""
+    tenants = tmp_path / "tenants"
+    tenant = tenants / "demo"
+    tenant.mkdir(parents=True)
+    (tenant / "__init__.py").write_text("", encoding="utf-8")
+    current = _publish_generation(
+        tenant,
+        asset_id="asset",
+        suffix="current",
+        fingerprint="f" * 64,
+    )
+    alias = tenant / "datasets" / "alias.jsonl"
+    alias.symlink_to(current.files["train"])
+    store = TenantStore(tenants, repository_base=tmp_path)
+
+    assert "datasets/alias.jsonl" not in {
+        row["path"] for row in store.list_datasets("demo")
+    }
+    assert store.is_evaluation_asset_dataset("demo", "datasets/alias.jsonl")
+    assert store.get_dataset("demo", "datasets/alias.jsonl") is None
+
+
+def test_prepared_ordinary_snapshot_rejects_swap_to_studio_before_read(
+    tmp_path: Path,
+) -> None:
+    """A path swap after classification cannot expose Studio row bytes."""
+    tenants = tmp_path / "tenants"
+    tenant = tenants / "demo"
+    tenant.mkdir(parents=True)
+    (tenant / "__init__.py").write_text("", encoding="utf-8")
+    ordinary = tenant / "datasets" / "ordinary.jsonl"
+    ordinary.parent.mkdir(parents=True)
+    ordinary.write_text('{"case_id":"ordinary"}\n', encoding="utf-8")
+    current = _publish_generation(
+        tenant,
+        asset_id="asset",
+        suffix="current",
+        fingerprint="e" * 64,
+    )
+    store = TenantStore(tenants, repository_base=tmp_path)
+    snapshot, studio_data = store.prepare_dataset(
+        "demo",
+        "datasets/ordinary.jsonl",
+    )
+    assert studio_data is False
+    ordinary.unlink()
+    ordinary.symlink_to(current.files["train"])
+
+    assert store.materialize_dataset(snapshot) is None
+
+
+def test_studio_listing_defers_release_validation_until_materialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-authorization listing preparation never hashes Studio split bytes."""
+    tenants = tmp_path / "tenants"
+    tenant = tenants / "demo"
+    tenant.mkdir(parents=True)
+    (tenant / "__init__.py").write_text("", encoding="utf-8")
+    _publish_generation(
+        tenant,
+        asset_id="asset",
+        suffix="current",
+        fingerprint="9" * 64,
+    )
+    store = TenantStore(tenants, repository_base=tmp_path)
+    real_resolve = webui_data_module.resolve_evaluation_asset_release
+    calls: list[Path] = []
+
+    def tracked_resolve(catalog: Path, **kwargs):
+        calls.append(catalog)
+        return real_resolve(catalog, **kwargs)
+
+    monkeypatch.setattr(
+        webui_data_module,
+        "resolve_evaluation_asset_release",
+        tracked_resolve,
+    )
+
+    prepared, studio_data = store.prepare_dataset_listing("demo")
+
+    assert studio_data is True
+    assert calls == []
+    assert len(store.materialize_dataset_listing(prepared)) == 4
+    assert calls
+
+
+def test_historical_studio_read_defers_generation_hashes_until_materialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Historical Studio files are classified cheaply before authorization."""
+    tenants = tmp_path / "tenants"
+    tenant = tenants / "demo"
+    tenant.mkdir(parents=True)
+    (tenant / "__init__.py").write_text("", encoding="utf-8")
+    generation = _publish_generation(
+        tenant,
+        asset_id="asset",
+        suffix="historical",
+        fingerprint="8" * 64,
+    )
+    relative = generation.files["train"].relative_to(tenant).as_posix()
+    store = TenantStore(tenants, repository_base=tmp_path)
+    real_validate = webui_data_module.validate_historical_generation
+    calls: list[Path] = []
+
+    def tracked_validate(directory: Path, **kwargs):
+        calls.append(directory)
+        return real_validate(directory, **kwargs)
+
+    monkeypatch.setattr(
+        webui_data_module,
+        "validate_historical_generation",
+        tracked_validate,
+    )
+
+    prepared, studio_data = store.prepare_dataset("demo", relative)
+
+    assert studio_data is True
+    assert calls == []
+    assert store.materialize_dataset(prepared)["rows"] == [
+        {"case_id": "historical-train"}
+    ]
+    assert calls
 
 
 def test_list_runs_recurses_under_evals_tmp(tmp_path: Path) -> None:
@@ -42,7 +302,7 @@ def test_list_runs_recurses_under_evals_tmp(tmp_path: Path) -> None:
     (run_dir / "summary.md").write_text("# Summary\n", encoding="utf-8")
     (run_dir / "results.jsonl").write_text('{"case_id":"a","composite_score":100}\n', encoding="utf-8")
 
-    runs = TenantStore(tenants).list_runs("demo")
+    runs = TenantStore(tenants, repository_base=tmp_path).list_runs("demo")
 
     assert len(runs) == 1
     assert runs[0]["run_dir"] == "evals/tmp/chain-variant002-val"
@@ -64,7 +324,10 @@ def test_get_run_supports_nested_run_dir(tmp_path: Path) -> None:
     (run_dir / "summary.md").write_text("# Summary\n", encoding="utf-8")
     (run_dir / "results.jsonl").write_text('{"case_id":"a","composite_score":100}\n', encoding="utf-8")
 
-    run = TenantStore(tenants).get_run("demo", "evals/tmp/chain-variant002-val")
+    run = TenantStore(tenants, repository_base=tmp_path).get_run(
+        "demo",
+        "evals/tmp/chain-variant002-val",
+    )
 
     assert run is not None
     assert run["run_dir"] == "evals/tmp/chain-variant002-val"
@@ -96,7 +359,7 @@ def test_list_prompts_includes_skills_with_kind_and_group(tmp_path: Path) -> Non
     skill.parent.mkdir(parents=True)
     skill.write_text("Drill in first.\n", encoding="utf-8")
 
-    store = TenantStore(tenants)
+    store = TenantStore(tenants, repository_base=tmp_path)
     prompts = store.list_prompts("demo")
 
     # Both subtrees surface, each tagged by kind + group (parent dir name).
@@ -120,7 +383,7 @@ def test_get_prompt_serves_skill_subtree(tmp_path: Path) -> None:
     skill.parent.mkdir(parents=True)
     skill.write_text("Be decisive.\n", encoding="utf-8")
 
-    store = TenantStore(tenants)
+    store = TenantStore(tenants, repository_base=tmp_path)
     data = store.get_prompt("demo", "skills/answer-formatting/variant-002.md")
     assert data == {
         "path": "skills/answer-formatting/variant-002.md",
@@ -142,7 +405,7 @@ def test_list_and_get_configs_support_config_and_configs_dirs(tmp_path: Path) ->
     (tenant / "configs" / "nested").mkdir(parents=True)
     (tenant / "configs" / "nested" / "train.json").write_text('{"split":"train"}\n', encoding="utf-8")
 
-    store = TenantStore(tenants)
+    store = TenantStore(tenants, repository_base=tmp_path)
 
     assert store.list_configs("demo") == [
         {"path": "config/local.json", "name": "local.json", "bytes": 17},
@@ -189,7 +452,7 @@ def test_evaluation_asset_only_directory_is_a_tenant(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    store = TenantStore(tmp_path)
+    store = TenantStore(tmp_path, repository_base=tmp_path.parent)
     listed = store.list_tenants()
 
     assert [row["tenant_id"] for row in listed] == ["bootstrap_tenant"]
@@ -245,7 +508,7 @@ def test_evaluation_asset_stage_returns_bounded_artifact_previews(
         encoding="utf-8",
     )
 
-    store = TenantStore(tmp_path)
+    store = TenantStore(tmp_path, repository_base=tmp_path.parent)
     detail = store.get_evaluation_asset_stage(
         "bootstrap_tenant",
         "v1",
@@ -319,7 +582,10 @@ def test_evaluation_asset_stage_reads_stage_oriented_layout(
         encoding="utf-8",
     )
 
-    detail = TenantStore(tmp_path).get_evaluation_asset_stage(
+    detail = TenantStore(
+        tmp_path,
+        repository_base=tmp_path.parent,
+    ).get_evaluation_asset_stage(
         "bootstrap_tenant",
         "v1",
         "intent_clustering",
@@ -330,7 +596,10 @@ def test_evaluation_asset_stage_reads_stage_oriented_layout(
         "stages/04_intent_clustering/intent_inventory.jsonl"
     )
     assert detail["clusters"][0]["representatives"] == ["request alpha"]
-    guideline_detail = TenantStore(tmp_path).get_evaluation_asset_stage(
+    guideline_detail = TenantStore(
+        tmp_path,
+        repository_base=tmp_path.parent,
+    ).get_evaluation_asset_stage(
         "bootstrap_tenant",
         "v1",
         "rubric_extraction",
@@ -392,7 +661,7 @@ def test_missing_label_artifacts_belong_to_label_inference(
         / "missing_labeled_feedback_report.md"
     ).write_text("# Missing\n", encoding="utf-8")
 
-    store = TenantStore(tmp_path)
+    store = TenantStore(tmp_path, repository_base=tmp_path.parent)
     coverage = store.get_evaluation_asset_stage(
         "bootstrap_tenant",
         "v1",

@@ -118,7 +118,9 @@ EVALUATION_ASSET_HTML = r"""<!doctype html>
   .asset-head { padding: 24px 26px; display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
   .asset-head code { color: var(--muted); font: 12px var(--mono); }
   .asset-head p { margin: 5px 0 0; color: var(--muted); }
-  .status-running { color: var(--amber); background: var(--amber-soft); }
+  .status-draft { color: var(--muted); background: #edf2ef; }
+  .status-queued, .status-running, .status-awaiting_review { color: var(--amber); background: var(--amber-soft); }
+  .status-released { color: var(--green); background: var(--green-soft); }
   .status-failed { color: var(--red); background: var(--red-soft); }
   .pipeline { display: grid; grid-template-columns: repeat(8,minmax(108px,1fr)); gap: 9px;
     padding: 0 26px 26px; overflow-x: auto; }
@@ -513,7 +515,7 @@ async function api(path, options) {
 
 function statusPill(status) {
   const value = status || 'not started';
-  const cls = value === 'failed' ? 'status-failed' : ['running','queued'].includes(value) ? 'status-running' : '';
+  const cls = `status-${value}`;
   return `<span class="pill ${cls}"><i class="dot"></i>${esc(pretty(value))}</span>`;
 }
 
@@ -711,6 +713,8 @@ function renderTenant() {
     return;
   }
   const config = asset.config || {}, state = asset.state || {}, dirs = asset.directories || {};
+  const canExtend = state.status === 'released';
+  const canAdopt = state.status === 'completed';
   const canResume = state.status === 'failed'
     || (!asset.runner_active && ['running','queued'].includes(state.status));
   const stages = state.stages || [];
@@ -747,6 +751,10 @@ function renderTenant() {
         ${state.error ? `<br>${esc(state.error)}` : '<br>The persisted run has no active worker.'}
         <div class="error-actions"><button id="resume">Resume with current decisions</button></div>
         <br>Select the failed stage below to adjust its input parameters.</div>` : ''}
+      ${canAdopt ? `<div class="error-box"><strong>Legacy completed checkpoint</strong>
+        <br>Verify every stage, source hash, manifest, and catalog copy before release.
+        <div class="error-actions"><button id="adopt">Adopt verified legacy asset</button></div>
+        <br>CLI equivalent: <code>assets adopt --tenant ${esc(APP.tenant)} --asset-id ${esc(asset.asset_id)}</code>.</div>` : ''}
       ${asset.lineage ? `<div class="lineage-note"><strong>Extended from ${esc(asset.lineage.parent_asset_id)}</strong>
         · ${asset.lineage.clustering_mode === 'keep' ? 'Original intent clustering reused'
           : 'Intent clustering refreshed'} · ${Number((asset.lineage.added_labeled_record_ids || []).length)}
@@ -761,7 +769,9 @@ function renderTenant() {
       <section class="card panel"><h3>Self-contained artifacts</h3><div class="dirs">${dirCards}</div></section>
     </div>`;
   document.getElementById('another').onclick = renderCreate;
-  document.getElementById('extend').onclick = () => renderExtend(asset);
+  const extend = document.getElementById('extend');
+  extend.disabled = !canExtend;
+  if (canExtend) extend.onclick = () => renderExtend(asset);
   document.querySelectorAll('[data-asset]').forEach(button => button.onclick = () => {
     APP.assetId = button.dataset.asset; APP.stageKey = null; APP.stageDetail = null;
     renderTenant();
@@ -772,6 +782,8 @@ function renderTenant() {
   wireStageDetail(asset);
   const resume = document.getElementById('resume');
   if (resume) resume.onclick = () => resumeAsset(asset.asset_id, {});
+  const adopt = document.getElementById('adopt');
+  if (adopt) adopt.onclick = () => adoptLegacyAsset(asset.asset_id, adopt);
   if (!APP.stageDetail || APP.stageDetail.stage !== APP.stageKey) loadStage(asset.asset_id);
 }
 
@@ -786,7 +798,7 @@ function renderExtend(parent) {
       <div class="section-head"><div><h2>Incremental asset setup</h2>
         <p>The parent remains unchanged. The new version receives complete, self-contained artifacts.</p></div></div>
       <form id="extend-form">
-        <label>Parent asset <span>The completed version used as the base.</span>
+        <label>Parent asset <span>The verified released version used as the base.</span>
           <input name="parent_asset_id" value="${esc(parent.asset_id)}" readonly>
         </label>
         <label>New asset version <span>Must not already exist.</span>
@@ -1364,6 +1376,22 @@ async function resumeAsset(assetId, updates, sourceButton) {
     const message = document.getElementById('resume-message');
     if (message) { message.className = 'message error'; message.textContent = error.message; }
     else button.textContent = error.message;
+  }
+}
+
+async function adoptLegacyAsset(assetId, button) {
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Verifying legacy asset…';
+  try {
+    await api(`/api/tenants/${encodeURIComponent(APP.tenant)}/evaluation-assets/${encodeURIComponent(assetId)}/adopt`, {
+      method: 'POST', headers: {'Content-Type':'application/json'}
+    });
+    await selectTenant(APP.tenant);
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = originalText;
+    button.title = error.message;
   }
 }
 

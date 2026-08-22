@@ -31,6 +31,7 @@ Routes:
     POST /api/evaluation-assets/start              -> create and run an asset
     POST /api/evaluation-assets/extend             -> create an incremental version
     POST /api/tenants/<t>/evaluation-assets/<a>/resume -> revise and resume an asset
+    POST /api/tenants/<t>/evaluation-assets/<a>/adopt -> adopt legacy completion
 """
 
 from __future__ import annotations
@@ -148,6 +149,13 @@ class _Handler(BaseHTTPRequestHandler):
         if params is not None:
             self._route_resume_evaluation_asset(params)
             return
+        params = _match(
+            "/api/tenants/{tenant}/evaluation-assets/{asset}/adopt",
+            parsed.path,
+        )
+        if params is not None:
+            self._route_adopt_evaluation_asset(params)
+            return
         self._send_json({"error": "not found", "path": parsed.path}, status=404)
 
     # -- route table -----------------------------------------------------
@@ -193,13 +201,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "bad index"}, status=400)
             return
         run_rel = unquote(params["run"])
-        studio_data = self.store.run_uses_evaluation_asset_dataset(
+        snapshot, studio_data = self.store.prepare_case(
             params["tenant"],
             run_rel,
+            index,
         )
         if studio_data and not self._authorize_studio_request(no_store=True):
             return
-        data = self.store.get_case(params["tenant"], run_rel, index)
+        data = self.store.materialize_case(snapshot)
         self._send_json_or_404(data, no_store=studio_data)
 
     def _route_iterations(self, params: Dict[str, str], query: Dict[str, List[str]]) -> None:
@@ -228,11 +237,14 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json_or_404(data)
 
     def _route_datasets(self, params: Dict[str, str], query: Dict[str, List[str]]) -> None:
-        studio_data = self.store.has_evaluation_asset_datasets(params["tenant"])
+        snapshots, studio_data = self.store.prepare_dataset_listing(
+            params["tenant"]
+        )
         if studio_data and not self._authorize_studio_request(no_store=True):
             return
+        datasets = self.store.materialize_dataset_listing(snapshots)
         self._send_json(
-            self.store.list_datasets(params["tenant"]),
+            datasets,
             no_store=studio_data,
         )
 
@@ -242,17 +254,16 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "missing path"}, status=400)
             return
         dataset_rel = unquote(rel)
-        studio_data = self.store.is_evaluation_asset_dataset(
+        offset = _int_param(query, "offset", 0)
+        limit = _int_param(query, "limit", 100)
+        snapshot, studio_data = self.store.prepare_dataset(
             params["tenant"],
             dataset_rel,
         )
         if studio_data and not self._authorize_studio_request(no_store=True):
             return
-        offset = _int_param(query, "offset", 0)
-        limit = _int_param(query, "limit", 100)
-        data = self.store.get_dataset(
-            params["tenant"],
-            dataset_rel,
+        data = self.store.materialize_dataset(
+            snapshot,
             offset=offset,
             limit=limit,
         )
@@ -420,6 +431,20 @@ class _Handler(BaseHTTPRequestHandler):
         except FileExistsError as exc:
             self._send_json({"error": str(exc)}, status=409)
             return
+        except RuntimeError as exc:
+            self._send_json({"error": str(exc)}, status=409)
+            return
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        self._send_json(state, status=202)
+
+    def _route_adopt_evaluation_asset(self, params: Dict[str, str]) -> None:
+        try:
+            state = self.asset_manager.adopt(
+                params["tenant"],
+                params["asset"],
+            )
         except RuntimeError as exc:
             self._send_json({"error": str(exc)}, status=409)
             return
@@ -726,7 +751,13 @@ def _is_same_http_origin(origin: str, authority: str) -> bool:
     return request_authority == (_normalized_host(parsed.hostname), origin_port)
 
 
-def serve(tenants_root: Path, host: str = "127.0.0.1", port: int = 8765) -> None:
+def serve(
+    tenants_root: Path,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    *,
+    repository_base: Path | None = None,
+) -> None:
     """Start the UI server and block until interrupted."""
     if not _is_loopback_name(host):
         raise ValueError("Evaluation Asset Studio must bind to a loopback host")
@@ -740,8 +771,12 @@ def serve(tenants_root: Path, host: str = "127.0.0.1", port: int = 8765) -> None
         if isinstance(bind_address, ipaddress.IPv6Address)
         else ThreadingHTTPServer
     )
-    store = TenantStore(tenants_root)
-    asset_manager = EvaluationAssetRunManager(tenants_root)
+    effective_base = repository_base if repository_base is not None else Path.cwd()
+    store = TenantStore(tenants_root, repository_base=effective_base)
+    asset_manager = EvaluationAssetRunManager(
+        tenants_root,
+        repository_base=effective_base,
+    )
 
     handler = type(
         "_BoundHandler",
