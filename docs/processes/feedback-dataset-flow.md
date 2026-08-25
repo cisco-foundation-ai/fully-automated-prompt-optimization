@@ -17,10 +17,11 @@ The workflow keeps three ideas separate:
 - Trusted feedback defines what correctness means.
 - Unlabeled traces define what users actually ask for.
 - Matched unlabeled traces may receive inferred labels from trusted feedback,
-  but only after an intent coverage gate passes and an exact-fingerprint review
-  decision approves the resulting case.
+  but only after an intent coverage gate passes. Scoreable inferred and
+  mechanically accepted synthetic cases are approved automatically.
 - Synthetic examples are proposed only for intents matched to trusted labeled
-  evidence. They are published only after exact-fingerprint approval.
+  evidence. Synthetic coverage is disabled by default; when enabled, cases
+  that pass Stage 7's mechanical checks are automatically approved.
 
 ## Product and Execution Model
 
@@ -96,8 +97,8 @@ and are not additional evaluation-asset stages.
 | 4. `intent_clustering` — Mine intent clusters | `intent_records.jsonl`; configured embedding provider/model; exact cluster count | Vectorize canonical intent text with the selected OpenAI embedding model or local TF-IDF; allocate the configured cluster count across routes; cluster deterministically within each route; retain representative record IDs and top terms | `stages/04_intent_clustering/` |
 | 5. `coverage_decisions` — Apply coverage decisions | `intent_inventory.jsonl`, `intent_records.jsonl`, training-derived `trusted_intents.jsonl`; configured embedding provider/model and coverage parameters | Compare each mined cluster with trusted intents; apply the match threshold (default `0.6`) and trusted-support constraints; classify every cluster; deterministically select centroid-near traces from under-supported and unsupported clusters for correctness-label acquisition. Every queue row records `purpose`, `method`, and `sampling_semantics: non_probability`; it is not an unbiased sample or prevalence estimate | `stages/05_coverage_decisions/`, including `review_queue/` |
 | 6. `label_inference` — Infer reviewable labels | Intent clusters and matches; canonical unlabeled records; training-visible trusted evaluation guidelines; configured guideline model | For matched clusters only, use the configured LLM and matched guideline to propose a case rubric and inferred cases. Persist a complete dependency fingerprint over the guideline, support, match/cluster/source membership, provider/model/settings, prompt, split plan, and algorithm. Hold an output with no scoreable rule/check/reference/tool expectation; it produces no cases or synthesis | `stages/06_label_inference/`, including inference dependencies and held outputs |
-| 7. `synthetic_coverage` — Optional synthetic coverage and review preparation | Supported clusters, representative requests, scoreable inferred rubrics and Stage 6 dependencies; enable flag and candidates-per-cluster setting | When enabled, request the configured number of candidates and apply only the enforced schema, nonempty-context, substantive-scoreability, narrow literal-label-leakage, and token-overlap checks. Persist complete Stage 7 dependencies, exact review fingerprints, exact canonical-context duplicate families, and conflict/scoreability holds. When disabled, make no synthetic model call and write empty synthetic artifacts. After the Stage 7 receipt commits, transition to `awaiting_review` | `stages/07_synthetic_coverage/`, `reviews/decisions.jsonl`, and `reviews/finalizations.jsonl` |
-| 8. `dataset_splits` — Finalize and build dataset splits | Trusted cases; one explicit current review finalization; exact duplicate-family authority; split seed | Publish non-held trusted cases plus exact-fingerprint-approved inferred/synthetic cases only; pending and rejected cases stay in review artifacts, and held cases stay in triage. Preserve early trusted assignments, keep each exact-context/supplied-group family in one split, never put a derived case in regression, and publish the four immutable consumer files | `stages/08_dataset_splits/`, root `asset_manifest.json`, and `datasets/evaluation_assets/<asset_id>/` |
+| 7. `synthetic_coverage` — Optional synthetic coverage and review preparation | Supported clusters, representative requests, scoreable inferred rubrics and Stage 6 dependencies; enable flag and candidates-per-cluster setting | When enabled, request the configured number of candidates and apply only the enforced schema, nonempty-context, substantive-scoreability, narrow literal-label-leakage, and token-overlap checks. Persist complete Stage 7 dependencies, exact review fingerprints, exact canonical-context duplicate families, and conflict/scoreability holds. Scoreable inferred and mechanically accepted synthetic cases receive an automatic pipeline approval; held cases remain excluded. When disabled, make no synthetic model call and write empty synthetic artifacts. After the Stage 7 receipt commits, transition to `awaiting_review` | `stages/07_synthetic_coverage/`, `reviews/decisions.jsonl`, and `reviews/finalizations.jsonl` |
+| 8. `dataset_splits` — Finalize and build dataset splits | Trusted cases; one explicit current review finalization; exact duplicate-family authority; split seed | Publish non-held trusted cases plus pipeline-approved inferred/synthetic cases; held cases stay in triage. Preserve early trusted assignments, keep each exact-context/supplied-group family in one split, never put a derived case in regression, and publish the four immutable consumer files | `stages/08_dataset_splits/`, root `asset_manifest.json`, and `datasets/evaluation_assets/<asset_id>/` |
 
 The persisted Stage 3 identifier remains `rubric_extraction` so existing
 `pipeline_state.json`, CLI, and API clients stay compatible. Its product name,
@@ -322,7 +323,7 @@ audit records both boundaries and execution resumes at that earlier stage.
 ### Reviewing and finalizing derived cases
 
 Stage 7 writes eligible inferred and synthetic proposals to
-`derived_review_items.jsonl`. Each item starts pending and binds the complete
+`derived_review_items.jsonl`. Each item binds the complete
 case, its scoreable expected payload, Stage 6/7 dependency, and source
 provenance to an exact SHA-256 fingerprint. Unscoreable cases and exact-context
 truth conflicts are held outside the approvable queue. Exact canonical
@@ -335,7 +336,9 @@ receipt, dependencies, item fingerprints, holds, review-set fingerprint, and
 decision-set fingerprint. The review set is stable across decision-only changes;
 the decision set binds the canonical resolved `case_id`, item fingerprint,
 status, and decision ID rows. An eligible item may append one immutable
-`approved` or `rejected` decision for its exact fingerprint. Missing, stale,
+`approved` or `rejected` decision for its exact fingerprint. Mechanically
+accepted synthetic items and scoreable inferred items are automatically
+approved by the pipeline. Missing, stale,
 duplicate, malformed, or mismatched authority fails closed to pending or an
 integrity error; there is no latest-write-wins reversal. Decisions and
 historical finalizations remain append-only across invalidation.
@@ -526,13 +529,13 @@ Each evaluation asset produces the fixed FAPO JSONL split files below:
 |---|---|---|
 | `train_trusted` | Trusted feedback cases selected for optimization | Optimization and failure discovery |
 | `train_inferred` | Exact-fingerprint-approved labels on real traces from matched trusted feedback | Optimization coverage |
-| `train_synthetic` | Mechanically accepted and exact-fingerprint-approved synthetic cases | Optimization coverage |
+| `train_synthetic` | Mechanically accepted and pipeline-approved synthetic cases | Optimization coverage |
 | `validation_trusted` | Held-out trusted examples | Candidate selection |
 | `validation_inferred` | Exact-fingerprint-approved inferred labels assigned to validation for this dataset version | Coverage-oriented validation |
-| `validation_synthetic` | Mechanically accepted and exact-fingerprint-approved synthetic examples assigned to validation | Coverage-oriented validation |
+| `validation_synthetic` | Mechanically accepted and pipeline-approved synthetic examples assigned to validation | Coverage-oriented validation |
 | `test_trusted` | Held-out trusted examples used for release-candidate testing | Final release check |
 | `test_inferred` | Exact-fingerprint-approved inferred labels assigned to test for this dataset version | Coverage-oriented final check |
-| `test_synthetic` | Mechanically accepted and exact-fingerprint-approved synthetic examples assigned to test | Coverage-oriented final check |
+| `test_synthetic` | Mechanically accepted and pipeline-approved synthetic examples assigned to test | Coverage-oriented final check |
 | `regression_trusted` | Automatic 20% holdout sampled only from trusted feedback cases | Tight non-regression gate |
 | `triage_hold` | Exact-truth conflicts, unscoreable derived cases, and approved derived cases attached to regression | Audit/repair queue only |
 
@@ -872,10 +875,10 @@ contract, or calibrated semantic equivalence. The token-overlap heuristic is a
 candidate-rejection mechanism, not the exact canonical-context family identity
 used for split safety.
 
-Mechanically accepted synthetic cases remain pending until an exact-fingerprint
-review approves them. Approved cases may be assigned to training, validation,
-or test for that dataset version. Pending, rejected, and held cases remain
-auditable but unpublished; derived cases never enter `regression_trusted`.
+Mechanically accepted synthetic cases and scoreable inferred cases receive a
+fingerprint-bound pipeline approval and may be assigned to training,
+validation, or test for that dataset version. Held cases remain auditable but
+unpublished; derived cases never enter `regression_trusted`.
 
 ## Prepared Feedback Record
 
@@ -1083,8 +1086,8 @@ filter is not evidence that those properties hold.
 - Do not claim semantic/paraphrase deduplication. Exact canonical contexts are
   grouped; the token-overlap synthetic check is a separate rejection heuristic.
 - Keep validation and test examples out of prompt/skill authoring context during optimization.
-- Assign only exact-fingerprint-approved inferred and mechanically accepted,
-  exact-fingerprint-approved synthetic cases to train, validation, or test.
+- Assign only pipeline-approved inferred and synthetic cases to train,
+  validation, or test.
 - Automatically assign approximately 20% of trusted connected groups to
   `regression_trusted` at the early boundary.
 - Route a derived case connected to a regression family to `triage_hold`.
@@ -1132,8 +1135,8 @@ lifecycle:
   downstream provider payloads, or UI previews.
 - Do not mix one supplied/exact-context-connected family across splits.
 - Do not synthesize labels for intents that do not match trusted labeled evidence.
-- Do not publish an inferred or synthetic case without approval for its exact
-  current fingerprint.
+- Do not publish an inferred or synthetic case without its exact current
+  pipeline approval.
 - Keep inferred and synthetic cases out of `regression_trusted`; the core
   selects that gate automatically from trusted feedback.
 - Do not commit raw feedback traces or local generated datasets unless the tenant workflow explicitly allows it.

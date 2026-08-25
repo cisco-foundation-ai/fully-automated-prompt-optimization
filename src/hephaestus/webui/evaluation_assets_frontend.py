@@ -635,7 +635,7 @@ function renderCreate() {
         <label>Intent match threshold <span>Minimum Stage 5 cosine score for a trusted-intent match.</span>
           <input name="match_threshold" type="number" min="0" max="1" step="0.01" value="0.6" required>
         </label>
-        <label>Stage 7 synthetic coverage <span>Optional augmentation after real unlabeled records are labeled.</span>
+        <label>Stage 7 synthetic coverage <span>Optional augmentation, disabled by default. Mechanically accepted synthetic cases are approved automatically.</span>
           <select id="synthetic-enabled" name="synthetic_coverage_enabled">
             <option value="false" selected>Disabled</option>
             <option value="true">Enabled</option>

@@ -230,7 +230,8 @@ do not edit them again when they are active.
   least one guideline, provenance is retained, evaluator plans prefer
   deterministic or state checks where possible, and guidelines are marked
   uncalibrated without adding a blocking review gate. Inferred labels and
-  synthetic cases remain review-required.
+  scoreable inferred and mechanically accepted synthetic cases are
+  automatically approved by the pipeline.
 - For `intent_clustering`, verify the produced count equals the requested
   count. A cluster view is exploratory; projection positions do not change the
   vector-space clustering result.
@@ -269,7 +270,8 @@ Report:
 - counts for feedback, unlabeled records, clusters, matched clusters, missing
   label clusters, inferred cases, and splits
 - any failed stage and its persisted error
-- review-required inferred or synthetic outputs and next human decision
+- automatically approved inferred/synthetic outputs and any held cases that
+  require investigation
 
 The Explorer UI uses the same core service and filesystem state. It is valid to
 trigger a run through the Evaluation Asset Studio and monitor it through the

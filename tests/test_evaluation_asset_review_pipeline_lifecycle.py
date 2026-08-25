@@ -237,7 +237,7 @@ def _review_statuses(page: Mapping[str, Any]) -> dict[str, str]:
     return {str(item["case_id"]): str(item["status"]) for item in page["items"]}
 
 
-def test_pending_only_finalization_publishes_no_derived_cases(
+def test_automatic_approval_publishes_derived_cases(
     tmp_path: Path,
 ) -> None:
     pipeline, _, _ = _new_pipeline(tmp_path)
@@ -248,8 +248,8 @@ def test_pending_only_finalization_publishes_no_derived_cases(
     assert paused.status == "awaiting_review"
     assert page["counts"] == {
         "trusted": 1,
-        "approved": 0,
-        "pending": 2,
+        "approved": 2,
+        "pending": 0,
         "rejected": 0,
         "held": 0,
         "total": 3,
@@ -264,8 +264,11 @@ def test_pending_only_finalization_publishes_no_derived_cases(
 
     published = _published_cases(pipeline.layout)
     assert released.status == "released"
-    assert derived_ids.isdisjoint(str(case["case_id"]) for case in published)
-    assert {case["metadata"]["trust_tier"] for case in published} == {"trusted_feedback"}
+    assert derived_ids <= {str(case["case_id"]) for case in published}
+    assert {case["metadata"]["trust_tier"] for case in published} == {
+        "trusted_feedback",
+        "inferred_from_trusted_feedback",
+    }
     snapshot = json.loads(
         pipeline.layout.artifact_path(
             PipelineStage.DATASET_SPLITS,
@@ -274,36 +277,19 @@ def test_pending_only_finalization_publishes_no_derived_cases(
     )
     assert snapshot["counts"] == {
         "trusted": 1,
-        "approved": 0,
-        "pending": 2,
+        "approved": 2,
+        "pending": 0,
         "rejected": 0,
         "held": 0,
     }
 
 
-def test_finalization_rejects_a_stale_decision_snapshot_and_replays_release(
+def test_finalization_replays_the_automatic_decision_snapshot(
     tmp_path: Path,
 ) -> None:
     """Catch decision races hidden by a stable item/dependency review set."""
     pipeline, _, _ = _new_pipeline(tmp_path)
     assert pipeline.run().status == "awaiting_review"
-    stale_page = pipeline.layout.list_review_items()
-    item = stale_page["items"][0]
-    pipeline.layout.decide_review(
-        item["case_id"],
-        item["fingerprint"],
-        "approved",
-        reviewer="reviewer-a",
-        expected_review_set_fingerprint=stale_page["review_set_fingerprint"],
-    )
-
-    with pytest.raises(ValueError, match="decision set changed"):
-        pipeline.finalize_review(
-            reviewer="reviewer-a",
-            expected_review_set_fingerprint=stale_page["review_set_fingerprint"],
-            expected_decision_set_fingerprint=stale_page["decision_set_fingerprint"],
-        )
-
     current_page = pipeline.layout.list_review_items()
     assert (
         pipeline.finalize_review(
@@ -325,30 +311,12 @@ def test_finalization_rejects_a_stale_decision_snapshot_and_replays_release(
     )
 
 
-def test_exact_approve_and_reject_control_release_inclusion(
+def test_automatic_approval_controls_release_inclusion(
     tmp_path: Path,
 ) -> None:
     pipeline, _, _ = _new_pipeline(tmp_path)
     assert pipeline.run().status == "awaiting_review"
     page = pipeline.layout.list_review_items()
-    approved_item, rejected_item = page["items"]
-
-    approved = pipeline.layout.decide_review(
-        approved_item["case_id"],
-        approved_item["fingerprint"],
-        "approved",
-        reviewer="reviewer-a",
-        expected_review_set_fingerprint=page["review_set_fingerprint"],
-    )
-    pipeline.layout.decide_review(
-        rejected_item["case_id"],
-        rejected_item["fingerprint"],
-        "rejected",
-        reviewer="reviewer-a",
-        expected_review_set_fingerprint=page["review_set_fingerprint"],
-    )
-    page = pipeline.layout.list_review_items()
-
     released = pipeline.finalize_review(
         reviewer="reviewer-a",
         expected_review_set_fingerprint=page["review_set_fingerprint"],
@@ -357,11 +325,11 @@ def test_exact_approve_and_reject_control_release_inclusion(
 
     published_by_id = {str(case["case_id"]): case for case in _published_cases(pipeline.layout)}
     assert released.status == "released"
-    assert approved_item["case_id"] in published_by_id
-    assert rejected_item["case_id"] not in published_by_id
-    approved_case = published_by_id[approved_item["case_id"]]
-    assert approved_case["metadata"]["review_status"] == "approved"
-    assert approved_case["metadata"]["decision_id"] == approved["decision_id"]
+    assert {item["case_id"] for item in page["items"]} <= set(published_by_id)
+    for item in page["items"]:
+        approved_case = published_by_id[item["case_id"]]
+        assert approved_case["metadata"]["review_status"] == "approved"
+        assert approved_case["metadata"]["decision_id"] == item["decision_id"]
     snapshot = json.loads(
         pipeline.layout.artifact_path(
             PipelineStage.DATASET_SPLITS,
@@ -369,8 +337,7 @@ def test_exact_approve_and_reject_control_release_inclusion(
         ).read_text(encoding="utf-8")
     )
     assert {item["case_id"]: item["status"] for item in snapshot["items"]} == {
-        approved_item["case_id"]: "approved",
-        rejected_item["case_id"]: "rejected",
+        item["case_id"]: "approved" for item in page["items"]
     }
 
 
@@ -380,16 +347,9 @@ def test_child_inherits_identical_fingerprint_decisions(
     parent, _, _ = _new_pipeline(tmp_path)
     assert parent.run().status == "awaiting_review"
     parent_page = parent.layout.list_review_items()
-    parent_decisions: dict[str, dict[str, Any]] = {}
-    for item, status in zip(parent_page["items"], ("approved", "rejected")):
-        parent_decisions[item["case_id"]] = parent.layout.decide_review(
-            item["case_id"],
-            item["fingerprint"],
-            status,
-            reviewer="reviewer-a",
-            expected_review_set_fingerprint=parent_page["review_set_fingerprint"],
-        )
-    parent_page = parent.layout.list_review_items()
+    parent_decisions = {
+        item["case_id"]: item for item in parent_page["items"]
+    }
     assert (
         parent.finalize_review(
             reviewer="reviewer-a",

@@ -120,6 +120,7 @@ from src.hephaestus.evaluation_assets.review import (
     case_content_fingerprint,
     decision_set_fingerprint,
     inherit_review_decision,
+    record_review_decision,
     parse_review_finalization,
     review_set_fingerprint,
     validate_duplicate_family,
@@ -2790,6 +2791,37 @@ class EvaluationAssetPipeline:
             held_rows,
         )
         self._inherit_parent_review_decisions(queue, timestamp=timestamp)
+        self._auto_approve_derived_review_items(queue, timestamp=timestamp)
+
+    def _auto_approve_derived_review_items(
+        self,
+        review_items: Sequence[Mapping[str, Any]],
+        *,
+        timestamp: str,
+    ) -> None:
+        """Approve scoreable inferred and synthetic cases for publication.
+
+        Inferred cases and opt-in synthetic cases enter this queue only after
+        their respective pipeline checks. Held or unscoreable cases are absent
+        and remain excluded from publication.
+        """
+        decisions = self.layout._read_control_log(self.layout.review_decisions_path)
+        for item in review_items:
+            decision, append = record_review_decision(
+                item,
+                decisions,
+                status="approved",
+                reviewer="fapo_pipeline",
+                timestamp=timestamp,
+                note="Automatically approved by the evaluation-asset pipeline.",
+            )
+            if append:
+                self.layout._append_jsonl_once(
+                    self.layout.review_decisions_path,
+                    decision,
+                    identity_fields=("decision_id",),
+                )
+                decisions = [*decisions, decision]
 
     def _inherit_parent_review_decisions(
         self,

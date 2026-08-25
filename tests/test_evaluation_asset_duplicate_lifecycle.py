@@ -448,37 +448,12 @@ def test_exact_context_copies_share_one_approved_published_family(
     assert len({member["group_id"] for member in family["members"]}) == 3
     assert review_page["counts"] == {
         "trusted": 1,
-        "approved": 0,
-        "pending": 4,
+        "approved": 4,
+        "pending": 0,
         "rejected": 0,
         "held": 0,
         "total": 5,
     }
-    items_by_id = {row["case_id"]: row for row in review_page["items"]}
-    decisions: dict[str, dict[str, Any]] = {}
-    for case_id in ("inferred-inferred-copy", synthetic_id):
-        item = items_by_id[case_id]
-        decisions[case_id] = pipeline.layout.decide_review(
-            case_id,
-            item["fingerprint"],
-            "approved",
-            reviewer="reviewer-a",
-            expected_review_set_fingerprint=review_page[
-                "review_set_fingerprint"
-            ],
-        )
-    rejected = items_by_id["inferred-rejected-only"]
-    pipeline.layout.decide_review(
-        rejected["case_id"],
-        rejected["fingerprint"],
-        "rejected",
-        reviewer="reviewer-a",
-        expected_review_set_fingerprint=review_page[
-            "review_set_fingerprint"
-        ],
-    )
-    review_page = pipeline.layout.list_review_items()
-
     assert (
         pipeline.finalize_review(
             reviewer="reviewer-a",
@@ -506,12 +481,9 @@ def test_exact_context_copies_share_one_approved_published_family(
     ]
     assert published_locations == {"train"}
     assert {row["case_id"] for row in published_family} == member_ids
-    assert {
-        split for split, rows in split_rows.items() if rows
-    } == {"train"}
-    assert {
+    assert member_ids <= {
         row["case_id"] for rows in split_rows.values() for row in rows
-    } == member_ids
+    }
     assert {row["metadata"]["split_group_id"] for row in published_family} == {
         family["split_group_id"]
     }
@@ -519,11 +491,15 @@ def test_exact_context_copies_share_one_approved_published_family(
         row["metadata"]["decision_id"]
         for row in published_family
         if row["case_id"] != "feedback-trusted-copy"
-    } == {row["decision_id"] for row in decisions.values()}
-    assert "inferred-pending-only" not in {
+    } == {
+        item["decision_id"]
+        for item in review_page["items"]
+        if item["case_id"] in {row["case_id"] for row in published_family}
+    }
+    assert "inferred-pending-only" in {
         row["case_id"] for rows in split_rows.values() for row in rows
     }
-    assert "inferred-rejected-only" not in {
+    assert "inferred-rejected-only" in {
         row["case_id"] for rows in split_rows.values() for row in rows
     }
     _assert_review_manifests(
@@ -531,15 +507,15 @@ def test_exact_context_copies_share_one_approved_published_family(
         review_page=review_page,
         expected_statuses={
             "inferred-inferred-copy": "approved",
-            "inferred-pending-only": "pending",
-            "inferred-rejected-only": "rejected",
+            "inferred-pending-only": "approved",
+            "inferred-rejected-only": "approved",
             synthetic_id: "approved",
         },
         expected_counts={
             "trusted": 1,
-            "approved": 2,
-            "pending": 1,
-            "rejected": 1,
+            "approved": 4,
+            "pending": 0,
+            "rejected": 0,
             "held": 0,
         },
     )
@@ -569,25 +545,12 @@ def test_conflicting_truth_holds_and_excludes_the_complete_exact_family(
     }
     assert review_page["counts"] == {
         "trusted": 0,
-        "approved": 0,
-        "pending": 2,
+        "approved": 2,
+        "pending": 0,
         "rejected": 0,
         "held": 3,
         "total": 5,
     }
-    items_by_id = {row["case_id"]: row for row in review_page["items"]}
-    rejected = items_by_id["inferred-rejected-only"]
-    pipeline.layout.decide_review(
-        rejected["case_id"],
-        rejected["fingerprint"],
-        "rejected",
-        reviewer="reviewer-a",
-        expected_review_set_fingerprint=review_page[
-            "review_set_fingerprint"
-        ],
-    )
-    review_page = pipeline.layout.list_review_items()
-
     assert (
         pipeline.finalize_review(
             reviewer="reviewer-a",
@@ -619,14 +582,14 @@ def test_conflicting_truth_holds_and_excludes_the_complete_exact_family(
         pipeline,
         review_page=review_page,
         expected_statuses={
-            "inferred-pending-only": "pending",
-            "inferred-rejected-only": "rejected",
+            "inferred-pending-only": "approved",
+            "inferred-rejected-only": "approved",
         },
         expected_counts={
             "trusted": 0,
-            "approved": 0,
-            "pending": 1,
-            "rejected": 1,
+            "approved": 2,
+            "pending": 0,
+            "rejected": 0,
             "held": 3,
         },
     )
