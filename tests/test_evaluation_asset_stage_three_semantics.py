@@ -22,7 +22,7 @@ from src.hephaestus.evaluation_assets.stage_three_contract import (
 )
 
 
-def test_native_trusted_intent_uses_only_source_request_semantics() -> None:
+def test_native_trusted_intent_uses_all_prior_user_request_semantics() -> None:
     guideline = {
         "guideline_id": "guideline-task-route-1",
         "intent_label": "downstream label canary",
@@ -36,8 +36,9 @@ def test_native_trusted_intent_uses_only_source_request_semantics() -> None:
             "group_id": "group-1",
             "user_input": "  source request semantics  ",
             "conversation_context": [
-                {"role": "user", "content": "earlier context is not canonical"},
+                {"role": "user", "content": "first user turn"},
                 {"role": "assistant", "content": "latest context semantics"},
+                {"role": "user", "content": "second user turn"},
             ],
             "tool_calls": [
                 {"name": "lookup_tool", "arguments": {}},
@@ -52,7 +53,7 @@ def test_native_trusted_intent_uses_only_source_request_semantics() -> None:
 
     assert trusted_intent["label"] == "downstream label canary"
     assert trusted_intent["texts"] == [
-        "source request semantics latest context semantics tools archive lookup_tool"
+        "source request semantics first user turn second user turn tools archive lookup_tool"
     ]
 
 

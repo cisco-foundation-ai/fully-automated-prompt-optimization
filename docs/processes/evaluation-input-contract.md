@@ -94,8 +94,9 @@ Every `conversation_context` item requires:
 ```
 
 Both fields are nonempty strings. Additional vendor-neutral message metadata
-may be retained, but downstream canonical intent text uses only the latest
-message `content`.
+may be retained. Downstream canonical intent text includes every prior message
+whose role is exactly `user`, in conversation order; assistant messages are
+not included.
 
 ## Tool Calls
 

@@ -3172,7 +3172,7 @@ def _normalize_intent(row: Mapping[str, Any]) -> Dict[str, Any]:
         part
         for part in (
             user_input,
-            _latest_context_text(context),
+            _user_context_text(context),
             "tools " + " ".join(_tool_names(tool_calls)),
         )
         if part and part != "tools "
@@ -4532,13 +4532,17 @@ def _redact_value(value: Any) -> Any:
     return value
 
 
-def _latest_context_text(context: Any) -> str:
+def _user_context_text(context: Any) -> str:
+    """Return every prior user message in conversation order for intent mining."""
     if not isinstance(context, list):
         return ""
-    for item in reversed(context):
-        if isinstance(item, Mapping) and item.get("content"):
-            return _redact_text(_string(item["content"]))
-    return ""
+    return " ".join(
+        _redact_text(_string(item["content"]))
+        for item in context
+        if isinstance(item, Mapping)
+        and item.get("role") == "user"
+        and item.get("content")
+    )
 
 
 def _tool_names(calls: Any) -> List[str]:

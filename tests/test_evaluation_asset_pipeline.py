@@ -348,6 +348,7 @@ def test_normalization_preserves_structural_fields_and_redacts_content() -> None
         assert normalized["metadata"]["source_system"] == row["metadata"][
             "source_system"
         ]
+
         assert normalized["metadata"]["source_version"] == row["metadata"][
             "source_version"
         ]
@@ -393,6 +394,30 @@ def test_normalization_preserves_structural_fields_and_redacts_content() -> None
     feedback_serialized = json.dumps(feedback, sort_keys=True)
     assert "rationale@example.com" not in feedback_serialized
     assert "correction@example.com" not in feedback_serialized
+
+
+def test_normalized_intent_includes_all_prior_user_messages() -> None:
+    intent = _normalize_intent(
+        {
+            "schema_version": "fapo-evaluation-input-v1",
+            "record_id": "record-1",
+            "group_id": "group-1",
+            "task_type": "answer",
+            "user_input": "Current request",
+            "conversation_context": [
+                {"role": "user", "content": "First user request"},
+                {"role": "assistant", "content": "Assistant response"},
+                {"role": "user", "content": "Second user request"},
+            ],
+            "tool_calls": [{"name": "lookup", "arguments": {}}],
+            "runtime": {},
+            "metadata": {},
+        }
+    )
+
+    assert intent["canonical_intent_text"] == (
+        "Current request First user request Second user request tools lookup"
+    )
 
 
 def test_normalization_defaults_preserve_exact_canonical_source_strings() -> None:

@@ -617,8 +617,8 @@ If those counts are absent, the shared utility uses `len(texts)` as the trusted-
 
 The core uses the following deterministic mechanics:
 
-1. Stage 2 builds `canonical_intent_text` from `user_input`, the latest
-   conversation-context text, and observed tool names. It preserves the
+1. Stage 2 builds `canonical_intent_text` from `user_input`, every prior
+   user conversation-context message in order, and observed tool names. It preserves the
    supplied `route` byte-for-byte, defaulting it to the exact `task_type` only
    when `route` is absent. Present whitespace is significant routing identity.
 2. Stage 4 vectorizes that canonical text with the configured OpenAI embedding
@@ -944,7 +944,8 @@ Stage 3 deliberately separates evidence from generalization:
    `evidence_required`, and an evaluator plan. Conflicts and uncertainties stay
    explicit.
 4. `trusted_intents.jsonl` aggregates training support counts. Matching text is
-   built from the source user request, latest conversation context, observed
+   built from the source user request, every prior user conversation-context
+   message in order, and observed
    tool names, and intent label; it excludes normative criterion statements.
    `trusted_cases.jsonl` embeds the applicable guideline IDs and complete
    guideline snapshots so training split files remain independently usable.

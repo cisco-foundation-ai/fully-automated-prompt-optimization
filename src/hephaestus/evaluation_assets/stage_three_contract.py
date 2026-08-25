@@ -757,13 +757,16 @@ def trusted_intent_from_guideline(
 
 def _canonical_source_intent_text(row: Mapping[str, Any]) -> str:
     user_input = str(row.get("user_input") or "").strip()
-    context_text = ""
+    context_texts: list[str] = []
     context = row.get("conversation_context")
     if isinstance(context, list):
-        for message in reversed(context):
-            if isinstance(message, Mapping) and message.get("content"):
-                context_text = str(message["content"]).strip()
-                break
+        context_texts = [
+            str(message["content"]).strip()
+            for message in context
+            if isinstance(message, Mapping)
+            and message.get("role") == "user"
+            and message.get("content")
+        ]
 
     tool_names: set[str] = set()
     tool_calls = row.get("tool_calls")
@@ -778,7 +781,7 @@ def _canonical_source_intent_text(row: Mapping[str, Any]) -> str:
                 tool_names.add(str(name))
     tools_text = f"tools {' '.join(sorted(tool_names))}" if tool_names else ""
     return " ".join(
-        part for part in (user_input, context_text, tools_text) if part
+        part for part in (user_input, *context_texts, tools_text) if part
     )
 
 
