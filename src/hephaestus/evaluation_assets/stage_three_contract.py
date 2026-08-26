@@ -13,7 +13,11 @@ import re
 from typing import Any, Literal, Mapping, Sequence
 
 from src.hephaestus.datasets.evaluation_assets import validate_fapo_case
-from src.hephaestus.evaluation_assets.input_contract import effective_route
+from src.hephaestus.evaluation_assets.input_contract import (
+    effective_route,
+    episode_tool_names,
+    episode_user_messages,
+)
 from src.hephaestus.evaluation_assets.trust_tiers import TRUSTED_FEEDBACK
 
 CRITERION_KINDS = frozenset({"required", "prohibited", "preferred"})
@@ -767,8 +771,14 @@ def _canonical_source_intent_text(row: Mapping[str, Any]) -> str:
             and message.get("role") == "user"
             and message.get("content")
         ]
+    represented_user_messages = {user_input, *context_texts}
+    episode_texts = [
+        message
+        for message in episode_user_messages(row.get("episode"))
+        if message not in represented_user_messages
+    ]
 
-    tool_names: set[str] = set()
+    tool_names = set(episode_tool_names(row.get("episode")))
     tool_calls = row.get("tool_calls")
     if isinstance(tool_calls, list):
         for call in tool_calls:
@@ -781,7 +791,9 @@ def _canonical_source_intent_text(row: Mapping[str, Any]) -> str:
                 tool_names.add(str(name))
     tools_text = f"tools {' '.join(sorted(tool_names))}" if tool_names else ""
     return " ".join(
-        part for part in (user_input, *context_texts, tools_text) if part
+        part
+        for part in (user_input, *context_texts, *episode_texts, tools_text)
+        if part
     )
 
 

@@ -10,6 +10,8 @@ import pytest
 
 from src.hephaestus.evaluation_assets.input_contract import (
     SCHEMA_VERSION,
+    episode_tool_names,
+    episode_user_messages,
     input_contract_document,
     redact_correctness_signals,
     validate_input_records,
@@ -50,6 +52,121 @@ def test_canonical_labeled_and_unlabeled_records_validate() -> None:
         labeled=False,
         path=Path("unlabeled.jsonl"),
     )
+
+
+def test_contract_accepts_an_ordered_episode() -> None:
+    """A full episode can supplement the backward-compatible flat fields."""
+    episode = {
+        "episode_id": "episode-1",
+        "termination_reason": "completed",
+        "events": [
+            {
+                "sequence": 0,
+                "type": "message",
+                "role": "user",
+                "content": "Find the order.",
+            },
+            {
+                "sequence": 1,
+                "type": "tool_call",
+                "call_id": "call-1",
+                "name": "lookup_order",
+                "arguments": {"order_id": "123"},
+            },
+            {
+                "sequence": 2,
+                "type": "tool_result",
+                "call_id": "call-1",
+                "result": {"status": "shipped"},
+            },
+            {
+                "sequence": 3,
+                "type": "message",
+                "role": "assistant",
+                "content": "The order shipped.",
+            },
+        ],
+    }
+    record = {**_record(), "episode": episode}
+
+    validate_input_records(
+        [record],
+        labeled=False,
+        path=Path("unlabeled.jsonl"),
+    )
+
+    assert episode_user_messages(episode) == ["Find the order."]
+    assert episode_tool_names(episode) == ["lookup_order"]
+
+
+@pytest.mark.parametrize(
+    ("episode", "message"),
+    [
+        ([], "episode.*object"),
+        ({"events": []}, "episode.events.*must not be empty"),
+        (
+            {
+                "events": [
+                    {
+                        "sequence": 0,
+                        "type": "message",
+                        "role": "user",
+                        "content": "Request",
+                    },
+                    {
+                        "sequence": 0,
+                        "type": "message",
+                        "role": "assistant",
+                        "content": "Response",
+                    },
+                ]
+            },
+            "sequence.*strictly increasing",
+        ),
+        (
+            {"events": [{"sequence": 0, "type": "observation"}]},
+            "type.*message.*tool_call.*tool_result",
+        ),
+        (
+            {
+                "events": [
+                    {
+                        "sequence": 0,
+                        "type": "tool_call",
+                        "call_id": "call-1",
+                        "name": "lookup",
+                        "arguments": [],
+                    }
+                ]
+            },
+            "arguments.*object",
+        ),
+        (
+            {
+                "events": [
+                    {
+                        "sequence": 0,
+                        "type": "tool_result",
+                        "call_id": "missing-call",
+                        "result": {},
+                    }
+                ]
+            },
+            "call_id.*prior tool call",
+        ),
+    ],
+)
+def test_contract_rejects_malformed_episodes(
+    episode: object,
+    message: str,
+) -> None:
+    """Episode ordering and tool-call links are enforced at ingestion."""
+    with pytest.raises(ValueError, match=message):
+        validate_input_records(
+            [{**_record(), "episode": episode}],
+            labeled=False,
+            path=Path("unlabeled.jsonl"),
+        )
 
 
 def test_contract_rejects_vendor_shaped_or_ambiguous_records() -> None:
@@ -96,6 +213,18 @@ def test_contract_document_is_versioned_and_explicit() -> None:
         },
         "optional": ["content"],
         "kinds": ["deterministic", "executable"],
+    }
+    assert "episode" in contract["optional_fields"]
+    assert contract["episode"] == {
+        "required": ["events"],
+        "types": {"events": "array"},
+        "optional": ["episode_id", "termination_reason"],
+        "event_types": ["message", "tool_call", "tool_result"],
+        "event_common_required": ["sequence", "type"],
+        "message_required": ["role", "content"],
+        "tool_call_required": ["call_id", "name", "arguments"],
+        "tool_result_required": ["call_id"],
+        "tool_result_content": ["result", "error"],
     }
 
 

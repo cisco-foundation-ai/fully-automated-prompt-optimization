@@ -14,6 +14,7 @@ FEEDBACK_POLARITIES = frozenset({"positive", "negative", "mixed"})
 CORRECTNESS_SIGNAL_KINDS = frozenset({"deterministic", "executable"})
 CORRECTNESS_SIGNAL_REQUIRED_FIELDS = ("kind", "check_id", "passed")
 CORRECTNESS_SIGNAL_OPTIONAL_FIELDS = ("content",)
+EPISODE_EVENT_TYPES = frozenset({"message", "tool_call", "tool_result"})
 
 COMMON_REQUIRED_FIELDS = (
     "schema_version",
@@ -81,6 +82,8 @@ def validate_input_records(
 
         _validate_messages(row["conversation_context"], location)
         _validate_tool_calls(row["tool_calls"], location)
+        if "episode" in row:
+            _validate_episode(row["episode"], location)
         for field in ("runtime", "metadata"):
             if not isinstance(row[field], Mapping):
                 raise ValueError(f"{location}: '{field}' must be an object")
@@ -109,7 +112,12 @@ def input_contract_document() -> Dict[str, Any]:
             "runtime": "object",
             "metadata": "object",
         },
-        "optional_fields": ["request_id", "route", "assistant_output"],
+        "optional_fields": [
+            "request_id",
+            "route",
+            "assistant_output",
+            "episode",
+        ],
         "labeled_required_fields": ["assistant_output", "feedback"],
         "feedback": {
             "required": ["polarity", "rationale"],
@@ -136,6 +144,17 @@ def input_contract_document() -> Dict[str, Any]:
             "types": {"name": "string", "arguments": "object"},
             "optional": ["result", "error"],
         },
+        "episode": {
+            "required": ["events"],
+            "types": {"events": "array"},
+            "optional": ["episode_id", "termination_reason"],
+            "event_types": sorted(EPISODE_EVENT_TYPES),
+            "event_common_required": ["sequence", "type"],
+            "message_required": ["role", "content"],
+            "tool_call_required": ["call_id", "name", "arguments"],
+            "tool_result_required": ["call_id"],
+            "tool_result_content": ["result", "error"],
+        },
         "notes": [
             "group_id is required for leakage-safe dataset splitting",
             "route defaults to task_type when omitted",
@@ -159,6 +178,41 @@ def redact_correctness_signals(
             item["content"] = redact_content(item["content"])
         redacted.append(item)
     return redacted
+
+
+def episode_user_messages(value: Any) -> list[str]:
+    """Return ordered user-message content from a canonical episode."""
+    if not isinstance(value, Mapping):
+        return []
+    events = value.get("events")
+    if not isinstance(events, list):
+        return []
+    return [
+        str(event["content"]).strip()
+        for event in events
+        if isinstance(event, Mapping)
+        and event.get("type") == "message"
+        and event.get("role") == "user"
+        and event.get("content")
+    ]
+
+
+def episode_tool_names(value: Any) -> list[str]:
+    """Return sorted unique tool names observed in a canonical episode."""
+    if not isinstance(value, Mapping):
+        return []
+    events = value.get("events")
+    if not isinstance(events, list):
+        return []
+    return sorted(
+        {
+            str(event["name"])
+            for event in events
+            if isinstance(event, Mapping)
+            and event.get("type") == "tool_call"
+            and event.get("name")
+        }
+    )
 
 
 def _validate_messages(value: Any, location: str) -> None:
@@ -196,6 +250,111 @@ def _validate_tool_calls(value: Any, location: str) -> None:
             raise ValueError(
                 f"{location}: '{field}.error' must be a string or null"
             )
+
+
+def _validate_episode(value: Any, location: str) -> None:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{location}: 'episode' must be an object")
+    events = value.get("events")
+    if not isinstance(events, list):
+        raise ValueError(f"{location}: 'episode.events' must be an array")
+    if not events:
+        raise ValueError(f"{location}: 'episode.events' must not be empty")
+    for field in ("episode_id", "termination_reason"):
+        if field in value:
+            _require_nonempty_string(value[field], location, f"episode.{field}")
+
+    previous_sequence = -1
+    pending_calls: set[str] = set()
+    completed_calls: set[str] = set()
+    for index, event in enumerate(events):
+        field = f"episode.events[{index}]"
+        if not isinstance(event, Mapping):
+            raise ValueError(f"{location}: '{field}' must be an object")
+        sequence = event.get("sequence")
+        if (
+            not isinstance(sequence, int)
+            or isinstance(sequence, bool)
+            or sequence < 0
+        ):
+            raise ValueError(
+                f"{location}: '{field}.sequence' must be a non-negative integer"
+            )
+        if sequence <= previous_sequence:
+            raise ValueError(
+                f"{location}: '{field}.sequence' must be strictly increasing"
+            )
+        previous_sequence = sequence
+
+        event_type = event.get("type")
+        if event_type not in EPISODE_EVENT_TYPES:
+            allowed = ", ".join(sorted(EPISODE_EVENT_TYPES))
+            raise ValueError(
+                f"{location}: '{field}.type' must be one of: {allowed}"
+            )
+        if event_type == "message":
+            for name in ("role", "content"):
+                if name not in event:
+                    raise ValueError(
+                        f"{location}: '{field}.{name}' is required"
+                    )
+                _require_nonempty_string(
+                    event[name],
+                    location,
+                    f"{field}.{name}",
+                )
+            continue
+
+        if "call_id" not in event:
+            raise ValueError(f"{location}: '{field}.call_id' is required")
+        _require_nonempty_string(
+            event["call_id"],
+            location,
+            f"{field}.call_id",
+        )
+        call_id = str(event["call_id"])
+        if event_type == "tool_call":
+            if call_id in pending_calls or call_id in completed_calls:
+                raise ValueError(
+                    f"{location}: '{field}.call_id' duplicates '{call_id}'"
+                )
+            if "name" not in event:
+                raise ValueError(f"{location}: '{field}.name' is required")
+            _require_nonempty_string(
+                event["name"],
+                location,
+                f"{field}.name",
+            )
+            if "arguments" not in event or not isinstance(
+                event["arguments"], Mapping
+            ):
+                raise ValueError(
+                    f"{location}: '{field}.arguments' must be an object"
+                )
+            pending_calls.add(call_id)
+            continue
+
+        if call_id not in pending_calls:
+            raise ValueError(
+                f"{location}: '{field}.call_id' must reference a prior tool call"
+            )
+        if call_id in completed_calls:
+            raise ValueError(
+                f"{location}: '{field}.call_id' already has a result"
+            )
+        if "result" not in event and "error" not in event:
+            raise ValueError(
+                f"{location}: '{field}' requires 'result' or 'error'"
+            )
+        if (
+            "error" in event
+            and event["error"] is not None
+            and not isinstance(event["error"], str)
+        ):
+            raise ValueError(
+                f"{location}: '{field}.error' must be a string or null"
+            )
+        completed_calls.add(call_id)
 
 
 def _validate_feedback(value: Any, location: str) -> None:

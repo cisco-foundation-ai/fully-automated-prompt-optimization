@@ -29,6 +29,7 @@ from src.hephaestus.evaluation_assets.pipeline import (
     EvaluationAssetPipeline,
     _build_labeling_queue,
     _compile_evaluation_guidelines,
+    _feedback_provider_record,
     _normalize_feedback,
     _normalize_intent,
     _normalize_rubric,
@@ -410,14 +411,106 @@ def test_normalized_intent_includes_all_prior_user_messages() -> None:
                 {"role": "user", "content": "Second user request"},
             ],
             "tool_calls": [{"name": "lookup", "arguments": {}}],
+            "episode": {
+                "events": [
+                    {
+                        "sequence": 0,
+                        "type": "message",
+                        "role": "user",
+                        "content": "Current request",
+                    },
+                    {
+                        "sequence": 1,
+                        "type": "message",
+                        "role": "assistant",
+                        "content": "Assistant response",
+                    },
+                    {
+                        "sequence": 2,
+                        "type": "message",
+                        "role": "user",
+                        "content": "Confirmed return",
+                    },
+                    {
+                        "sequence": 3,
+                        "type": "tool_call",
+                        "call_id": "call-1",
+                        "name": "submit_return",
+                        "arguments": {},
+                    },
+                ]
+            },
             "runtime": {},
             "metadata": {},
         }
     )
 
     assert intent["canonical_intent_text"] == (
-        "Current request First user request Second user request tools lookup"
+        "Current request First user request Second user request Confirmed return "
+        "tools lookup submit_return"
     )
+    assert intent["tool_names"] == ["lookup", "submit_return"]
+
+
+def test_episode_redaction_preserves_structure_and_redacts_content() -> None:
+    """Episode links remain usable without leaking content-bearing PII."""
+    row = {
+        "schema_version": "fapo-evaluation-input-v1",
+        "record_id": "record-1",
+        "group_id": "group-1",
+        "task_type": "answer",
+        "user_input": "Request from user@example.com",
+        "assistant_output": "Completed for user@example.com",
+        "conversation_context": [],
+        "tool_calls": [],
+        "episode": {
+            "episode_id": "episode-1",
+            "termination_reason": "Finished for user@example.com",
+            "events": [
+                {
+                    "sequence": 0,
+                    "type": "message",
+                    "role": "user",
+                    "content": "Request from user@example.com",
+                },
+                {
+                    "sequence": 1,
+                    "type": "tool_call",
+                    "call_id": "call-1",
+                    "name": "lookup_order",
+                    "arguments": {"owner": "user@example.com"},
+                },
+                {
+                    "sequence": 2,
+                    "type": "tool_result",
+                    "call_id": "call-1",
+                    "result": {"owner": "user@example.com"},
+                },
+            ],
+        },
+        "runtime": {},
+        "metadata": {},
+        "feedback": {
+            "polarity": "positive",
+            "rationale": "Correct for user@example.com",
+        },
+    }
+
+    normalized = _normalize_feedback(row)
+
+    assert normalized["episode"]["episode_id"] == "episode-1"
+    assert [event["sequence"] for event in normalized["episode"]["events"]] == [
+        0,
+        1,
+        2,
+    ]
+    assert normalized["episode"]["events"][1]["call_id"] == "call-1"
+    assert normalized["episode"]["events"][1]["name"] == "lookup_order"
+    assert "user@example.com" not in json.dumps(normalized, sort_keys=True)
+
+    provider_record = _feedback_provider_record(normalized)
+    assert provider_record["conversation_context"] == []
+    assert provider_record["episode"] == normalized["episode"]
 
 
 def test_normalization_defaults_preserve_exact_canonical_source_strings() -> None:

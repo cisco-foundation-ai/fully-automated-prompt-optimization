@@ -45,6 +45,35 @@ def test_native_trusted_intent_uses_all_prior_user_request_semantics() -> None:
                 {"name": "archive", "arguments": {}},
                 {"name": "lookup_tool", "arguments": {"query": "repeat"}},
             ],
+            "episode": {
+                "events": [
+                    {
+                        "sequence": 0,
+                        "type": "message",
+                        "role": "user",
+                        "content": "source request semantics",
+                    },
+                    {
+                        "sequence": 1,
+                        "type": "message",
+                        "role": "assistant",
+                        "content": "episode assistant canary",
+                    },
+                    {
+                        "sequence": 2,
+                        "type": "message",
+                        "role": "user",
+                        "content": "episode follow-up",
+                    },
+                    {
+                        "sequence": 3,
+                        "type": "tool_call",
+                        "call_id": "call-1",
+                        "name": "episode_tool",
+                        "arguments": {},
+                    },
+                ]
+            },
             "feedback": {"polarity": "negative"},
         }
     }
@@ -53,7 +82,8 @@ def test_native_trusted_intent_uses_all_prior_user_request_semantics() -> None:
 
     assert trusted_intent["label"] == "downstream label canary"
     assert trusted_intent["texts"] == [
-        "source request semantics first user turn second user turn tools archive lookup_tool"
+        "source request semantics first user turn second user turn episode follow-up "
+        "tools archive episode_tool lookup_tool"
     ]
 
 

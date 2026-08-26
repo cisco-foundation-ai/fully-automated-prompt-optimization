@@ -84,6 +84,8 @@ from src.hephaestus.evaluation_assets.durability import (
 )
 from src.hephaestus.evaluation_assets.input_contract import (
     effective_route,
+    episode_tool_names,
+    episode_user_messages,
     redact_correctness_signals,
     validate_input_records,
 )
@@ -120,8 +122,8 @@ from src.hephaestus.evaluation_assets.review import (
     case_content_fingerprint,
     decision_set_fingerprint,
     inherit_review_decision,
-    record_review_decision,
     parse_review_finalization,
+    record_review_decision,
     review_set_fingerprint,
     validate_duplicate_family,
     validate_review_finalization,
@@ -237,11 +239,13 @@ def _local_authority_sha256(
 EVIDENCE_EXTRACTION_PROMPT = """\
 Extract atomic evaluation evidence from explicit user feedback. Return one JSON
 object with an `evidence` array preserving every `record_id`. The feedback is
-trusted evidence; the previous assistant output and tool calls are context, not
-an answer key. Each item must contain record_id, intent_label, confidence (0..1),
-observations, requested_corrections, and uncertainties. Each observation must
-contain claim, evidence_type, evidence_pointer, and polarity. Record only claims
-directly supported by the supplied feedback or correction. Do not generalize a
+trusted evidence; the prior conversation, previous assistant output, ordered
+episode, and tool calls are context, not an answer key. When an episode is
+present, use its event order to interpret multi-turn behavior and tool results.
+Each item must contain record_id, intent_label, confidence (0..1), observations,
+requested_corrections, and uncertainties. Each observation must contain claim,
+evidence_type, evidence_pointer, and polarity. Record only claims directly
+supported by the supplied feedback or correction. Do not generalize a
 case-specific preference into a universal rule. Never invent environment facts,
 private identifiers, tool results, or unsupported correctness requirements.
 """
@@ -1600,14 +1604,7 @@ class EvaluationAssetPipeline:
                     EVIDENCE_EXTRACTION_PROMPT,
                     {
                         "records": [
-                            {
-                                "record_id": row["record_id"],
-                                "task_type": row["task_type"],
-                                "user_input": row["user_input"],
-                                "assistant_output": row["assistant_output"],
-                                "tool_calls": row["tool_calls"],
-                                "feedback": row["feedback"],
-                            }
+                            _feedback_provider_record(row)
                             for row in batch
                         ]
                     },
@@ -2004,10 +2001,13 @@ class EvaluationAssetPipeline:
                             "cluster_id": cluster.cluster_id,
                             "route": cluster.route,
                             "representative_requests": [
-                                row_by_id[record_id]["user_input"] for record_id in cluster.representative_ids
+                                row_by_id[record_id]["canonical_intent_text"]
+                                for record_id in cluster.representative_ids
                             ],
                             "trusted_requests": [
-                                normalized_by_id[record_id]["user_input"]
+                                _canonical_intent_text(
+                                    normalized_by_id[record_id]
+                                )
                                 for record_id in guideline_by_id[
                                     str(match_by_cluster[cluster.cluster_id].matched_intent_id)
                                 ]["source_record_ids"]
@@ -3163,26 +3163,64 @@ def _normalize_feedback(row: Mapping[str, Any]) -> Dict[str, Any]:
     return prepared
 
 
+def _feedback_provider_record(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """Expose complete redacted episode context to evidence extraction."""
+    record = {
+        "record_id": row["record_id"],
+        "task_type": row["task_type"],
+        "user_input": row["user_input"],
+        "conversation_context": row["conversation_context"],
+        "assistant_output": row["assistant_output"],
+        "tool_calls": row["tool_calls"],
+        "feedback": row["feedback"],
+    }
+    if "episode" in row:
+        record["episode"] = row["episode"]
+    return record
+
+
 def _normalize_intent(row: Mapping[str, Any]) -> Dict[str, Any]:
     prepared = _redact_record(row)
-    user_input = _string(prepared["user_input"])
-    context = prepared["conversation_context"]
-    tool_calls = prepared["tool_calls"]
-    canonical = " ".join(
-        part
-        for part in (
-            user_input,
-            _user_context_text(context),
-            "tools " + " ".join(_tool_names(tool_calls)),
-        )
-        if part and part != "tools "
-    )
+    canonical, tool_names = _intent_text_and_tools(prepared)
     if "request_id" not in prepared:
         prepared["request_id"] = prepared["record_id"]
     prepared["route"] = effective_route(prepared)
     prepared["canonical_intent_text"] = canonical
-    prepared["tool_names"] = _tool_names(tool_calls)
+    prepared["tool_names"] = tool_names
     return prepared
+
+
+def _canonical_intent_text(row: Mapping[str, Any]) -> str:
+    """Build intent text for an already-redacted canonical record."""
+    return _intent_text_and_tools(row)[0]
+
+
+def _intent_text_and_tools(row: Mapping[str, Any]) -> tuple[str, List[str]]:
+    user_input = _string(row["user_input"])
+    context = row["conversation_context"]
+    tool_calls = row["tool_calls"]
+    prior_user_messages = _user_context_messages(context)
+    represented_user_messages = {user_input, *prior_user_messages}
+    episode_messages = [
+        message
+        for message in episode_user_messages(row.get("episode"))
+        if message not in represented_user_messages
+    ]
+    tool_names = sorted(
+        set(_tool_names(tool_calls))
+        | set(episode_tool_names(row.get("episode")))
+    )
+    canonical = " ".join(
+        part
+        for part in (
+            user_input,
+            *prior_user_messages,
+            *episode_messages,
+            "tools " + " ".join(tool_names),
+        )
+        if part and part != "tools "
+    )
+    return canonical, tool_names
 
 
 def _validate_normalized_identity(
@@ -4388,6 +4426,8 @@ def _redact_record(row: Mapping[str, Any]) -> Dict[str, Any]:
         prepared["conversation_context"] = _redact_messages(prepared["conversation_context"])
     if "tool_calls" in prepared:
         prepared["tool_calls"] = _redact_tool_calls(prepared["tool_calls"])
+    if "episode" in prepared:
+        prepared["episode"] = _redact_episode(prepared["episode"])
     for field in ("runtime", "metadata"):
         if field in prepared:
             prepared[field] = _redact_named_content(prepared[field])
@@ -4465,6 +4505,40 @@ def _redact_tool_calls(value: Any) -> Any:
     return calls[0] if unwrap else calls
 
 
+def _redact_episode(value: Any) -> Any:
+    """Redact episode content while preserving event ordering and links."""
+    if not isinstance(value, Mapping):
+        return _redact_value(value)
+    episode = dict(value)
+    events = episode.get("events")
+    if not isinstance(events, list):
+        return _redact_named_content(episode)
+    redacted_events = []
+    preserved_fields = {"sequence", "type", "role", "call_id", "name"}
+    content_fields = {"content", "arguments", "result", "error"}
+    for item in events:
+        if not isinstance(item, Mapping):
+            redacted_events.append(_redact_named_content(item))
+            continue
+        event = dict(item)
+        for key, nested in tuple(event.items()):
+            if key in preserved_fields and not _is_composite_value(nested):
+                continue
+            if key in content_fields:
+                event[key] = _redact_value(nested)
+            else:
+                event[key] = _redact_named_content(nested)
+        redacted_events.append(event)
+    episode["events"] = redacted_events
+    for key, nested in tuple(episode.items()):
+        if key == "events":
+            continue
+        if key == "episode_id" and not _is_composite_value(nested):
+            continue
+        episode[key] = _redact_named_content(nested)
+    return episode
+
+
 def _redact_feedback(value: Any) -> Any:
     if not isinstance(value, Mapping):
         return value
@@ -4532,17 +4606,17 @@ def _redact_value(value: Any) -> Any:
     return value
 
 
-def _user_context_text(context: Any) -> str:
-    """Return every prior user message in conversation order for intent mining."""
+def _user_context_messages(context: Any) -> List[str]:
+    """Return prior user messages in conversation order for intent mining."""
     if not isinstance(context, list):
-        return ""
-    return " ".join(
+        return []
+    return [
         _redact_text(_string(item["content"]))
         for item in context
         if isinstance(item, Mapping)
         and item.get("role") == "user"
         and item.get("content")
-    )
+    ]
 
 
 def _tool_names(calls: Any) -> List[str]:

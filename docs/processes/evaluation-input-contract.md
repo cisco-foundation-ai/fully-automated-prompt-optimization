@@ -67,6 +67,7 @@ Optional common fields:
 | `request_id` | nonempty string | `record_id` |
 | `route` | nonempty string | `task_type` |
 | `assistant_output` | string | Omitted for unlabeled records when unavailable |
+| `episode` | object | Omitted when the source has no complete event stream |
 
 `record_id` values must be unique within each file. `group_id` is mandatory;
 for a genuinely independent record, use its `record_id`. The core additionally
@@ -120,6 +121,72 @@ Every `tool_calls` item requires:
 
 The clustering representation retains deduplicated tool names. Rubric
 extraction may inspect the full redacted tool-call objects.
+
+## Episodes
+
+An optional `episode` preserves a complete, ordered interaction without
+overloading `conversation_context`, `assistant_output`, or flat `tool_calls`:
+
+```json
+{
+  "episode_id": "episode-000001",
+  "termination_reason": "completed",
+  "events": [
+    {
+      "sequence": 0,
+      "type": "message",
+      "role": "user",
+      "content": "Find my order."
+    },
+    {
+      "sequence": 1,
+      "type": "tool_call",
+      "call_id": "call-000001",
+      "name": "lookup_order",
+      "arguments": {"order_id": "..."}
+    },
+    {
+      "sequence": 2,
+      "type": "tool_result",
+      "call_id": "call-000001",
+      "result": {"status": "shipped"}
+    },
+    {
+      "sequence": 3,
+      "type": "message",
+      "role": "assistant",
+      "content": "Your order has shipped."
+    }
+  ]
+}
+```
+
+`episode.events` must be a nonempty array. Every event requires a unique,
+strictly increasing nonnegative integer `sequence` and one of these types:
+
+- `message`: requires nonempty `role` and `content` strings.
+- `tool_call`: requires a nonempty `call_id`, a nonempty `name`, and an
+  `arguments` object. Call IDs may not be reused within the episode.
+- `tool_result`: requires a `call_id` that references an earlier tool call and
+  at least one of `result` or `error`. A call may have only one result event;
+  `error`, when present, must be a string or `null`.
+
+`episode_id` and `termination_reason` are optional nonempty strings. The
+pipeline preserves event order and call/result links, redacts content-bearing
+fields, and exposes the redacted episode to feedback-evidence extraction. User
+messages and tool names also contribute to intent representation so later
+turns are not lost during clustering and guideline inference.
+
+For backward compatibility, the existing flat fields remain required.
+Adapters should populate `user_input`, `conversation_context`, `tool_calls`,
+and, when applicable, `assistant_output` with their conventional summary view
+of the same interaction. Exact duplicate user messages and tool names are
+deduplicated when the canonical intent text is built.
+
+An episode is observed context, not correctness evidence or an answer key.
+Only the canonical feedback on a labeled record supports evaluation-guideline
+claims. An unlabeled episode remains usage evidence even when it contains tool
+results or a successful termination reason.
 
 ## Labeled Records
 
@@ -233,7 +300,9 @@ Stage 1 rejects:
 - Empty identifier, grouping, task, or user-input strings.
 - Duplicate `record_id` values within one file.
 - Incorrect array or object types.
-- Malformed conversation messages or tool calls.
+- Malformed conversation messages, tool calls, or episode events.
+- Episode events with invalid ordering, reused call IDs, tool results without
+  a prior call, or multiple results for one call.
 - Labeled records without `assistant_output` or canonical feedback.
 - Feedback polarities outside the three canonical values.
 - Malformed `correctness_signals`, including unsupported kinds, blank check
@@ -257,10 +326,11 @@ GET /api/evaluation-assets/input-contract
 
 An external adapter is responsible for joining vendor-specific trace and
 feedback resources, traversing child spans, extracting messages, standardizing
-tool calls, assigning stable groups, and mapping feedback into canonical
-polarity and rationale. If an adapter emits `correctness_signals`, it is also
-responsible for assigning a stable `check_id` and ensuring that the recorded
-boolean is the actual outcome of that deterministic or executable check.
+tool calls, constructing an ordered episode when the source provides one,
+assigning stable groups, and mapping feedback into canonical polarity and
+rationale. If an adapter emits `correctness_signals`, it is also responsible
+for assigning a stable `check_id` and ensuring that the recorded boolean is the
+actual outcome of that deterministic or executable check.
 
 Because the shared core intentionally preserves identifiers and routing fields,
 an adapter must replace identifiers with stable pseudonyms before this boundary
