@@ -10,9 +10,11 @@ import pytest
 
 from src.hephaestus.evaluation_assets.input_contract import (
     SCHEMA_VERSION,
+    canonical_user_intent_text,
     episode_tool_names,
     episode_user_messages,
     input_contract_document,
+    record_user_messages,
     redact_correctness_signals,
     validate_input_records,
 )
@@ -97,6 +99,75 @@ def test_contract_accepts_an_ordered_episode() -> None:
 
     assert episode_user_messages(episode) == ["Find the order."]
     assert episode_tool_names(episode) == ["lookup_order"]
+
+
+def test_user_intent_text_uses_all_episode_messages_without_tools() -> None:
+    """Episode user turns are authoritative and repeated turns are retained."""
+    record = {
+        **_record(),
+        "user_input": "Flat request",
+        "conversation_context": [
+            {"role": "user", "content": "Flat prior request"}
+        ],
+        "tool_calls": [{"name": "flat_tool", "arguments": {}}],
+        "episode": {
+            "events": [
+                {
+                    "sequence": 0,
+                    "type": "message",
+                    "role": "user",
+                    "content": "Episode request",
+                },
+                {
+                    "sequence": 1,
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "Assistant response",
+                },
+                {
+                    "sequence": 2,
+                    "type": "message",
+                    "role": "user",
+                    "content": "Episode request",
+                },
+                {
+                    "sequence": 3,
+                    "type": "tool_call",
+                    "call_id": "call-1",
+                    "name": "episode_tool",
+                    "arguments": {},
+                },
+            ]
+        },
+    }
+
+    assert record_user_messages(record) == [
+        "Episode request",
+        "Episode request",
+    ]
+    assert canonical_user_intent_text(record) == (
+        "Episode request\nEpisode request"
+    )
+
+
+def test_user_intent_text_falls_back_to_legacy_user_fields() -> None:
+    """Legacy records preserve prior-to-current user-message chronology."""
+    record = {
+        **_record(),
+        "user_input": "Current request",
+        "conversation_context": [
+            {"role": "user", "content": "Earlier request"},
+            {"role": "assistant", "content": "Assistant response"},
+        ],
+    }
+
+    assert record_user_messages(record) == [
+        "Earlier request",
+        "Current request",
+    ]
+    assert canonical_user_intent_text(record) == (
+        "Earlier request\nCurrent request"
+    )
 
 
 @pytest.mark.parametrize(

@@ -83,9 +83,9 @@ from src.hephaestus.evaluation_assets.durability import (
     verify_stage_receipt,
 )
 from src.hephaestus.evaluation_assets.input_contract import (
+    canonical_user_intent_text,
     effective_route,
     episode_tool_names,
-    episode_user_messages,
     redact_correctness_signals,
     validate_input_records,
 )
@@ -3196,31 +3196,12 @@ def _canonical_intent_text(row: Mapping[str, Any]) -> str:
 
 
 def _intent_text_and_tools(row: Mapping[str, Any]) -> tuple[str, List[str]]:
-    user_input = _string(row["user_input"])
-    context = row["conversation_context"]
     tool_calls = row["tool_calls"]
-    prior_user_messages = _user_context_messages(context)
-    represented_user_messages = {user_input, *prior_user_messages}
-    episode_messages = [
-        message
-        for message in episode_user_messages(row.get("episode"))
-        if message not in represented_user_messages
-    ]
     tool_names = sorted(
         set(_tool_names(tool_calls))
         | set(episode_tool_names(row.get("episode")))
     )
-    canonical = " ".join(
-        part
-        for part in (
-            user_input,
-            *prior_user_messages,
-            *episode_messages,
-            "tools " + " ".join(tool_names),
-        )
-        if part and part != "tools "
-    )
-    return canonical, tool_names
+    return canonical_user_intent_text(row), tool_names
 
 
 def _validate_normalized_identity(
@@ -4604,19 +4585,6 @@ def _redact_value(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {key: _redact_value(item) for key, item in value.items()}
     return value
-
-
-def _user_context_messages(context: Any) -> List[str]:
-    """Return prior user messages in conversation order for intent mining."""
-    if not isinstance(context, list):
-        return []
-    return [
-        _redact_text(_string(item["content"]))
-        for item in context
-        if isinstance(item, Mapping)
-        and item.get("role") == "user"
-        and item.get("content")
-    ]
 
 
 def _tool_names(calls: Any) -> List[str]:

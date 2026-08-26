@@ -95,9 +95,9 @@ Every `conversation_context` item requires:
 ```
 
 Both fields are nonempty strings. Additional vendor-neutral message metadata
-may be retained. Downstream canonical intent text includes every prior message
-whose role is exactly `user`, in conversation order; assistant messages are
-not included.
+may be retained. For a record without an `episode`, downstream canonical intent
+text includes every prior message whose role is exactly `user`, followed by the
+current `user_input`. Assistant messages are not included.
 
 ## Tool Calls
 
@@ -119,7 +119,8 @@ Every `tool_calls` item requires:
 - `result` is optional and may contain any JSON value.
 - `error` is optional and must be a string or `null`.
 
-The clustering representation retains deduplicated tool names. Rubric
+Prepared intent records retain deduplicated tool names as structural trajectory
+metadata, but tool names are not included in intent-embedding text. Rubric
 extraction may inspect the full redacted tool-call objects.
 
 ## Episodes
@@ -173,15 +174,17 @@ strictly increasing nonnegative integer `sequence` and one of these types:
 
 `episode_id` and `termination_reason` are optional nonempty strings. The
 pipeline preserves event order and call/result links, redacts content-bearing
-fields, and exposes the redacted episode to feedback-evidence extraction. User
-messages and tool names also contribute to intent representation so later
-turns are not lost during clustering and guideline inference.
+fields, and exposes the redacted episode to feedback-evidence extraction. When
+an episode contains user messages, every such message contributes to intent
+representation in event order. Those episode messages are authoritative over
+the backward-compatible flat message fields. Repeated user messages are
+retained; assistant messages and tool activity do not enter the intent text.
 
 For backward compatibility, the existing flat fields remain required.
 Adapters should populate `user_input`, `conversation_context`, `tool_calls`,
 and, when applicable, `assistant_output` with their conventional summary view
-of the same interaction. Exact duplicate user messages and tool names are
-deduplicated when the canonical intent text is built.
+of the same interaction. Canonical user messages are separated by newlines in
+the text supplied for clustering and trusted-intent matching.
 
 An episode is observed context, not correctness evidence or an answer key.
 Only the canonical feedback on a labeled record supports evaluation-guideline

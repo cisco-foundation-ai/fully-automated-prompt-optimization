@@ -197,6 +197,33 @@ def episode_user_messages(value: Any) -> list[str]:
     ]
 
 
+def record_user_messages(row: Mapping[str, Any]) -> list[str]:
+    """Return the user-authored intent stream in chronological order."""
+    episode_messages = episode_user_messages(row.get("episode"))
+    if episode_messages:
+        return episode_messages
+
+    messages: list[str] = []
+    context = row.get("conversation_context")
+    if isinstance(context, list):
+        messages.extend(
+            str(message["content"]).strip()
+            for message in context
+            if isinstance(message, Mapping)
+            and message.get("role") == "user"
+            and message.get("content")
+        )
+    user_input = str(row.get("user_input") or "").strip()
+    if user_input:
+        messages.append(user_input)
+    return messages
+
+
+def canonical_user_intent_text(row: Mapping[str, Any]) -> str:
+    """Build embedding text from only the record's ordered user messages."""
+    return "\n".join(record_user_messages(row))
+
+
 def episode_tool_names(value: Any) -> list[str]:
     """Return sorted unique tool names observed in a canonical episode."""
     if not isinstance(value, Mapping):

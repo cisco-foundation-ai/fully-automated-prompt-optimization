@@ -417,7 +417,7 @@ def test_normalized_intent_includes_all_prior_user_messages() -> None:
                         "sequence": 0,
                         "type": "message",
                         "role": "user",
-                        "content": "Current request",
+                        "content": "First user request",
                     },
                     {
                         "sequence": 1,
@@ -429,10 +429,22 @@ def test_normalized_intent_includes_all_prior_user_messages() -> None:
                         "sequence": 2,
                         "type": "message",
                         "role": "user",
-                        "content": "Confirmed return",
+                        "content": "Second user request",
                     },
                     {
                         "sequence": 3,
+                        "type": "message",
+                        "role": "user",
+                        "content": "Current request",
+                    },
+                    {
+                        "sequence": 4,
+                        "type": "message",
+                        "role": "user",
+                        "content": "Confirmed return",
+                    },
+                    {
+                        "sequence": 5,
                         "type": "tool_call",
                         "call_id": "call-1",
                         "name": "submit_return",
@@ -446,10 +458,12 @@ def test_normalized_intent_includes_all_prior_user_messages() -> None:
     )
 
     assert intent["canonical_intent_text"] == (
-        "Current request First user request Second user request Confirmed return "
-        "tools lookup submit_return"
+        "First user request\nSecond user request\nCurrent request\n"
+        "Confirmed return"
     )
     assert intent["tool_names"] == ["lookup", "submit_return"]
+    assert "lookup" not in intent["canonical_intent_text"]
+    assert "submit_return" not in intent["canonical_intent_text"]
 
 
 def test_episode_redaction_preserves_structure_and_redacts_content() -> None:
