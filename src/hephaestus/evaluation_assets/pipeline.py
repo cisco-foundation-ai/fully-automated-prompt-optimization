@@ -241,7 +241,12 @@ Extract atomic evaluation evidence from explicit user feedback. Return one JSON
 object with an `evidence` array preserving every `record_id`. The feedback is
 trusted evidence; the prior conversation, previous assistant output, ordered
 episode, and tool calls are context, not an answer key. When an episode is
-present, use its event order to interpret multi-turn behavior and tool results.
+present, use its event order to interpret multi-turn behavior, tool arguments,
+tool results, and tool errors. Use the observed tool trajectory to ground which
+action or outcome the feedback refers to and cite precise `tool_calls` or
+`episode.events` pointers when relevant. A returned tool result proves only
+that an outcome was observed; it does not prove that the tool choice, arguments,
+state change, or overall behavior was correct. Record ambiguity as uncertainty.
 Each item must contain record_id, intent_label, confidence (0..1), observations,
 requested_corrections, and uncertainties. Each observation must contain claim,
 evidence_type, evidence_pointer, and polarity. Record only claims directly
@@ -265,9 +270,17 @@ of the guideline source_record_ids. Evaluator must contain type and fallback;
 prefer state_check or deterministic_check when the evidence is
 objectively verifiable, semantic_trajectory only when the path itself matters,
 llm_judge for qualitative criteria, and human_review when evidence is
-insufficient. Avoid literal tool names unless the feedback makes that exact tool
-contract mandatory. Permit multiple valid solution paths. reference_output must
-be a string or null and must never be copied from a previous assistant response.
+insufficient. Every example includes `observed_tool_calls` with the actual
+redacted arguments and an outcome_status of result_returned, error_returned, or
+not_recorded. Consider those calls when defining tool expectations, evaluator
+plans, evidence requirements, applicability, state-change criteria, and failure
+conditions; do not ignore them when the feedback concerns task completion or a
+tool-backed action. These calls are observed context, not independent
+correctness evidence: result_returned does not establish that the tool, its
+arguments, or the resulting state was correct. Prefer semantic tool expectations
+and permit multiple valid solution paths. Require a literal tool name only when
+the supplied evidence establishes that exact contract. reference_output must be
+a string or null and must never be copied from a previous assistant response.
 """
 
 INFERENCE_PROMPT = """\
@@ -1639,12 +1652,7 @@ class EvaluationAssetPipeline:
                     "route": route,
                     "evidence": route_evidence,
                     "examples": [
-                        {
-                            "record_id": row["record_id"],
-                            "task_type": row["task_type"],
-                            "user_input": row["user_input"],
-                            "feedback_polarity": row["feedback"]["polarity"],
-                        }
+                        _guideline_provider_example(row)
                         for row in source_records
                     ],
                 },
@@ -3177,6 +3185,37 @@ def _feedback_provider_record(row: Mapping[str, Any]) -> Dict[str, Any]:
     if "episode" in row:
         record["episode"] = row["episode"]
     return record
+
+
+def _guideline_provider_example(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """Expose compact observed tool context to guideline synthesis."""
+    observed_tool_calls = []
+    for position, raw_call in enumerate(row["tool_calls"], start=1):
+        call = dict(raw_call)
+        if "error" in call and call["error"] is not None:
+            outcome_status = "error_returned"
+        elif "result" in call:
+            outcome_status = "result_returned"
+        else:
+            outcome_status = "not_recorded"
+        observed = {
+            "position": position,
+            "name": call["name"],
+            "arguments": call["arguments"],
+            "outcome_status": outcome_status,
+        }
+        if call.get("call_id"):
+            observed["call_id"] = call["call_id"]
+        if outcome_status == "error_returned":
+            observed["error"] = call["error"]
+        observed_tool_calls.append(observed)
+    return {
+        "record_id": row["record_id"],
+        "task_type": row["task_type"],
+        "user_input": row["user_input"],
+        "feedback_polarity": row["feedback"]["polarity"],
+        "observed_tool_calls": observed_tool_calls,
+    }
 
 
 def _normalize_intent(row: Mapping[str, Any]) -> Dict[str, Any]:

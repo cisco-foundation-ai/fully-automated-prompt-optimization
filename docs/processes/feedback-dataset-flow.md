@@ -933,11 +933,20 @@ Stage 3 deliberately separates evidence from generalization:
 
 1. `feedback_evidence.jsonl` records atomic claims, explicit corrections, and
    uncertainties for eligible training feedback only. The previous assistant
-   output is context and never becomes an answer key. Ineligible rows remain in
-   Stage 2 audit artifacts and make no guideline call.
+   output is context and never becomes an answer key. Evidence extraction sees
+   complete redacted tool calls and, when present, the ordered episode with
+   tool arguments, results, and errors. It uses that trajectory to ground which
+   action or observed outcome the feedback refers to, while unresolved
+   ambiguity becomes an uncertainty. Ineligible rows remain in Stage 2 audit
+   artifacts and make no guideline call.
 2. `candidate_guidelines.jsonl` contains model-proposed groupings of compatible
-   eligible training evidence within a route. Every eligible training
-   `record_id` must be represented.
+   eligible training evidence within a route. Guideline synthesis also receives
+   compact `observed_tool_calls` for each source example: ordered tool names,
+   redacted arguments, and whether a result, error, or no outcome was recorded.
+   It uses this context for tool expectations, evaluator plans, evidence
+   requirements, state-change criteria, and failure conditions. Full successful
+   result payloads are not duplicated because they were already available to
+   evidence extraction. Every eligible training `record_id` must be represented.
 3. `evaluation_guidelines.jsonl` is the compiled contract used downstream.
    Each guideline has stable provenance and criteria with source record IDs,
    `kind`, `dimension`, `severity`, `applicability`, `scoring`,
@@ -975,6 +984,13 @@ trusted-case IDs; it never silently deduplicates. The live writer performs this
 check before any Stage 3 artifact or receipt write, and native/historical replay
 uses the same check. Any mismatch fails before receipts, journal, state,
 history, events, or catalog authority changes.
+
+Observed tool execution is never independent correctness evidence. A returned
+result does not prove that the tool choice, arguments, resulting state, or
+overall behavior was correct. Normative criteria still require trusted feedback,
+an explicit correction, or another declared correctness signal. Guidelines
+prefer semantic tool expectations and allow alternate valid workflows; they use
+literal tool names only when the evidence establishes an exact contract.
 
 Evaluator plans use this preference order:
 

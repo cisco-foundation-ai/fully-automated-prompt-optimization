@@ -30,6 +30,7 @@ from src.hephaestus.evaluation_assets.pipeline import (
     _build_labeling_queue,
     _compile_evaluation_guidelines,
     _feedback_provider_record,
+    _guideline_provider_example,
     _normalize_feedback,
     _normalize_intent,
     _normalize_rubric,
@@ -476,7 +477,14 @@ def test_episode_redaction_preserves_structure_and_redacts_content() -> None:
         "user_input": "Request from user@example.com",
         "assistant_output": "Completed for user@example.com",
         "conversation_context": [],
-        "tool_calls": [],
+        "tool_calls": [
+            {
+                "call_id": "call-1",
+                "name": "lookup_order",
+                "arguments": {"owner": "user@example.com"},
+                "result": {"owner": "user@example.com"},
+            }
+        ],
         "episode": {
             "episode_id": "episode-1",
             "termination_reason": "Finished for user@example.com",
@@ -524,7 +532,103 @@ def test_episode_redaction_preserves_structure_and_redacts_content() -> None:
 
     provider_record = _feedback_provider_record(normalized)
     assert provider_record["conversation_context"] == []
+    assert provider_record["tool_calls"] == normalized["tool_calls"]
+    assert provider_record["tool_calls"][0]["result"] == {"owner": "<email>"}
     assert provider_record["episode"] == normalized["episode"]
+
+
+def test_guideline_synthesis_payload_includes_observed_tool_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guideline creation receives tool arguments and explicit outcome status."""
+    row = {
+        "record_id": "feedback-1",
+        "task_type": "answer",
+        "user_input": "Complete the requested action.",
+        "tool_calls": [
+            {
+                "call_id": "call-1",
+                "name": "lookup_record",
+                "arguments": {"record_id": "record-1"},
+                "result": {"status": "ready", "large": "not duplicated"},
+                "error": None,
+            },
+            {
+                "call_id": "call-2",
+                "name": "apply_change",
+                "arguments": {"record_id": "record-1", "value": "new"},
+                "error": "permission denied",
+            },
+            {
+                "call_id": "call-3",
+                "name": "audit_change",
+                "arguments": {},
+            },
+        ],
+        "feedback": {"polarity": "mixed"},
+    }
+
+    example = _guideline_provider_example(row)
+
+    assert example == {
+        "record_id": "feedback-1",
+        "task_type": "answer",
+        "user_input": "Complete the requested action.",
+        "feedback_polarity": "mixed",
+        "observed_tool_calls": [
+            {
+                "position": 1,
+                "call_id": "call-1",
+                "name": "lookup_record",
+                "arguments": {"record_id": "record-1"},
+                "outcome_status": "result_returned",
+            },
+            {
+                "position": 2,
+                "call_id": "call-2",
+                "name": "apply_change",
+                "arguments": {"record_id": "record-1", "value": "new"},
+                "outcome_status": "error_returned",
+                "error": "permission denied",
+            },
+            {
+                "position": 3,
+                "call_id": "call-3",
+                "name": "audit_change",
+                "arguments": {},
+                "outcome_status": "not_recorded",
+            },
+        ],
+    }
+    assert "not duplicated" not in json.dumps(example, sort_keys=True)
+    assert "observed_tool_calls" in GUIDELINE_SYNTHESIS_PROMPT
+    assert "result_returned does not establish" in GUIDELINE_SYNTHESIS_PROMPT
+
+    captured_payloads = []
+
+    def capture_call(stage, prompt, payload, normalize):
+        del stage, prompt, normalize
+        captured_payloads.append(payload)
+        return [], []
+
+    pipeline = EvaluationAssetPipeline.__new__(EvaluationAssetPipeline)
+    pipeline._provider_identities = {
+        "rubric": {"provider": "fake", "model": "fake-rubric"}
+    }
+    monkeypatch.setattr(pipeline, "_call_rubric_provider", capture_call)
+
+    evidence = [{"record_id": "feedback-1", "route": "answer"}]
+    assert pipeline._synthesize_guidelines(
+        evidence,
+        {"feedback-1": row},
+    ) == ([], [])
+    assert captured_payloads == [
+        {
+            "route": "answer",
+            "evidence": evidence,
+            "examples": [example],
+        }
+    ]
 
 
 def test_normalization_defaults_preserve_exact_canonical_source_strings() -> None:
