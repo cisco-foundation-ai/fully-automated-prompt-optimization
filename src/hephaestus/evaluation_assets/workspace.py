@@ -2780,6 +2780,7 @@ class EvaluationAssetLayout:
             ) from exc
 
         dependency_catalogs: dict[str, dict[str, dict[str, Any]]] = {}
+        inferred_case_dependencies: dict[str, dict[str, Any]] = {}
         try:
             for stage, name, schema, trust_tier in (
                 (
@@ -2815,6 +2816,30 @@ class EvaluationAssetLayout:
                     dependency_fingerprint(dependency)
                     catalog[cluster_id] = dict(dependency)
                 dependency_catalogs[trust_tier] = catalog
+            inferred_case_path = self.artifact_path(
+                PipelineStage.SYNTHETIC_COVERAGE,
+                "inferred_review_dependencies.jsonl",
+            )
+            if inferred_case_path.is_file():
+                for row in self._read_required_review_rows(
+                    inferred_case_path,
+                    "inferred review dependency",
+                ):
+                    if set(row) != {"case_id", "dependency"}:
+                        raise ValueError("inferred review dependency fields are invalid")
+                    case_id = row.get("case_id")
+                    dependency = row.get("dependency")
+                    if (
+                        not isinstance(case_id, str)
+                        or not case_id
+                        or not isinstance(dependency, Mapping)
+                        or dependency.get("schema_version")
+                        != STAGE_SIX_DEPENDENCY_SCHEMA_VERSION
+                        or case_id in inferred_case_dependencies
+                    ):
+                        raise ValueError("inferred review dependency identity is invalid")
+                    dependency_fingerprint(dependency)
+                    inferred_case_dependencies[case_id] = dict(dependency)
         except (TypeError, ValueError) as exc:
             raise EvaluationAssetIntegrityError(
                 self.tenant_id,
@@ -2833,6 +2858,7 @@ class EvaluationAssetLayout:
         items: list[dict[str, Any]] = []
         try:
             for raw_item in raw_items:
+                raw_case_id = str(raw_item.get("case_id") or "")
                 raw_case = raw_item.get("case")
                 metadata = (
                     raw_case.get("metadata")
@@ -2851,7 +2877,12 @@ class EvaluationAssetLayout:
                 )
                 catalog = dependency_catalogs.get(str(trust_tier))
                 dependency = (
-                    catalog.get(str(cluster_id)) if catalog is not None else None
+                    inferred_case_dependencies.get(raw_case_id)
+                    if trust_tier == INFERRED_FROM_TRUSTED_FEEDBACK
+                    and inferred_case_dependencies
+                    else catalog.get(str(cluster_id))
+                    if catalog is not None
+                    else None
                 )
                 if dependency is None:
                     raise ValueError("review item dependency is unavailable")

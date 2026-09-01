@@ -946,7 +946,11 @@ Stage 3 deliberately separates evidence from generalization:
    It uses this context for tool expectations, evaluator plans, evidence
    requirements, state-change criteria, and failure conditions. Full successful
    result payloads are not duplicated because they were already available to
-   evidence extraction. Every eligible training `record_id` must be represented.
+   evidence extraction. Long source IDs are replaced with short opaque aliases
+   for the provider call and restored deterministically before strict validation.
+   Criteria inherit the complete validated source-ID set of their parent
+   guideline, so the provider cannot invent or misplace criterion provenance.
+   Every eligible training `record_id` must be represented.
 3. `evaluation_guidelines.jsonl` is the compiled contract used downstream.
    Each guideline has stable provenance and criteria with source record IDs,
    `kind`, `dimension`, `severity`, `applicability`, `scoring`,
@@ -991,6 +995,12 @@ overall behavior was correct. Normative criteria still require trusted feedback,
 an explicit correction, or another declared correctness signal. Guidelines
 prefer semantic tool expectations and allow alternate valid workflows; they use
 literal tool names only when the evidence establishes an exact contract.
+
+If a provider returns JSON that fails semantic schema validation, FAFO records
+the body-free call hash and makes one fresh regeneration attempt against the
+same payload with the strict schema reminder. The malformed body is neither
+persisted nor fed back to the model. A second invalid response fails the stage
+without writing partial Stage 3 authority.
 
 Evaluator plans use this preference order:
 

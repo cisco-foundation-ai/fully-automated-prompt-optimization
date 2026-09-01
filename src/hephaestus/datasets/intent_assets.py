@@ -663,6 +663,174 @@ def build_intent_match_texts(
     return match_texts
 
 
+def build_episode_guideline_candidate_texts(
+    clusters: Sequence[IntentCluster],
+    records: Sequence[IntentRecord],
+    trusted_intents: Sequence[TrustedIntent],
+) -> Dict[str, str]:
+    """Build one embedding corpus for cluster and episode candidate retrieval.
+
+    Cluster vectors provide a broad, amortized retrieval signal.  Record vectors
+    preserve episode-specific intent so a heterogeneous cluster does not force
+    every member to inherit the same candidate set.
+    """
+    texts = build_intent_match_texts(clusters, records, trusted_intents)
+    texts.update({f"record:{record.record_id}": record.text for record in records})
+    return texts
+
+
+def build_episode_guideline_candidate_rows(
+    clusters: Sequence[IntentCluster],
+    records: Sequence[IntentRecord],
+    trusted_intents: Sequence[TrustedIntent],
+    *,
+    vectors: Optional[Mapping[str, SparseVector]] = None,
+    cluster_top_k: int = 9,
+    episode_top_k: int = 9,
+    max_candidates: int = 10,
+    exhaustive_route_limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """Retrieve a bounded guideline candidate set for every episode.
+
+    Retrieval is vectorized and route constrained.  Each episode receives the
+    union of broad cluster candidates and episode-local candidates, bounded by
+    ``max_candidates``.  This keeps downstream LLM work proportional to a small
+    constant rather than the total number of trusted guidelines.  Small route
+    catalogs are evaluated exhaustively to avoid losing cross-cutting rules.
+    """
+    assert_unique_cluster_ids(clusters)
+    for name, value in (
+        ("cluster_top_k", cluster_top_k),
+        ("episode_top_k", episode_top_k),
+        ("max_candidates", max_candidates),
+    ):
+        if value < 1:
+            raise ValueError(f"{name} must be at least 1")
+    if exhaustive_route_limit < 0:
+        raise ValueError("exhaustive_route_limit must be at least 0")
+    if not clusters or not records:
+        return []
+
+    record_by_id = {record.record_id: record for record in records}
+    trusted_by_id = {intent.intent_id: intent for intent in trusted_intents}
+    texts = build_episode_guideline_candidate_texts(
+        clusters,
+        records,
+        trusted_intents,
+    )
+    vector_by_key = (
+        dict(vectors) if vectors is not None else build_tfidf_vectors(texts)
+    )
+
+    rows: List[Dict[str, Any]] = []
+    for cluster in clusters:
+        eligible = [
+            intent
+            for intent in trusted_intents
+            if intent.route is None or intent.route == cluster.route
+        ]
+        cluster_scores = {
+            intent.intent_id: cosine_similarity(
+                vector_by_key.get(f"cluster:{cluster.cluster_id}", {}),
+                vector_by_key.get(f"trusted:{intent.intent_id}", {}),
+            )
+            for intent in eligible
+        }
+        broad_ids = _top_scored_ids(cluster_scores, cluster_top_k)
+        for record_id in cluster.record_ids:
+            if record_id not in record_by_id:
+                raise ValueError(
+                    f"Cluster {cluster.cluster_id} references unknown record "
+                    f"{record_id}"
+                )
+            episode_scores = {
+                intent.intent_id: cosine_similarity(
+                    vector_by_key.get(f"record:{record_id}", {}),
+                    vector_by_key.get(f"trusted:{intent.intent_id}", {}),
+                )
+                for intent in eligible
+            }
+            local_ids = _top_scored_ids(episode_scores, episode_top_k)
+            exhaustive = len(eligible) <= exhaustive_route_limit
+            candidate_ids = (
+                {intent.intent_id for intent in eligible}
+                if exhaustive
+                else set(broad_ids) | set(local_ids)
+            )
+            ranked_ids = sorted(
+                candidate_ids,
+                key=lambda intent_id: (
+                    -max(
+                        cluster_scores.get(intent_id, 0.0),
+                        episode_scores.get(intent_id, 0.0),
+                    ),
+                    -episode_scores.get(intent_id, 0.0),
+                    -cluster_scores.get(intent_id, 0.0),
+                    intent_id,
+                ),
+            )[: (len(candidate_ids) if exhaustive else max_candidates)]
+            rows.append(
+                {
+                    "record_id": record_id,
+                    "cluster_id": cluster.cluster_id,
+                    "route": cluster.route,
+                    "candidates": [
+                        {
+                            "guideline_id": intent_id,
+                            "intent_label": trusted_by_id[intent_id].label,
+                            "cluster_score": round(
+                                cluster_scores.get(intent_id, 0.0),
+                                4,
+                            ),
+                            "episode_score": round(
+                                episode_scores.get(intent_id, 0.0),
+                                4,
+                            ),
+                            "retrieval_score": round(
+                                max(
+                                    cluster_scores.get(intent_id, 0.0),
+                                    episode_scores.get(intent_id, 0.0),
+                                ),
+                                4,
+                            ),
+                            "retrieval_sources": sorted(
+                                {
+                                    *(
+                                        ["route_exhaustive"]
+                                        if exhaustive
+                                        else []
+                                    ),
+                                    *(
+                                        ["cluster"]
+                                        if intent_id in broad_ids
+                                        else []
+                                    ),
+                                    *(
+                                        ["episode"]
+                                        if intent_id in local_ids
+                                        else []
+                                    ),
+                                }
+                            ),
+                        }
+                        for intent_id in ranked_ids
+                    ],
+                }
+            )
+    return rows
+
+
+def _top_scored_ids(scores: Mapping[str, float], limit: int) -> List[str]:
+    """Return stable top-scoring identities without applying a hard threshold."""
+    return [
+        intent_id
+        for intent_id, _ in sorted(
+            scores.items(),
+            key=lambda item: (-item[1], item[0]),
+        )[:limit]
+    ]
+
+
 def cluster_to_dict(cluster: IntentCluster) -> Dict[str, Any]:
     """Serialize an intent cluster for JSONL reports."""
     return {

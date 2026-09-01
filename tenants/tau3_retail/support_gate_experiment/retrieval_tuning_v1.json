@@ -1,0 +1,57 @@
+{
+  "schema_version": "tau3-retail-retrieval-tuning-v1",
+  "status": "development_replay",
+  "selected_policy": {
+    "cluster_top_k": 9,
+    "episode_top_k": 9,
+    "max_candidates_per_episode": 10,
+    "exhaustive_route_limit": 20,
+    "rationale": "Use exhaustive review for small guideline catalogs; otherwise favor candidate recall with the smallest tested bounded setting that retained at least 98% of sampled requirements."
+  },
+  "sample": {
+    "episodes": 30,
+    "reference_attachments": 59,
+    "guidelines_in_route": 13,
+    "labels": "sealed Codex model-expert development annotations"
+  },
+  "previous_bounded_policy": {
+    "cluster_top_k": 6,
+    "episode_top_k": 6,
+    "max_candidates_per_episode": 10,
+    "candidate_recall": 0.8983,
+    "retained_reference_attachments": 53,
+    "missed_reference_attachments": 6,
+    "mean_candidates_per_episode": 7.2
+  },
+  "selected_bounded_policy_replay": {
+    "exhaustive_small_route_rule_disabled_for_analysis": true,
+    "candidate_recall": 0.9831,
+    "retained_reference_attachments": 58,
+    "missed_reference_attachments": 1,
+    "mean_candidates_per_episode": 9.5333,
+    "maximum_candidates_per_episode": 10
+  },
+  "actual_tau_policy": {
+    "route_is_exhaustive": true,
+    "reason": "The Tau Retail route has 13 guidelines, below the exhaustive limit of 20.",
+    "candidate_recall": 1.0,
+    "retained_reference_attachments": 59,
+    "missed_reference_attachments": 0,
+    "candidates_per_episode": 13
+  },
+  "known_bounded_miss": {
+    "case_id": "HO-015",
+    "intent_label": "recover_from_failed_customer_lookup_with_corrected_identity_information",
+    "cluster_rank": 13,
+    "episode_rank": 13,
+    "interpretation": "The guideline is activated by a failed tool lookup and corrected retry rather than by primary user-intent similarity. Small catalogs are protected by exhaustive review; a future tool-event retrieval channel can address this for large catalogs if needed."
+  },
+  "provider_usage": {
+    "new_model_calls": 0,
+    "new_model_tokens": 0
+  },
+  "sources": {
+    "candidate_rows": "../evaluation_assets/baseline-gpt55-episode-v1/stages/05_coverage_decisions/episode_guideline_candidates.jsonl",
+    "annotations": "held_out_audit_v1/annotations/codex_applicability.jsonl"
+  }
+}

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import (
     Any,
     Callable,
+    Collection,
     Dict,
     Iterable,
     List,
@@ -47,7 +48,8 @@ from src.hephaestus.datasets.intent_assets import (
     IntentRecord,
     TrustedIntent,
     assert_unique_cluster_ids,
-    build_intent_match_texts,
+    build_episode_guideline_candidate_rows,
+    build_episode_guideline_candidate_texts,
     cluster_records_fixed_count,
     cluster_to_dict,
     dense_vectors_to_sparse,
@@ -86,6 +88,7 @@ from src.hephaestus.evaluation_assets.input_contract import (
     canonical_user_intent_text,
     effective_route,
     episode_tool_names,
+    record_user_messages,
     redact_correctness_signals,
     validate_input_records,
 )
@@ -140,6 +143,12 @@ from src.hephaestus.evaluation_assets.stage_three_contract import (
     compile_evaluation_guidelines as _compile_evaluation_guidelines,  # noqa: F401
 )
 from src.hephaestus.evaluation_assets.stage_three_contract import (
+    compile_applicability_contract,
+    evaluate_applicability_contract,
+    extract_episode_facts,
+    normalize_applicability_contract,
+)
+from src.hephaestus.evaluation_assets.stage_three_contract import (
     expected_from_rubric as _expected,
 )
 from src.hephaestus.evaluation_assets.stage_three_contract import (
@@ -180,6 +189,12 @@ LABELING_QUEUE_ACQUISITION = {
     "method": "deterministic_centroid_nearest",
     "sampling_semantics": "non_probability",
 }
+GUIDELINE_CANDIDATE_CLUSTER_TOP_K = 9
+GUIDELINE_CANDIDATE_EPISODE_TOP_K = 9
+GUIDELINE_CANDIDATE_MAX_PER_EPISODE = 10
+GUIDELINE_CANDIDATE_EXHAUSTIVE_ROUTE_LIMIT = 20
+GUIDELINE_APPLICABILITY_MAX_GROUPS_PER_CALL = 12
+GUIDELINE_APPLICABILITY_MAX_CANDIDATE_PAIRS_PER_CALL = 72
 PUBLISHED_DATASET_SPLITS = (
     "train",
     "validation",
@@ -260,13 +275,29 @@ Create reusable evaluation guidelines from trusted feedback evidence grouped by
 route. Return one JSON object with a `guidelines` array. Every supplied record_id
 must appear in at least one guideline's source_record_ids. Aggregate compatible
 evidence and keep conflicting or case-specific evidence explicit rather than
-silently resolving it. Each guideline must contain intent_label, description,
-route, source_record_ids, confidence (0..1), criteria, tool_expectations, and
+silently resolving it. Use only record_id values present in the supplied
+evidence: never invent, transform, or copy an ID from another field. Each
+guideline's source_record_ids must be a nonempty subset of those supplied IDs.
+Only group records when every criterion is supported by every source record in
+the guideline. Do not emit source_record_ids inside criterion objects; criteria
+inherit the validated parent guideline's complete source_record_ids. The
+supplied record_id values are short opaque aliases; preserve them exactly even
+when the example content resembles another task. Each guideline must contain
+intent_label, description, route,
+source_record_ids, confidence (0..1), criteria, tool_expectations,
 reference_output, conflicts, and uncertainties. Each criterion must contain
-kind (required, prohibited, or preferred), statement, source_record_ids,
-dimension, severity (critical, major, or minor), applicability, scoring,
-evidence_required, and evaluator. Criterion source_record_ids must be a subset
-of the guideline source_record_ids. Evaluator must contain type and fallback;
+kind (required, prohibited, or preferred), statement, dimension, severity
+(critical, major, or minor), applicability, scoring, evidence_required, and
+evaluator. applicability must be a nonempty string or a
+JSON object, scoring must be a nonempty string, and evidence_required must be a
+JSON boolean (`true` or `false`), never a string, number, array, or object.
+intent_label, description, route, criterion statements, and criterion dimensions
+must be nonempty strings. source_record_ids and criteria must be nonempty JSON
+arrays. conflicts and uncertainties must be JSON arrays containing only strings;
+use `[]` when there are none. tool_expectations must be a JSON object; use `{}`
+when there are none. reference_output must be a string or null. Evaluator must
+contain exactly type and fallback, both strings selected from the evaluator
+types below;
 prefer state_check or deterministic_check when the evidence is
 objectively verifiable, semantic_trajectory only when the path itself matters,
 llm_judge for qualitative criteria, and human_review when evidence is
@@ -279,15 +310,65 @@ tool-backed action. These calls are observed context, not independent
 correctness evidence: result_returned does not establish that the tool, its
 arguments, or the resulting state was correct. Prefer semantic tool expectations
 and permit multiple valid solution paths. Require a literal tool name only when
-the supplied evidence establishes that exact contract. reference_output must be
-a string or null and must never be copied from a previous assistant response.
+the supplied evidence establishes that exact contract. reference_output must
+never be copied from a previous assistant response. Return only the JSON object,
+with no markdown or explanatory text.
 """
 
-INFERENCE_PROMPT = """\
-Infer reviewable case rubrics for unlabeled intent clusters using only the
-supplied trusted evaluation guideline as correctness evidence. Return one JSON object with a
-`rubrics` array preserving every `cluster_id`. Each item must contain cluster_id,
-intent_label, confidence (0..1), must, must_not, should, deterministic_checks,
+EPISODE_GUIDELINE_APPLICABILITY_PROMPT = """\
+Return exactly one applicability decision for every supplied `decision_id`.
+Do not omit, merge, rename, invent, or duplicate a decision. Evaluate every
+candidate guideline independently.
+
+A guideline applies only when the episode creates a distinct, user-facing
+evaluation obligation within that guideline's core target scenario.
+Applicability does not mean the agent handled the obligation correctly.
+
+For each candidate:
+
+1. Read all user messages in order and identify the concrete request, question,
+   constraint, authorization, correction, or withdrawal that could activate
+   the guideline. Evaluate an earlier requirement while it was active even if
+   the user later changed direction.
+2. Derive the core activation conditions from the intent label, description,
+   required or prohibited criteria, and their applicability. If the core
+   scenario combines conditions, require all defining conditions unless the
+   guideline explicitly presents them as alternatives.
+3. Do not activate a guideline from one incidental, preferred, or subordinate
+   criterion; from a broad topical resemblance; or from only one fragment of a
+   compound scenario. The episode must match the guideline as a whole.
+4. Tool calls, arguments, results, errors, state summaries, and
+   `structured_episode_facts` may resolve state, entity, timing, or scope for a
+   user-anchored requirement. They cannot create user intent, combine unrelated
+   branches, or prove correct behavior.
+5. A guideline for delivering information requires that the user explicitly
+   ask to receive that information, accept an offer to receive it, or require
+   it as the user-facing result. Merely specifying desired properties, answering
+   a clarification, or requiring an internal lookup for another action does
+   not create a separate information-delivery obligation.
+6. A request for an unavailable or unsupported action can activate a guideline
+   requiring a limitation or alternative. Independent obligations can activate
+   multiple guidelines; never force one best match.
+
+Exclude a guideline when its core activation evidence is absent or comes from
+different requests, entities, branches, or times. In the reason, identify the
+user requirement supporting each selected guideline.
+
+Return only one JSON object with a `decisions` array. Every item must contain
+`decision_id`, `applicable_guideline_ids`, `confidence`, `reason`, and
+`evidence_pointers`. Use only IDs from that decision's
+`candidate_guideline_ids`. The two pointer fields must be arrays of strings and
+`confidence` must be between 0 and 1. Before returning, verify that the output
+contains the exact set of supplied `decision_id` values.
+"""
+
+INFERENCE_PROMPT = EPISODE_GUIDELINE_APPLICABILITY_PROMPT + """\
+
+When mode is `legacy_cluster_rubric`, infer reviewable case rubrics for
+unlabeled intent clusters using only the supplied trusted evaluation guideline
+as correctness evidence. Return one JSON object with a `rubrics` array
+preserving every `cluster_id`. Each item must contain cluster_id, intent_label,
+confidence (0..1), must, must_not, should, deterministic_checks,
 tool_expectations, and reference_output. Representative unlabeled requests may
 shape slots and wording but are not correctness evidence. The must, must_not,
 and should fields must be arrays of strings; deterministic_checks must be an
@@ -303,6 +384,16 @@ conversation_context. Requests must be realistic, self-contained,
 non-attributable, mutually distinct, and materially different from
 representatives. Do not include an answer, rubric, feedback rationale, private
 identifier, secret, or invented tool result.
+"""
+
+SCHEMA_REGENERATION_PROMPT = """\
+The previous response failed strict schema validation. Generate a new response
+from scratch from the same user payload; do not attempt to quote, patch, or
+refer to the previous response. Preserve every required input identifier
+exactly, use only identifiers supplied in the payload, emit every required
+field with the exact requested JSON type, and return only the requested JSON
+object. If the evidence cannot support a field, use the contract's explicit
+empty or null value rather than inventing content.
 """
 
 STAGE_PROMPTS = {
@@ -372,12 +463,50 @@ class EvaluationAssetPipeline:
         layout: EvaluationAssetLayout,
         rubric_provider: Optional[RubricProvider] = None,
         embedding_provider: Optional[EmbeddingProvider] = None,
+        applicability_contracts: Optional[
+            Mapping[str, Mapping[str, Any]]
+        ] = None,
+        applicability_unknown_policy: Optional[str] = None,
+        applicability_semantic_review_intent_labels: Optional[
+            Collection[str]
+        ] = None,
     ) -> None:
         self.layout = layout
         self.config: EvaluationAssetConfig | None = None
         self.lineage: dict[str, Any] = {}
         self._injected_rubric_provider = rubric_provider
         self._injected_embedding_provider = embedding_provider
+        self._injected_applicability_contracts = (
+            {
+                str(intent_label): normalize_applicability_contract(contract)
+                for intent_label, contract in applicability_contracts.items()
+            }
+            if applicability_contracts is not None
+            else None
+        )
+        if applicability_unknown_policy is None:
+            applicability_unknown_policy = (
+                "not_supported"
+                if applicability_contracts is not None
+                else "llm_fallback"
+            )
+        if applicability_unknown_policy not in {
+            "llm_fallback",
+            "not_supported",
+        }:
+            raise ValueError(
+                "applicability_unknown_policy must be 'llm_fallback' or "
+                "'not_supported'"
+            )
+        self._applicability_unknown_policy = applicability_unknown_policy
+        raw_review_labels = applicability_semantic_review_intent_labels or ()
+        review_labels = frozenset(str(item).strip() for item in raw_review_labels)
+        if "" in review_labels:
+            raise ValueError(
+                "applicability_semantic_review_intent_labels cannot contain "
+                "an empty label"
+            )
+        self._applicability_semantic_review_intent_labels = review_labels
         self.rubric_provider = rubric_provider
         self.embedding_provider = embedding_provider
         self._provider_identities: dict[str, dict[str, Any]] = {}
@@ -541,34 +670,47 @@ class EvaluationAssetPipeline:
         if self.rubric_provider is None:
             raise RuntimeError("Rubric provider is not configured")
         try:
-            _discard_provider_metadata(self.rubric_provider)
-            response = self.rubric_provider.generate_json(system_prompt, payload)
-            metadata = _drain_provider_metadata(self.rubric_provider)
-            if not isinstance(response, Mapping):
-                raise ValueError("Rubric provider response must be a JSON object")
-            normalized = normalize(response)
             identity = self._provider_identities["rubric"]
             settings = self._provider_settings["rubric"]["settings"]
-            self._stage_call_rows.append(
-                build_provider_call(
-                    stage=stage.value,
-                    ordinal=len(self._stage_call_rows) + 1,
-                    provider_role="rubric",
-                    provider=identity["provider"],
-                    model=identity["model"],
-                    request={
-                        "interface": "generate_json-v1",
-                        "system_prompt": system_prompt,
-                        "payload": dict(payload),
-                        "provider": identity["provider"],
-                        "model": identity["model"],
-                        "settings": settings,
-                    },
-                    response=dict(response),
-                    metadata=metadata,
+            for schema_attempt in range(2):
+                call_prompt = (
+                    system_prompt
+                    if schema_attempt == 0
+                    else f"{system_prompt}\n\n{SCHEMA_REGENERATION_PROMPT}"
                 )
-            )
-            return normalized
+                _discard_provider_metadata(self.rubric_provider)
+                response = self.rubric_provider.generate_json(call_prompt, payload)
+                metadata = _drain_provider_metadata(self.rubric_provider)
+                self._stage_call_rows.append(
+                    build_provider_call(
+                        stage=stage.value,
+                        ordinal=len(self._stage_call_rows) + 1,
+                        provider_role="rubric",
+                        provider=identity["provider"],
+                        model=identity["model"],
+                        request={
+                            "interface": "generate_json-v1",
+                            "system_prompt": call_prompt,
+                            "payload": dict(payload),
+                            "provider": identity["provider"],
+                            "model": identity["model"],
+                            "settings": settings,
+                        },
+                        response=response,
+                        metadata=metadata,
+                    )
+                )
+                try:
+                    if not isinstance(response, Mapping):
+                        raise ValueError(
+                            "Rubric provider response must be a JSON object"
+                        )
+                    return normalize(response)
+                except ValueError:
+                    if schema_attempt == 0:
+                        continue
+                    raise
+            raise AssertionError("schema regeneration loop did not return")
         except Exception as exc:
             raise ProviderCallError(
                 stage=stage,
@@ -631,6 +773,13 @@ class EvaluationAssetPipeline:
         unlabeled_source: Path,
         rubric_provider: Optional[RubricProvider] = None,
         embedding_provider: Optional[EmbeddingProvider] = None,
+        applicability_contracts: Optional[
+            Mapping[str, Mapping[str, Any]]
+        ] = None,
+        applicability_unknown_policy: Optional[str] = None,
+        applicability_semantic_review_intent_labels: Optional[
+            Collection[str]
+        ] = None,
         initial_status: str = "draft",
         *,
         repository_base: Path | None = None,
@@ -652,6 +801,11 @@ class EvaluationAssetPipeline:
             layout,
             rubric_provider=rubric_provider,
             embedding_provider=embedding_provider,
+            applicability_contracts=applicability_contracts,
+            applicability_unknown_policy=applicability_unknown_policy,
+            applicability_semantic_review_intent_labels=(
+                applicability_semantic_review_intent_labels
+            ),
         )
 
     def run(
@@ -1645,19 +1799,36 @@ class EvaluationAssetPipeline:
         for route in sorted(evidence_by_route):
             route_evidence = sorted(evidence_by_route[route], key=lambda item: str(item["record_id"]))
             source_records = [normalized_by_id[str(item["record_id"])] for item in route_evidence]
+            source_alias_by_id = {
+                str(item["record_id"]): f"source-{index:03d}"
+                for index, item in enumerate(route_evidence, start=1)
+            }
+            source_id_by_alias = {
+                alias: record_id for record_id, alias in source_alias_by_id.items()
+            }
             route_candidates, route_guidelines = self._call_rubric_provider(
                 PipelineStage.RUBRIC_EXTRACTION,
                 GUIDELINE_SYNTHESIS_PROMPT,
                 {
                     "route": route,
-                    "evidence": route_evidence,
+                    "evidence": [
+                        {
+                            **item,
+                            "record_id": source_alias_by_id[str(item["record_id"])],
+                        }
+                        for item in route_evidence
+                    ],
                     "examples": [
-                        _guideline_provider_example(row)
+                        {
+                            **_guideline_provider_example(row),
+                            "record_id": source_alias_by_id[str(row["record_id"])],
+                        }
                         for row in source_records
                     ],
                 },
                 partial(
-                    _normalize_guideline_response,
+                    _normalize_aliased_guideline_response,
+                    source_id_by_alias=source_id_by_alias,
                     route=route,
                     evidence=route_evidence,
                     rubric_provider=self._provider_identities["rubric"]["provider"],
@@ -1820,7 +1991,11 @@ class EvaluationAssetPipeline:
         records = [_intent_record(row) for row in intent_rows]
         trusted = [_trusted_intent(row) for row in trusted_rows]
         clusters = [_intent_cluster(row) for row in cluster_rows]
-        match_texts = build_intent_match_texts(clusters, records, trusted)
+        match_texts = build_episode_guideline_candidate_texts(
+            clusters,
+            records,
+            trusted,
+        )
         vectors = None
         if self.embedding_provider is not None:
             embedding_keys = list(match_texts)
@@ -1848,12 +2023,29 @@ class EvaluationAssetPipeline:
             coverage_policy=policy,
             vectors=vectors,
         )
+        episode_candidates = build_episode_guideline_candidate_rows(
+            clusters,
+            records,
+            trusted,
+            vectors=vectors,
+            cluster_top_k=GUIDELINE_CANDIDATE_CLUSTER_TOP_K,
+            episode_top_k=GUIDELINE_CANDIDATE_EPISODE_TOP_K,
+            max_candidates=GUIDELINE_CANDIDATE_MAX_PER_EPISODE,
+            exhaustive_route_limit=GUIDELINE_CANDIDATE_EXHAUSTIVE_ROUTE_LIMIT,
+        )
         write_jsonl(
             self.layout.artifact_path(
                 PipelineStage.COVERAGE_DECISIONS,
                 "intent_matches.jsonl",
             ),
             [match_to_dict(match) for match in matches],
+        )
+        write_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.COVERAGE_DECISIONS,
+                "episode_guideline_candidates.jsonl",
+            ),
+            episode_candidates,
         )
         write_coverage_report(
             self.layout.artifact_path(
@@ -1939,6 +2131,21 @@ class EvaluationAssetPipeline:
         normalized_by_id = {row["record_id"]: row for row in normalized}
         guideline_by_id = {row["guideline_id"]: row for row in evaluation_guidelines}
         match_by_cluster = {match.cluster_id: match for match in matches}
+        if bool(
+            getattr(
+                self.rubric_provider,
+                "supports_episode_guideline_applicability",
+                False,
+            )
+        ):
+            return self._infer_episode_labels(
+                intent_rows=intent_rows,
+                normalized=normalized,
+                raw_rows=raw_rows,
+                evaluation_guidelines=evaluation_guidelines,
+                clusters=clusters,
+                matches=matches,
+            )
         matched = [
             cluster
             for cluster in clusters
@@ -2004,6 +2211,7 @@ class EvaluationAssetPipeline:
                 PipelineStage.LABEL_INFERENCE,
                 INFERENCE_PROMPT,
                 {
+                    "mode": "legacy_cluster_rubric",
                     "clusters": [
                         {
                             "cluster_id": cluster.cluster_id,
@@ -2135,6 +2343,296 @@ class EvaluationAssetPipeline:
                 "inferred_cases.jsonl",
             ),
             inferred_cases,
+        )
+        return {
+            "inferred_cases": len(inferred_cases),
+            "review_clusters": len(missing),
+        }
+
+    def _infer_episode_labels(
+        self,
+        *,
+        intent_rows: Sequence[Mapping[str, Any]],
+        normalized: Sequence[Mapping[str, Any]],
+        raw_rows: Sequence[Mapping[str, Any]],
+        evaluation_guidelines: Sequence[Mapping[str, Any]],
+        clusters: Sequence[IntentCluster],
+        matches: Sequence[IntentMatch],
+    ) -> Dict[str, int]:
+        """Attach zero, one, or many trusted guidelines to each episode."""
+        evaluation_guidelines = _attach_applicability_contracts(
+            evaluation_guidelines,
+            self._injected_applicability_contracts,
+        )
+        row_by_id = {str(row["record_id"]): row for row in intent_rows}
+        raw_by_id = {str(row["record_id"]): row for row in raw_rows}
+        normalized_by_id = {str(row["record_id"]): row for row in normalized}
+        guideline_by_id = {
+            str(row["guideline_id"]): row for row in evaluation_guidelines
+        }
+        guideline_id_by_intent_label = {
+            str(row["intent_label"]): str(row["guideline_id"])
+            for row in evaluation_guidelines
+        }
+        missing_review_labels = sorted(
+            self._applicability_semantic_review_intent_labels
+            - set(guideline_id_by_intent_label)
+        )
+        if missing_review_labels:
+            raise ValueError(
+                "Semantic-review intent labels are absent from the guideline "
+                f"library: {missing_review_labels}"
+            )
+        semantic_review_guideline_ids = {
+            guideline_id_by_intent_label[intent_label]
+            for intent_label in self._applicability_semantic_review_intent_labels
+        }
+        match_by_cluster = {match.cluster_id: match for match in matches}
+        trusted_record_ids = set(normalized_by_id)
+        eligible_record_ids = _eligible_episode_record_ids(
+            clusters,
+            trusted_record_ids,
+        )
+
+        candidate_path = self.layout.artifact_path(
+            PipelineStage.COVERAGE_DECISIONS,
+            "episode_guideline_candidates.jsonl",
+        )
+        if candidate_path.is_file():
+            candidate_rows = _load_jsonl(candidate_path)
+        else:
+            candidate_rows = _legacy_episode_candidate_rows(
+                clusters,
+                matches,
+                evaluation_guidelines,
+            )
+        candidate_by_record = _unique_rows_by_key(
+            [
+                row
+                for row in candidate_rows
+                if str(row.get("record_id")) in eligible_record_ids
+            ],
+            key="record_id",
+            source="episode guideline candidates",
+        )
+        missing_candidates = sorted(eligible_record_ids - set(candidate_by_record))
+        if missing_candidates:
+            raise ValueError(
+                "Episode guideline candidates omitted record(s): "
+                + ", ".join(missing_candidates)
+            )
+
+        groups, group_by_record, deterministic_rows = _build_applicability_groups(
+            eligible_record_ids=eligible_record_ids,
+            candidate_by_record=candidate_by_record,
+            raw_by_id=raw_by_id,
+            guideline_by_id=guideline_by_id,
+            unknown_policy=self._applicability_unknown_policy,
+            semantic_review_guideline_ids=semantic_review_guideline_ids,
+            use_applicability_contracts=(
+                self._injected_applicability_contracts is not None
+            ),
+            use_deterministic_candidate_filters=False,
+        )
+        decisions_by_id: Dict[str, Dict[str, Any]] = {
+            str(row["decision_id"]): row for row in deterministic_rows
+        }
+        for batch in _applicability_batches(groups):
+            generated = self._call_rubric_provider(
+                PipelineStage.LABEL_INFERENCE,
+                INFERENCE_PROMPT,
+                _applicability_provider_payload(batch, guideline_by_id),
+                partial(
+                    _normalize_applicability_response,
+                    decision_groups=batch,
+                ),
+            )
+            group_by_decision_id = {
+                str(group["decision_id"]): group for group in batch
+            }
+            for decision in generated:
+                decision_id = str(decision["decision_id"])
+                decisions_by_id[decision_id] = _merge_applicability_decision(
+                    group_by_decision_id[decision_id],
+                    decision,
+                )
+
+        applicability_rows: List[Dict[str, Any]] = []
+        episode_rubrics: List[Dict[str, Any]] = []
+        held_outputs: List[Dict[str, Any]] = []
+        selected_ids_by_record: Dict[str, tuple[str, ...]] = {}
+        decision_by_record: Dict[str, Dict[str, Any]] = {}
+        for record_id in sorted(eligible_record_ids):
+            group = group_by_record[record_id]
+            decision = dict(decisions_by_id[str(group["decision_id"])])
+            selected_ids = tuple(
+                str(item) for item in decision["applicable_guideline_ids"]
+            )
+            selected_ids_by_record[record_id] = selected_ids
+            decision_by_record[record_id] = decision
+            applicability_rows.append(
+                _record_applicability_row(
+                    record_id=record_id,
+                    group=group,
+                    decision=decision,
+                )
+            )
+            if not selected_ids:
+                held_outputs.append(
+                    {
+                        "record_id": record_id,
+                        "cluster_id": str(group["cluster_id_by_record"][record_id]),
+                        "hold_reason": "no_applicable_guideline",
+                        "decision_id": decision["decision_id"],
+                        "reason": decision["reason"],
+                    }
+                )
+                continue
+            selected_guidelines = [guideline_by_id[item] for item in selected_ids]
+            rubric = _rubric_from_guidelines(
+                record_id,
+                selected_guidelines,
+                self._provider_identities["rubric"]["provider"],
+                self._provider_identities["rubric"]["model"],
+            )
+            rubric["label_source"] = INFERRED_FROM_TRUSTED_FEEDBACK
+            rubric["review_status"] = "review_required"
+            rubric["confidence"] = round(
+                min(float(rubric["confidence"]), float(decision["confidence"])),
+                4,
+            )
+            rubric["cluster_id"] = str(group["cluster_id_by_record"][record_id])
+            rubric["applicability_decision_id"] = decision["decision_id"]
+            if has_scoreable_rubric(rubric):
+                episode_rubrics.append(rubric)
+            else:
+                held_outputs.append(
+                    {
+                        "record_id": record_id,
+                        "cluster_id": rubric["cluster_id"],
+                        "hold_reason": "unscoreable_episode_rubric",
+                        "decision_id": decision["decision_id"],
+                        "rubric": rubric,
+                    }
+                )
+
+        rubric_by_record = {
+            str(row["record_id"]): row for row in episode_rubrics
+        }
+        labels, inferred_cases = _inferred_episode_cases(
+            clusters=clusters,
+            matches=matches,
+            intent_rows=intent_rows,
+            raw_rows=raw_rows,
+            rubric_by_record=rubric_by_record,
+            decision_by_record=decision_by_record,
+            config=self.config,
+        )
+
+        cluster_rubrics: List[Dict[str, Any]] = []
+        dependency_rows: List[Dict[str, Any]] = []
+        cluster_support, missing = _episode_cluster_support(
+            clusters=clusters,
+            matches=matches,
+            row_by_id=row_by_id,
+            eligible_record_ids=eligible_record_ids,
+            selected_ids_by_record=selected_ids_by_record,
+            rubric_by_record=rubric_by_record,
+        )
+        for cluster in clusters:
+            match = match_by_cluster[cluster.cluster_id]
+            record_ids = [
+                record_id
+                for record_id in cluster.record_ids
+                if record_id in eligible_record_ids
+            ]
+            if not record_ids:
+                continue
+            selected_sets = {
+                selected_ids_by_record[record_id] for record_id in record_ids
+            }
+            homogeneous = (
+                bool(record_ids)
+                and len(selected_sets) == 1
+                and next(iter(selected_sets))
+                and all(record_id in rubric_by_record for record_id in record_ids)
+            )
+            if not homogeneous:
+                held_outputs.append(
+                    _episode_gate_cluster_hold(
+                        cluster,
+                        record_ids,
+                        selected_ids_by_record,
+                        rubric_by_record,
+                    )
+                )
+                continue
+            selected_ids = next(iter(selected_sets))
+            selected_guidelines = [guideline_by_id[item] for item in selected_ids]
+            cluster_rubric = _rubric_from_guidelines(
+                cluster.cluster_id,
+                selected_guidelines,
+                self._provider_identities["rubric"]["provider"],
+                self._provider_identities["rubric"]["model"],
+            )
+            cluster_rubric["cluster_id"] = cluster_rubric.pop("record_id")
+            cluster_rubric["label_source"] = INFERRED_FROM_TRUSTED_FEEDBACK
+            cluster_rubric["review_status"] = "review_required"
+            cluster_rubric["confidence"] = round(
+                min(
+                    float(cluster_rubric["confidence"]),
+                    *(float(decision_by_record[item]["confidence"]) for item in record_ids),
+                ),
+                4,
+            )
+            guideline_bundle = _guideline_dependency_bundle(selected_guidelines)
+            dependency = _stage_six_dependency(
+                cluster=cluster,
+                match=match,
+                guideline=guideline_bundle,
+                intent_rows=row_by_id,
+                trusted_rows=normalized_by_id,
+                provider=self._provider_settings["rubric"],
+            )
+            cluster_rubric["dependency_sha256"] = dependency["dependency_sha256"]
+            cluster_rubrics.append(cluster_rubric)
+            dependency_rows.append(
+                {"cluster_id": cluster.cluster_id, "dependency": dependency}
+            )
+
+        write_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.LABEL_INFERENCE,
+                "episode_guideline_applicability.jsonl",
+            ),
+            applicability_rows,
+        )
+        write_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.LABEL_INFERENCE,
+                "inferred_unlabeled_episode_rubrics.jsonl",
+            ),
+            episode_rubrics,
+        )
+        for name, rows in (
+            ("cluster_feedback_support.jsonl", cluster_support),
+            ("inferred_unlabeled_cluster_rubrics.jsonl", cluster_rubrics),
+            ("inference_dependencies.jsonl", dependency_rows),
+            ("held_inference_outputs.jsonl", held_outputs),
+            ("inferred_unlabeled_labels.jsonl", labels),
+            ("missing_labeled_feedback_clusters.jsonl", missing),
+            ("inferred_cases.jsonl", inferred_cases),
+        ):
+            write_jsonl(
+                self.layout.artifact_path(PipelineStage.LABEL_INFERENCE, name),
+                rows,
+            )
+        _write_missing_report(
+            self.layout.artifact_path(
+                PipelineStage.LABEL_INFERENCE,
+                "missing_labeled_feedback_report.md",
+            ),
+            missing,
         )
         return {
             "inferred_cases": len(inferred_cases),
@@ -2667,15 +3165,34 @@ class EvaluationAssetPipeline:
             )
         )
         synthetic_cases = _load_jsonl(self.layout.artifact_path(stage, "synthetic_cases.jsonl"))
-        inference_dependencies = _dependency_rows_by_cluster(
-            _load_jsonl(
-                self.layout.artifact_path(
-                    PipelineStage.LABEL_INFERENCE,
-                    "inference_dependencies.jsonl",
-                )
-            ),
-            source="inference dependencies",
+        episode_applicability_path = self.layout.artifact_path(
+            PipelineStage.LABEL_INFERENCE,
+            "episode_guideline_applicability.jsonl",
         )
+        if episode_applicability_path.is_file():
+            inference_dependencies_by_case = _dependency_rows_by_case(
+                self._write_inferred_review_dependencies(inferred_cases),
+                source="inferred review dependencies",
+            )
+            inference_dependencies_by_cluster: Dict[str, Dict[str, Any]] = {}
+        else:
+            write_jsonl(
+                self.layout.artifact_path(
+                    PipelineStage.SYNTHETIC_COVERAGE,
+                    "inferred_review_dependencies.jsonl",
+                ),
+                [],
+            )
+            inference_dependencies_by_case = {}
+            inference_dependencies_by_cluster = _dependency_rows_by_cluster(
+                _load_jsonl(
+                    self.layout.artifact_path(
+                        PipelineStage.LABEL_INFERENCE,
+                        "inference_dependencies.jsonl",
+                    )
+                ),
+                source="inference dependencies",
+            )
         synthetic_dependencies = _dependency_rows_by_cluster(
             _load_jsonl(self.layout.artifact_path(stage, "synthetic_dependencies.jsonl")),
             source="synthetic dependencies",
@@ -2690,7 +3207,9 @@ class EvaluationAssetPipeline:
             cluster_id = str(metadata.get("source_cluster") or "")
             trust_tier = str(metadata.get("trust_tier") or "")
             if trust_tier == INFERRED_FROM_TRUSTED_FEEDBACK:
-                dependency = inference_dependencies.get(cluster_id)
+                dependency = inference_dependencies_by_case.get(
+                    str(review_case["case_id"])
+                ) or inference_dependencies_by_cluster.get(cluster_id)
             elif trust_tier == SYNTHETIC_FROM_TRUSTED_RUBRIC:
                 dependency = synthetic_dependencies.get(cluster_id)
             else:
@@ -2800,6 +3319,133 @@ class EvaluationAssetPipeline:
         )
         self._inherit_parent_review_decisions(queue, timestamp=timestamp)
         self._auto_approve_derived_review_items(queue, timestamp=timestamp)
+
+    def _write_inferred_review_dependencies(
+        self,
+        inferred_cases: Sequence[Mapping[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Bind each inferred case to its exact episode applicability decision."""
+        stage = PipelineStage.LABEL_INFERENCE
+        clusters = {
+            cluster.cluster_id: cluster
+            for cluster in (
+                _intent_cluster(row)
+                for row in _load_jsonl(
+                    self.layout.artifact_path(
+                        PipelineStage.INTENT_CLUSTERING,
+                        "intent_inventory.jsonl",
+                    )
+                )
+            )
+        }
+        matches = {
+            match.cluster_id: match
+            for match in (
+                _intent_match(row)
+                for row in _load_jsonl(
+                    self.layout.artifact_path(
+                        PipelineStage.COVERAGE_DECISIONS,
+                        "intent_matches.jsonl",
+                    )
+                )
+            )
+        }
+        guidelines = _unique_rows_by_key(
+            _load_jsonl(
+                self.layout.artifact_path(
+                    PipelineStage.RUBRIC_EXTRACTION,
+                    "evaluation_guidelines.jsonl",
+                )
+            ),
+            key="guideline_id",
+            source="evaluation guidelines",
+        )
+        applicability = _unique_rows_by_key(
+            _load_jsonl(
+                self.layout.artifact_path(
+                    stage,
+                    "episode_guideline_applicability.jsonl",
+                )
+            ),
+            key="record_id",
+            source="episode guideline applicability",
+        )
+        intent_rows = _unique_rows_by_key(
+            _load_jsonl(
+                self.layout.artifact_path(
+                    PipelineStage.PREPARED_INPUTS,
+                    "intent_records.jsonl",
+                )
+            ),
+            key="record_id",
+            source="intent records",
+        )
+        trusted_rows = _unique_rows_by_key(
+            _load_jsonl(
+                self.layout.artifact_path(
+                    PipelineStage.PREPARED_INPUTS,
+                    "normalized_feedback.jsonl",
+                )
+            ),
+            key="record_id",
+            source="normalized feedback",
+        )
+
+        rows: List[Dict[str, Any]] = []
+        seen_case_ids: set[str] = set()
+        for case in inferred_cases:
+            case_id = str(case.get("case_id") or "")
+            metadata = case.get("metadata")
+            if (
+                not case_id.startswith("inferred-")
+                or case_id in seen_case_ids
+                or not isinstance(metadata, Mapping)
+            ):
+                raise ReviewIntegrityError(
+                    "inferred case identity is invalid for review dependency creation"
+                )
+            seen_case_ids.add(case_id)
+            record_id = case_id.removeprefix("inferred-")
+            cluster_id = str(metadata.get("source_cluster") or "")
+            cluster = clusters.get(cluster_id)
+            match = matches.get(cluster_id)
+            decision = applicability.get(record_id)
+            if cluster is None or match is None or decision is None:
+                raise ReviewIntegrityError(
+                    f"inferred case {case_id} lacks episode applicability inputs"
+                )
+            selected_ids = decision.get("applicable_guideline_ids")
+            if not isinstance(selected_ids, list) or not selected_ids:
+                raise ReviewIntegrityError(
+                    f"inferred case {case_id} lacks applicable guidelines"
+                )
+            try:
+                selected_guidelines = [guidelines[str(item)] for item in selected_ids]
+            except KeyError as exc:
+                raise ReviewIntegrityError(
+                    f"inferred case {case_id} references an unknown guideline"
+                ) from exc
+            guideline_bundle = _guideline_dependency_bundle(selected_guidelines)
+            guideline_bundle["episode_record_id"] = record_id
+            guideline_bundle["episode_applicability"] = dict(decision)
+            dependency = _stage_six_dependency(
+                cluster=cluster,
+                match=match,
+                guideline=guideline_bundle,
+                intent_rows=intent_rows,
+                trusted_rows=trusted_rows,
+                provider=self._provider_settings["rubric"],
+            )
+            rows.append({"case_id": case_id, "dependency": dependency})
+
+        write_jsonl(
+            self.layout.artifact_path(
+                PipelineStage.SYNTHETIC_COVERAGE,
+                "inferred_review_dependencies.jsonl",
+            ),
+            rows,
+        )
+        return rows
 
     def _auto_approve_derived_review_items(
         self,
@@ -2958,12 +3604,33 @@ def _dependency_rows_by_cluster(
     return dependencies
 
 
+def _dependency_rows_by_case(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    source: str,
+) -> Dict[str, Dict[str, Any]]:
+    """Index authentic dependency descriptors by their persisted case key."""
+    indexed = _unique_rows_by_key(rows, key="case_id", source=source)
+    dependencies: Dict[str, Dict[str, Any]] = {}
+    for case_id, row in indexed.items():
+        dependency = row.get("dependency")
+        if not isinstance(dependency, Mapping) or not dependency_matches(
+            dependency,
+            dependency,
+        ):
+            raise ReviewIntegrityError(
+                f"{source} has unauthentic dependency for {case_id!r}"
+            )
+        dependencies[case_id] = dict(dependency)
+    return dependencies
+
+
 def _review_dependencies_by_case(
     layout: EvaluationAssetLayout,
     review_items: Sequence[Mapping[str, Any]],
 ) -> Dict[str, Dict[str, Any]]:
     """Resolve every queued case to its complete current Stage 6/7 dependency."""
-    inference = _dependency_rows_by_cluster(
+    inference_by_cluster = _dependency_rows_by_cluster(
         _load_jsonl(
             layout.artifact_path(
                 PipelineStage.LABEL_INFERENCE,
@@ -2971,6 +3638,18 @@ def _review_dependencies_by_case(
             )
         ),
         source="inference dependencies",
+    )
+    inference_path = layout.artifact_path(
+        PipelineStage.SYNTHETIC_COVERAGE,
+        "inferred_review_dependencies.jsonl",
+    )
+    inference_by_case = (
+        _dependency_rows_by_case(
+            _load_jsonl(inference_path),
+            source="inferred review dependencies",
+        )
+        if inference_path.is_file()
+        else {}
     )
     synthetic = _dependency_rows_by_cluster(
         _load_jsonl(
@@ -2990,14 +3669,14 @@ def _review_dependencies_by_case(
             raise ReviewIntegrityError("review item case authority is malformed")
         cluster_id = str(metadata.get("source_cluster") or "")
         trust_tier = str(metadata.get("trust_tier") or "")
-        dependencies = (
-            inference
-            if trust_tier == INFERRED_FROM_TRUSTED_FEEDBACK
-            else synthetic
-            if trust_tier == SYNTHETIC_FROM_TRUSTED_RUBRIC
-            else None
-        )
-        dependency = dependencies.get(cluster_id) if dependencies is not None else None
+        if trust_tier == INFERRED_FROM_TRUSTED_FEEDBACK:
+            dependency = inference_by_case.get(case_id) or inference_by_cluster.get(
+                cluster_id
+            )
+        elif trust_tier == SYNTHETIC_FROM_TRUSTED_RUBRIC:
+            dependency = synthetic.get(cluster_id)
+        else:
+            dependency = None
         if dependency is None or case_id in resolved:
             raise ReviewIntegrityError(f"review item {case_id!r} has no unique current dependency")
         resolved[case_id] = dependency
@@ -3216,6 +3895,60 @@ def _guideline_provider_example(row: Mapping[str, Any]) -> Dict[str, Any]:
         "feedback_polarity": row["feedback"]["polarity"],
         "observed_tool_calls": observed_tool_calls,
     }
+
+
+def _normalize_aliased_guideline_response(
+    response: Mapping[str, Any],
+    *,
+    source_id_by_alias: Mapping[str, str],
+    route: str,
+    evidence: Sequence[Mapping[str, Any]],
+    rubric_provider: str,
+    rubric_model: str,
+    identity_profile: str,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Restore exact source IDs before applying the strict guideline contract."""
+    prepared = dict(response)
+    raw_guidelines = prepared.get("guidelines")
+    if isinstance(raw_guidelines, list):
+        guidelines = []
+        for raw_guideline in raw_guidelines:
+            if not isinstance(raw_guideline, Mapping):
+                guidelines.append(raw_guideline)
+                continue
+            guideline = dict(raw_guideline)
+            guideline["source_record_ids"] = _restore_source_ids(
+                guideline.get("source_record_ids"),
+                source_id_by_alias,
+            )
+            raw_criteria = guideline.get("criteria")
+            if isinstance(raw_criteria, list):
+                criteria = []
+                for raw_criterion in raw_criteria:
+                    if not isinstance(raw_criterion, Mapping):
+                        criteria.append(raw_criterion)
+                        continue
+                    criterion = dict(raw_criterion)
+                    criterion.pop("source_record_ids", None)
+                    criteria.append(criterion)
+                guideline["criteria"] = criteria
+            guidelines.append(guideline)
+        prepared["guidelines"] = guidelines
+    return _normalize_guideline_response(
+        prepared,
+        route=route,
+        evidence=evidence,
+        rubric_provider=rubric_provider,
+        rubric_model=rubric_model,
+        identity_profile=identity_profile,
+    )
+
+
+def _restore_source_ids(value: Any, source_id_by_alias: Mapping[str, str]) -> Any:
+    """Restore known aliases and leave unknown values for strict rejection."""
+    if not isinstance(value, list):
+        return value
+    return [source_id_by_alias.get(item, item) if isinstance(item, str) else item for item in value]
 
 
 def _normalize_intent(row: Mapping[str, Any]) -> Dict[str, Any]:
@@ -3507,6 +4240,1153 @@ def _normalize_synthetic_response(
                 )
             )
     return cases
+
+
+def _legacy_episode_candidate_rows(
+    clusters: Sequence[IntentCluster],
+    matches: Sequence[IntentMatch],
+    guidelines: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Reconstruct the old one-candidate behavior for resumable old Stage 5s."""
+    guideline_ids = {str(row["guideline_id"]) for row in guidelines}
+    match_by_cluster = {match.cluster_id: match for match in matches}
+    rows: List[Dict[str, Any]] = []
+    for cluster in clusters:
+        match = match_by_cluster[cluster.cluster_id]
+        matched_id = str(match.matched_intent_id or "")
+        candidates = []
+        if matched_id in guideline_ids:
+            candidates.append(
+                {
+                    "guideline_id": matched_id,
+                    "intent_label": match.matched_label,
+                    "cluster_score": match.score,
+                    "episode_score": match.score,
+                    "retrieval_score": match.score,
+                    "retrieval_sources": ["legacy_cluster_match"],
+                }
+            )
+        for record_id in cluster.record_ids:
+            rows.append(
+                {
+                    "record_id": record_id,
+                    "cluster_id": cluster.cluster_id,
+                    "route": cluster.route,
+                    "candidates": candidates,
+                }
+            )
+    return rows
+
+
+def _attach_applicability_contracts(
+    guidelines: Sequence[Mapping[str, Any]],
+    contracts_by_intent_label: Optional[
+        Mapping[str, Mapping[str, Any]]
+    ],
+) -> List[Dict[str, Any]]:
+    """Attach one reviewed contract to every guideline in a frozen library."""
+    if contracts_by_intent_label is None:
+        return [dict(guideline) for guideline in guidelines]
+    intent_labels = [
+        str(guideline.get("intent_label") or "")
+        for guideline in guidelines
+    ]
+    if not all(intent_labels) or len(set(intent_labels)) != len(intent_labels):
+        raise ValueError(
+            "Applicability contracts require unique nonempty guideline intent labels"
+        )
+    if set(contracts_by_intent_label) != set(intent_labels):
+        missing = sorted(set(intent_labels) - set(contracts_by_intent_label))
+        extra = sorted(set(contracts_by_intent_label) - set(intent_labels))
+        raise ValueError(
+            "Applicability contract inventory differs from the guideline library: "
+            f"missing={missing}, extra={extra}"
+        )
+    return [
+        {
+            **dict(guideline),
+            "applicability_contract": dict(
+                contracts_by_intent_label[str(guideline["intent_label"])]
+            ),
+        }
+        for guideline in guidelines
+    ]
+
+
+def _build_applicability_groups(
+    *,
+    eligible_record_ids: set[str],
+    candidate_by_record: Mapping[str, Mapping[str, Any]],
+    raw_by_id: Mapping[str, Mapping[str, Any]],
+    guideline_by_id: Mapping[str, Mapping[str, Any]],
+    unknown_policy: str = "llm_fallback",
+    semantic_review_guideline_ids: Collection[str] = (),
+    use_applicability_contracts: bool = True,
+    use_deterministic_candidate_filters: bool = True,
+) -> tuple[
+    List[Dict[str, Any]],
+    Dict[str, Dict[str, Any]],
+    List[Dict[str, Any]],
+]:
+    """Build deduplicated episode decisions for direct or hybrid applicability.
+
+    The production episode path uses retrieval followed by direct semantic
+    review of every candidate.  Deterministic filters and applicability
+    contracts remain opt-in for controlled comparisons and reviewed policies.
+    """
+    if unknown_policy not in {"llm_fallback", "not_supported"}:
+        raise ValueError(
+            "unknown_policy must be 'llm_fallback' or 'not_supported'"
+        )
+    review_guideline_ids = {str(item) for item in semantic_review_guideline_ids}
+    unknown_review_guideline_ids = sorted(
+        review_guideline_ids - set(guideline_by_id)
+    )
+    if unknown_review_guideline_ids:
+        raise ValueError(
+            "Semantic-review guideline IDs are absent from the guideline library: "
+            f"{unknown_review_guideline_ids}"
+        )
+    groups_by_signature: Dict[str, Dict[str, Any]] = {}
+    for record_id in sorted(eligible_record_ids):
+        if record_id not in raw_by_id:
+            raise ValueError(f"Missing raw episode {record_id}")
+        candidate_row = candidate_by_record[record_id]
+        raw_candidates = candidate_row.get("candidates")
+        if not isinstance(raw_candidates, list):
+            raise ValueError(f"Episode candidates are invalid for {record_id}")
+        observable = _episode_observables(raw_by_id[record_id])
+        episode_facts = extract_episode_facts(observable)
+        active_candidates: List[Dict[str, Any]] = []
+        hard_rejections: List[Dict[str, Any]] = []
+        hard_acceptances: List[Dict[str, Any]] = []
+        semantic_review_acceptances: List[Dict[str, Any]] = []
+        unsupported_unknowns: List[Dict[str, Any]] = []
+        contract_sha256_by_guideline: Dict[str, str] = {}
+        seen: set[str] = set()
+        for raw_candidate in raw_candidates:
+            if not isinstance(raw_candidate, Mapping):
+                raise ValueError(f"Episode candidate is invalid for {record_id}")
+            guideline_id = str(raw_candidate.get("guideline_id") or "")
+            if not guideline_id or guideline_id in seen:
+                raise ValueError(f"Episode candidate identity is invalid for {record_id}")
+            seen.add(guideline_id)
+            guideline = guideline_by_id.get(guideline_id)
+            if guideline is None:
+                raise ValueError(
+                    f"Episode candidate {guideline_id} has no evaluation guideline"
+                )
+            if str(guideline.get("route") or "") != str(
+                candidate_row.get("route") or ""
+            ):
+                hard_rejections.append(
+                    {
+                        "guideline_id": guideline_id,
+                        "reason": "candidate route differs from the episode route",
+                        "evidence_pointers": [],
+                        "decision_source": "deterministic_route_filter",
+                    }
+                )
+                continue
+            rejection = (
+                _deterministic_candidate_rejection(observable, guideline)
+                if use_deterministic_candidate_filters
+                else None
+            )
+            if rejection:
+                hard_rejections.append(
+                    {
+                        "guideline_id": guideline_id,
+                        "reason": rejection,
+                        "evidence_pointers": [],
+                        "decision_source": "deterministic_contradiction_filter",
+                    }
+                )
+                continue
+            contract = (
+                compile_applicability_contract(guideline)
+                if use_applicability_contracts
+                else None
+            )
+            if contract is not None:
+                contract_sha256_by_guideline[guideline_id] = hashlib.sha256(
+                    json.dumps(
+                        contract,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                ).hexdigest()
+                contract_decision = evaluate_applicability_contract(
+                    episode_facts,
+                    contract,
+                )
+                deterministic_item = {
+                    "guideline_id": guideline_id,
+                    "reason": contract_decision.reason,
+                    "evidence_pointers": list(
+                        contract_decision.evidence_pointers
+                    ),
+                    "decision_source": "deterministic_applicability_contract",
+                }
+                if contract_decision.status == "not_applicable":
+                    hard_rejections.append(deterministic_item)
+                    continue
+                if contract_decision.status == "applicable":
+                    if guideline_id in review_guideline_ids:
+                        active_candidates.append(dict(raw_candidate))
+                        semantic_review_acceptances.append(
+                            {
+                                **deterministic_item,
+                                "decision_source": (
+                                    "deterministic_applicability_contract_"
+                                    "pending_semantic_review"
+                                ),
+                            }
+                        )
+                        continue
+                    hard_acceptances.append(deterministic_item)
+                    continue
+                if unknown_policy == "not_supported":
+                    unsupported_unknowns.append(
+                        {
+                            **deterministic_item,
+                            "decision_source": (
+                                "deterministic_unknown_not_supported_policy"
+                            ),
+                        }
+                    )
+                    continue
+            active_candidates.append(dict(raw_candidate))
+
+        signature_payload = {
+            "observable_episode": observable,
+            "candidate_guideline_ids": [
+                str(item["guideline_id"]) for item in active_candidates
+            ],
+            "hard_rejections": hard_rejections,
+            "hard_acceptances": hard_acceptances,
+            "semantic_review_acceptances": semantic_review_acceptances,
+            "unsupported_unknowns": unsupported_unknowns,
+            "unknown_policy": unknown_policy,
+            "applicability_contract_sha256_by_guideline": (
+                contract_sha256_by_guideline
+            ),
+        }
+        signature = hashlib.sha256(
+            json.dumps(
+                signature_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        group = groups_by_signature.get(signature)
+        if group is None:
+            group = {
+                "decision_id": f"applicability-{signature[:24]}",
+                "observable_signature_sha256": signature,
+                "observable_episode": observable,
+                "structured_episode_facts": episode_facts.to_dict(),
+                "candidate_guideline_ids": [
+                    str(item["guideline_id"]) for item in active_candidates
+                ],
+                "retrieved_candidates": [dict(item) for item in raw_candidates],
+                "hard_rejections": hard_rejections,
+                "hard_acceptances": hard_acceptances,
+                "semantic_review_acceptances": semantic_review_acceptances,
+                "unsupported_unknowns": unsupported_unknowns,
+                "unknown_policy": unknown_policy,
+                "applicability_contract_sha256_by_guideline": (
+                    contract_sha256_by_guideline
+                ),
+                "record_ids": [],
+                "cluster_id_by_record": {},
+            }
+            groups_by_signature[signature] = group
+        group["record_ids"].append(record_id)
+        group["cluster_id_by_record"][record_id] = str(
+            candidate_row["cluster_id"]
+        )
+
+    groups = sorted(groups_by_signature.values(), key=lambda row: row["decision_id"])
+    group_by_record = {
+        record_id: group
+        for group in groups
+        for record_id in group["record_ids"]
+    }
+    deterministic_rows = [
+        {
+            "decision_id": group["decision_id"],
+            "applicable_guideline_ids": [
+                str(item["guideline_id"])
+                for item in group["hard_acceptances"]
+            ],
+            "confidence": 1.0,
+            "reason": (
+                "All retrieved candidates were resolved by deterministic "
+                "applicability contracts, contradiction checks, or the "
+                "configured unknown-evidence policy."
+            ),
+            "evidence_pointers": list(
+                dict.fromkeys(
+                    pointer
+                    for item in (
+                        group["hard_acceptances"]
+                        + group["hard_rejections"]
+                        + group["semantic_review_acceptances"]
+                        + group["unsupported_unknowns"]
+                    )
+                    for pointer in item["evidence_pointers"]
+                )
+            ),
+            "candidate_decisions": [],
+            "decision_source": "deterministic_applicability_contract",
+        }
+        for group in groups
+        if not group["candidate_guideline_ids"]
+    ]
+    llm_groups = [group for group in groups if group["candidate_guideline_ids"]]
+    return llm_groups, group_by_record, deterministic_rows
+
+
+def _episode_observables(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return compact, redacted request and tool-state evidence for gating."""
+    prepared = _redact_record(row)
+    user_messages = record_user_messages(prepared)
+    tool_observations: List[Dict[str, Any]] = []
+    episode = prepared.get("episode")
+    if isinstance(episode, Mapping) and isinstance(episode.get("events"), list):
+        calls_by_id: Dict[str, Dict[str, Any]] = {}
+        for event_index, raw_event in enumerate(episode["events"]):
+            if not isinstance(raw_event, Mapping):
+                continue
+            event_type = raw_event.get("type")
+            if event_type == "tool_call":
+                call_id = str(raw_event.get("call_id") or "")
+                observation = {
+                    "pointer": f"episode.events[{event_index}]",
+                    "name": str(raw_event.get("name") or ""),
+                    "arguments": _compact_tool_value(raw_event.get("arguments")),
+                    "outcome_status": "not_recorded",
+                }
+                calls_by_id[call_id] = observation
+                tool_observations.append(observation)
+            elif event_type == "tool_result":
+                call_id = str(raw_event.get("call_id") or "")
+                observation = calls_by_id.get(call_id)
+                if observation is None:
+                    continue
+                if raw_event.get("error") is not None:
+                    observation["outcome_status"] = "error_returned"
+                    observation["error"] = _compact_tool_value(raw_event["error"])
+                else:
+                    observation["outcome_status"] = "result_returned"
+                    observation["result_state"] = _compact_tool_result(
+                        raw_event.get("result")
+                    )
+    else:
+        for index, raw_call in enumerate(prepared.get("tool_calls") or []):
+            if not isinstance(raw_call, Mapping):
+                continue
+            observation = {
+                "pointer": f"tool_calls[{index}]",
+                "name": str(raw_call.get("name") or ""),
+                "arguments": _compact_tool_value(raw_call.get("arguments")),
+                "outcome_status": "not_recorded",
+            }
+            if raw_call.get("error") is not None:
+                observation["outcome_status"] = "error_returned"
+                observation["error"] = _compact_tool_value(raw_call["error"])
+            elif "result" in raw_call:
+                observation["outcome_status"] = "result_returned"
+                observation["result_state"] = _compact_tool_result(
+                    raw_call.get("result")
+                )
+            tool_observations.append(observation)
+    return {
+        "user_messages": user_messages,
+        "tool_observations": tool_observations,
+    }
+
+
+def _compact_tool_value(value: Any, *, depth: int = 0) -> Any:
+    """Bound arbitrary tool data while retaining useful arguments."""
+    if depth > 4:
+        return "<nested>"
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith(("{", "[")):
+            try:
+                return _compact_tool_value(json.loads(stripped), depth=depth + 1)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return stripped if len(stripped) <= 500 else stripped[:497] + "..."
+    if isinstance(value, Mapping):
+        return {
+            str(key): _compact_tool_value(nested, depth=depth + 1)
+            for key, nested in list(value.items())[:30]
+        }
+    if isinstance(value, list):
+        return [
+            _compact_tool_value(item, depth=depth + 1) for item in value[:20]
+        ]
+    return value
+
+
+_RESULT_STATE_KEY_RE = re.compile(
+    r"(?:status|state|reason|error|address|payment|refund|balance|price|"
+    r"difference|tracking|cancel|return|exchange|available|order_id|item_id|"
+    r"resource_id|"
+    r"method|amount)",
+    re.I,
+)
+_RESULT_BULK_KEYS = {"variants", "products"}
+_RESULT_ITEM_IDENTITY_KEYS = {"item_id", "name", "product_id", "resource_id"}
+
+
+def _compact_tool_result(value: Any, *, depth: int = 0) -> Any:
+    """Extract bounded state-bearing fields from potentially large results."""
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith(("{", "[")):
+            try:
+                value = json.loads(stripped)
+            except json.JSONDecodeError:
+                return stripped if len(stripped) <= 300 else stripped[:297] + "..."
+        else:
+            return stripped if len(stripped) <= 300 else stripped[:297] + "..."
+    if depth > 4:
+        return "<nested>"
+    if isinstance(value, Mapping):
+        output: Dict[str, Any] = {}
+        for key, nested in value.items():
+            key_text = str(key)
+            if key_text.lower() == "items":
+                item_summaries = _compact_result_item_identities(nested)
+                if item_summaries:
+                    output[key_text] = item_summaries
+                continue
+            if key_text.lower() in _RESULT_BULK_KEYS:
+                continue
+            if _RESULT_STATE_KEY_RE.search(key_text):
+                output[key_text] = _compact_tool_value(nested, depth=depth + 1)
+            elif isinstance(nested, (Mapping, list)):
+                compact = _compact_tool_result(nested, depth=depth + 1)
+                if compact not in ({}, [], None):
+                    output[key_text] = compact
+            if len(output) >= 24:
+                break
+        return output
+    if isinstance(value, list):
+        compacted = [
+            _compact_tool_result(item, depth=depth + 1) for item in value[:10]
+        ]
+        return [item for item in compacted if item not in ({}, [], None)]
+    return value
+
+
+def _compact_result_item_identities(value: Any) -> List[Dict[str, Any]]:
+    """Retain bounded entity identity so state can be tied to requested items."""
+    raw_items: Sequence[Any]
+    if isinstance(value, list):
+        raw_items = value[:20]
+    elif isinstance(value, Mapping):
+        raw_items = list(value.values())[:20]
+    else:
+        return []
+    output: List[Dict[str, Any]] = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, Mapping):
+            continue
+        identity = {
+            str(key): _compact_tool_value(item)
+            for key, item in raw_item.items()
+            if str(key).lower() in _RESULT_ITEM_IDENTITY_KEYS
+        }
+        if identity:
+            output.append(identity)
+    return output
+
+
+def _deterministic_candidate_rejection(
+    observable: Mapping[str, Any],
+    guideline: Mapping[str, Any],
+) -> Optional[str]:
+    """Reject only high-precision action, scope, or state contradictions."""
+    user_text = " ".join(
+        str(item).lower() for item in observable.get("user_messages") or []
+    )
+    activation_text = _guideline_activation_text(guideline)
+    intent_label = str(guideline.get("intent_label") or "").lower()
+
+    undo_cancel = bool(
+        re.search(
+            r"\b(?:undo|reverse|revert|reinstate|restore)\b.{0,40}\b(?:cancel|cancellation)\b",
+            user_text,
+        )
+        or re.search(
+            r"\b(?:cancel|cancellation)\b.{0,40}\b(?:undo|reverse|revert|reinstate|restore)\b",
+            user_text,
+        )
+    )
+    if (
+        undo_cancel
+        and re.search(r"\bcancel(?:lation|led|ing)?\b", activation_text)
+        and not re.search(r"\b(?:undo|reverse|revert|reinstate|restore)\b", activation_text)
+    ):
+        return "episode asks to reverse a cancellation, not perform one"
+
+    order_address = bool(
+        re.search(r"\b(?:shipping|delivery|order[- ]level) address\b", user_text)
+    )
+    default_address = bool(
+        re.search(r"\b(?:default|account|profile|future) address\b", user_text)
+    )
+    guideline_order_address = "address" in intent_label and bool(
+        re.search(r"\b(?:shipping|delivery|order[-_ ]level)\b", intent_label)
+    )
+    guideline_default_address = "address" in intent_label and bool(
+        re.search(r"\b(?:default|account|profile|future)\b", intent_label)
+    )
+    if default_address and not order_address and guideline_order_address:
+        return "episode requests an account/default address change, not an order address change"
+    if order_address and not default_address and guideline_default_address:
+        return "episode requests an order address change, not an account/default address change"
+
+    states = _observable_order_states(observable)
+    if states == {"delivered"} and re.search(r"\bpending\b", intent_label):
+        return "observed order state is delivered, while the guideline requires pending state"
+    if states == {"pending"} and re.search(r"\bdelivered\b", intent_label):
+        return "observed order state is pending, while the guideline requires delivered state"
+    return None
+
+
+def _guideline_activation_text(guideline: Mapping[str, Any]) -> str:
+    criteria = guideline.get("criteria")
+    applicability = []
+    if isinstance(criteria, list):
+        applicability = [
+            json.dumps(item.get("applicability"), sort_keys=True)
+            for item in criteria
+            if isinstance(item, Mapping)
+        ]
+    return " ".join(
+        [
+            str(guideline.get("intent_label") or ""),
+            str(guideline.get("description") or ""),
+            *applicability,
+        ]
+    ).lower()
+
+
+def _observable_order_states(observable: Mapping[str, Any]) -> set[str]:
+    values: set[str] = set()
+
+    def visit(value: Any, key: str = "") -> None:
+        if isinstance(value, Mapping):
+            for nested_key, nested in value.items():
+                visit(nested, str(nested_key))
+        elif isinstance(value, list):
+            for nested in value:
+                visit(nested, key)
+        elif key.lower() in {"status", "state"}:
+            text = str(value).lower()
+            for status in ("pending", "delivered", "processed", "cancelled"):
+                if status in text:
+                    values.add(status)
+
+    visit(observable.get("tool_observations"))
+    return values
+
+
+def _applicability_batches(
+    groups: Sequence[Mapping[str, Any]],
+) -> Iterable[List[Mapping[str, Any]]]:
+    """Batch by both decision count and candidate-pair payload cost."""
+    batch: List[Mapping[str, Any]] = []
+    pair_count = 0
+    for group in groups:
+        group_pairs = len(group["candidate_guideline_ids"])
+        if batch and (
+            len(batch) >= GUIDELINE_APPLICABILITY_MAX_GROUPS_PER_CALL
+            or pair_count + group_pairs
+            > GUIDELINE_APPLICABILITY_MAX_CANDIDATE_PAIRS_PER_CALL
+        ):
+            yield batch
+            batch = []
+            pair_count = 0
+        batch.append(group)
+        pair_count += group_pairs
+    if batch:
+        yield batch
+
+
+def _applicability_provider_payload(
+    groups: Sequence[Mapping[str, Any]],
+    guideline_by_id: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, Any]:
+    guideline_ids = sorted(
+        {
+            str(guideline_id)
+            for group in groups
+            for guideline_id in group["candidate_guideline_ids"]
+        }
+    )
+    return {
+        "mode": "episode_guideline_applicability",
+        "guidelines": [
+            _applicability_guideline_card(guideline_by_id[item])
+            for item in guideline_ids
+        ],
+        "decision_groups": [
+            {
+                "decision_id": group["decision_id"],
+                "observable_episode": group["observable_episode"],
+                "structured_episode_facts": group["structured_episode_facts"],
+                "candidate_guideline_ids": group["candidate_guideline_ids"],
+            }
+            for group in groups
+        ],
+    }
+
+
+def _applicability_guideline_card(guideline: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "guideline_id": guideline["guideline_id"],
+        "intent_label": guideline["intent_label"],
+        "description": guideline["description"],
+        "criteria": [
+            {
+                "criterion_id": item["criterion_id"],
+                "kind": item["kind"],
+                "statement": item["statement"],
+                "applicability": item["applicability"],
+                "severity": item["severity"],
+            }
+            for item in guideline["criteria"]
+        ],
+        "tool_expectations": guideline["tool_expectations"],
+    }
+
+
+def _normalize_applicability_response(
+    response: Mapping[str, Any],
+    *,
+    decision_groups: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    items = response.get("decisions")
+    if not isinstance(items, list):
+        raise ValueError("Applicability response missing decisions array")
+    returned: Dict[str, Mapping[str, Any]] = {}
+    for item in items:
+        if not isinstance(item, Mapping):
+            raise ValueError("Applicability response contains an invalid decision")
+        decision_id = str(item.get("decision_id") or "")
+        if not decision_id or decision_id in returned:
+            raise ValueError("Applicability decision identity is invalid")
+        returned[decision_id] = item
+    expected_ids = {str(group["decision_id"]) for group in decision_groups}
+    if set(returned) != expected_ids:
+        raise ValueError("Applicability response omitted or invented a decision_id")
+
+    normalized: List[Dict[str, Any]] = []
+    for group in decision_groups:
+        decision_id = str(group["decision_id"])
+        raw = returned[decision_id]
+        candidate_ids = [str(item) for item in group["candidate_guideline_ids"]]
+        selected = raw.get("applicable_guideline_ids")
+        if (
+            not isinstance(selected, list)
+            or not all(isinstance(item, str) for item in selected)
+        ):
+            raise ValueError(f"Applicability selection is invalid for {decision_id}")
+        retrieved_ids = {
+            str(item["guideline_id"])
+            for item in group.get("retrieved_candidates") or []
+            if isinstance(item, Mapping) and item.get("guideline_id")
+        }
+        if not set(selected).issubset(retrieved_ids or set(candidate_ids)):
+            raise ValueError(f"Applicability selection is invalid for {decision_id}")
+        selected_ids = set(selected) & set(candidate_ids)
+        confidence = raw.get("confidence")
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not math.isfinite(float(confidence))
+            or not 0.0 <= float(confidence) <= 1.0
+        ):
+            raise ValueError(f"Applicability confidence is invalid for {decision_id}")
+        reason = str(raw.get("reason") or "").strip()
+        pointers = raw.get("evidence_pointers")
+        if (
+            not reason
+            or not isinstance(pointers, list)
+            or not all(isinstance(item, str) for item in pointers)
+        ):
+            raise ValueError(f"Applicability rationale is invalid for {decision_id}")
+        candidate_reason_by_id: Dict[str, str] = {}
+        raw_candidate_decisions = raw.get("candidate_decisions")
+        if isinstance(raw_candidate_decisions, list):
+            for candidate in raw_candidate_decisions:
+                if not isinstance(candidate, Mapping):
+                    continue
+                guideline_id = str(candidate.get("guideline_id") or "")
+                candidate_reason = str(candidate.get("reason") or "").strip()
+                if guideline_id in candidate_ids and candidate_reason:
+                    candidate_reason_by_id.setdefault(
+                        guideline_id,
+                        candidate_reason,
+                    )
+        candidate_decisions = [
+            {
+                "guideline_id": guideline_id,
+                "status": (
+                    "applicable"
+                    if guideline_id in selected_ids
+                    else "not_applicable"
+                ),
+                "reason": candidate_reason_by_id.get(guideline_id, reason),
+            }
+            for guideline_id in candidate_ids
+        ]
+        normalized.append(
+            {
+                "decision_id": decision_id,
+                "applicable_guideline_ids": [
+                    guideline_id
+                    for guideline_id in candidate_ids
+                    if guideline_id in selected_ids
+                ],
+                "confidence": round(float(confidence), 4),
+                "reason": reason,
+                "evidence_pointers": list(pointers),
+                "candidate_decisions": candidate_decisions,
+                "decision_source": "llm_episode_applicability",
+            }
+        )
+    return normalized
+
+
+def _merge_applicability_decision(
+    group: Mapping[str, Any],
+    decision: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Merge deterministic contract results with an LLM fallback decision."""
+    hard_acceptances = list(group.get("hard_acceptances") or [])
+    hard_rejections = list(group.get("hard_rejections") or [])
+    semantic_review_acceptances = list(
+        group.get("semantic_review_acceptances") or []
+    )
+    unsupported_unknowns = list(group.get("unsupported_unknowns") or [])
+    if (
+        not hard_acceptances
+        and not hard_rejections
+        and not semantic_review_acceptances
+        and not unsupported_unknowns
+    ):
+        return dict(decision)
+
+    selected = {
+        str(item) for item in decision["applicable_guideline_ids"]
+    } | {
+        str(item["guideline_id"]) for item in hard_acceptances
+    }
+    ordered_selected = [
+        str(item["guideline_id"])
+        for item in group["retrieved_candidates"]
+        if str(item["guideline_id"]) in selected
+    ]
+    deterministic_pointers = [
+        str(pointer)
+        for item in (
+            hard_acceptances
+            + hard_rejections
+            + semantic_review_acceptances
+            + unsupported_unknowns
+        )
+        for pointer in item.get("evidence_pointers") or []
+    ]
+    pointers = list(
+        dict.fromkeys(
+            deterministic_pointers
+            + [str(item) for item in decision["evidence_pointers"]]
+        )
+    )
+    return {
+        **dict(decision),
+        "applicable_guideline_ids": ordered_selected,
+        "reason": (
+            f"Deterministic contracts resolved {len(hard_acceptances)} applicable "
+            f"and {len(hard_rejections)} not-applicable candidate(s), while "
+            f"{len(semantic_review_acceptances)} proposed acceptance(s) received "
+            "semantic review and "
+            f"{len(unsupported_unknowns)} unresolved candidate(s) were not "
+            "automatically supported; "
+            + str(decision["reason"])
+        ),
+        "evidence_pointers": pointers,
+        "decision_source": "hybrid_episode_applicability",
+    }
+
+
+def _record_applicability_row(
+    *,
+    record_id: str,
+    group: Mapping[str, Any],
+    decision: Mapping[str, Any],
+) -> Dict[str, Any]:
+    hard_by_id = {
+        str(item["guideline_id"]): {
+            "guideline_id": str(item["guideline_id"]),
+            "status": "not_applicable",
+            "reason": str(item["reason"]),
+            "evidence_pointers": list(item.get("evidence_pointers") or []),
+            "decision_source": str(item["decision_source"]),
+        }
+        for item in group["hard_rejections"]
+    }
+    accepted_by_id = {
+        str(item["guideline_id"]): {
+            "guideline_id": str(item["guideline_id"]),
+            "status": "applicable",
+            "reason": str(item["reason"]),
+            "evidence_pointers": list(item.get("evidence_pointers") or []),
+            "decision_source": str(item["decision_source"]),
+        }
+        for item in group.get("hard_acceptances") or []
+    }
+    unsupported_by_id = {
+        str(item["guideline_id"]): {
+            "guideline_id": str(item["guideline_id"]),
+            "status": "not_automatically_supported",
+            "reason": str(item["reason"]),
+            "evidence_pointers": list(item.get("evidence_pointers") or []),
+            "decision_source": str(item["decision_source"]),
+        }
+        for item in group.get("unsupported_unknowns") or []
+    }
+    semantic_review_ids = {
+        str(item["guideline_id"])
+        for item in group.get("semantic_review_acceptances") or []
+    }
+    llm_by_id = {
+        str(item["guideline_id"]): {
+            **dict(item),
+            "decision_source": (
+                "llm_semantic_review_of_deterministic_acceptance"
+                if str(item["guideline_id"]) in semantic_review_ids
+                else decision["decision_source"]
+            ),
+        }
+        for item in decision["candidate_decisions"]
+    }
+    candidate_decisions = []
+    for candidate in group["retrieved_candidates"]:
+        guideline_id = str(candidate["guideline_id"])
+        candidate_decisions.append(
+            {
+                **dict(candidate),
+                **(
+                    hard_by_id.get(guideline_id)
+                    or accepted_by_id.get(guideline_id)
+                    or unsupported_by_id.get(guideline_id)
+                    or llm_by_id[guideline_id]
+                ),
+            }
+        )
+    return {
+        "record_id": record_id,
+        "cluster_id": str(group["cluster_id_by_record"][record_id]),
+        "decision_id": decision["decision_id"],
+        "observable_signature_sha256": group["observable_signature_sha256"],
+        "deduplicated_record_count": len(group["record_ids"]),
+        "structured_episode_facts": dict(group["structured_episode_facts"]),
+        "applicability_contract_sha256_by_guideline": dict(
+            group.get("applicability_contract_sha256_by_guideline") or {}
+        ),
+        "unknown_policy": str(group.get("unknown_policy") or "llm_fallback"),
+        "not_automatically_supported_guideline_ids": [
+            str(item["guideline_id"])
+            for item in group.get("unsupported_unknowns") or []
+        ],
+        "semantically_reviewed_guideline_ids": sorted(semantic_review_ids),
+        "semantic_review_proposals": [
+            dict(item)
+            for item in group.get("semantic_review_acceptances") or []
+        ],
+        "applicable_guideline_ids": list(decision["applicable_guideline_ids"]),
+        "confidence": decision["confidence"],
+        "reason": decision["reason"],
+        "evidence_pointers": list(decision["evidence_pointers"]),
+        "decision_source": decision["decision_source"],
+        "candidate_decisions": candidate_decisions,
+    }
+
+
+def _guideline_dependency_bundle(
+    guidelines: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    guideline_ids = [str(row["guideline_id"]) for row in guidelines]
+    source_ids = sorted(
+        {
+            str(record_id)
+            for guideline in guidelines
+            for record_id in guideline["source_record_ids"]
+        }
+    )
+    return {
+        "bundle_id": "guideline-bundle-"
+        + hashlib.sha256("\n".join(guideline_ids).encode("utf-8")).hexdigest()[:24],
+        "guideline_ids": guideline_ids,
+        "source_record_ids": source_ids,
+        "guidelines": [dict(row) for row in guidelines],
+    }
+
+
+def _episode_gate_cluster_hold(
+    cluster: IntentCluster,
+    record_ids: Sequence[str],
+    selected_ids_by_record: Mapping[str, tuple[str, ...]],
+    rubric_by_record: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Explain why one cluster cannot support one synthetic-generation rubric."""
+    selected_sets = sorted(
+        {selected_ids_by_record.get(record_id, ()) for record_id in record_ids}
+    )
+    if not record_ids:
+        hold_reason = "no_unlabeled_episode_members"
+        reason = "No unlabeled episode remains after trusted-record exclusion."
+    elif any(
+        not selected_ids_by_record.get(record_id)
+        or record_id not in rubric_by_record
+        for record_id in record_ids
+    ):
+        hold_reason = "episode_guideline_coverage_gap"
+        reason = "At least one episode lacks a supported, scoreable guideline set."
+    else:
+        hold_reason = "heterogeneous_episode_guideline_sets"
+        reason = (
+            "Real episodes were labeled individually, but the cluster has no "
+            "single rubric suitable for cluster-level synthetic generation."
+        )
+    return {
+        "cluster_id": cluster.cluster_id,
+        "hold_reason": hold_reason,
+        "reason": reason,
+        "record_ids": list(record_ids),
+        "selected_guideline_sets": [list(item) for item in selected_sets],
+    }
+
+
+def _eligible_episode_record_ids(
+    clusters: Sequence[IntentCluster],
+    trusted_record_ids: Collection[str],
+) -> set[str]:
+    """Return all non-trusted episodes without applying a cluster support gate."""
+    trusted = set(trusted_record_ids)
+    return {
+        record_id
+        for cluster in clusters
+        for record_id in cluster.record_ids
+        if record_id not in trusted
+    }
+
+
+def _episode_cluster_support(
+    *,
+    clusters: Sequence[IntentCluster],
+    matches: Sequence[IntentMatch],
+    row_by_id: Mapping[str, Mapping[str, Any]],
+    eligible_record_ids: Collection[str],
+    selected_ids_by_record: Mapping[str, tuple[str, ...]],
+    rubric_by_record: Mapping[str, Mapping[str, Any]],
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Aggregate post-gate episode support without using cluster similarity as proof.
+
+    Cluster similarity is a retrieval signal only.  A cluster is supported when
+    every unlabeled episode in it received a nonempty, scoreable guideline set
+    from the episode applicability gate.  Mixed clusters remain useful for
+    episode-level cases but are reported as only partially supported.
+    """
+    eligible = set(eligible_record_ids)
+    match_by_cluster = {match.cluster_id: match for match in matches}
+    support_rows: List[Dict[str, Any]] = []
+    missing_rows: List[Dict[str, Any]] = []
+    for cluster in clusters:
+        match = match_by_cluster[cluster.cluster_id]
+        record_ids = [
+            record_id for record_id in cluster.record_ids if record_id in eligible
+        ]
+        supported_ids = [
+            record_id
+            for record_id in record_ids
+            if selected_ids_by_record.get(record_id)
+            and record_id in rubric_by_record
+        ]
+        unsupported_ids = [
+            record_id for record_id in record_ids if record_id not in supported_ids
+        ]
+        selected_guideline_ids = sorted(
+            {
+                guideline_id
+                for record_id in supported_ids
+                for guideline_id in selected_ids_by_record[record_id]
+            }
+        )
+        if not record_ids:
+            status = "no_unlabeled_episode_members"
+            reason = "No unlabeled episode remains after trusted-record exclusion."
+        elif not unsupported_ids:
+            status = "supported"
+            reason = (
+                "Every unlabeled episode received a supported, scoreable "
+                "guideline set from the episode applicability gate."
+            )
+        elif supported_ids:
+            status = "partially_supported"
+            reason = (
+                "Only some unlabeled episodes received a supported, scoreable "
+                "guideline set from the episode applicability gate."
+            )
+        else:
+            status = "unsupported"
+            reason = (
+                "No unlabeled episode received a supported, scoreable guideline "
+                "set from the episode applicability gate."
+            )
+        unsupported_reasons = {
+            record_id: (
+                "no_applicable_guideline"
+                if not selected_ids_by_record.get(record_id)
+                else "unscoreable_episode_rubric"
+            )
+            for record_id in unsupported_ids
+        }
+        support_row = {
+            "cluster_id": cluster.cluster_id,
+            "route": cluster.route,
+            "status": status,
+            "reason": reason,
+            "unlabeled_episode_count": len(record_ids),
+            "supported_episode_count": len(supported_ids),
+            "unsupported_episode_count": len(unsupported_ids),
+            "support_rate": (
+                round(len(supported_ids) / len(record_ids), 4)
+                if record_ids
+                else None
+            ),
+            "supported_record_ids": supported_ids,
+            "unsupported_records": [
+                {
+                    "record_id": record_id,
+                    "reason": unsupported_reasons[record_id],
+                }
+                for record_id in unsupported_ids
+            ],
+            "selected_guideline_ids": selected_guideline_ids,
+            "retrieval_cluster_status": match.status,
+            "retrieval_best_candidate_guideline_id": match.matched_intent_id,
+            "retrieval_cluster_score": match.score,
+        }
+        support_rows.append(support_row)
+        if status not in {"partially_supported", "unsupported"}:
+            continue
+        missing_rows.append(
+            {
+                "cluster_id": cluster.cluster_id,
+                "route": cluster.route,
+                "size": cluster.size,
+                "status": (
+                    "partially_supported_after_episode_gate"
+                    if status == "partially_supported"
+                    else "unsupported_after_episode_gate"
+                ),
+                "reason": reason,
+                "best_candidate_intent_id": match.matched_intent_id,
+                "match_score": match.score,
+                "supported_episode_count": len(supported_ids),
+                "unsupported_episode_count": len(unsupported_ids),
+                "unsupported_records": support_row["unsupported_records"],
+                "representative_examples": [
+                    {
+                        "record_id": record_id,
+                        "user_input": row_by_id[record_id]["user_input"],
+                    }
+                    for record_id in cluster.representative_ids
+                ],
+            }
+        )
+    return support_rows, missing_rows
+
+
+def _inferred_episode_cases(
+    *,
+    clusters: Sequence[IntentCluster],
+    matches: Sequence[IntentMatch],
+    intent_rows: Sequence[Mapping[str, Any]],
+    raw_rows: Sequence[Mapping[str, Any]],
+    rubric_by_record: Mapping[str, Mapping[str, Any]],
+    decision_by_record: Mapping[str, Mapping[str, Any]],
+    config: EvaluationAssetConfig,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    match_by_cluster = {match.cluster_id: match for match in matches}
+    intent_by_id = {str(row["record_id"]): row for row in intent_rows}
+    raw_by_id = {str(row["record_id"]): row for row in raw_rows}
+    labels: List[Dict[str, Any]] = []
+    cases: List[Dict[str, Any]] = []
+    for cluster in clusters:
+        match = match_by_cluster[cluster.cluster_id]
+        for record_id in cluster.record_ids:
+            rubric = rubric_by_record.get(record_id)
+            if rubric is None:
+                continue
+            decision = decision_by_record[record_id]
+            intent = intent_by_id[record_id]
+            raw = raw_by_id[record_id]
+            expected = _expected(rubric)
+            applicable_ids = list(rubric["evaluation_guideline_ids"])
+            labels.append(
+                {
+                    "record_id": record_id,
+                    "cluster_id": cluster.cluster_id,
+                    "matched_intent_id": match.matched_intent_id,
+                    "match_score": match.score,
+                    "applicable_guideline_ids": applicable_ids,
+                    "applicability_decision_id": decision["decision_id"],
+                    "applicability_confidence": decision["confidence"],
+                    "review_status": "review_required",
+                    "expected": expected,
+                }
+            )
+            case = {
+                "case_id": f"inferred-{record_id}",
+                "task_type": intent["task_type"],
+                "context": _context(
+                    _string(raw["user_input"]),
+                    raw["conversation_context"],
+                    raw["tool_calls"],
+                    raw["runtime"],
+                ),
+                "expected": expected,
+                "metadata": {
+                    "source": "unlabeled_trace",
+                    "source_cluster": cluster.cluster_id,
+                    "matched_intent_id": match.matched_intent_id,
+                    "match_score": match.score,
+                    "applicable_guideline_ids": applicable_ids,
+                    "applicability_decision_id": decision["decision_id"],
+                    "applicability_confidence": decision["confidence"],
+                    "dataset_version": config.asset_id,
+                    "group_id": intent["group_id"],
+                    "request_id": intent["request_id"],
+                    "trust_tier": INFERRED_FROM_TRUSTED_FEEDBACK,
+                    "review_status": "review_required",
+                },
+            }
+            validate_fapo_case(case)
+            cases.append(case)
+    return labels, cases
 
 
 def _inferred_cases(

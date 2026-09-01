@@ -14,6 +14,7 @@ from src.hephaestus.datasets.intent_assets import (
     IntentCluster,
     IntentRecord,
     TrustedIntent,
+    build_episode_guideline_candidate_rows,
     build_intent_inventory,
     build_intent_match_texts,
     canonical_intent_text,
@@ -24,6 +25,134 @@ from src.hephaestus.datasets.intent_assets import (
     load_trusted_intents_from_jsonl,
     match_clusters_to_trusted_intents,
 )
+
+
+def test_episode_guideline_candidates_combine_cluster_and_episode_retrieval() -> None:
+    records = [
+        IntentRecord("cancel-record", "cancel the order", route="retail"),
+        IntentRecord("exchange-record", "exchange the item", route="retail"),
+    ]
+    clusters = [
+        IntentCluster(
+            cluster_id="retail-001",
+            route="retail",
+            record_ids=["cancel-record", "exchange-record"],
+            representative_ids=["cancel-record", "exchange-record"],
+            top_terms=[],
+        )
+    ]
+    trusted = [
+        TrustedIntent("cancel-guideline", "cancel", ["cancel"], route="retail"),
+        TrustedIntent("exchange-guideline", "exchange", ["exchange"], route="retail"),
+    ]
+    vectors = {
+        "cluster:retail-001": {"x": 0.7071, "y": 0.7071},
+        "record:cancel-record": {"x": 1.0},
+        "record:exchange-record": {"y": 1.0},
+        "trusted:cancel-guideline": {"x": 1.0},
+        "trusted:exchange-guideline": {"y": 1.0},
+    }
+
+    rows = build_episode_guideline_candidate_rows(
+        clusters,
+        records,
+        trusted,
+        vectors=vectors,
+        cluster_top_k=1,
+        episode_top_k=1,
+        max_candidates=2,
+        exhaustive_route_limit=0,
+    )
+
+    assert [item["guideline_id"] for item in rows[0]["candidates"]] == [
+        "cancel-guideline"
+    ]
+    assert [item["guideline_id"] for item in rows[1]["candidates"]] == [
+        "exchange-guideline",
+        "cancel-guideline",
+    ]
+    assert rows[1]["candidates"][0]["retrieval_sources"] == ["episode"]
+
+
+def test_episode_guideline_candidate_defaults_are_recall_oriented_and_bounded() -> None:
+    records = [IntentRecord("r1", "multi-intent request", route="route")]
+    clusters = [
+        IntentCluster(
+            cluster_id="route-001",
+            route="route",
+            record_ids=["r1"],
+            representative_ids=["r1"],
+            top_terms=[],
+        )
+    ]
+    trusted = [
+        TrustedIntent(f"g{index:02d}", f"guideline {index}", [], route="route")
+        for index in range(21)
+    ]
+    vectors = {
+        "cluster:route-001": {
+            f"d{index}": float(21 - index) for index in range(21)
+        },
+        "record:r1": {f"d{index}": float(index + 1) for index in range(21)},
+        **{
+            f"trusted:g{index:02d}": {f"d{index}": 1.0}
+            for index in range(21)
+        },
+    }
+
+    rows = build_episode_guideline_candidate_rows(
+        clusters,
+        records,
+        trusted,
+        vectors=vectors,
+    )
+
+    candidates = rows[0]["candidates"]
+    assert len(candidates) == 10
+    assert all(
+        "route_exhaustive" not in item["retrieval_sources"]
+        for item in candidates
+    )
+    expected_union = {
+        *(f"g{index:02d}" for index in range(9)),
+        *(f"g{index:02d}" for index in range(12, 21)),
+    }
+    assert {item["guideline_id"] for item in candidates} <= expected_union
+
+
+def test_episode_guideline_candidates_are_exhaustive_for_small_routes() -> None:
+    records = [IntentRecord("r1", "request", route="route")]
+    clusters = [
+        IntentCluster(
+            cluster_id="route-001",
+            route="route",
+            record_ids=["r1"],
+            representative_ids=["r1"],
+            top_terms=[],
+        )
+    ]
+    trusted = [
+        TrustedIntent(f"g{index:02d}", f"guideline {index}", [], route="route")
+        for index in range(13)
+    ]
+    vectors = {
+        "cluster:route-001": {"x": 1.0},
+        "record:r1": {"x": 1.0},
+        **{f"trusted:g{index:02d}": {"x": 1.0} for index in range(13)},
+    }
+
+    rows = build_episode_guideline_candidate_rows(
+        clusters,
+        records,
+        trusted,
+        vectors=vectors,
+    )
+
+    assert len(rows[0]["candidates"]) == 13
+    assert all(
+        "route_exhaustive" in item["retrieval_sources"]
+        for item in rows[0]["candidates"]
+    )
 
 
 def test_fixed_count_clustering_is_exact_and_deterministic() -> None:

@@ -350,6 +350,7 @@ _EVALUATION_STAGE_PATTERNS = {
     ),
     "coverage_decisions": (
         "stages/05_coverage_decisions/intent_matches.jsonl",
+        "stages/05_coverage_decisions/episode_guideline_candidates.jsonl",
         "stages/05_coverage_decisions/coverage_report.md",
         "stages/05_coverage_decisions/review_queue/labeling_queue.jsonl",
         "decision_assets/intent_matches.jsonl",
@@ -358,6 +359,8 @@ _EVALUATION_STAGE_PATTERNS = {
     ),
     "label_inference": (
         "stages/06_label_inference/inferred_unlabeled_cluster_rubrics.jsonl",
+        "stages/06_label_inference/inferred_unlabeled_episode_rubrics.jsonl",
+        "stages/06_label_inference/episode_guideline_applicability.jsonl",
         "stages/06_label_inference/inferred_unlabeled_labels.jsonl",
         "stages/06_label_inference/missing_labeled_feedback_clusters.jsonl",
         "stages/06_label_inference/missing_labeled_feedback_report.md",
@@ -375,6 +378,7 @@ _EVALUATION_STAGE_PATTERNS = {
         "stages/07_synthetic_coverage/rejected_synthetic.jsonl",
         "stages/07_synthetic_coverage/synthetic_filter_issues.jsonl",
         "stages/07_synthetic_coverage/synthetic_cases.jsonl",
+        "stages/07_synthetic_coverage/inferred_review_dependencies.jsonl",
         "stages/07_synthetic_coverage/derived_review_items.jsonl",
         "stages/07_synthetic_coverage/duplicate_families.jsonl",
         "stages/07_synthetic_coverage/held_derived_cases.jsonl",
@@ -495,6 +499,11 @@ _ARTIFACT_CATALOG = {
         "Machine-readable trusted-intent match result for every cluster.",
         "Supporting data",
     ),
+    "episode_guideline_candidates.jsonl": (
+        "Episode guideline candidates",
+        "Bounded cluster-plus-episode retrieval candidates for every trace.",
+        "Supporting data",
+    ),
     "coverage_report.md": (
         "Coverage report",
         "Readable summary of supported clusters and labeling gaps.",
@@ -509,6 +518,16 @@ _ARTIFACT_CATALOG = {
         "Inferred cluster rubrics",
         "Review-required rubrics inferred for supported clusters.",
         "Supporting data",
+    ),
+    "inferred_unlabeled_episode_rubrics.jsonl": (
+        "Inferred episode rubrics",
+        "Review-required rubrics compiled from each episode's applicable guidelines.",
+        "Key outputs",
+    ),
+    "episode_guideline_applicability.jsonl": (
+        "Episode guideline applicability",
+        "Auditable zero, one, or many guideline decisions for each trace.",
+        "Key outputs",
     ),
     "inferred_unlabeled_labels.jsonl": (
         "Inferred trace labels",
@@ -568,6 +587,11 @@ _ARTIFACT_CATALOG = {
     "inference_dependencies.jsonl": (
         "Inference dependencies",
         "Protected full-content dependency descriptors; previews are disabled.",
+        "Diagnostics",
+    ),
+    "inferred_review_dependencies.jsonl": (
+        "Inferred review dependencies",
+        "Protected per-case dependencies bound to episode applicability decisions.",
         "Diagnostics",
     ),
     "held_inference_outputs.jsonl": (
@@ -716,9 +740,12 @@ _PROTECTED_STAGE_THREE_ARTIFACTS = frozenset(
 _PROTECTED_DERIVED_ARTIFACTS = frozenset(
     {
         "inferred_unlabeled_cluster_rubrics.jsonl",
+        "inferred_unlabeled_episode_rubrics.jsonl",
+        "episode_guideline_applicability.jsonl",
         "inferred_unlabeled_labels.jsonl",
         "inferred_cases.jsonl",
         "inference_dependencies.jsonl",
+        "inferred_review_dependencies.jsonl",
         "held_inference_outputs.jsonl",
         "synthetic_candidates.jsonl",
         "synthetic_cases.jsonl",

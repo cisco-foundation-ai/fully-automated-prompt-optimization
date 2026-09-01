@@ -608,6 +608,8 @@ _PERSISTENCE_NAMED_SINKS = {
     "tempfile.NamedTemporaryFile",
 }
 _AUDITED_PIPELINE_PARTIAL_TARGETS = {
+    "_normalize_aliased_guideline_response",
+    "_normalize_applicability_response",
     "_normalize_feedback_evidence_response",
     "_normalize_guideline_response",
     "_normalize_inferred_rubric_response",

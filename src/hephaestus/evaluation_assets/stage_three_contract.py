@@ -10,7 +10,8 @@ import hashlib
 import json
 import math
 import re
-from typing import Any, Literal, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Iterable, Literal, Mapping, Optional, Sequence
 
 from src.hephaestus.datasets.evaluation_assets import validate_fapo_case
 from src.hephaestus.evaluation_assets.input_contract import (
@@ -951,3 +952,616 @@ def _validate_json_numbers(value: Any) -> None:
 
 def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "general"
+
+
+APPLICABILITY_CONTRACT_SCHEMA_VERSION = "fapo-applicability-contract-v1"
+_APPLICABILITY_STATUSES = frozenset(
+    {"applicable", "not_applicable", "unknown"}
+)
+
+
+@dataclass(frozen=True)
+class EpisodeFacts:
+    """Structured, evidence-linked facts extracted from one observable episode."""
+
+    tags: frozenset[str]
+    known_dimensions: frozenset[str]
+    evidence_by_tag: Mapping[str, tuple[str, ...]]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a stable JSON-compatible representation."""
+        return {
+            "tags": sorted(self.tags),
+            "known_dimensions": sorted(self.known_dimensions),
+            "evidence_by_tag": {
+                tag: list(self.evidence_by_tag[tag])
+                for tag in sorted(self.evidence_by_tag)
+            },
+        }
+
+
+@dataclass(frozen=True)
+class ApplicabilityContractDecision:
+    """Tri-state result from deterministic applicability evaluation."""
+
+    status: str
+    reason: str
+    evidence_pointers: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.status not in _APPLICABILITY_STATUSES:
+            raise ValueError(f"Invalid applicability status: {self.status!r}")
+
+
+_USER_FACT_PATTERNS: tuple[tuple[str, str, re.Pattern[str]], ...] = (
+    (
+        "action",
+        "action:reverse_cancellation",
+        re.compile(
+            r"\b(?:undo|reverse|revert|reinstate|restore|reactivate)\b.{0,50}"
+            r"\b(?:cancel|cancellation|cancelled|canceled)\b|"
+            r"\b(?:cancel|cancellation|cancelled|canceled)\b.{0,50}"
+            r"\b(?:undo|reverse|revert|reinstate|restore|reactivate)\b",
+            re.I,
+        ),
+    ),
+    (
+        "action",
+        "action:cancel",
+        re.compile(r"\b(?:cancel|cancellation|cancelled|canceled)\b", re.I),
+    ),
+    (
+        "action",
+        "action:return",
+        re.compile(r"\b(?:return|returns|returning|returned)\b", re.I),
+    ),
+    (
+        "action",
+        "action:exchange",
+        re.compile(
+            r"\b(?:exchange|exchanges|exchanging|exchage|exchages|exchaging)\b|"
+            r"\b(?:swap|swapping)(?:\s+out)?\b.{0,60}"
+            r"\b(?:items?|products?|size|color|colour|variant|model|version|"
+            r"laptops?|watches?|shirts?|shoes?|boots?|jackets?|bottles?|"
+            r"speakers?|tablets?|lamps?|cameras?|helmets?)\b|"
+            r"\b(?:items?|products?|laptops?|watches?|shirts?|shoes?|boots?|"
+            r"jackets?|bottles?|speakers?|tablets?|lamps?|cameras?|helmets?)"
+            r"\b.{0,100}"
+            r"\b(?:swap|swapping)\b",
+            re.I,
+        ),
+    ),
+    (
+        "action",
+        "action:modify_item",
+        re.compile(
+            r"\b(?:change|modify|replace|switch|upgrade|downgrade)\b.{0,80}"
+            r"\b(?:item|product|size|color|colour|variant|model|version|"
+            r"laptop|watch|shirt|shoe|boot|jacket|bottle|speaker|tablet)\b",
+            re.I,
+        ),
+    ),
+    (
+        "action",
+        "action:remove_item",
+        re.compile(
+            r"\b(?:remove|cancel)\b.{0,60}\b(?:item|items|just|only|selected)\b|"
+            r"\b(?:item|items)\b.{0,60}\b(?:remove|cancel)\b",
+            re.I,
+        ),
+    ),
+    (
+        "action",
+        "action:update_address",
+        re.compile(
+            r"\b(?:address|ship|shipping|deliver|delivery|sent)\b.{0,80}"
+            r"\b(?:change|update|new|instead|to)\b|"
+            r"\b(?:change|update|send|ship|deliver)\b.{0,80}\baddress\b",
+            re.I,
+        ),
+    ),
+    (
+        "scope",
+        "scope:default_address",
+        re.compile(
+            r"\b(?:default|account|profile|future[- ]order)\b.{0,40}\baddress\b|"
+            r"\baddress\b.{0,40}\b(?:default|account|profile|future[- ]order)\b",
+            re.I,
+        ),
+    ),
+    (
+        "scope",
+        "scope:order_address",
+        re.compile(
+            r"\b(?:shipping|delivery|order)\b.{0,50}\baddress\b|"
+            r"\baddress\b.{0,50}\b(?:shipping|delivery|order)\b|"
+            r"\b(?:send|ship|deliver|sent)\b.{0,80}\b(?:order|it|this)\b",
+            re.I,
+        ),
+    ),
+    (
+        "action",
+        "action:change_payment",
+        re.compile(
+            r"\b(?:change|switch|use|charge|refund)\b.{0,80}"
+            r"\b(?:payment|card|paypal|gift card|visa|mastercard|amex)\b|"
+            r"\b(?:payment method|gift card)\b.{0,80}\b(?:change|switch|use)\b",
+            re.I,
+        ),
+    ),
+    (
+        "action",
+        "action:factual_question",
+        re.compile(
+            r"\b(?:how much|how many|what(?:'s| is| are)|which|list|show|tell me|"
+            r"check|available|availability|option|options|tracking|total|balance|"
+            r"status|price difference|order details|recent orders)\b",
+            re.I,
+        ),
+    ),
+    (
+        "condition",
+        "condition:all_pending_orders",
+        re.compile(
+            r"\b(?:all|every|any)\b.{0,40}\b(?:pending|open|unshipped)\b.{0,30}"
+            r"\border|orders\b|\b(?:pending|open|unshipped) orders\b",
+            re.I,
+        ),
+    ),
+    (
+        "condition",
+        "condition:refund_routing",
+        re.compile(
+            r"\brefund\b.{0,80}\b(?:card|paypal|gift card|original|payment method)\b|"
+            r"\b(?:card|paypal|gift card|original payment method)\b.{0,80}\brefund\b",
+            re.I,
+        ),
+    ),
+    (
+        "request",
+        "request:exact_factual_value",
+        re.compile(
+            r"\btracking\s+(?:number|id)\b|"
+            r"\bexactly\s+how\s+many\b|"
+            r"\bhow\s+much\s+(?:i(?:'|’)?(?:ll|d)\s+get\s+back|"
+            r"i\s+(?:paid|would\s+get)|money\s+i(?:'|’)?m\s+getting\s+back|"
+            r"(?:the\s+)?refund|(?:the\s+)?items?\s+i(?:'|’)?m\s+keeping)|"
+            r"\b(?:total\s+(?:amount|price)|amount\s+.*?\s+total)\b|"
+            r"\b(?:price|amount)\s+i\s+paid\b|"
+            r"\b(?:check|confirm|tell\s+me|know)\b.{0,80}"
+            r"\b(?:storage\s+size|battery\s+life|which\s+address|"
+            r"still\s+on\s+the\s+way)\b|"
+            r"\boptions?.{0,80}\balong\s+with\s+(?:their\s+)?prices\b|"
+            r"\bwhich\s+one\s+saves\s+me\s+more\b|"
+            r"\bwhy\b.{0,80}\bdelay\b|"
+            r"\bwhen\s+(?:it(?:'|’)s|is)\s+arriving\b|"
+            r"\border\s+status\b|"
+            r"\bwhich\b.{0,80}\b(?:i|we)\s+ordered\b|"
+            r"\bwhat\b.{0,50}\bmaterials?\b",
+            re.I,
+        ),
+    ),
+    (
+        "topic",
+        "topic:gift_card_balance",
+        re.compile(
+            r"\bgift\s*card\b.{0,70}\b(?:balance|left|remaining)\b|"
+            r"\b(?:balance|left|remaining)\b.{0,70}\bgift\s*card\b|"
+            r"\bhow\s+much\b.{0,70}\bgift\s*card\b",
+            re.I,
+        ),
+    ),
+    (
+        "scope",
+        "scope:pending_request",
+        re.compile(
+            r"\b(?:pending|hasn['’]?t shipped|haven['’]?t shipped|"
+            r"not yet shipped|still processing|just placed|recently placed)\b",
+            re.I,
+        ),
+    ),
+    (
+        "scope",
+        "scope:delivered_request",
+        re.compile(r"\b(?:received|delivered|just got|i got|arrived)\b", re.I),
+    ),
+    (
+        "request",
+        "request:return_items",
+        re.compile(
+            r"\b(?:want|need|like|help\s+me|can\s+you|please|"
+            r"go\s+ahead\s+and)\b.{0,50}\breturn\b|"
+            r"\bprocess\s+(?:the\s+)?return\b|"
+            r"\breturn\s+(?:my|the|all|everything|just|only|an?)\b",
+            re.I,
+        ),
+    ),
+    (
+        "request",
+        "request:update_default_address",
+        re.compile(
+            r"\b(?:make|set|change|update)\b.{0,70}"
+            r"\b(?:default|account|profile|future[- ]order)\b.{0,40}"
+            r"\baddress\b|"
+            r"\b(?:default|account|profile|future[- ]order)\b.{0,40}"
+            r"\baddress\b.{0,70}\b(?:change|update|set|new)\b",
+            re.I,
+        ),
+    ),
+    (
+        "request",
+        "request:update_order_address",
+        re.compile(
+            r"\b(?:change|update|fix|correct)\b.{0,100}"
+            r"\b(?:shipping|delivery|order)\s+address\b|"
+            r"\b(?:shipping|delivery|order)\s+address\b.{0,100}"
+            r"\b(?:change|update|fix|correct|new|instead)\b",
+            re.I,
+        ),
+    ),
+    (
+        "request",
+        "request:partial_order_removal",
+        re.compile(
+            r"\b(?:cancel|remove|return)\s+"
+            r"(?:just|only|selected|the\s+following)\b|"
+            r"\b(?:cancel|remove|return)\b.{0,80}"
+            r"\b(?:except\s+for|but\s+keep|and\s+keep)\b|"
+            r"\bkeep\s+(?!an?\s+eye\b).{0,60}\b(?:and|but)\b.{0,30}"
+            r"\b(?:cancel|remove|return)\b",
+            re.I,
+        ),
+    ),
+)
+
+_STATE_TAGS = {
+    "pending": "pending",
+    "delivered": "delivered",
+    "cancelled": "cancelled",
+    "canceled": "cancelled",
+    "return requested": "return_requested",
+    "exchange requested": "exchange_requested",
+}
+
+
+def extract_episode_facts(observable: Mapping[str, Any]) -> EpisodeFacts:
+    """Extract conservative generic fact tags from user and tool evidence."""
+    tags: set[str] = set()
+    known_dimensions: set[str] = set()
+    evidence: dict[str, list[str]] = {}
+
+    user_messages = observable.get("user_messages")
+    if isinstance(user_messages, list):
+        known_dimensions.add("action")
+        for index, message in enumerate(user_messages):
+            pointer = f"user_messages[{index}]"
+            for dimension, tag, pattern in _USER_FACT_PATTERNS:
+                if not pattern.search(str(message)):
+                    continue
+                tags.add(tag)
+                known_dimensions.add(dimension)
+                evidence.setdefault(tag, []).append(pointer)
+
+    tool_observations = observable.get("tool_observations")
+    if isinstance(tool_observations, list):
+        known_dimensions.add("tool")
+        outcomes_by_name: dict[str, set[str]] = {}
+        for index, raw_observation in enumerate(tool_observations):
+            if not isinstance(raw_observation, Mapping):
+                continue
+            pointer = str(
+                raw_observation.get("pointer") or f"tool_observations[{index}]"
+            )
+            name = str(raw_observation.get("name") or "").strip().lower()
+            if name:
+                _add_fact(tags, evidence, f"tool:{name}", pointer)
+            outcome = str(raw_observation.get("outcome_status") or "")
+            if name and outcome:
+                _add_fact(
+                    tags,
+                    evidence,
+                    f"tool_outcome:{name}:{outcome}",
+                    pointer,
+                )
+                known_dimensions.add("tool_outcome")
+                outcomes_by_name.setdefault(name, set()).add(outcome)
+            serialized = json.dumps(
+                raw_observation,
+                sort_keys=True,
+                ensure_ascii=False,
+            ).lower()
+            if outcome == "error_returned":
+                _add_fact(tags, evidence, "condition:tool_error", pointer)
+                known_dimensions.add("condition")
+            if re.search(r"insufficient|not enough|cannot cover|can't cover", serialized):
+                _add_fact(
+                    tags,
+                    evidence,
+                    "condition:insufficient_payment",
+                    pointer,
+                )
+                known_dimensions.add("condition")
+            if name.startswith("find_user") and (
+                outcome == "error_returned"
+                or re.search(r"not found|no user|no matching", serialized)
+            ):
+                _add_fact(tags, evidence, "condition:lookup_failed", pointer)
+                known_dimensions.add("condition")
+            for state, normalized in _STATE_TAGS.items():
+                if not re.search(
+                    rf'\b(?:status|state)\b[\\\"\s:=-]{{0,12}}\b{re.escape(state)}\b',
+                    serialized,
+                ):
+                    continue
+                _add_fact(tags, evidence, f"state:{normalized}", pointer)
+                known_dimensions.add("state")
+
+        recovered_lookup_names = sorted(
+            name
+            for name, outcomes in outcomes_by_name.items()
+            if "error_returned" in outcomes
+            and "result_returned" in outcomes
+            and (
+                name.startswith("find_")
+                or name.startswith("get_")
+                or "lookup" in name
+                or "search" in name
+            )
+        )
+        if recovered_lookup_names:
+            recovery_pointers = [
+                pointer
+                for name in recovered_lookup_names
+                for outcome in ("error_returned", "result_returned")
+                for pointer in evidence.get(
+                    f"tool_outcome:{name}:{outcome}",
+                    [],
+                )
+            ]
+            for pointer in recovery_pointers:
+                _add_fact(
+                    tags,
+                    evidence,
+                    "condition:lookup_recovered",
+                    pointer,
+                )
+            known_dimensions.add("condition")
+
+    return EpisodeFacts(
+        tags=frozenset(tags),
+        known_dimensions=frozenset(known_dimensions),
+        evidence_by_tag={
+            tag: tuple(_ordered_unique(pointers))
+            for tag, pointers in evidence.items()
+        },
+    )
+
+
+def normalize_applicability_contract(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and normalize a machine-readable applicability contract."""
+    if raw.get("schema_version") != APPLICABILITY_CONTRACT_SCHEMA_VERSION:
+        raise ValueError("Applicability contract schema_version is invalid")
+    requires = _normalize_applicability_clauses(
+        raw.get("requires"),
+        field="requires",
+    )
+    excludes = _normalize_applicability_clauses(
+        raw.get("excludes", []),
+        field="excludes",
+    )
+    deterministic_accept = raw.get("deterministic_accept", False)
+    if not isinstance(deterministic_accept, bool):
+        raise ValueError("Applicability deterministic_accept must be boolean")
+    return {
+        "schema_version": APPLICABILITY_CONTRACT_SCHEMA_VERSION,
+        "requires": requires,
+        "excludes": excludes,
+        "deterministic_accept": deterministic_accept,
+    }
+
+
+def compile_applicability_contract(
+    guideline: Mapping[str, Any],
+    *,
+    infer_unreviewed: bool = False,
+) -> Optional[dict[str, Any]]:
+    """Return an explicit contract or infer a conservative action prefilter."""
+    explicit = guideline.get("applicability_contract")
+    if isinstance(explicit, Mapping):
+        return normalize_applicability_contract(explicit)
+    if not infer_unreviewed:
+        return None
+
+    text = " ".join(
+        [
+            str(guideline.get("intent_label") or ""),
+            str(guideline.get("description") or ""),
+            *[
+                str(item.get("applicability") or "")
+                for item in guideline.get("criteria") or []
+                if isinstance(item, Mapping)
+            ],
+        ]
+    ).lower()
+    action_tags = _inferred_guideline_action_tags(text)
+    if not action_tags:
+        return None
+    excludes: list[dict[str, Any]] = []
+    if "action:cancel" in action_tags and not re.search(
+        r"undo|reverse|reinstate|restore|reactivate", text
+    ):
+        excludes.append(
+            {
+                "dimension": "action",
+                "any_of": ["action:reverse_cancellation"],
+                "on_known_absence": "unknown",
+            }
+        )
+    return normalize_applicability_contract(
+        {
+            "schema_version": APPLICABILITY_CONTRACT_SCHEMA_VERSION,
+            "requires": [
+                {
+                    "dimension": "action",
+                    "any_of": sorted(action_tags),
+                    "on_known_absence": "not_applicable",
+                }
+            ],
+            "excludes": excludes,
+            "deterministic_accept": False,
+        }
+    )
+
+
+def evaluate_applicability_contract(
+    facts: EpisodeFacts,
+    contract: Mapping[str, Any],
+) -> ApplicabilityContractDecision:
+    """Evaluate a normalized contract using conservative tri-state logic."""
+    normalized = normalize_applicability_contract(contract)
+    for clause in normalized["excludes"]:
+        matched = sorted(set(clause["any_of"]) & facts.tags)
+        if matched:
+            return ApplicabilityContractDecision(
+                status="not_applicable",
+                reason="deterministic exclusion matched: " + ", ".join(matched),
+                evidence_pointers=_evidence_for_tags(facts, matched),
+            )
+
+    unresolved: list[str] = []
+    for clause in normalized["requires"]:
+        alternatives = set(clause["any_of"])
+        if alternatives & facts.tags:
+            continue
+        dimension = str(clause["dimension"])
+        if (
+            dimension in facts.known_dimensions
+            and clause["on_known_absence"] == "not_applicable"
+        ):
+            return ApplicabilityContractDecision(
+                status="not_applicable",
+                reason=(
+                    f"known {dimension} facts do not satisfy any required tag: "
+                    + ", ".join(sorted(alternatives))
+                ),
+                evidence_pointers=(),
+            )
+        unresolved.append(dimension)
+
+    if unresolved or not normalized["deterministic_accept"]:
+        reason = "contract requires semantic review"
+        if unresolved:
+            reason += "; unresolved dimensions: " + ", ".join(
+                sorted(set(unresolved))
+            )
+        return ApplicabilityContractDecision(
+            status="unknown",
+            reason=reason,
+            evidence_pointers=(),
+        )
+
+    matched_tags = sorted(
+        {
+            tag
+            for clause in normalized["requires"]
+            for tag in clause["any_of"]
+            if tag in facts.tags
+        }
+    )
+    return ApplicabilityContractDecision(
+        status="applicable",
+        reason="all deterministic applicability requirements matched",
+        evidence_pointers=_evidence_for_tags(facts, matched_tags),
+    )
+
+
+def _normalize_applicability_clauses(
+    value: Any,
+    *,
+    field: str,
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or (field == "requires" and not value):
+        raise ValueError(f"Applicability contract {field} must be a nonempty list")
+    normalized: list[dict[str, Any]] = []
+    for raw_clause in value:
+        if not isinstance(raw_clause, Mapping):
+            raise ValueError(f"Applicability contract {field} clause is invalid")
+        dimension = str(raw_clause.get("dimension") or "").strip()
+        any_of = raw_clause.get("any_of")
+        on_known_absence = str(
+            raw_clause.get("on_known_absence") or "unknown"
+        ).strip()
+        if (
+            not dimension
+            or not isinstance(any_of, list)
+            or not any_of
+            or not all(isinstance(item, str) and item.strip() for item in any_of)
+            or on_known_absence not in {"unknown", "not_applicable"}
+        ):
+            raise ValueError(f"Applicability contract {field} clause is invalid")
+        normalized.append(
+            {
+                "dimension": dimension,
+                "any_of": _ordered_unique(str(item).strip() for item in any_of),
+                "on_known_absence": on_known_absence,
+            }
+        )
+    return normalized
+
+
+def _inferred_guideline_action_tags(text: str) -> set[str]:
+    tags: set[str] = set()
+    keyword_tags = (
+        (r"\b(?:cancel|cancellation)\b", "action:cancel"),
+        (r"\breturn\b", "action:return"),
+        (r"\bexchange\b", "action:exchange"),
+        (
+            r"\b(?:item modification|item change|replace|replacement variant)\b",
+            "action:modify_item",
+        ),
+        (r"\b(?:remove item|item removal)\b", "action:remove_item"),
+        (r"\b(?:address|shipping)\b", "action:update_address"),
+        (
+            r"\b(?:payment method|gift.card balance|switch.*payment)\b",
+            "action:change_payment",
+        ),
+        (
+            r"\b(?:factual|question|tracking|availability|order total|specific value)\b",
+            "action:factual_question",
+        ),
+        (
+            r"\b(?:lookup fails|failed.*lookup|corrected.*identity)\b",
+            "action:factual_question",
+        ),
+    )
+    for pattern, tag in keyword_tags:
+        if re.search(pattern, text):
+            tags.add(tag)
+    return tags
+
+
+def _add_fact(
+    tags: set[str],
+    evidence: dict[str, list[str]],
+    tag: str,
+    pointer: str,
+) -> None:
+    tags.add(tag)
+    evidence.setdefault(tag, []).append(pointer)
+
+
+def _evidence_for_tags(
+    facts: EpisodeFacts,
+    tags: Sequence[str],
+) -> tuple[str, ...]:
+    return tuple(
+        _ordered_unique(
+            pointer
+            for tag in tags
+            for pointer in facts.evidence_by_tag.get(tag, ())
+        )
+    )
+
+
+def _ordered_unique(values: Iterable[str]) -> list[str]:
+    return list(dict.fromkeys(values))

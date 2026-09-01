@@ -21,9 +21,10 @@ DEFAULT_MAX_OUTPUT_TOKENS = 4096
 
 
 class OpenAIRubricProvider:
-    """OpenAI JSON generator for guideline creation and inferred-label rubrics."""
+    """OpenAI JSON generator for guidelines and episode applicability decisions."""
 
     provider_name = "openai"
+    supports_episode_guideline_applicability = True
 
     def __init__(
         self,
@@ -112,11 +113,11 @@ class OpenAIRubricProvider:
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is not set.")
-        # try:
-        #     import truststore
-        #     truststore.inject_into_ssl()
-        # except ImportError:
-        #     pass
+        try:
+            import truststore
+            truststore.inject_into_ssl()
+        except ImportError:
+            pass
         return OpenAI(
             api_key=api_key,
             timeout=self.timeout_seconds,
