@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from src.hephaestus import artifact_io
-from src.hephaestus.datasets.intent_assets import IntentCluster, IntentMatch
+from src.hephaestus.datasets.intent_assets import IntentCluster
 from src.hephaestus.datasets.jsonl_loader import load_cases
 from src.hephaestus.evaluation_assets import pipeline as pipeline_module
 from src.hephaestus.evaluation_assets.durability import (
@@ -25,26 +25,21 @@ from src.hephaestus.evaluation_assets.models import (
     PipelineState,
 )
 from src.hephaestus.evaluation_assets.pipeline import (
-    EPISODE_GUIDELINE_APPLICABILITY_PROMPT,
+    EVIDENCE_EXTRACTION_PROMPT,
+    FULL_CATALOG_RUBRIC_PROMPT,
     GUIDELINE_SYNTHESIS_PROMPT,
-    INFERENCE_PROMPT,
     EvaluationAssetPipeline,
-    _attach_applicability_contracts,
-    _build_applicability_groups,
-    _build_labeling_queue,
     _compile_evaluation_guidelines,
     _compact_tool_result,
-    _eligible_episode_record_ids,
-    _episode_cluster_support,
     _feedback_provider_record,
+    _full_catalog_episode_payload,
     _guideline_provider_example,
-    _merge_applicability_decision,
     _normalize_aliased_guideline_response,
-    _normalize_applicability_response,
+    _normalize_feedback_evidence,
     _normalize_feedback,
+    _normalize_full_catalog_rubric_response,
     _normalize_intent,
     _normalize_rubric,
-    _record_applicability_row,
     _rubric_from_guidelines,
 )
 from src.hephaestus.evaluation_assets.publication import (
@@ -56,6 +51,160 @@ from src.hephaestus.evaluation_assets.workspace import (
     EvaluationAssetLayout,
     utc_now,
 )
+
+
+def test_review_source_uses_episode_guideline_when_cluster_match_is_missing() -> None:
+    """An episode-first decision can support a case from a weak cluster."""
+    dependency = pipeline_module.build_stage_six_dependency(
+        cluster={"cluster_id": "cluster-1"},
+        match={"matched_intent_id": None},
+        guideline={"guideline_ids": ["guideline-1"]},
+        source_members=[
+            {
+                "identity": "unlabeled:u1",
+                "content_sha256": "a" * 64,
+            }
+        ],
+        provider={"provider": "fake", "model": "fake"},
+        prompt={"revision": "episode-v1", "sha256": "b" * 64},
+        algorithm_revision="episode-first-v1",
+    )
+
+    provenance = pipeline_module._review_source_provenance(
+        {
+            "case_id": "inferred-u1",
+            "metadata": {
+                "source_cluster": "cluster-1",
+                "matched_intent_id": None,
+                "applicable_guideline_ids": ["guideline-1"],
+            },
+        },
+        dependency,
+    )
+
+    assert provenance == {
+        "source_record_ids": ["u1"],
+        "source_record_sha256s": ["sha256:" + "a" * 64],
+        "source_cluster": "cluster-1",
+        "matched_intent_id": "guideline-1",
+    }
+
+
+def test_full_catalog_episode_payload_contains_complete_trace_evidence() -> None:
+    guideline = {"guideline_id": "guideline-1", "criteria": []}
+    payload = _full_catalog_episode_payload(
+        {
+            "record_id": "episode-1",
+            "group_id": "group-1",
+            "request_id": "request-1",
+            "task_type": "support",
+            "route": "support",
+            "user_input": "Please cancel the order.",
+            "assistant_output": "The order was cancelled.",
+            "conversation_context": [
+                {"role": "user", "content": "I need help with an order."},
+                {"role": "assistant", "content": "Which order?"},
+            ],
+            "tool_calls": [
+                {
+                    "name": "cancel_order",
+                    "arguments": {"order_id": "order-1"},
+                    "result": {"status": "cancelled"},
+                }
+            ],
+            "runtime": {"channel": "chat"},
+        },
+        [guideline],
+        trusted_feedback={"polarity": "positive", "rationale": "Correct."},
+    )
+
+    assert payload["mode"] == "full_catalog_episode_rubric"
+    assert payload["evaluation_guidelines"] == [guideline]
+    assert payload["episode"]["user_messages"] == [
+        "I need help with an order.",
+        "Please cancel the order.",
+    ]
+    assert payload["episode"]["assistant_messages"] == [
+        {"pointer": "conversation_context[1]", "content": "Which order?"},
+        {"pointer": "assistant_output", "content": "The order was cancelled."},
+    ]
+    assert payload["episode"]["tool_observations"][0]["outcome_status"] == (
+        "result_returned"
+    )
+    assert payload["episode"]["tool_observations"][0]["result_state"] == {
+        "status": "cancelled"
+    }
+    assert "tau" not in FULL_CATALOG_RUBRIC_PROMPT.lower()
+
+
+def test_full_catalog_rubric_supports_guideline_and_trace_inferred_provenance() -> None:
+    guideline = {"guideline_id": "guideline-1", "criteria": []}
+    common = {
+        "record_id": "episode-1",
+        "intent_label": "cancel order",
+        "confidence": 0.9,
+        "must": ["Complete the requested action."],
+        "must_not": [],
+        "should": [],
+        "deterministic_checks": [],
+        "tool_expectations": {},
+        "reference_output": None,
+        "evidence_pointers": ["episode.user_messages[0]"],
+    }
+    grounded = _normalize_full_catalog_rubric_response(
+        {
+            "rubrics": [
+                {
+                    **common,
+                    "applicable_guideline_ids": ["guideline-1"],
+                    "provenance": "guideline_grounded",
+                }
+            ]
+        },
+        record_id="episode-1",
+        guidelines=[guideline],
+        rubric_provider="fake",
+        rubric_model="fake",
+        trusted=False,
+    )
+    inferred = _normalize_full_catalog_rubric_response(
+        {
+            "rubrics": [
+                {
+                    **common,
+                    "applicable_guideline_ids": [],
+                    "provenance": "trace_inferred",
+                }
+            ]
+        },
+        record_id="episode-1",
+        guidelines=[guideline],
+        rubric_provider="fake",
+        rubric_model="fake",
+        trusted=False,
+    )
+
+    assert grounded["label_source"] == "inferred_from_trusted_feedback"
+    assert grounded["evaluation_guidelines"] == [guideline]
+    assert inferred["label_source"] == "trace_inferred"
+    assert inferred["evaluation_guidelines"] == []
+    with pytest.raises(ValueError, match="provenance"):
+        _normalize_full_catalog_rubric_response(
+            {
+                "rubrics": [
+                    {
+                        **common,
+                        "applicable_guideline_ids": [],
+                        "provenance": "guideline_grounded",
+                    }
+                ]
+            },
+            record_id="episode-1",
+            guidelines=[guideline],
+            rubric_provider="fake",
+            rubric_model="fake",
+            trusted=False,
+        )
 
 
 class FakeEmbeddingProvider:
@@ -95,11 +244,38 @@ class FakeRubricProvider:
 
     def __init__(self):
         self.synthetic_calls = 0
+        self.episode_rubric_calls = 0
         self.feedback_record_ids = []
         self.calls = 0
 
     def generate_json(self, system_prompt, payload):
         self.calls += 1
+        if payload.get("mode") == "full_catalog_episode_rubric":
+            self.episode_rubric_calls += 1
+            guideline_ids = [
+                row["guideline_id"]
+                for row in payload["evaluation_guidelines"]
+            ]
+            return {
+                "rubrics": [
+                    {
+                        "record_id": payload["episode"]["record_id"],
+                        "applicable_guideline_ids": guideline_ids,
+                        "provenance": (
+                            "guideline_grounded" if guideline_ids else "trace_inferred"
+                        ),
+                        "intent_label": "answer the request",
+                        "confidence": 0.8,
+                        "must": ["Answer the user's stated request."],
+                        "must_not": ["Change the requested scope."],
+                        "should": ["Be concise."],
+                        "deterministic_checks": [],
+                        "tool_expectations": {},
+                        "reference_output": None,
+                        "evidence_pointers": ["episode.user_messages[0]"],
+                    }
+                ]
+            }
         if "records" in payload:
             self.feedback_record_ids.extend(
                 row["record_id"] for row in payload["records"]
@@ -203,470 +379,6 @@ class FakeRubricProvider:
         }
 
 
-class EpisodeApplicabilityRubricProvider(FakeRubricProvider):
-    """Test provider opting in to the per-episode applicability contract."""
-
-    supports_episode_guideline_applicability = True
-
-    def __init__(self):
-        super().__init__()
-        self.applicability_prompts = []
-
-    def generate_json(self, system_prompt, payload):
-        if payload.get("mode") == "episode_guideline_applicability":
-            self.calls += 1
-            self.applicability_prompts.append(system_prompt)
-            return {
-                "decisions": [
-                    {
-                        "decision_id": row["decision_id"],
-                        "applicable_guideline_ids": list(
-                            row["candidate_guideline_ids"]
-                        ),
-                        "confidence": 0.85,
-                        "reason": "The trusted guideline applies to the request.",
-                        "evidence_pointers": ["user_messages[0]"],
-                        "candidate_decisions": [
-                            {
-                                "guideline_id": guideline_id,
-                                "status": "applicable",
-                                "reason": "The request is within this guideline's scope.",
-                            }
-                            for guideline_id in row["candidate_guideline_ids"]
-                        ],
-                    }
-                    for row in payload["decision_groups"]
-                ]
-            }
-        return super().generate_json(system_prompt, payload)
-
-
-class SelectiveEpisodeApplicabilityRubricProvider(EpisodeApplicabilityRubricProvider):
-    """Select a guideline for one episode and none for another in one cluster."""
-
-    def generate_json(self, system_prompt, payload):
-        if payload.get("mode") != "episode_guideline_applicability":
-            return super().generate_json(system_prompt, payload)
-        self.calls += 1
-        decisions = []
-        for index, row in enumerate(payload["decision_groups"]):
-            selected = list(row["candidate_guideline_ids"]) if index == 0 else []
-            decisions.append(
-                {
-                    "decision_id": row["decision_id"],
-                    "applicable_guideline_ids": selected,
-                    "confidence": 0.85,
-                    "reason": "Applicability differs between the two episodes.",
-                    "evidence_pointers": ["user_messages[0]"],
-                    "candidate_decisions": [
-                        {
-                            "guideline_id": guideline_id,
-                            "status": (
-                                "applicable"
-                                if guideline_id in selected
-                                else "not_applicable"
-                            ),
-                            "reason": "The episode scope was checked independently.",
-                        }
-                        for guideline_id in row["candidate_guideline_ids"]
-                    ],
-                }
-            )
-        return {"decisions": decisions}
-
-
-def test_episode_applicability_deduplicates_and_filters_contradictions() -> None:
-    guidelines = {
-        "cancel-guideline": {
-            "guideline_id": "cancel-guideline",
-            "route": "retail",
-            "intent_label": "cancel order",
-            "description": "Cancel a pending order.",
-            "criteria": [
-                {
-                    "criterion_id": "cancel-criterion",
-                    "kind": "required",
-                    "statement": "Cancel the order.",
-                    "applicability": "When the user asks to cancel an order.",
-                    "severity": "critical",
-                }
-            ],
-            "tool_expectations": {},
-        },
-        "exchange-guideline": {
-            "guideline_id": "exchange-guideline",
-            "route": "retail",
-            "intent_label": "exchange item",
-            "description": "Exchange an item.",
-            "criteria": [
-                {
-                    "criterion_id": "exchange-criterion",
-                    "kind": "required",
-                    "statement": "Exchange the requested item.",
-                    "applicability": "When the user asks to exchange an item.",
-                    "severity": "critical",
-                }
-            ],
-            "tool_expectations": {},
-        },
-    }
-    raw_by_id = {
-        record_id: {
-            "record_id": record_id,
-            "group_id": record_id,
-            "task_type": "retail",
-            "route": "retail",
-            "user_input": "Please undo the cancellation and exchange this item.",
-            "conversation_context": [],
-            "tool_calls": [],
-            "runtime": {},
-            "metadata": {},
-        }
-        for record_id in ("episode-a", "episode-b")
-    }
-    candidate_by_record = {
-        record_id: {
-            "record_id": record_id,
-            "cluster_id": "retail-001",
-            "route": "retail",
-            "candidates": [
-                {"guideline_id": "cancel-guideline", "retrieval_score": 0.9},
-                {"guideline_id": "exchange-guideline", "retrieval_score": 0.8},
-            ],
-        }
-        for record_id in raw_by_id
-    }
-
-    groups, group_by_record, deterministic = _build_applicability_groups(
-        eligible_record_ids=set(raw_by_id),
-        candidate_by_record=candidate_by_record,
-        raw_by_id=raw_by_id,
-        guideline_by_id=guidelines,
-    )
-
-    assert len(groups) == 1
-    assert groups[0]["record_ids"] == ["episode-a", "episode-b"]
-    assert groups[0]["candidate_guideline_ids"] == ["exchange-guideline"]
-    assert groups[0]["hard_rejections"][0]["guideline_id"] == "cancel-guideline"
-    assert group_by_record["episode-a"] is group_by_record["episode-b"]
-    assert deterministic == []
-
-    decisions = _normalize_applicability_response(
-        {
-            "decisions": [
-                {
-                    "decision_id": groups[0]["decision_id"],
-                    "applicable_guideline_ids": ["exchange-guideline"],
-                    "confidence": 0.91,
-                    "reason": "The user explicitly requested an exchange.",
-                    "evidence_pointers": ["user_messages[0]"],
-                    "candidate_decisions": [
-                        {
-                            "guideline_id": "exchange-guideline",
-                            "status": "applicable",
-                            "reason": "The requested action is an exchange.",
-                        }
-                    ],
-                }
-            ]
-        },
-        decision_groups=groups,
-    )
-    assert decisions[0]["applicable_guideline_ids"] == ["exchange-guideline"]
-
-
-def test_episode_applicability_contract_can_skip_llm_group() -> None:
-    """A complete reviewed contract resolves a candidate without an LLM call."""
-    guideline = {
-        "guideline_id": "exchange-guideline",
-        "route": "retail",
-        "intent_label": "exchange item",
-        "description": "Exchange an item.",
-        "criteria": [],
-        "tool_expectations": {},
-        "applicability_contract": {
-            "schema_version": "fapo-applicability-contract-v1",
-            "requires": [
-                {
-                    "dimension": "action",
-                    "any_of": ["action:exchange"],
-                    "on_known_absence": "not_applicable",
-                }
-            ],
-            "excludes": [],
-            "deterministic_accept": True,
-        },
-    }
-    raw = {
-        "record_id": "episode-a",
-        "group_id": "episode-a",
-        "task_type": "retail",
-        "route": "retail",
-        "user_input": "Please exchange this item.",
-        "conversation_context": [],
-        "tool_calls": [],
-        "runtime": {},
-        "metadata": {},
-    }
-    candidate = {
-        "record_id": "episode-a",
-        "cluster_id": "retail-001",
-        "route": "retail",
-        "candidates": [
-            {"guideline_id": "exchange-guideline", "retrieval_score": 0.9}
-        ],
-    }
-
-    groups, group_by_record, deterministic = _build_applicability_groups(
-        eligible_record_ids={"episode-a"},
-        candidate_by_record={"episode-a": candidate},
-        raw_by_id={"episode-a": raw},
-        guideline_by_id={"exchange-guideline": guideline},
-    )
-
-    assert groups == []
-    assert group_by_record["episode-a"]["hard_acceptances"][0][
-        "guideline_id"
-    ] == "exchange-guideline"
-    assert deterministic[0]["applicable_guideline_ids"] == [
-        "exchange-guideline"
-    ]
-
-
-def test_risky_contract_acceptance_can_require_semantic_veto() -> None:
-    """Only an opted-in deterministic acceptance is sent to semantic review."""
-    guideline = {
-        "guideline_id": "exchange-guideline",
-        "route": "retail",
-        "intent_label": "exchange item",
-        "description": "Exchange an item.",
-        "criteria": [],
-        "tool_expectations": {},
-        "applicability_contract": {
-            "schema_version": "fapo-applicability-contract-v1",
-            "requires": [
-                {
-                    "dimension": "action",
-                    "any_of": ["action:exchange"],
-                    "on_known_absence": "not_applicable",
-                }
-            ],
-            "excludes": [],
-            "deterministic_accept": True,
-        },
-    }
-    raw = {
-        "record_id": "episode-a",
-        "group_id": "episode-a",
-        "task_type": "retail",
-        "route": "retail",
-        "user_input": "Please exchange this item.",
-        "conversation_context": [],
-        "tool_calls": [],
-        "runtime": {},
-        "metadata": {},
-    }
-    candidate = {
-        "record_id": "episode-a",
-        "cluster_id": "retail-001",
-        "route": "retail",
-        "candidates": [
-            {"guideline_id": "exchange-guideline", "retrieval_score": 0.9}
-        ],
-    }
-
-    groups, group_by_record, deterministic = _build_applicability_groups(
-        eligible_record_ids={"episode-a"},
-        candidate_by_record={"episode-a": candidate},
-        raw_by_id={"episode-a": raw},
-        guideline_by_id={"exchange-guideline": guideline},
-        unknown_policy="not_supported",
-        semantic_review_guideline_ids={"exchange-guideline"},
-    )
-
-    assert deterministic == []
-    assert len(groups) == 1
-    group = group_by_record["episode-a"]
-    assert group["hard_acceptances"] == []
-    assert group["candidate_guideline_ids"] == ["exchange-guideline"]
-    assert group["semantic_review_acceptances"][0]["guideline_id"] == (
-        "exchange-guideline"
-    )
-
-    veto = _normalize_applicability_response(
-        {
-            "decisions": [
-                {
-                    "decision_id": group["decision_id"],
-                    "applicable_guideline_ids": [],
-                    "confidence": 0.94,
-                    "reason": "The broader guideline does not apply.",
-                    "evidence_pointers": ["user_messages[0]"],
-                }
-            ]
-        },
-        decision_groups=groups,
-    )[0]
-    merged = _merge_applicability_decision(group, veto)
-    assert merged["applicable_guideline_ids"] == []
-
-    row = _record_applicability_row(
-        record_id="episode-a",
-        group=group,
-        decision=merged,
-    )
-    assert row["semantically_reviewed_guideline_ids"] == [
-        "exchange-guideline"
-    ]
-    assert row["semantic_review_proposals"][0]["decision_source"] == (
-        "deterministic_applicability_contract_pending_semantic_review"
-    )
-    assert row["candidate_decisions"][0]["status"] == "not_applicable"
-    assert row["candidate_decisions"][0]["decision_source"] == (
-        "llm_semantic_review_of_deterministic_acceptance"
-    )
-
-
-def test_unknown_contract_result_is_not_automatically_supported() -> None:
-    """A conservative gate excludes unknowns without erasing the distinction."""
-    guideline = {
-        "guideline_id": "exchange-guideline",
-        "route": "retail",
-        "intent_label": "exchange item",
-        "description": "Exchange a delivered item.",
-        "criteria": [],
-        "tool_expectations": {},
-        "applicability_contract": {
-            "schema_version": "fapo-applicability-contract-v1",
-            "requires": [
-                {
-                    "dimension": "action",
-                    "any_of": ["action:exchange"],
-                    "on_known_absence": "not_applicable",
-                },
-                {
-                    "dimension": "state",
-                    "any_of": ["state:delivered"],
-                    "on_known_absence": "unknown",
-                },
-            ],
-            "excludes": [],
-            "deterministic_accept": True,
-        },
-    }
-    raw = {
-        "record_id": "episode-a",
-        "group_id": "episode-a",
-        "task_type": "retail",
-        "route": "retail",
-        "user_input": "Please exchange this item.",
-        "conversation_context": [],
-        "tool_calls": [],
-        "runtime": {},
-        "metadata": {},
-    }
-    candidate = {
-        "record_id": "episode-a",
-        "cluster_id": "retail-001",
-        "route": "retail",
-        "candidates": [
-            {"guideline_id": "exchange-guideline", "retrieval_score": 0.9}
-        ],
-    }
-
-    groups, group_by_record, deterministic = _build_applicability_groups(
-        eligible_record_ids={"episode-a"},
-        candidate_by_record={"episode-a": candidate},
-        raw_by_id={"episode-a": raw},
-        guideline_by_id={"exchange-guideline": guideline},
-        unknown_policy="not_supported",
-    )
-
-    assert groups == []
-    group = group_by_record["episode-a"]
-    assert group["hard_rejections"] == []
-    assert group["unsupported_unknowns"][0]["guideline_id"] == (
-        "exchange-guideline"
-    )
-    assert deterministic[0]["applicable_guideline_ids"] == []
-
-    row = _record_applicability_row(
-        record_id="episode-a",
-        group=group,
-        decision=deterministic[0],
-    )
-    assert row["applicable_guideline_ids"] == []
-    assert row["not_automatically_supported_guideline_ids"] == [
-        "exchange-guideline"
-    ]
-    assert row["candidate_decisions"][0]["status"] == (
-        "not_automatically_supported"
-    )
-
-
-def test_contract_registry_defaults_pipeline_unknowns_to_not_supported(
-    tmp_path: Path,
-) -> None:
-    """Reviewed contract registries opt into the zero-LLM unknown policy."""
-    layout = pipeline_module.EvaluationAssetLayout(
-        tmp_path,
-        "tenant-a",
-        "asset-a",
-        repository_base=tmp_path,
-    )
-    contract = {
-        "schema_version": "fapo-applicability-contract-v1",
-        "requires": [
-            {
-                "dimension": "action",
-                "any_of": ["action:exchange"],
-                "on_known_absence": "not_applicable",
-            }
-        ],
-        "excludes": [],
-        "deterministic_accept": False,
-    }
-
-    pipeline = EvaluationAssetPipeline(
-        layout,
-        applicability_contracts={"exchange_item": contract},
-    )
-
-    assert pipeline._applicability_unknown_policy == "not_supported"
-
-
-def test_reviewed_contract_registry_attaches_by_frozen_intent_label() -> None:
-    """Injected contracts must exactly cover a frozen guideline library."""
-    guidelines = [
-        {
-            "guideline_id": "guideline-a",
-            "intent_label": "exchange_item",
-        }
-    ]
-    contract = {
-        "schema_version": "fapo-applicability-contract-v1",
-        "requires": [
-            {
-                "dimension": "action",
-                "any_of": ["action:exchange"],
-                "on_known_absence": "not_applicable",
-            }
-        ],
-        "excludes": [],
-        "deterministic_accept": False,
-    }
-
-    attached = _attach_applicability_contracts(
-        guidelines,
-        {"exchange_item": contract},
-    )
-
-    assert attached[0]["applicability_contract"] == contract
-    assert "applicability_contract" not in guidelines[0]
-    with pytest.raises(ValueError, match="inventory differs"):
-        _attach_applicability_contracts(guidelines, {"wrong_intent": contract})
-
-
 def test_compact_tool_result_retains_item_identity_with_parent_state() -> None:
     """Compaction keeps entity identity needed to resolve mixed-state episodes."""
     compact = _compact_tool_result(
@@ -698,389 +410,6 @@ def test_compact_tool_result_retains_item_identity_with_parent_state() -> None:
     }
 
 
-def test_episode_applicability_merges_contract_acceptance_with_llm_fallback() -> None:
-    """Deterministic acceptances and semantic fallback selections are combined."""
-    group = {
-        "decision_id": "decision-1",
-        "retrieved_candidates": [
-            {"guideline_id": "deterministic-guideline"},
-            {"guideline_id": "llm-guideline"},
-            {"guideline_id": "rejected-guideline"},
-        ],
-        "hard_acceptances": [
-            {
-                "guideline_id": "deterministic-guideline",
-                "evidence_pointers": ["user_messages[0]"],
-            }
-        ],
-        "hard_rejections": [
-            {
-                "guideline_id": "rejected-guideline",
-                "evidence_pointers": ["user_messages[1]"],
-            }
-        ],
-    }
-    decision = {
-        "decision_id": "decision-1",
-        "applicable_guideline_ids": ["llm-guideline"],
-        "confidence": 0.84,
-        "reason": "The unresolved candidate applies.",
-        "evidence_pointers": ["tool_observations[0]"],
-        "candidate_decisions": [],
-        "decision_source": "llm_episode_applicability",
-    }
-
-    merged = _merge_applicability_decision(group, decision)
-
-    assert merged["applicable_guideline_ids"] == [
-        "deterministic-guideline",
-        "llm-guideline",
-    ]
-    assert merged["decision_source"] == "hybrid_episode_applicability"
-    assert merged["evidence_pointers"] == [
-        "user_messages[0]",
-        "user_messages[1]",
-        "tool_observations[0]",
-    ]
-
-
-@pytest.mark.parametrize(
-    "selected_ids",
-    [[], ["guideline-a"], ["guideline-a", "guideline-b"]],
-)
-def test_episode_applicability_accepts_zero_one_or_many_guidelines(
-    selected_ids: list[str],
-) -> None:
-    group = {
-        "decision_id": "decision-1",
-        "candidate_guideline_ids": ["guideline-a", "guideline-b"],
-    }
-    normalized = _normalize_applicability_response(
-        {
-            "decisions": [
-                {
-                    "decision_id": "decision-1",
-                    "applicable_guideline_ids": selected_ids,
-                    "confidence": 0.8,
-                    "reason": "Applicability was evaluated independently.",
-                    "evidence_pointers": ["user_messages[0]"],
-                    "candidate_decisions": [
-                        {
-                            "guideline_id": guideline_id,
-                            "status": (
-                                "applicable"
-                                if guideline_id in selected_ids
-                                else "not_applicable"
-                            ),
-                            "reason": "Candidate scope was checked.",
-                        }
-                        for guideline_id in group["candidate_guideline_ids"]
-                    ],
-                }
-            ]
-        },
-        decision_groups=[group],
-    )
-
-    assert normalized[0]["applicable_guideline_ids"] == selected_ids
-
-
-def test_episode_applicability_ignores_deterministic_top_level_echo() -> None:
-    """The complete unresolved candidate decisions remain canonical."""
-    group = {
-        "decision_id": "decision-1",
-        "candidate_guideline_ids": ["llm-guideline"],
-        "retrieved_candidates": [
-            {"guideline_id": "deterministic-guideline"},
-            {"guideline_id": "llm-guideline"},
-        ],
-    }
-
-    normalized = _normalize_applicability_response(
-        {
-            "decisions": [
-                {
-                    "decision_id": "decision-1",
-                    "applicable_guideline_ids": [
-                        "deterministic-guideline",
-                        "llm-guideline",
-                    ],
-                    "confidence": 0.9,
-                    "reason": "Both requirements apply to the full episode.",
-                    "evidence_pointers": ["user_messages[0]"],
-                    "candidate_decisions": [
-                        {
-                            "guideline_id": "llm-guideline",
-                            "status": "applicable",
-                            "reason": "The unresolved request matches.",
-                        }
-                    ],
-                }
-            ]
-        },
-        decision_groups=[group],
-    )
-
-    assert normalized[0]["applicable_guideline_ids"] == ["llm-guideline"]
-
-
-def test_pipeline_writes_episode_applicability_artifacts_for_opted_in_provider(
-    tmp_path: Path,
-) -> None:
-    tenants_root = tmp_path / "tenants"
-    source_root = tenants_root / "tenant_a" / "source_artifacts"
-    source_root.mkdir(parents=True)
-    feedback = source_root / "feedback.jsonl"
-    unlabeled = source_root / "unlabeled.jsonl"
-    _write_extension_feedback(feedback, [f"f{index}" for index in range(1, 6)])
-    _write_extension_unlabeled(unlabeled, ["u1", "u2"])
-    rubric_provider = EpisodeApplicabilityRubricProvider()
-    pipeline = EvaluationAssetPipeline.create(
-        tenants_root,
-        EvaluationAssetConfig(
-            tenant_id="tenant_a",
-            asset_id="episode-v1",
-            cluster_count=1,
-            rubric_provider="fake",
-            rubric_model="fake-rubric",
-            embedding_provider="fake",
-            embedding_model="fake-embedding",
-        ),
-        feedback,
-        unlabeled,
-        repository_base=tmp_path,
-        rubric_provider=rubric_provider,
-        embedding_provider=FakeEmbeddingProvider(),
-    )
-
-    state = pipeline.run()
-
-    assert state.status == "awaiting_review"
-    assert rubric_provider.applicability_prompts
-    assert set(rubric_provider.applicability_prompts) == {
-        INFERENCE_PROMPT
-    }
-    assert EPISODE_GUIDELINE_APPLICABILITY_PROMPT in INFERENCE_PROMPT
-    candidate_rows = _read_test_jsonl(
-        pipeline.layout.artifact_path(
-            PipelineStage.COVERAGE_DECISIONS,
-            "episode_guideline_candidates.jsonl",
-        )
-    )
-    applicability_rows = _read_test_jsonl(
-        pipeline.layout.artifact_path(
-            PipelineStage.LABEL_INFERENCE,
-            "episode_guideline_applicability.jsonl",
-        )
-    )
-    episode_rubrics = _read_test_jsonl(
-        pipeline.layout.artifact_path(
-            PipelineStage.LABEL_INFERENCE,
-            "inferred_unlabeled_episode_rubrics.jsonl",
-        )
-    )
-    inferred_cases = _read_test_jsonl(
-        pipeline.layout.artifact_path(
-            PipelineStage.LABEL_INFERENCE,
-            "inferred_cases.jsonl",
-        )
-    )
-    cluster_support = _read_test_jsonl(
-        pipeline.layout.artifact_path(
-            PipelineStage.LABEL_INFERENCE,
-            "cluster_feedback_support.jsonl",
-        )
-    )
-    assert len(candidate_rows) == len(applicability_rows) == len(episode_rubrics) == 2
-    assert len(inferred_cases) == 2
-    assert len(cluster_support) == 1
-    assert cluster_support[0]["status"] == "supported"
-    assert cluster_support[0]["support_rate"] == 1.0
-    review_dependencies = _read_test_jsonl(
-        pipeline.layout.artifact_path(
-            PipelineStage.SYNTHETIC_COVERAGE,
-            "inferred_review_dependencies.jsonl",
-        )
-    )
-    assert len(review_dependencies) == 2
-    assert all(row["applicable_guideline_ids"] for row in applicability_rows)
-    assert all(
-        row["expected"]["evaluation_guideline_ids"]
-        == row["metadata"]["applicable_guideline_ids"]
-        for row in inferred_cases
-    )
-    page = pipeline.layout.list_review_items()
-    for item in page["items"]:
-        pipeline.layout.decide_review(
-            item["case_id"],
-            item["fingerprint"],
-            "approved",
-            reviewer="test-reviewer",
-            expected_review_set_fingerprint=page["review_set_fingerprint"],
-        )
-    page = pipeline.layout.list_review_items()
-    released = pipeline.finalize_review(
-        reviewer="test-reviewer",
-        expected_review_set_fingerprint=page["review_set_fingerprint"],
-        expected_decision_set_fingerprint=page["decision_set_fingerprint"],
-    )
-    assert released.status == "released"
-
-
-def test_episode_review_dependencies_support_heterogeneous_clusters(
-    tmp_path: Path,
-) -> None:
-    tenants_root = tmp_path / "tenants"
-    source_root = tenants_root / "tenant_a" / "source_artifacts"
-    source_root.mkdir(parents=True)
-    feedback = source_root / "feedback.jsonl"
-    unlabeled = source_root / "unlabeled.jsonl"
-    _write_extension_feedback(feedback, [f"f{index}" for index in range(1, 6)])
-    _write_extension_unlabeled(unlabeled, ["u1", "u2"])
-    pipeline = EvaluationAssetPipeline.create(
-        tenants_root,
-        EvaluationAssetConfig(
-            tenant_id="tenant_a",
-            asset_id="heterogeneous-episode-v1",
-            cluster_count=1,
-            rubric_provider="fake",
-            rubric_model="fake-rubric",
-            embedding_provider="fake",
-            embedding_model="fake-embedding",
-        ),
-        feedback,
-        unlabeled,
-        repository_base=tmp_path,
-        rubric_provider=SelectiveEpisodeApplicabilityRubricProvider(),
-        embedding_provider=FakeEmbeddingProvider(),
-    )
-
-    state = pipeline.run()
-
-    assert state.status == "awaiting_review"
-    cluster_dependencies = _read_test_jsonl(
-        pipeline.layout.artifact_path(
-            PipelineStage.LABEL_INFERENCE,
-            "inference_dependencies.jsonl",
-        )
-    )
-    inferred_cases = _read_test_jsonl(
-        pipeline.layout.artifact_path(
-            PipelineStage.LABEL_INFERENCE,
-            "inferred_cases.jsonl",
-        )
-    )
-    review_dependencies = _read_test_jsonl(
-        pipeline.layout.artifact_path(
-            PipelineStage.SYNTHETIC_COVERAGE,
-            "inferred_review_dependencies.jsonl",
-        )
-    )
-    assert cluster_dependencies == []
-    assert len(inferred_cases) == len(review_dependencies) == 1
-    assert review_dependencies[0]["case_id"] == inferred_cases[0]["case_id"]
-    assert pipeline.layout.list_review_items()["counts"]["approved"] == 1
-
-
-def test_episode_cluster_support_is_derived_after_episode_gate() -> None:
-    """A weak coarse match does not prevent supported episodes from proceeding."""
-    clusters = [
-        IntentCluster(
-            cluster_id="retail-001",
-            route="retail",
-            record_ids=["u1", "u2"],
-            representative_ids=["u1"],
-            top_terms=["order"],
-        )
-    ]
-    matches = [
-        IntentMatch(
-            cluster_id="retail-001",
-            status="missing_or_weak_labels",
-            score=0.42,
-            matched_intent_id=None,
-            matched_label=None,
-            cluster_size=2,
-            trusted_example_count=0,
-            trusted_group_count=0,
-            unlabeled_to_trusted_ratio=None,
-            reason="The coarse cluster score is below the coverage threshold.",
-        )
-    ]
-    row_by_id = {
-        "u1": {"user_input": "Cancel my order."},
-        "u2": {"user_input": "Tell me the order status."},
-    }
-
-    assert _eligible_episode_record_ids(clusters, set()) == {"u1", "u2"}
-
-    support, missing = _episode_cluster_support(
-        clusters=clusters,
-        matches=matches,
-        row_by_id=row_by_id,
-        eligible_record_ids={"u1", "u2"},
-        selected_ids_by_record={
-            "u1": ("cancel-guideline",),
-            "u2": ("status-guideline",),
-        },
-        rubric_by_record={"u1": {"must": ["cancel"]}, "u2": {"must": ["reply"]}},
-    )
-
-    assert missing == []
-    assert support[0]["status"] == "supported"
-    assert support[0]["retrieval_cluster_status"] == "missing_or_weak_labels"
-    assert support[0]["selected_guideline_ids"] == [
-        "cancel-guideline",
-        "status-guideline",
-    ]
-
-
-def test_episode_cluster_support_reports_partial_support() -> None:
-    clusters = [
-        IntentCluster(
-            cluster_id="retail-001",
-            route="retail",
-            record_ids=["u1", "u2"],
-            representative_ids=["u1"],
-            top_terms=["order"],
-        )
-    ]
-    matches = [
-        IntentMatch(
-            cluster_id="retail-001",
-            status="matched_trusted_intent",
-            score=0.9,
-            matched_intent_id="guideline-1",
-            matched_label="order",
-            cluster_size=2,
-            trusted_example_count=1,
-            trusted_group_count=1,
-            unlabeled_to_trusted_ratio=2.0,
-            reason="Coverage requirements passed.",
-        )
-    ]
-    row_by_id = {
-        "u1": {"user_input": "Cancel my order."},
-        "u2": {"user_input": "Do something unsupported."},
-    }
-
-    support, missing = _episode_cluster_support(
-        clusters=clusters,
-        matches=matches,
-        row_by_id=row_by_id,
-        eligible_record_ids={"u1", "u2"},
-        selected_ids_by_record={"u1": ("guideline-1",), "u2": ()},
-        rubric_by_record={"u1": {"must": ["cancel"]}},
-    )
-
-    assert support[0]["status"] == "partially_supported"
-    assert support[0]["support_rate"] == 0.5
-    assert missing[0]["status"] == "partially_supported_after_episode_gate"
-    assert missing[0]["unsupported_records"] == [
-        {"record_id": "u2", "reason": "no_applicable_guideline"}
-    ]
-
-
 class SecretFailingRubricProvider(FakeRubricProvider):
     def generate_json(self, system_prompt, payload):
         raise RuntimeError(
@@ -1101,8 +430,7 @@ class SecretMalformedRubricProvider(FakeRubricProvider):
             response["guidelines"][0]["confidence"] = "sk-live-secret-token"
         elif (
             self.malformed_response == "inferred"
-            and "clusters" in payload
-            and "synthetic evaluation input" not in system_prompt
+            and payload.get("mode") == "full_catalog_episode_rubric"
         ):
             response["rubrics"][0]["confidence"] = "sk-live-secret-token"
         elif (
@@ -1424,6 +752,17 @@ def test_episode_redaction_preserves_structure_and_redacts_content() -> None:
     assert provider_record["tool_calls"] == normalized["tool_calls"]
     assert provider_record["tool_calls"][0]["result"] == {"owner": "<email>"}
     assert provider_record["episode"] == normalized["episode"]
+    assert provider_record["trace_analysis"]["tool_observations"] == [
+        {
+            "pointer": "episode.events[1]",
+            "name": "lookup_order",
+            "arguments": {"owner": "<email>"},
+            "outcome_status": "result_returned",
+            "result_state": {},
+        }
+    ]
+    assert "feedback_trace_mistake_pattern" in EVIDENCE_EXTRACTION_PROMPT
+    assert "environment failures" in EVIDENCE_EXTRACTION_PROMPT
 
 
 def test_guideline_synthesis_payload_includes_observed_tool_calls(
@@ -1463,7 +802,34 @@ def test_guideline_synthesis_payload_includes_observed_tool_calls(
         "record_id": "feedback-1",
         "task_type": "answer",
         "user_input": "Complete the requested action.",
-        "feedback_polarity": "mixed",
+        "feedback": {"polarity": "mixed"},
+        "trace_analysis": {
+            "user_messages": ["Complete the requested action."],
+            "assistant_messages": [],
+            "tool_observations": [
+                {
+                    "pointer": "tool_calls[0]",
+                    "name": "lookup_record",
+                    "arguments": {"record_id": "record-1"},
+                    "outcome_status": "result_returned",
+                    "result_state": {"status": "ready"},
+                },
+                {
+                    "pointer": "tool_calls[1]",
+                    "name": "apply_change",
+                    "arguments": {"record_id": "record-1", "value": "new"},
+                    "outcome_status": "error_returned",
+                    "error": "permission denied",
+                },
+                {
+                    "pointer": "tool_calls[2]",
+                    "name": "audit_change",
+                    "arguments": {},
+                    "outcome_status": "not_recorded",
+                },
+            ],
+        },
+        "runtime": {},
         "observed_tool_calls": [
             {
                 "position": 1,
@@ -1491,6 +857,8 @@ def test_guideline_synthesis_payload_includes_observed_tool_calls(
     }
     assert "not duplicated" not in json.dumps(example, sort_keys=True)
     assert "observed_tool_calls" in GUIDELINE_SYNTHESIS_PROMPT
+    assert "feedback_trace_mistake_pattern" in GUIDELINE_SYNTHESIS_PROMPT
+    assert "trace_analysis" in GUIDELINE_SYNTHESIS_PROMPT
     assert "result_returned does not establish" in GUIDELINE_SYNTHESIS_PROMPT
     assert "evidence_required must be a" in GUIDELINE_SYNTHESIS_PROMPT
     assert "JSON boolean" in GUIDELINE_SYNTHESIS_PROMPT
@@ -1528,6 +896,105 @@ def test_guideline_synthesis_payload_includes_observed_tool_calls(
         }
     ]
     assert "feedback-1" not in json.dumps(captured_payloads, sort_keys=True)
+
+
+def test_feedback_trace_mistake_patterns_require_correlation_and_repair() -> None:
+    """Mistake patterns are accepted only with feedback and trace evidence."""
+    source = {
+        "record_id": "feedback-1",
+        "group_id": "group-1",
+        "route": "answer",
+        "task_type": "answer",
+        "feedback": {"polarity": "negative"},
+    }
+    raw = {
+        "intent_label": "complete the request",
+        "confidence": 0.9,
+        "observations": [
+            {
+                "claim": "The agent reported success after the tool returned an error.",
+                "evidence_type": "feedback_trace_mistake_pattern",
+                "evidence_pointer": "feedback.rationale; episode.events[4]",
+                "polarity": "negative",
+            }
+        ],
+        "requested_corrections": [
+            "Acknowledge the failed tool outcome and do not claim completion."
+        ],
+        "uncertainties": [],
+    }
+
+    normalized = _normalize_feedback_evidence(raw, source, "fake", "fake-model")
+
+    assert normalized["observations"][0]["evidence_type"] == (
+        "feedback_trace_mistake_pattern"
+    )
+    assert normalized["requested_corrections"] == raw["requested_corrections"]
+
+    missing_trace_pointer = {
+        **raw,
+        "observations": [
+            {
+                **raw["observations"][0],
+                "evidence_pointer": "feedback.rationale",
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match="both feedback and an observed trace"):
+        _normalize_feedback_evidence(
+            missing_trace_pointer,
+            source,
+            "fake",
+            "fake-model",
+        )
+
+    with pytest.raises(ValueError, match="expected behavior or repair"):
+        _normalize_feedback_evidence(
+            {**raw, "requested_corrections": []},
+            source,
+            "fake",
+            "fake-model",
+        )
+
+    with pytest.raises(ValueError, match="must agree with feedback"):
+        _normalize_feedback_evidence(
+            raw,
+            {**source, "feedback": {"polarity": "positive"}},
+            "fake",
+            "fake-model",
+        )
+
+
+def test_feedback_trace_success_pattern_does_not_require_a_repair() -> None:
+    """A positively endorsed behavior is itself the expected behavior."""
+    source = {
+        "record_id": "feedback-1",
+        "group_id": "group-1",
+        "route": "answer",
+        "task_type": "answer",
+        "feedback": {"polarity": "positive"},
+    }
+    raw = {
+        "intent_label": "complete the request",
+        "confidence": 0.9,
+        "observations": [
+            {
+                "claim": "The agent confirmed the requested option before acting.",
+                "evidence_type": "feedback_trace_success_pattern",
+                "evidence_pointer": "feedback.rationale; episode.events[4]",
+                "polarity": "positive",
+            }
+        ],
+        "requested_corrections": [],
+        "uncertainties": [],
+    }
+
+    normalized = _normalize_feedback_evidence(raw, source, "fake", "fake-model")
+
+    assert normalized["observations"][0]["evidence_type"] == (
+        "feedback_trace_success_pattern"
+    )
+    assert normalized["requested_corrections"] == []
 
 
 def test_guideline_synthesis_restores_opaque_source_aliases() -> None:
@@ -2243,7 +1710,6 @@ def test_stage_one_revalidates_each_copied_input_before_provider_calls(
     ("malformed_call", "expected_stage"),
     [
         (1, PipelineStage.INTENT_CLUSTERING),
-        (2, PipelineStage.COVERAGE_DECISIONS),
     ],
 )
 def test_pipeline_validates_injected_embedding_batches_at_every_stage(
@@ -2251,7 +1717,7 @@ def test_pipeline_validates_injected_embedding_batches_at_every_stage(
     malformed_call: int,
     expected_stage: PipelineStage,
 ) -> None:
-    """Custom providers cannot bypass Stage 4 or Stage 5 vector validation."""
+    """Custom providers cannot bypass clustering vector validation."""
     tenants_root = tmp_path / "tenants"
     feedback, unlabeled = _write_minimal_input_pair(tenants_root, "tenant_a")
     embedding_provider = MalformedEmbeddingProvider(malformed_call)
@@ -2994,7 +2460,7 @@ def test_revise_config_invalidates_only_dependent_stages(tmp_path: Path) -> None
     )
     stage_five_artifact = layout.artifact_path(
         PipelineStage.COVERAGE_DECISIONS,
-        "intent_matches.jsonl",
+        "cluster_sampling_metadata.jsonl",
     )
     stage_four_artifact.write_text("{}\n", encoding="utf-8")
     stage_five_artifact.write_text("{}\n", encoding="utf-8")
@@ -3208,6 +2674,8 @@ def test_extend_asset_keeps_clustering_and_extracts_only_new_rubrics(
     child_locations = _split_case_locations(child_layout)
     assert parent_locations
     for case_id, parent_split in parent_locations.items():
+        if case_id == "inferred-u1":
+            continue
         assert child_locations[case_id] == parent_split
     lineage = json.loads(child_layout.lineage_path.read_text(encoding="utf-8"))
     assert lineage["parent_asset_id"] == "v1"
@@ -3314,59 +2782,6 @@ def test_extend_asset_rejects_unlabeled_additions_when_clustering_is_kept(
             additional_unlabeled=added_unlabeled,
             clustering_mode="keep",
         )
-
-
-def test_labeling_queue_samples_only_clusters_needing_trusted_labels() -> None:
-    clusters = [
-        IntentCluster(
-            cluster_id="route-a-001",
-            route="route_a",
-            record_ids=[f"u{index}" for index in range(1, 25)],
-            representative_ids=["u1", "u2", "u3"],
-            top_terms=["category", "alpha"],
-        ),
-        IntentCluster(
-            cluster_id="route-b-001",
-            route="route_b",
-            record_ids=["u25"],
-            representative_ids=["u25"],
-            top_terms=["category", "beta"],
-        ),
-    ]
-    matches = [
-        IntentMatch(
-            cluster_id="route-a-001",
-            status="missing_or_weak_labels",
-            score=0.2,
-            reason="below threshold",
-        ),
-        IntentMatch(
-            cluster_id="route-b-001",
-            status="matched_trusted_intent",
-            score=0.9,
-        ),
-    ]
-    intent_rows = [
-        {
-            "record_id": f"u{index}",
-            "user_input": f"request {index}",
-            "route": "route_a" if index < 25 else "route_b",
-        }
-        for index in range(1, 26)
-    ]
-
-    queue = _build_labeling_queue(
-        clusters,
-        matches,
-        intent_rows,
-        sample_ratio=0.1,
-        max_per_cluster=3,
-    )
-
-    assert [row["trace"]["record_id"] for row in queue] == ["u1", "u2", "u3"]
-    assert {row["cluster_id"] for row in queue} == {"route-a-001"}
-    assert {row["annotation_status"] for row in queue} == {"pending"}
-    assert {row["samples_from_cluster"] for row in queue} == {3}
 
 
 @pytest.mark.parametrize(
@@ -3501,12 +2916,33 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
     ).exists()
     assert layout.artifact_path(
         "coverage_decisions",
-        "intent_matches.jsonl",
+        "cluster_sampling_metadata.jsonl",
     ).exists()
-    assert layout.artifact_path(
-        "coverage_decisions",
-        "review_queue/labeling_queue.jsonl",
-    ).exists()
+    for stale_path in (
+        layout.artifact_path("coverage_decisions", "intent_matches.jsonl"),
+        layout.artifact_path(
+            "coverage_decisions", "review_queue/labeling_queue.jsonl"
+        ),
+        layout.artifact_path(
+            "label_inference", "episode_guideline_candidates.jsonl"
+        ),
+        layout.artifact_path(
+            "label_inference", "episode_guideline_applicability.jsonl"
+        ),
+        layout.artifact_path(
+            "label_inference", "inferred_unlabeled_cluster_rubrics.jsonl"
+        ),
+        layout.artifact_path("label_inference", "inference_dependencies.jsonl"),
+    ):
+        assert not stale_path.exists()
+    for name in (
+        "episode_rubrics.jsonl",
+        "trusted_cases.jsonl",
+        "inferred_cases.jsonl",
+        "case_dependencies.jsonl",
+        "held_rubric_outputs.jsonl",
+    ):
+        assert layout.artifact_path("label_inference", name).exists()
     assert layout.artifact_path("dataset_splits", "train.jsonl").exists()
     assert layout.manifest_path.exists()
     release = resolve_evaluation_asset_release(layout.published_datasets)
@@ -3562,19 +2998,18 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
     )
     trusted_case = json.loads(
         layout.artifact_path(
-            "rubric_extraction",
+            "label_inference",
             "trusted_cases.jsonl",
         )
         .read_text(encoding="utf-8")
         .splitlines()[0]
     )
-    inferred_rubric = json.loads(
-        layout.artifact_path(
-            "label_inference",
-            "inferred_unlabeled_cluster_rubrics.jsonl",
+    inferred_rubric = next(
+        row
+        for row in _read_test_jsonl(
+            layout.artifact_path("label_inference", "episode_rubrics.jsonl")
         )
-        .read_text(encoding="utf-8")
-        .splitlines()[0]
+        if row["record_id"] == "u1"
     )
     dataset_manifest = json.loads(
         layout.artifact_path(
@@ -3610,36 +3045,39 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
     assert "review_status" not in trusted_case["metadata"]
     assert "thread_group" not in trusted_case["metadata"]
     assert "request_group" not in trusted_case["metadata"]
-    assert trusted_case["expected"]["evaluation_guideline_ids"] == [
-        evaluation_guideline["guideline_id"]
-    ]
+    assert evaluation_guideline["guideline_id"] in (
+        trusted_case["expected"]["evaluation_guideline_ids"]
+    )
     assert inferred_rubric["review_status"] == "review_required"
+    assert inferred_rubric["rubric_provenance"] == "guideline_grounded"
     assert (
         dataset_manifest["review_policy"]["evaluation_guidelines"]
         == "active_from_trusted_evidence"
     )
     assert dataset_manifest["review_policy"]["guideline_calibration"] == "uncalibrated"
-    assert dataset_manifest["coverage"]["match_threshold"] == 0.6
+    assert dataset_manifest["clustering"]["purpose"] == (
+        "batch_sampling_and_analysis"
+    )
+    assert dataset_manifest["clustering"]["correctness_role"] == "none"
     assert dataset_manifest["evaluation_guidelines"] == {
         "schema_version": "fapo-evaluation-guideline-v1",
         "count": 1,
         "activation_status": "active_from_trusted_evidence",
         "calibration_status": "uncalibrated",
     }
-    assert dataset_manifest["coverage"]["labeling_queue"] == {
-        "statuses": [
-            "needs_more_trusted_examples",
-            "missing_or_weak_labels",
+    assert dataset_manifest["episode_rubric_generation"] == {
+        "method": "full_catalog_single_call_per_episode_v1",
+        "guideline_selection": "inside_rubric_generation_call",
+        "guideline_catalog": "all_split_permitted_guidelines",
+        "no_applicable_guideline_fallback": "trace_inferred",
+        "trace_evidence": [
+            "user_messages",
+            "assistant_messages",
+            "tool_calls",
+            "tool_results",
+            "runtime",
+            "trusted_feedback_when_present",
         ],
-        "sample_ratio": 0.1,
-        "minimum_per_cluster": 1,
-        "maximum_per_cluster": 3,
-        "selection": "deterministic_centroid_nearest",
-        "acquisition": {
-            "purpose": "correctness_label_acquisition",
-            "method": "deterministic_centroid_nearest",
-            "sampling_semantics": "non_probability",
-        },
     }
     assert dataset_manifest["synthetic_coverage"] == {
         "enabled": synthetic_coverage_enabled,
@@ -3667,9 +3105,8 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
         },
     }
     assert dataset_manifest["review_policy"]["derived_cases"] == "approved_only"
-    assert (
-        dataset_manifest["review_policy"]["coverage_labeling_queue"]
-        == "human_label_required"
+    assert dataset_manifest["review_policy"]["episode_rubrics"] == (
+        "case_specific_with_explicit_provenance"
     )
     review_snapshot_path = layout.artifact_path(
         PipelineStage.DATASET_SPLITS,
@@ -3688,20 +3125,12 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
         status: len(rows) for status, rows in fingerprint_inventory.items()
     } == dataset_manifest["review"]["counts"]
     held_ids = {row["case_id"] for row in review_snapshot["held"]}
-    trusted_review_cases = [
-        *_read_test_jsonl(
-            layout.artifact_path(
-                PipelineStage.RUBRIC_EXTRACTION,
-                "trusted_cases.jsonl",
-            )
-        ),
-        *_read_test_jsonl(
-            layout.artifact_path(
-                PipelineStage.RUBRIC_EXTRACTION,
-                "protected_trusted_cases.jsonl",
-            )
-        ),
-    ]
+    trusted_review_cases = _read_test_jsonl(
+        layout.artifact_path(
+            PipelineStage.LABEL_INFERENCE,
+            "trusted_cases.jsonl",
+        )
+    )
     assert fingerprint_inventory["trusted"] == sorted(
         (
             {
@@ -3754,6 +3183,7 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
     assert rubric_provider.synthetic_calls == (
         1 if synthetic_coverage_enabled else 0
     )
+    assert rubric_provider.episode_rubric_calls == 13
 
     regression_cases = [
         json.loads(line)

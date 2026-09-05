@@ -32,8 +32,12 @@ _HISTORICAL_REUSE_SCHEMA_VERSION_V2 = "fapo-evaluation-asset-reuse-v2"
 _HISTORICAL_SNAPSHOT_SCHEMA_VERSION_V2 = (
     "fapo-evaluation-asset-parent-snapshot-v2"
 )
-REUSE_SCHEMA_VERSION = _HISTORICAL_REUSE_SCHEMA_VERSION_V2
-SNAPSHOT_SCHEMA_VERSION = _HISTORICAL_SNAPSHOT_SCHEMA_VERSION_V2
+_HISTORICAL_REUSE_SCHEMA_VERSION_V3 = "fapo-evaluation-asset-reuse-v3"
+_HISTORICAL_SNAPSHOT_SCHEMA_VERSION_V3 = (
+    "fapo-evaluation-asset-parent-snapshot-v3"
+)
+REUSE_SCHEMA_VERSION = _HISTORICAL_REUSE_SCHEMA_VERSION_V3
+SNAPSHOT_SCHEMA_VERSION = _HISTORICAL_SNAPSHOT_SCHEMA_VERSION_V3
 APPEND_STAGE_THREE_EVIDENCE_OPERATION = (
     "append_evidence_and_rebuild_guidelines"
 )
@@ -59,7 +63,15 @@ _HISTORICAL_NATIVE_STAGE_THREE_SEEDS_V2 = (
     "protected_evaluation_guidelines.jsonl",
     "protected_trusted_cases.jsonl",
 )
-NATIVE_STAGE_THREE_SEEDS = _HISTORICAL_NATIVE_STAGE_THREE_SEEDS_V2
+_HISTORICAL_NATIVE_STAGE_THREE_SEEDS_V3 = (
+    "feedback_evidence.jsonl",
+    "candidate_guidelines.jsonl",
+    "evaluation_guidelines.jsonl",
+    "protected_feedback_evidence.jsonl",
+    "protected_candidate_guidelines.jsonl",
+    "protected_evaluation_guidelines.jsonl",
+)
+NATIVE_STAGE_THREE_SEEDS = _HISTORICAL_NATIVE_STAGE_THREE_SEEDS_V3
 _HISTORICAL_LEGACY_STAGE_THREE_SEEDS_V1 = (
     "feedback_rubrics.jsonl",
     "trusted_intents.jsonl",
@@ -101,7 +113,17 @@ _HISTORICAL_COMMON_PARENT_SNAPSHOT_FILES_V2 = (
     "parent_review_decisions.jsonl",
     "parent_review_finalizations.jsonl",
 )
-COMMON_PARENT_SNAPSHOT_FILES = _HISTORICAL_COMMON_PARENT_SNAPSHOT_FILES_V2
+_HISTORICAL_COMMON_PARENT_SNAPSHOT_FILES_V3 = (
+    "parent_trusted_split_plan.jsonl",
+    "parent_intent_inventory.jsonl",
+    "parent_derived_review_items.jsonl",
+    "parent_review_decisions.jsonl",
+    "parent_train.jsonl",
+    "parent_validation.jsonl",
+    "parent_test.jsonl",
+    "parent_regression_trusted.jsonl",
+)
+COMMON_PARENT_SNAPSHOT_FILES = _HISTORICAL_COMMON_PARENT_SNAPSHOT_FILES_V3
 _HISTORICAL_STATIC_SNAPSHOT_INPUTS_V1 = MappingProxyType(
     {
         "intent_clustering": ("parent_intent_inventory.jsonl",),
@@ -158,36 +180,25 @@ _HISTORICAL_STATIC_SNAPSHOT_INPUTS_V2 = MappingProxyType(
         ),
     }
 )
-_STATIC_SNAPSHOT_INPUTS = MappingProxyType(
+_HISTORICAL_STATIC_SNAPSHOT_INPUTS_V3 = MappingProxyType(
     {
         "prepared_inputs": ("parent_trusted_split_plan.jsonl",),
         "intent_clustering": ("parent_intent_inventory.jsonl",),
-        "coverage_decisions": ("parent_intent_matches.jsonl",),
-        "label_inference": (
-            "parent_intent_matches.jsonl",
-            "parent_inferred_cluster_rubrics.jsonl",
-            "parent_inferred_cases.jsonl",
-            "parent_inference_dependencies.jsonl",
-            "parent_held_inference_outputs.jsonl",
-        ),
+        "coverage_decisions": (),
+        "label_inference": (),
         "synthetic_coverage": (
-            "parent_intent_matches.jsonl",
-            "parent_synthetic_cases.jsonl",
-            "parent_synthetic_dependencies.jsonl",
             "parent_derived_review_items.jsonl",
-            "parent_duplicate_families.jsonl",
-            "parent_held_derived_cases.jsonl",
+            "parent_review_decisions.jsonl",
         ),
         "dataset_splits": (
             "parent_train.jsonl",
             "parent_validation.jsonl",
             "parent_test.jsonl",
             "parent_regression_trusted.jsonl",
-            "parent_review_decisions.jsonl",
-            "parent_review_finalizations.jsonl",
         ),
     }
 )
+_STATIC_SNAPSHOT_INPUTS = _HISTORICAL_STATIC_SNAPSHOT_INPUTS_V3
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 _GENERATION_ID = re.compile(r"^sha256-[0-9a-f]{64}$")
 _PARENT_RELEASE_FIELDS = {
@@ -238,6 +249,17 @@ _historical_extension_persistence_profiles = {
         ),
         static_snapshot_inputs=_HISTORICAL_STATIC_SNAPSHOT_INPUTS_V2,
     ),
+    _HISTORICAL_REUSE_SCHEMA_VERSION_V3: ExtensionPersistenceProfile(
+        reuse_schema_version=_HISTORICAL_REUSE_SCHEMA_VERSION_V3,
+        snapshot_schema_version=_HISTORICAL_SNAPSHOT_SCHEMA_VERSION_V3,
+        native_stage_three_seeds=_HISTORICAL_NATIVE_STAGE_THREE_SEEDS_V3,
+        legacy_stage_three_seeds=_HISTORICAL_LEGACY_STAGE_THREE_SEEDS_V2,
+        stage_three_operation=APPEND_STAGE_THREE_EVIDENCE_OPERATION,
+        common_parent_snapshot_files=(
+            _HISTORICAL_COMMON_PARENT_SNAPSHOT_FILES_V3
+        ),
+        static_snapshot_inputs=_HISTORICAL_STATIC_SNAPSHOT_INPUTS_V3,
+    ),
 }
 if REUSE_SCHEMA_VERSION not in _historical_extension_persistence_profiles:
     _historical_extension_persistence_profiles[REUSE_SCHEMA_VERSION] = (
@@ -255,7 +277,19 @@ _EXTENSION_PERSISTENCE_PROFILES = MappingProxyType(
     dict(_historical_extension_persistence_profiles)
 )
 
-_PRE_V3_EXTENSION_PERSISTENCE_PROFILE = ExtensionPersistenceProfile(
+_HISTORICAL_PRE_V3_EXTENSION_PERSISTENCE_PROFILE = ExtensionPersistenceProfile(
+    reuse_schema_version=_HISTORICAL_REUSE_SCHEMA_VERSION_V2,
+    snapshot_schema_version=_HISTORICAL_SNAPSHOT_SCHEMA_VERSION_V2,
+    native_stage_three_seeds=(),
+    legacy_stage_three_seeds=(),
+    stage_three_operation=REBUILD_STAGE_THREE_WITHOUT_PARENT_SEEDS_OPERATION,
+    common_parent_snapshot_files=(
+        *_HISTORICAL_COMMON_PARENT_SNAPSHOT_FILES_V1,
+        "parent_trusted_split_plan.jsonl",
+    ),
+    static_snapshot_inputs=_PRE_V3_STATIC_SNAPSHOT_INPUTS,
+)
+_CURRENT_PRE_V3_PARENT_EXTENSION_PERSISTENCE_PROFILE = ExtensionPersistenceProfile(
     reuse_schema_version=REUSE_SCHEMA_VERSION,
     snapshot_schema_version=SNAPSHOT_SCHEMA_VERSION,
     native_stage_three_seeds=(),
@@ -426,13 +460,22 @@ def validate_extension_evidence(
 
     seeded = _mapping(reuse["seeded_incremental_stage"])
     _exact_keys(seeded, {"stage", "artifacts", "operation"})
-    persistence_profile = (
-        _PRE_V3_EXTENSION_PERSISTENCE_PROFILE
-        if persisted_profile.reuse_schema_version == REUSE_SCHEMA_VERSION
-        and seeded.get("operation")
-        == REBUILD_STAGE_THREE_WITHOUT_PARENT_SEEDS_OPERATION
-        else persisted_profile
-    )
+    if seeded.get("operation") == REBUILD_STAGE_THREE_WITHOUT_PARENT_SEEDS_OPERATION:
+        if persisted_profile.reuse_schema_version == REUSE_SCHEMA_VERSION:
+            persistence_profile = (
+                _CURRENT_PRE_V3_PARENT_EXTENSION_PERSISTENCE_PROFILE
+            )
+        elif (
+            persisted_profile.reuse_schema_version
+            == _HISTORICAL_REUSE_SCHEMA_VERSION_V2
+        ):
+            persistence_profile = (
+                _HISTORICAL_PRE_V3_EXTENSION_PERSISTENCE_PROFILE
+            )
+        else:
+            persistence_profile = persisted_profile
+    else:
+        persistence_profile = persisted_profile
     stage_three_seeds = tuple(_identifier_list(seeded["artifacts"]))
     if (
         seeded["stage"] != "rubric_extraction"

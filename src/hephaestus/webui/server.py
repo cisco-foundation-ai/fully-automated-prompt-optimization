@@ -2,16 +2,15 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Zero-dependency HTTP server for the local web UI.
+"""Zero-dependency HTTP server for the local Explorer and JSON API.
 
-Serves the Explorer at ``/``, the Evaluation Asset Studio at
-``/evaluation-assets/``, and a small JSON API under ``/api/``. Built on
+Serves the Explorer at ``/`` and a small JSON API under ``/api/``. Built on
 :mod:`http.server` so the UI requires no extra packages beyond the standard
-library.
+library. Evaluation-asset creation and review have no web frontend; the API is
+retained for programmatic clients.
 
 Routes:
     GET /                                          -> SPA shell (HTML)
-    GET /evaluation-assets/                        -> asset studio (HTML)
     GET /api/overview?tenants=<a,b>                -> dashboard aggregates (filtered)
     GET /api/tenants                               -> [tenant summaries]
     GET /api/tenants/<t>/runs                      -> [run summaries]
@@ -56,7 +55,6 @@ from src.hephaestus.evaluation_assets.review import (
 )
 from src.hephaestus.evaluation_assets.service import EvaluationAssetRunManager
 from src.hephaestus.webui.data import TenantStore
-from src.hephaestus.webui.evaluation_assets_frontend import EVALUATION_ASSET_HTML
 from src.hephaestus.webui.frontend import INDEX_HTML
 
 _LOGO_PATH = Path(__file__).with_name("assets") / "fapo-explorer-logo.webp"
@@ -100,19 +98,14 @@ class _Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         query = _parse_query(parsed.query)
-        if _is_studio_path(path) and not self._authorize_studio_request():
+        if (
+            _is_evaluation_asset_api_path(path)
+            and not self._authorize_evaluation_asset_request()
+        ):
             return
 
         if path in ("/", "/index.html"):
             self._send_html(INDEX_HTML)
-            return
-
-        if path in (
-            "/evaluation-assets",
-            "/evaluation-assets/",
-            "/evaluation-assets/index.html",
-        ):
-            self._send_html(EVALUATION_ASSET_HTML)
             return
 
         if path == "/assets/fapo-explorer-logo.webp":
@@ -141,8 +134,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 (http.server API)
         parsed = urlparse(self.path)
-        if _is_studio_path(parsed.path) and not self._authorize_studio_request(
-            mutation=True
+        if (
+            _is_evaluation_asset_api_path(parsed.path)
+            and not self._authorize_evaluation_asset_request(mutation=True)
         ):
             return
         if parsed.path == "/api/evaluation-assets/start":
@@ -235,7 +229,9 @@ class _Handler(BaseHTTPRequestHandler):
             run_rel,
             index,
         )
-        if studio_data and not self._authorize_studio_request(no_store=True):
+        if studio_data and not self._authorize_evaluation_asset_request(
+            no_store=True
+        ):
             return
         data = self.store.materialize_case(snapshot)
         self._send_json_or_404(data, no_store=studio_data)
@@ -269,7 +265,9 @@ class _Handler(BaseHTTPRequestHandler):
         snapshots, studio_data = self.store.prepare_dataset_listing(
             params["tenant"]
         )
-        if studio_data and not self._authorize_studio_request(no_store=True):
+        if studio_data and not self._authorize_evaluation_asset_request(
+            no_store=True
+        ):
             return
         datasets = self.store.materialize_dataset_listing(snapshots)
         self._send_json(
@@ -289,7 +287,9 @@ class _Handler(BaseHTTPRequestHandler):
             params["tenant"],
             dataset_rel,
         )
-        if studio_data and not self._authorize_studio_request(no_store=True):
+        if studio_data and not self._authorize_evaluation_asset_request(
+            no_store=True
+        ):
             return
         data = self.store.materialize_dataset(
             snapshot,
@@ -632,7 +632,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        if no_store or _is_studio_path(urlparse(getattr(self, "path", "")).path):
+        if no_store or _is_evaluation_asset_api_path(
+            urlparse(getattr(self, "path", "")).path
+        ):
             self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
@@ -668,12 +670,10 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        if _is_studio_path(urlparse(getattr(self, "path", "")).path):
-            self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
-    def _authorize_studio_request(
+    def _authorize_evaluation_asset_request(
         self,
         *,
         mutation: bool = False,
@@ -682,7 +682,7 @@ class _Handler(BaseHTTPRequestHandler):
         authority = self.headers.get("Host", "")
         if not _is_loopback_authority(authority):
             self._send_json(
-                {"error": "Evaluation Asset Studio requires a loopback Host"},
+                {"error": "Evaluation-asset APIs require a loopback Host"},
                 status=403,
                 no_store=no_store,
             )
@@ -690,7 +690,7 @@ class _Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if mutation and origin and not _is_same_http_origin(origin, authority):
             self._send_json(
-                {"error": "Evaluation Asset Studio mutation Origin must match Host"},
+                {"error": "Evaluation-asset API mutation Origin must match Host"},
                 status=403,
                 no_store=no_store,
             )
@@ -935,10 +935,8 @@ def _match(pattern: str, path: str) -> Dict[str, str] | None:
     return params
 
 
-def _is_studio_path(path: str) -> bool:
+def _is_evaluation_asset_api_path(path: str) -> bool:
     if path in {"/api/overview", "/api/tenants"}:
-        return True
-    if path == "/evaluation-assets" or path.startswith("/evaluation-assets/"):
         return True
     if path == "/api/evaluation-assets" or path.startswith(
         "/api/evaluation-assets/"
@@ -1022,7 +1020,7 @@ def serve(
 ) -> None:
     """Start the UI server and block until interrupted."""
     if not _is_loopback_name(host):
-        raise ValueError("Evaluation Asset Studio must bind to a loopback host")
+        raise ValueError("FAPO web server must bind to a loopback host")
     bind_host = host.strip().strip("[]")
     try:
         bind_address = ipaddress.ip_address(bind_host)

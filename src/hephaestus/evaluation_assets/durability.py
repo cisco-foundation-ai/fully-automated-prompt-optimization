@@ -64,14 +64,17 @@ from src.hephaestus.evaluation_assets.provenance import (
     HISTORICAL_LEGACY_PROVENANCE_PROFILE_V1,
     HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2,
     HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3,
+    HISTORICAL_LEGACY_PROVENANCE_PROFILE_V4,
     HISTORICAL_PROVENANCE_PROFILE_V1,
     HISTORICAL_PROVENANCE_PROFILE_V2,
     HISTORICAL_PROVENANCE_PROFILE_V3,
+    HISTORICAL_PROVENANCE_PROFILE_V4,
     PROMPT_REVISIONS,
     build_algorithm_inventory,
     historical_algorithm_inventory_v1,
     historical_algorithm_inventory_v2,
     historical_algorithm_inventory_v3,
+    historical_algorithm_inventory_v4,
     historical_build_provenance_profile,
     historical_legacy_stage_provenance_profile,
     historical_provider_call_stages,
@@ -96,10 +99,11 @@ _RELEASE_AUTHORITY_SNAPSHOT: ContextVar[Mapping[Path, bytes] | None] = ContextVa
     default=None,
 )
 
-STAGE_RECEIPT_SCHEMA_VERSION = "fapo-stage-receipt-v3"
+STAGE_RECEIPT_SCHEMA_VERSION = "fapo-stage-receipt-v4"
 _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V1 = "fapo-stage-receipt-v1"
 _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V2 = "fapo-stage-receipt-v2"
 _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V3 = "fapo-stage-receipt-v3"
+_HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V4 = "fapo-stage-receipt-v4"
 UNAVAILABLE_PROVENANCE = {
     "status": "unavailable",
     "reason": "provider_call_metadata_not_recorded",
@@ -208,7 +212,8 @@ _HISTORICAL_STAGE_RECEIPT_FIELDS_V3 = frozenset(
         "counts",
     }
 )
-_STAGE_RECEIPT_FIELDS = set(_HISTORICAL_STAGE_RECEIPT_FIELDS_V3)
+_HISTORICAL_STAGE_RECEIPT_FIELDS_V4 = _HISTORICAL_STAGE_RECEIPT_FIELDS_V3
+_STAGE_RECEIPT_FIELDS = set(_HISTORICAL_STAGE_RECEIPT_FIELDS_V4)
 _CREATED_HISTORY_FIELDS = {
     "timestamp",
     "revision",
@@ -569,7 +574,12 @@ _stage_specifications_v3[_HistoricalPipelineStageV2.DATASET_SPLITS] = replace(
             "held_derived_cases.jsonl",
         ),
     ),
-    config_fields=(),
+    config_fields=(
+        "match_threshold",
+        "min_trusted_examples",
+        "min_trusted_groups",
+        "max_unlabeled_to_trusted_ratio",
+    ),
     required_asset_inputs=(
         "reviews/decisions.jsonl",
         "reviews/finalizations.jsonl",
@@ -577,6 +587,91 @@ _stage_specifications_v3[_HistoricalPipelineStageV2.DATASET_SPLITS] = replace(
 )
 _HISTORICAL_STAGE_SPECIFICATIONS_V3 = MappingProxyType(
     dict(_stage_specifications_v3)
+)
+_stage_specifications_v4 = {
+    stage: replace(specification)
+    for stage, specification in _stage_specifications_v3.items()
+}
+_stage_specifications_v4[_HistoricalPipelineStageV2.RUBRIC_EXTRACTION] = replace(
+    _stage_specifications_v4[_HistoricalPipelineStageV2.RUBRIC_EXTRACTION],
+    required_outputs=(
+        "feedback_evidence.jsonl",
+        "candidate_guidelines.jsonl",
+        "evaluation_guidelines.jsonl",
+        "protected_feedback_evidence.jsonl",
+        "protected_candidate_guidelines.jsonl",
+        "protected_evaluation_guidelines.jsonl",
+    ),
+    legacy_required_outputs=(),
+)
+_stage_specifications_v4[_HistoricalPipelineStageV2.COVERAGE_DECISIONS] = replace(
+    _stage_specifications_v4[_HistoricalPipelineStageV2.COVERAGE_DECISIONS],
+    required_outputs=("cluster_sampling_metadata.jsonl",),
+    direct_inputs=(
+        (_HistoricalPipelineStageV2.PREPARED_INPUTS, "intent_records.jsonl"),
+        (_HistoricalPipelineStageV2.INTENT_CLUSTERING, "intent_inventory.jsonl"),
+    ),
+    config_fields=(
+        "match_threshold",
+        "min_trusted_examples",
+        "min_trusted_groups",
+        "max_unlabeled_to_trusted_ratio",
+    ),
+    provider_roles=(),
+)
+_stage_specifications_v4[_HistoricalPipelineStageV2.LABEL_INFERENCE] = replace(
+    _stage_specifications_v4[_HistoricalPipelineStageV2.LABEL_INFERENCE],
+    required_outputs=(
+        "episode_rubrics.jsonl",
+        "trusted_cases.jsonl",
+        "inferred_cases.jsonl",
+        "case_dependencies.jsonl",
+        "held_rubric_outputs.jsonl",
+    ),
+    direct_inputs=(
+        (_HistoricalPipelineStageV2.PREPARED_INPUTS, "normalized_feedback.jsonl"),
+        (_HistoricalPipelineStageV2.PREPARED_INPUTS, "intent_records.jsonl"),
+        (_HistoricalPipelineStageV2.RUBRIC_EXTRACTION, "evaluation_guidelines.jsonl"),
+        (
+            _HistoricalPipelineStageV2.RUBRIC_EXTRACTION,
+            "protected_evaluation_guidelines.jsonl",
+        ),
+        (_HistoricalPipelineStageV2.INTENT_CLUSTERING, "intent_inventory.jsonl"),
+    ),
+    config_fields=("rubric_provider", "rubric_model"),
+    prompt_names=("label_inference",),
+    provider_roles=("rubric",),
+    legacy_direct_inputs=(),
+)
+_stage_specifications_v4[_HistoricalPipelineStageV2.SYNTHETIC_COVERAGE] = replace(
+    _stage_specifications_v4[_HistoricalPipelineStageV2.SYNTHETIC_COVERAGE],
+    direct_inputs=(
+        (_HistoricalPipelineStageV2.PREPARED_INPUTS, "intent_records.jsonl"),
+        (_HistoricalPipelineStageV2.INTENT_CLUSTERING, "intent_inventory.jsonl"),
+        (_HistoricalPipelineStageV2.LABEL_INFERENCE, "episode_rubrics.jsonl"),
+        (_HistoricalPipelineStageV2.LABEL_INFERENCE, "trusted_cases.jsonl"),
+        (_HistoricalPipelineStageV2.LABEL_INFERENCE, "inferred_cases.jsonl"),
+        (_HistoricalPipelineStageV2.LABEL_INFERENCE, "case_dependencies.jsonl"),
+    ),
+)
+_stage_specifications_v4[_HistoricalPipelineStageV2.DATASET_SPLITS] = replace(
+    _stage_specifications_v4[_HistoricalPipelineStageV2.DATASET_SPLITS],
+    direct_inputs=(
+        (_HistoricalPipelineStageV2.RAW_INPUTS, "input_manifest.json"),
+        (_HistoricalPipelineStageV2.PREPARED_INPUTS, "trusted_split_plan.jsonl"),
+        (_HistoricalPipelineStageV2.LABEL_INFERENCE, "trusted_cases.jsonl"),
+        (_HistoricalPipelineStageV2.LABEL_INFERENCE, "inferred_cases.jsonl"),
+        (_HistoricalPipelineStageV2.LABEL_INFERENCE, "case_dependencies.jsonl"),
+        (_HistoricalPipelineStageV2.LABEL_INFERENCE, "held_rubric_outputs.jsonl"),
+        (_HistoricalPipelineStageV2.SYNTHETIC_COVERAGE, "synthetic_cases.jsonl"),
+        (_HistoricalPipelineStageV2.SYNTHETIC_COVERAGE, "synthetic_dependencies.jsonl"),
+        (_HistoricalPipelineStageV2.SYNTHETIC_COVERAGE, "derived_review_items.jsonl"),
+        (_HistoricalPipelineStageV2.SYNTHETIC_COVERAGE, "duplicate_families.jsonl"),
+        (_HistoricalPipelineStageV2.SYNTHETIC_COVERAGE, "held_derived_cases.jsonl"),
+    ),
+)
+_HISTORICAL_STAGE_SPECIFICATIONS_V4 = MappingProxyType(
+    dict(_stage_specifications_v4)
 )
 _live_stage_by_value = {stage.value: stage for stage in PipelineStage}
 if set(_live_stage_by_value) == set(PERSISTED_STAGE_VALUES_V2):
@@ -596,7 +691,7 @@ if set(_live_stage_by_value) == set(PERSISTED_STAGE_VALUES_V2):
                 for input_stage, name in specification.legacy_direct_inputs
             ),
         )
-        for stage, specification in _stage_specifications_v3.items()
+        for stage, specification in _stage_specifications_v4.items()
     }
 else:
     STAGE_SPECIFICATIONS = {}
@@ -624,6 +719,13 @@ def stage_specification_for_receipt_schema(
                 ]
             except (KeyError, ValueError) as exc:
                 raise ValueError("receipt stage is unsupported") from exc
+    elif schema_version == _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V4:
+        try:
+            return _HISTORICAL_STAGE_SPECIFICATIONS_V4[
+                _HistoricalPipelineStageV2(stage_value)
+            ]
+        except (KeyError, ValueError) as exc:
+            raise ValueError("receipt stage is unsupported") from exc
     else:
         raise ValueError("receipt schema is unsupported")
     try:
@@ -648,7 +750,10 @@ def stage_three_text_profile_for_receipt_schema(
         and origin == "legacy_adoption"
     ):
         return "historical_v1"
-    if schema_version == _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V3:
+    if schema_version in {
+        _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V3,
+        _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V4,
+    }:
         return "current"
     raise ValueError("receipt schema is unsupported")
 
@@ -1585,7 +1690,14 @@ def build_stage_receipt(
         else canonical_sha256(not_applicable("stage_has_no_provider_role"))
     )
     receipt = {
-        "schema_version": STAGE_RECEIPT_SCHEMA_VERSION,
+        # A newly adopted pre-v2 checkpoint still carries the frozen v3
+        # receipt contract.  Giving historical artifacts the native v4 label
+        # would falsely claim that they satisfy the current stage inventory.
+        "schema_version": (
+            _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V3
+            if historical_unavailable
+            else STAGE_RECEIPT_SCHEMA_VERSION
+        ),
         "stage": stage.value,
         "stage_index": (
             _HISTORICAL_STAGE_INDEX_BY_VALUE_V1[stage.value]
@@ -1666,11 +1778,13 @@ def validate_stage_receipt_payload(
         stage_index = PERSISTED_STAGE_VALUES_V2.index(stage_value) + 1
         count_keys = PERSISTED_STAGE_COUNT_KEYS_V2[stage_value]
         stage_inventory = set(PERSISTED_STAGE_VALUES_V2)
+        receipt_schema_version = _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V3
     else:
         stage = PipelineStage(stage_value)
         stage_index = list(PipelineStage).index(stage) + 1
         count_keys = STAGE_COUNT_KEYS[stage]
         stage_inventory = {item.value for item in PipelineStage}
+        receipt_schema_version = STAGE_RECEIPT_SCHEMA_VERSION
     fields = set(_STAGE_RECEIPT_FIELDS)
     if stage_value == PERSISTED_STAGE_VALUES_V2[-1]:
         fields.update(
@@ -1683,7 +1797,7 @@ def validate_stage_receipt_payload(
     if (
         not isinstance(payload, Mapping)
         or set(payload) != fields
-        or payload.get("schema_version") != STAGE_RECEIPT_SCHEMA_VERSION
+        or payload.get("schema_version") != receipt_schema_version
         or payload.get("stage") != stage_value
         or payload.get("stage_index") != stage_index
         or isinstance(payload.get("stage_index"), bool)
@@ -2791,7 +2905,10 @@ def _verify_build_provenance_authority_links(
     if (
         not legacy
         and historical_build_provenance_profile(provenance)
-        == HISTORICAL_PROVENANCE_PROFILE_V3
+        in {
+            HISTORICAL_PROVENANCE_PROFILE_V3,
+            HISTORICAL_PROVENANCE_PROFILE_V4,
+        }
     ):
         review_snapshot_path = layout.artifact_path(
             _HISTORICAL_PIPELINE_STAGES_V1[-1],
@@ -2958,9 +3075,13 @@ def _verify_review_manifest_links(
     inputs = identity.get("inputs") if isinstance(identity, Mapping) else None
     if not isinstance(inputs, Mapping) or "review_snapshot" not in inputs:
         return
+    profile = historical_build_provenance_profile(provenance)
     if (
-        historical_build_provenance_profile(provenance)
-        != HISTORICAL_PROVENANCE_PROFILE_V3
+        profile
+        not in {
+            HISTORICAL_PROVENANCE_PROFILE_V3,
+            HISTORICAL_PROVENANCE_PROFILE_V4,
+        }
     ):
         raise ValueError("review snapshot provenance profile is unsupported")
     snapshot_path = layout.artifact_path(
@@ -2971,17 +3092,26 @@ def _verify_review_manifest_links(
         _read_json_object(layout, snapshot_path)
     )
     held_ids = {str(row["case_id"]) for row in snapshot["held"]}
-    trusted: list[dict[str, Any]] = []
-    for name in ("trusted_cases.jsonl", "protected_trusted_cases.jsonl"):
-        trusted.extend(
-            _read_jsonl_objects(
-                layout,
-                layout.artifact_path(
-                    _HISTORICAL_PIPELINE_STAGES_V1[2],
-                    name,
-                ),
-            )
+    if profile == HISTORICAL_PROVENANCE_PROFILE_V4:
+        trusted = _read_jsonl_objects(
+            layout,
+            layout.artifact_path(
+                _HISTORICAL_PIPELINE_STAGES_V1[5],
+                "trusted_cases.jsonl",
+            ),
         )
+    else:
+        trusted = []
+        for name in ("trusted_cases.jsonl", "protected_trusted_cases.jsonl"):
+            trusted.extend(
+                _read_jsonl_objects(
+                    layout,
+                    layout.artifact_path(
+                        _HISTORICAL_PIPELINE_STAGES_V1[2],
+                        name,
+                    ),
+                )
+            )
     fingerprints = {
         "trusted": sorted(
             (
@@ -3418,6 +3548,8 @@ def _stage_algorithm_evidence(
         if provenance_profile == HISTORICAL_PROVENANCE_PROFILE_V2
         else historical_algorithm_inventory_v3
         if provenance_profile == HISTORICAL_PROVENANCE_PROFILE_V3
+        else historical_algorithm_inventory_v4
+        if provenance_profile == HISTORICAL_PROVENANCE_PROFILE_V4
         else build_algorithm_inventory
     )
     inventory = inventory_builder(
@@ -3474,6 +3606,12 @@ def _require_receipt_stage_profile(
         ),
         HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3: (
             _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V3
+        ),
+        HISTORICAL_PROVENANCE_PROFILE_V4: (
+            _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V4
+        ),
+        HISTORICAL_LEGACY_PROVENANCE_PROFILE_V4: (
+            _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V4
         ),
         "native": STAGE_RECEIPT_SCHEMA_VERSION,
         "legacy": STAGE_RECEIPT_SCHEMA_VERSION,
@@ -3684,6 +3822,10 @@ def verify_stage_receipt(
         _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V3
     ):
         expected_receipt_fields = _HISTORICAL_STAGE_RECEIPT_FIELDS_V3
+    elif historical and persisted_receipt_schema == (
+        _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V4
+    ):
+        expected_receipt_fields = _HISTORICAL_STAGE_RECEIPT_FIELDS_V4
     elif not historical and persisted_receipt_schema == (
         STAGE_RECEIPT_SCHEMA_VERSION
     ):
@@ -4337,7 +4479,8 @@ def _verify_candidate_receipts(
             )
         if (
             set(receipt) != expected_fields
-            or receipt.get("schema_version") != STAGE_RECEIPT_SCHEMA_VERSION
+            or receipt.get("schema_version")
+            != _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V3
             or receipt.get("stage") != stage.value
             or not isinstance(receipt.get("stage_index"), int)
             or isinstance(receipt.get("stage_index"), bool)
@@ -4614,6 +4757,7 @@ def verify_raw_snapshot_floor(layout: Any, state: PipelineState) -> None:
             _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V1,
             _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V2,
             _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V3,
+            _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V4,
             STAGE_RECEIPT_SCHEMA_VERSION,
         }
         or receipt.get("stage") != raw_stage.value

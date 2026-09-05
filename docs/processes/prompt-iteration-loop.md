@@ -37,8 +37,8 @@ Claude Code and Codex use parallel prompt sets. Users running Claude Code should
 | Synthetic Pruner | `.claude/commands/synthetic-pruner.md` | `.codex/commands/synthetic-pruner.md` | Validates and cleans synthetic data |
 
 The synthetic-samples and synthetic-pruner commands are generic tenant-level
-synthetic-data helpers. They are not Evaluation Asset Studio Stage 7: Stage 7
-is a receipt-backed core-pipeline stage with its own supported-cluster,
+synthetic-data helpers. They are not evaluation-asset pipeline Stage 7: Stage 7
+is a receipt-backed core-pipeline stage with its own homogeneous-cluster,
 mechanical-filter, dependency-fingerprint, and review/finalization rules.
 
 ### Dataset Process References
@@ -49,8 +49,8 @@ mechanical-filter, dependency-fingerprint, and review/finalization rules.
 | Feedback and Unlabeled Trace Dataset Flow | `docs/processes/feedback-dataset-flow.md` | Converts trusted feedback plus unlabeled trace distributions into versioned train, validation, test, and regression datasets |
 
 Evaluation asset preparation precedes the optimization loop. The shared core,
-not the assistant prompt, owns normalization, evaluation-guideline creation, clustering,
-coverage decisions, label inference, synthetic coverage, and dataset splitting.
+not the assistant prompt, owns normalization, evaluation-guideline creation,
+clustering metadata, case-specific rubric generation, synthetic coverage, and dataset splitting.
 The resulting versioned splits become inputs to optimization and evaluation.
 
 ## Enforcement Boundary

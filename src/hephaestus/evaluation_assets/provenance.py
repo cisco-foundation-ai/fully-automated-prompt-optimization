@@ -84,15 +84,15 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GENERATION_ID = re.compile(r"^sha256-[0-9a-f]{64}$")
 
 PROVIDER_CALL_SCHEMA_VERSION = "fapo-provider-call-v2"
-STAGE_PROVENANCE_SCHEMA_VERSION = "fapo-stage-provenance-v3"
-BUILD_PROVENANCE_SCHEMA_VERSION = "fapo-evaluation-build-provenance-v3"
-BUILD_IDENTITY_SCHEMA_VERSION = "fapo-evaluation-build-identity-v3"
+STAGE_PROVENANCE_SCHEMA_VERSION = "fapo-stage-provenance-v4"
+BUILD_PROVENANCE_SCHEMA_VERSION = "fapo-evaluation-build-provenance-v4"
+BUILD_IDENTITY_SCHEMA_VERSION = "fapo-evaluation-build-identity-v4"
 PROVIDER_STAGE_ROLES = {
     "raw_inputs": (),
     "prepared_inputs": (),
     "rubric_extraction": ("rubric",),
     "intent_clustering": ("embedding",),
-    "coverage_decisions": ("embedding",),
+    "coverage_decisions": (),
     "label_inference": ("rubric",),
     "synthetic_coverage": ("rubric",),
     "dataset_splits": (),
@@ -108,9 +108,9 @@ STAGE_PROMPT_NAMES = {
     "dataset_splits": (),
 }
 PROMPT_REVISIONS = {
-    "evidence_extraction": "v1",
-    "guideline_synthesis": "v1",
-    "label_inference": "v1",
+    "evidence_extraction": "v2",
+    "guideline_synthesis": "v2",
+    "label_inference": "v2",
     "synthetic_coverage": "v1",
 }
 
@@ -130,6 +130,10 @@ HISTORICAL_PROVENANCE_PROFILE_V3 = "fapo-historical-provenance-profile-v3"
 HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3 = (
     "fapo-historical-legacy-provenance-profile-v3"
 )
+HISTORICAL_PROVENANCE_PROFILE_V4 = "fapo-historical-provenance-profile-v4"
+HISTORICAL_LEGACY_PROVENANCE_PROFILE_V4 = (
+    "fapo-historical-legacy-provenance-profile-v4"
+)
 _HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V1 = "fapo-provider-call-v1"
 _HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V1 = "fapo-stage-provenance-v1"
 _HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V1 = (
@@ -148,6 +152,12 @@ _HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V3 = (
     "fapo-evaluation-build-provenance-v3"
 )
 _HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V3 = "fapo-evaluation-build-identity-v3"
+_HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V4 = "fapo-provider-call-v2"
+_HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V4 = "fapo-stage-provenance-v4"
+_HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V4 = (
+    "fapo-evaluation-build-provenance-v4"
+)
+_HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V4 = "fapo-evaluation-build-identity-v4"
 _HISTORICAL_SOURCE_FIXED_MEMBERS_V1 = (
     "pyproject.toml",
     "src/__init__.py",
@@ -242,6 +252,7 @@ _HISTORICAL_PROVIDER_STAGE_ROLES_V3 = (
     ("synthetic_coverage", ("rubric",)),
     ("dataset_splits", ()),
 )
+_HISTORICAL_PROVIDER_STAGE_ROLES_V4 = tuple(PROVIDER_STAGE_ROLES.items())
 _HISTORICAL_STAGE_PROMPT_NAMES_V2 = _HISTORICAL_STAGE_PROMPT_NAMES_V1
 _HISTORICAL_STAGE_PROMPT_NAMES_V3 = (
     ("raw_inputs", ()),
@@ -253,6 +264,7 @@ _HISTORICAL_STAGE_PROMPT_NAMES_V3 = (
     ("synthetic_coverage", ("synthetic_coverage",)),
     ("dataset_splits", ()),
 )
+_HISTORICAL_STAGE_PROMPT_NAMES_V4 = tuple(STAGE_PROMPT_NAMES.items())
 _HISTORICAL_PROMPT_REVISIONS_V2 = _HISTORICAL_PROMPT_REVISIONS_V1
 _HISTORICAL_PROMPT_REVISIONS_V3 = (
     ("evidence_extraction", "v1"),
@@ -260,6 +272,8 @@ _HISTORICAL_PROMPT_REVISIONS_V3 = (
     ("label_inference", "v1"),
     ("synthetic_coverage", "v1"),
 )
+_HISTORICAL_PROMPT_REVISIONS_V4 = tuple(PROMPT_REVISIONS.items())
+_HISTORICAL_SOURCE_FIXED_MEMBERS_V4 = SOURCE_FIXED_MEMBERS
 _HISTORICAL_CONFIG_STRING_FIELDS_V1 = (
     "tenant_id",
     "asset_id",
@@ -292,6 +306,11 @@ def historical_stage_provenance_profile(payload: Mapping[str, Any]) -> str:
         == _HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V3
     ):
         return HISTORICAL_PROVENANCE_PROFILE_V3
+    if (
+        payload.get("schema_version")
+        == _HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V4
+    ):
+        return HISTORICAL_PROVENANCE_PROFILE_V4
     raise ValueError("historical stage provenance schema is unsupported")
 
 
@@ -304,7 +323,9 @@ def historical_legacy_stage_provenance_profile(
         return HISTORICAL_LEGACY_PROVENANCE_PROFILE_V1
     if profile == HISTORICAL_PROVENANCE_PROFILE_V2:
         return HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2
-    return HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3
+    if profile == HISTORICAL_PROVENANCE_PROFILE_V3:
+        return HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3
+    return HISTORICAL_LEGACY_PROVENANCE_PROFILE_V4
 
 
 def historical_build_provenance_profile(payload: Mapping[str, Any]) -> str:
@@ -334,6 +355,14 @@ def historical_build_provenance_profile(payload: Mapping[str, Any]) -> str:
         == _HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V3
     ):
         return HISTORICAL_PROVENANCE_PROFILE_V3
+    if (
+        payload.get("schema_version")
+        == _HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V4
+        and isinstance(identity, Mapping)
+        and identity.get("schema_version")
+        == _HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V4
+    ):
+        return HISTORICAL_PROVENANCE_PROFILE_V4
     raise ValueError("historical build provenance schema is unsupported")
 
 
@@ -345,6 +374,8 @@ def historical_provider_call_stages(profile: str) -> tuple[str, ...]:
         rows = _HISTORICAL_PROVIDER_STAGE_ROLES_V2
     elif profile == HISTORICAL_PROVENANCE_PROFILE_V3:
         rows = _HISTORICAL_PROVIDER_STAGE_ROLES_V3
+    elif profile == HISTORICAL_PROVENANCE_PROFILE_V4:
+        rows = _HISTORICAL_PROVIDER_STAGE_ROLES_V4
     else:
         raise ValueError("historical provider-call profile is unsupported")
     return tuple(stage for stage, roles in rows if roles)
@@ -363,13 +394,18 @@ def _provenance_profile_generation(profile: str) -> int:
     }:
         return 2
     if profile in {
-        "current",
-        "native",
-        "legacy",
         HISTORICAL_PROVENANCE_PROFILE_V3,
         HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3,
     }:
         return 3
+    if profile in {
+        "current",
+        "native",
+        "legacy",
+        HISTORICAL_PROVENANCE_PROFILE_V4,
+        HISTORICAL_LEGACY_PROVENANCE_PROFILE_V4,
+    }:
+        return 4
     raise ValueError("provenance validation profile is unsupported")
 
 
@@ -381,6 +417,7 @@ def _profile_provider_stage_roles(profile: str) -> dict[str, tuple[str, ...]]:
         1: _HISTORICAL_PROVIDER_STAGE_ROLES_V1,
         2: _HISTORICAL_PROVIDER_STAGE_ROLES_V2,
         3: _HISTORICAL_PROVIDER_STAGE_ROLES_V3,
+        4: _HISTORICAL_PROVIDER_STAGE_ROLES_V4,
     }[generation]
     return dict(rows)
 
@@ -393,6 +430,7 @@ def _profile_stage_prompt_names(profile: str) -> dict[str, tuple[str, ...]]:
         1: _HISTORICAL_STAGE_PROMPT_NAMES_V1,
         2: _HISTORICAL_STAGE_PROMPT_NAMES_V2,
         3: _HISTORICAL_STAGE_PROMPT_NAMES_V3,
+        4: _HISTORICAL_STAGE_PROMPT_NAMES_V4,
     }[generation]
     return dict(rows)
 
@@ -405,6 +443,7 @@ def _profile_prompt_revisions(profile: str) -> dict[str, str]:
         1: _HISTORICAL_PROMPT_REVISIONS_V1,
         2: _HISTORICAL_PROMPT_REVISIONS_V2,
         3: _HISTORICAL_PROMPT_REVISIONS_V3,
+        4: _HISTORICAL_PROMPT_REVISIONS_V4,
     }[generation]
     return dict(rows)
 
@@ -417,6 +456,7 @@ def _profile_source_fixed_members(profile: str) -> tuple[str, ...]:
         1: _HISTORICAL_SOURCE_FIXED_MEMBERS_V1,
         2: _HISTORICAL_SOURCE_FIXED_MEMBERS_V2,
         3: _HISTORICAL_SOURCE_FIXED_MEMBERS_V3,
+        4: _HISTORICAL_SOURCE_FIXED_MEMBERS_V4,
     }[generation]
 
 
@@ -787,12 +827,12 @@ def validate_provider_binding(
     return normalized
 
 
-def _algorithm_inventory_v3(
+def _algorithm_inventory_v4(
     config: Mapping[str, Any],
     *,
     extension: bool,
 ) -> dict[str, Any]:
-    """Return the frozen algorithm body introduced by provenance v3."""
+    """Return the frozen algorithm body introduced by provenance v4."""
     return {
         "raw_inputs": "fapo-evaluation-input-v1",
         "prepared_inputs": {
@@ -820,21 +860,17 @@ def _algorithm_inventory_v3(
             "max_representatives": 3,
         },
         "coverage_decisions": {
-            "algorithm": "route-constrained-cosine-v1",
-            "labeling_queue": "deterministic-centroid-nearest-v1",
-            "queue_acquisition": {
-                "purpose": "correctness_label_acquisition",
-                "method": "deterministic_centroid_nearest",
-                "sampling_semantics": "non_probability",
-            },
-            "sample_ratio": 0.1,
-            "minimum_per_cluster": 1,
-            "maximum_per_cluster": 3,
+            "algorithm": "cluster-sampling-metadata-v1",
+            "correctness_role": "none",
+            "purpose": "batch_sampling_and_analysis",
         },
         "label_inference": {
-            "algorithm": "trusted-guideline-inference-v1",
-            "dependency": "stage-six-dependency-v1",
-            "scoreability": "scoreable-rubric-or-hold-v1",
+            "algorithm": "full-catalog-episode-rubric-v1",
+            "call_granularity": "one-provider-call-per-episode",
+            "guideline_selection": "inside-rubric-generation-call",
+            "fallback": "trace-inferred-rubric-when-no-guideline-applies",
+            "dependency": "case-scoped-stage-six-dependency-v1",
+            "scoreability": "scoreable-episode-rubric-or-hold-v1",
             "extension_reuse": (
                 {"authorization": "exact-stage-six-dependency-match-v1"}
                 if extension
@@ -896,7 +932,42 @@ def build_algorithm_inventory(
     extension: bool,
 ) -> dict[str, Any]:
     """Return the exact live generation-affecting algorithm inventory."""
-    return _algorithm_inventory_v3(config, extension=extension)
+    return _algorithm_inventory_v4(config, extension=extension)
+
+
+def _algorithm_inventory_v3(
+    config: Mapping[str, Any],
+    *,
+    extension: bool,
+) -> dict[str, Any]:
+    """Return the frozen pre-V3-pipeline algorithm body."""
+    inventory = _algorithm_inventory_v4(config, extension=extension)
+    inventory["coverage_decisions"] = {
+        "algorithm": "route-constrained-cosine-v1",
+        "labeling_queue": "deterministic-centroid-nearest-v1",
+        "queue_acquisition": {
+            "purpose": "correctness_label_acquisition",
+            "method": "deterministic_centroid_nearest",
+            "sampling_semantics": "non_probability",
+        },
+        "sample_ratio": 0.1,
+        "minimum_per_cluster": 1,
+        "maximum_per_cluster": 3,
+    }
+    inventory["label_inference"] = {
+        "algorithm": "trusted-guideline-inference-v1",
+        "dependency": "stage-six-dependency-v1",
+        "scoreability": "scoreable-rubric-or-hold-v1",
+        "extension_reuse": (
+            {"authorization": "exact-stage-six-dependency-match-v1"}
+            if extension
+            else {
+                "status": "not_applicable",
+                "reason": "native_asset_has_no_parent",
+            }
+        ),
+    }
+    return inventory
 
 
 def historical_algorithm_inventory_v1(
@@ -955,6 +1026,15 @@ def historical_algorithm_inventory_v3(
 ) -> dict[str, Any]:
     """Return the immutable algorithm profile recorded by provenance v3."""
     return _algorithm_inventory_v3(config, extension=extension)
+
+
+def historical_algorithm_inventory_v4(
+    config: Mapping[str, Any],
+    *,
+    extension: bool,
+) -> dict[str, Any]:
+    """Return the immutable full-catalog episode-rubric profile."""
+    return _algorithm_inventory_v4(config, extension=extension)
 
 
 def build_provider_call(
@@ -1032,6 +1112,7 @@ def validate_provider_calls(
         HISTORICAL_PROVENANCE_PROFILE_V1,
         HISTORICAL_PROVENANCE_PROFILE_V2,
         HISTORICAL_PROVENANCE_PROFILE_V3,
+        HISTORICAL_PROVENANCE_PROFILE_V4,
     }:
         raise ValueError("provider call validation profile is unsupported")
     provider_stage_roles = _profile_provider_stage_roles(profile)
@@ -1042,6 +1123,8 @@ def validate_provider_calls(
         if profile == HISTORICAL_PROVENANCE_PROFILE_V2
         else _HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V3
         if profile == HISTORICAL_PROVENANCE_PROFILE_V3
+        else _HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V4
+        if profile == HISTORICAL_PROVENANCE_PROFILE_V4
         else PROVIDER_CALL_SCHEMA_VERSION
     )
     if expected_stage not in provider_stage_roles:
@@ -1291,15 +1374,18 @@ def validate_stage_provenance(
         HISTORICAL_PROVENANCE_PROFILE_V1,
         HISTORICAL_PROVENANCE_PROFILE_V2,
         HISTORICAL_PROVENANCE_PROFILE_V3,
+        HISTORICAL_PROVENANCE_PROFILE_V4,
         HISTORICAL_LEGACY_PROVENANCE_PROFILE_V1,
         HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2,
         HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3,
+        HISTORICAL_LEGACY_PROVENANCE_PROFILE_V4,
     }
     legacy = profile in {
         "legacy",
         HISTORICAL_LEGACY_PROVENANCE_PROFILE_V1,
         HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2,
         HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3,
+        HISTORICAL_LEGACY_PROVENANCE_PROFILE_V4,
     }
     provider_stage_roles = _profile_provider_stage_roles(profile)
     stage_prompt_names = _profile_stage_prompt_names(profile)
@@ -1320,6 +1406,11 @@ def validate_stage_provenance(
         if profile in {
             HISTORICAL_PROVENANCE_PROFILE_V3,
             HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3,
+        }
+        else _HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V4
+        if profile in {
+            HISTORICAL_PROVENANCE_PROFILE_V4,
+            HISTORICAL_LEGACY_PROVENANCE_PROFILE_V4,
         }
         else STAGE_PROVENANCE_SCHEMA_VERSION
     )
@@ -1342,9 +1433,11 @@ def validate_stage_provenance(
             HISTORICAL_PROVENANCE_PROFILE_V1,
             HISTORICAL_PROVENANCE_PROFILE_V2,
             HISTORICAL_PROVENANCE_PROFILE_V3,
+            HISTORICAL_PROVENANCE_PROFILE_V4,
             HISTORICAL_LEGACY_PROVENANCE_PROFILE_V1,
             HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2,
             HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3,
+            HISTORICAL_LEGACY_PROVENANCE_PROFILE_V4,
         }
         or not isinstance(payload, Mapping)
         or set(payload) != fields
@@ -1494,7 +1587,7 @@ def validate_stage_provenance(
     seeds = payload.get("seeds")
     split_seed_stage = (
         "prepared_inputs"
-        if _provenance_profile_generation(profile) == 3
+        if _provenance_profile_generation(profile) >= 3
         else "dataset_splits"
     )
     if expected_stage == split_seed_stage:
@@ -1610,6 +1703,7 @@ def validate_build_provenance(
         HISTORICAL_PROVENANCE_PROFILE_V1,
         HISTORICAL_PROVENANCE_PROFILE_V2,
         HISTORICAL_PROVENANCE_PROFILE_V3,
+        HISTORICAL_PROVENANCE_PROFILE_V4,
     }:
         raise ValueError("build provenance validation profile is unsupported")
     build_schema_version = (
@@ -1619,6 +1713,8 @@ def validate_build_provenance(
         if profile == HISTORICAL_PROVENANCE_PROFILE_V2
         else _HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V3
         if profile == HISTORICAL_PROVENANCE_PROFILE_V3
+        else _HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V4
+        if profile == HISTORICAL_PROVENANCE_PROFILE_V4
         else BUILD_PROVENANCE_SCHEMA_VERSION
     )
     identity_schema_version = (
@@ -1628,6 +1724,8 @@ def validate_build_provenance(
         if profile == HISTORICAL_PROVENANCE_PROFILE_V2
         else _HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V3
         if profile == HISTORICAL_PROVENANCE_PROFILE_V3
+        else _HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V4
+        if profile == HISTORICAL_PROVENANCE_PROFILE_V4
         else BUILD_IDENTITY_SCHEMA_VERSION
     )
     prompt_revisions = _profile_prompt_revisions(profile)
@@ -2016,6 +2114,8 @@ def _validate_call_evidence(
             if profile == HISTORICAL_PROVENANCE_PROFILE_V2
             else _HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V3
             if profile == HISTORICAL_PROVENANCE_PROFILE_V3
+            else _HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V4
+            if profile == HISTORICAL_PROVENANCE_PROFILE_V4
             else PROVIDER_CALL_SCHEMA_VERSION
         )
         reconstructed.append(
@@ -2204,6 +2304,8 @@ def _validate_native_build_profile(
         else historical_algorithm_inventory_v2(config, extension=extension)
         if generation == 2
         else historical_algorithm_inventory_v3(config, extension=extension)
+        if generation == 3
+        else historical_algorithm_inventory_v4(config, extension=extension)
         if historical
         else build_algorithm_inventory(config, extension=extension)
     )
@@ -2672,7 +2774,9 @@ def build_legacy_provenance(
     marker = unavailable("legacy_checkpoint_predates_provenance")
     config_values = dict(resolved_configuration)
     identity = {
-        "schema_version": BUILD_IDENTITY_SCHEMA_VERSION,
+        # Legacy adoption authenticates the frozen pre-v3 pipeline contract;
+        # it must not masquerade as a current v4-native build.
+        "schema_version": _HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V3,
         "hash_algorithm": "sha256",
         "resolved_configuration": {
             "values": config_values,
@@ -2702,7 +2806,7 @@ def build_legacy_provenance(
         "algorithms": dict(marker),
     }
     payload = {
-        "schema_version": BUILD_PROVENANCE_SCHEMA_VERSION,
+        "schema_version": _HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V3,
         "identity": identity,
         "identity_sha256": canonical_sha256(identity),
         "audit": {
@@ -2712,7 +2816,10 @@ def build_legacy_provenance(
         },
         "created_at": created_at,
     }
-    validate_build_provenance(payload)
+    validate_build_provenance(
+        payload,
+        profile=HISTORICAL_PROVENANCE_PROFILE_V3,
+    )
     return payload
 
 
@@ -2720,7 +2827,7 @@ def build_legacy_stage_provenance(stage: str) -> dict[str, Any]:
     """Build one explicit historical-unavailable stage provenance record."""
     marker = unavailable("legacy_checkpoint_predates_provenance")
     return {
-        "schema_version": STAGE_PROVENANCE_SCHEMA_VERSION,
+        "schema_version": _HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V3,
         "stage": stage,
         "provider_identity": dict(marker),
         "prompts": dict(marker),

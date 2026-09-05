@@ -50,6 +50,33 @@ class _DeterministicRubricProvider:
         payload: Mapping[str, Any],
     ) -> dict[str, Any]:
         self.calls += 1
+        if payload.get("mode") == "full_catalog_episode_rubric":
+            guideline_ids = [
+                row["guideline_id"]
+                for row in payload["evaluation_guidelines"]
+            ]
+            return {
+                "rubrics": [
+                    {
+                        "record_id": payload["episode"]["record_id"],
+                        "applicable_guideline_ids": guideline_ids,
+                        "provenance": (
+                            "guideline_grounded"
+                            if guideline_ids
+                            else "trace_inferred"
+                        ),
+                        "intent_label": "answer the request",
+                        "confidence": 0.8,
+                        "must": ["Answer the stated request."],
+                        "must_not": ["Change the requested scope."],
+                        "should": [],
+                        "deterministic_checks": [],
+                        "tool_expectations": {},
+                        "reference_output": None,
+                        "evidence_pointers": ["episode.user_messages[0]"],
+                    }
+                ]
+            }
         if "records" in payload:
             return {
                 "evidence": [
@@ -505,13 +532,21 @@ def test_unscoreable_inferred_rubric_counts_one_review_cluster(
         system_prompt: str,
         payload: Mapping[str, Any],
     ) -> dict[str, Any]:
-        if "clusters" not in payload or "evidence" in payload:
+        if (
+            payload.get("mode") != "full_catalog_episode_rubric"
+            or payload["episode"]["record_id"] != "u1"
+        ):
             return original_generate(system_prompt, payload)
         rubric_provider.calls += 1
         return {
             "rubrics": [
                 {
-                    "cluster_id": row["cluster_id"],
+                    "record_id": "u1",
+                    "applicable_guideline_ids": [
+                        row["guideline_id"]
+                        for row in payload["evaluation_guidelines"]
+                    ],
+                    "provenance": "guideline_grounded",
                     "intent_label": "answer the request",
                     "confidence": 0.8,
                     "must": [],
@@ -520,8 +555,8 @@ def test_unscoreable_inferred_rubric_counts_one_review_cluster(
                     "deterministic_checks": [],
                     "tool_expectations": {},
                     "reference_output": None,
+                    "evidence_pointers": ["episode.user_messages[0]"],
                 }
-                for row in payload["clusters"]
             ]
         }
 
@@ -541,7 +576,7 @@ def test_unscoreable_inferred_rubric_counts_one_review_cluster(
         _read_jsonl(
             pipeline.layout.artifact_path(
                 PipelineStage.LABEL_INFERENCE,
-                "held_inference_outputs.jsonl",
+                "held_rubric_outputs.jsonl",
             )
         )
     ) == 1

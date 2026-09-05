@@ -959,7 +959,6 @@ def test_build_provenance_calls_must_equal_authenticated_stage_ledgers(
     ledgers = {
         "rubric_extraction": [call],
         "intent_clustering": [],
-        "coverage_decisions": [],
         "label_inference": [],
         "synthetic_coverage": [],
     }
@@ -1003,7 +1002,6 @@ def test_historical_build_provenance_binds_v1_provider_settings_profile(
     ledgers = {
         "rubric_extraction": [call],
         "intent_clustering": [],
-        "coverage_decisions": [],
         "label_inference": [],
         "synthetic_coverage": [],
     }
@@ -1116,7 +1114,6 @@ def test_call_backed_injected_settings_survive_current_and_historical_validation
     ledgers = {
         "rubric_extraction": [call],
         "intent_clustering": [],
-        "coverage_decisions": [],
         "label_inference": [],
         "synthetic_coverage": [],
     }
@@ -1143,11 +1140,15 @@ def test_call_backed_injected_settings_survive_current_and_historical_validation
             extension=False,
         )
     )
+    for prompt in v2_payload["identity"]["prompts"]:
+        prompt["revision"] = "v1"
     del v2_payload["identity"]["inputs"]["review_snapshot"]
     v2_payload["identity_sha256"] = canonical_sha256(v2_payload["identity"])
+    v2_ledgers = dict(ledgers)
+    v2_ledgers["coverage_decisions"] = []
     provenance_module.validate_build_provenance_call_ledgers(
         v2_payload,
-        ledgers,
+        v2_ledgers,
         profile=provenance_module.HISTORICAL_PROVENANCE_PROFILE_V2,
     )
 
@@ -1169,11 +1170,14 @@ def test_call_backed_injected_settings_survive_current_and_historical_validation
             extension=False,
         )
     )
+    for prompt in v1_payload["identity"]["prompts"]:
+        prompt["revision"] = "v1"
     del v1_payload["identity"]["inputs"]["review_snapshot"]
     del v1_payload["identity"]["calls"][0]["settings_sha256"]
     v1_payload["identity_sha256"] = canonical_sha256(v1_payload["identity"])
     v1_ledgers = dict(ledgers)
     v1_ledgers["rubric_extraction"] = [v1_call]
+    v1_ledgers["coverage_decisions"] = []
 
     assert provenance_module.historical_build_provenance_profile(v1_payload) == (
         provenance_module.HISTORICAL_PROVENANCE_PROFILE_V1
@@ -1379,15 +1383,17 @@ def test_stage_provenance_validator_accepts_exact_native_and_legacy_profiles(
     payload, expected = _native_stage_provenance_case(tmp_path)
 
     assert provenance_module.validate_stage_provenance(payload, **expected) == payload
-    v3_expected = dict(expected)
-    v3_expected["profile"] = provenance_module.HISTORICAL_PROVENANCE_PROFILE_V3
+    v4_expected = dict(expected)
+    v4_expected["profile"] = provenance_module.HISTORICAL_PROVENANCE_PROFILE_V4
     assert provenance_module.validate_stage_provenance(
         payload,
-        **v3_expected,
+        **v4_expected,
     ) == payload
 
     v2_payload = json.loads(json.dumps(payload))
     v2_payload["schema_version"] = "fapo-stage-provenance-v2"
+    for prompt in v2_payload["prompts"]:
+        prompt["revision"] = "v1"
     v2_source = _historical_source(
         v2_payload["source"],
         members=provenance_module._HISTORICAL_SOURCE_FIXED_MEMBERS_V2,
@@ -1396,6 +1402,7 @@ def test_stage_provenance_validator_accepts_exact_native_and_legacy_profiles(
     v2_expected = dict(expected)
     v2_expected.update(
         profile=provenance_module.HISTORICAL_PROVENANCE_PROFILE_V2,
+        expected_prompts=v2_payload["prompts"],
         expected_source=v2_source,
     )
     assert provenance_module.validate_stage_provenance(
@@ -1405,6 +1412,8 @@ def test_stage_provenance_validator_accepts_exact_native_and_legacy_profiles(
 
     v1_payload = json.loads(json.dumps(payload))
     v1_payload["schema_version"] = "fapo-stage-provenance-v1"
+    for prompt in v1_payload["prompts"]:
+        prompt["revision"] = "v1"
     v1_provider = {
         role: {
             field: identity[field]
@@ -1425,6 +1434,7 @@ def test_stage_provenance_validator_accepts_exact_native_and_legacy_profiles(
     v1_expected.update(
         profile=provenance_module.HISTORICAL_PROVENANCE_PROFILE_V1,
         expected_provider_identity=v1_provider,
+        expected_prompts=v1_payload["prompts"],
         expected_calls=v1_payload["calls"],
         expected_source=v1_source,
     )
@@ -1437,7 +1447,7 @@ def test_stage_provenance_validator_accepts_exact_native_and_legacy_profiles(
     assert provenance_module.validate_stage_provenance(
         legacy,
         expected_stage="raw_inputs",
-        profile="legacy",
+        profile=provenance_module.HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3,
     ) == legacy
 
 

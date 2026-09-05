@@ -6,13 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 
 # FAPO Web UI
 
-The FAPO Web UI has two focused surfaces on one local server:
-
-- **FAPO Explorer** browses the artifacts a tenant accumulates during
-  optimization: eval runs, per-case outputs, iteration history, prompt variants
-  and agent skills, datasets, and tenant docs.
-- **Evaluation Asset Studio** creates and monitors the self-contained data
-  preparation assets that can bootstrap a tenant.
+FAPO Explorer browses the artifacts a tenant accumulates during optimization:
+eval runs, per-case outputs, iteration history, prompt variants and agent
+skills, datasets, and tenant docs. Evaluation-asset creation and review are
+CLI/API workflows in V3 and have no web frontend.
 
 It is intentionally zero-dependency — the server is built on Python's standard
 library `http.server`, and the frontend is a single self-contained HTML
@@ -27,10 +24,8 @@ From the repository root, with the project installed (`python -m pip install -e 
 python -m hephaestus.cli ui
 ```
 
-This serves FAPO Explorer at <http://127.0.0.1:8765/> and Evaluation Asset
-Studio at <http://127.0.0.1:8765/evaluation-assets/>. Both surfaces use the
-same server and read from the `tenants/` directory by default. Press `Ctrl+C`
-to stop.
+This serves FAPO Explorer at <http://127.0.0.1:8765/> and reads from the
+`tenants/` directory by default. Press `Ctrl+C` to stop.
 
 ### Options
 
@@ -61,112 +56,6 @@ average of each tenant's latest run score. It also lists the most recent runs
 and a per-tenant card showing that tenant's latest run (status, score, model,
 timestamp). Selecting a tenant card opens that tenant.
 
-The dashboard also shows the latest evaluation-asset stage for every tenant.
-Its **Open Evaluation Asset Studio** action moves data-preparation work to the
-separate Studio; the Explorer overview has no asset input form.
-
-### Evaluation Asset Studio
-
-The Studio has its own tenant index and creation screen. It accepts labeled and
-unlabeled JSONL paths, the evaluation-guideline creation model, embedding
-model, exact number of intent clusters, and the Stage 5 intent match threshold. The
-threshold defaults to `0.6` and is persisted with the asset. Stage 7 synthetic
-coverage is separately enabled or disabled and accepts an exact data-point
-count per supported cluster; it is disabled by default. Both JSONL files must
-already conform to the
-vendor-neutral `fapo-evaluation-input-v1` contract; the creation screen links
-to its machine-readable definition. The model menus include multiple GPT
-guideline models, current and legacy OpenAI embedding models, and a dependency-free local
-TF-IDF fallback. Selecting TF-IDF records `embedding_provider: tfidf` in the
-asset config and makes no embedding API calls. Starting a pipeline copies both
-source files into an independent
-`evaluation_assets/<asset_id>/stages/01_raw_inputs/` workspace before
-background processing begins. Stage 1 revalidates those copies and checks that
-the requested exact cluster count fits the unlabeled row and effective-route
-counts before any guideline or embedding provider work starts. The complete
-Studio workspace and its checkpoints are local-only; the Studio does not
-persist them to GCS or another remote backend.
-
-Stage 2 assigns exact-context-connected trusted groups to train, validation,
-test, or regression before any guideline authoring. It also records the
-minimum correctness-evidence gate. The reusable Stage 3 guideline and
-trusted-intent views contain eligible training feedback only; held-out criteria
-are compiled in protected split/group-local artifacts. Their content previews,
-along with inferred/synthetic case and dependency bodies, are disabled in the
-Studio. Metadata-only audit artifacts are projected through a fixed safe-field
-allowlist.
-
-Selecting a tenant visualizes all eight preparation stages, live status,
-selected models, requested clusters, match threshold, synthetic settings,
-pipeline counts, and the eight numbered stage directories. Each stage is clickable
-and opens a focused view with its
-inputs, processing steps, outputs, stage metrics, and bounded previews of the
-real files created there. Artifact inspection intentionally returns one
-syntax-highlighted example per file rather than rendering entire datasets. The
-Intent Mining stage also includes the projection-style interactive cluster
-browser from the original workflow mock, backed by the asset's real routes,
-cluster sizes, representative requests, and observed tools. Failed or
-interrupted pipelines can be resumed from this surface with current decisions
-or an edited model, embedding, cluster count, match threshold, or synthetic
-coverage configuration. The Studio shows which stage each setting affects;
-the core preserves earlier checkpoints and rebuilds the affected stage and all
-downstream artifacts.
-
-After Stage 7 completes, the asset pauses at `awaiting_review`; Stage 8 remains
-pending and no dataset generation is published. A dedicated review panel shows
-the current review-set and decision-set fingerprints, a bounded paged queue,
-and pending/approved/rejected/held counts. Pagination applies one offset and a
-1-through-100 limit to the deterministic combined eligible-plus-held
-projection, so `items.length + held.length` never exceeds the requested limit;
-`held` is also a supported status filter. Each eligible item has an exact
-fingerprint-bound approve or reject action. A decision sends the displayed
-review-set fingerprint. Finalization sends both displayed fingerprints, so it
-cannot freeze decisions that changed after the page was rendered. It warns
-that pending, rejected, and held derived cases remain unpublished; it never
-bulk-approves or implicitly approves them.
-
-Asset summaries expose a body-free `review_authority_revision` derived from
-the current decision-set fingerprint and current finalization identity. The
-Studio can therefore detect an approval, rejection, or finalization performed
-by another client and reload the review page without exposing protected case
-or dependency bodies. The public review payload also exposes the safe current
-`finalization` (`finalization_id`, `review_set_fingerprint`, and counts), or
-`null`; that projection remains available for a released asset.
-
-In Stage 7, **mechanically accepted** means only that a candidate passed the
-case schema, nonempty-context, substantive-scoreability, narrow
-literal-leakage, and token-overlap checks. The Studio does not present that
-status as proof of factual correctness, safety, domain consistency, tool
-feasibility, solvability, realism, privacy, or semantic equivalence; those
-questions remain for executable checks and human review.
-
-For a legacy asset with the exact top-level `completed` sentinel, the Studio
-shows **Adopt verified legacy asset**. Under the asset lock, adoption synchronously
-verifies every stage, source hash, manifest, catalog/config-history entry, then
-installs the immutable v2 release and refreshes the terminal view. It never
-reruns providers.
-
-Failed-stage summaries are safe to display: provider transport and semantic
-response validation failures expose the stage, configured provider/model,
-fixed exception category, and a bounded causal summary, but not raw provider
-messages, payloads, credentials, or response bodies. Detailed provider
-diagnostics remain available only through the in-memory chained exception or
-protected operator logging. Each individual state, event/history, JSONL,
-copied, or Markdown artifact is atomically replaced. Release publication uses
-the core's separate generation-wide transaction: a complete immutable
-four-file generation is installed before the sole `release.json` authority is
-atomically replaced.
-
-Released versions can be extended from the tenant asset view. The extension
-wizard accepts additional labeled feedback and optional unlabeled records,
-offers **Keep original clustering** and **Rerun clustering**, and previews the
-eight-stage execution plan. Keep mode is restricted to labeled-only additions;
-entering an unlabeled path automatically selects refresh mode. Both modes
-preserve verified parent trusted-group assignments. Stage 6/7 output and a
-parent terminal review decision are reused only for an exact complete
-dependency/review fingerprint match; changed content or dependencies return the
-child item to pending.
-
 ### Tenant tabs
 
 Inside a tenant, content is organized into tabs:
@@ -191,10 +80,10 @@ For an `authoritative` run, ground truth is authenticated only when the bundle's
 dataset path agrees with its run identity, the validated `run_manifest.json`
 has authenticated the bundle, the resolved dataset remains inside the tenant
 dataset root, and the dataset bytes match the recorded fingerprint. The UI then
-joins the exact recorded dataset by `case_id`. Studio dataset ground truth is
-not joined from a fallback path. Legacy and live-unverified directories can
+joins the exact recorded dataset by `case_id`. Evaluation-asset dataset ground
+truth is not joined from a fallback path. Legacy and live-unverified directories can
 expose only a best-effort join from `run_config.json`'s `dataset_path` (or the
-tenant's one ordinary dataset when no Studio catalog exists); that join is not
+tenant's one ordinary dataset when no evaluation-asset catalog exists); that join is not
 authority.
 
 ## Interactive features
@@ -232,24 +121,22 @@ These behaviors apply across the views above:
 
 ## How it works
 
-The UI has four small modules under `src/hephaestus/webui/`:
+The UI has three small modules under `src/hephaestus/webui/`:
 
-- **`server.py`** — a stdlib `ThreadingHTTPServer` that serves Explorer at `/`,
-  Evaluation Asset Studio at `/evaluation-assets/`, read APIs, and narrow
-  evaluation-asset start/extend/resume/adopt plus fingerprint-bound
-  list/approve/reject/finalize endpoints.
+- **`server.py`** — a stdlib `ThreadingHTTPServer` that serves Explorer at `/`
+  and JSON APIs. Evaluation-asset endpoints remain available to programmatic
+  clients, but no evaluation-asset HTML route is served.
 - **`data.py`** — `TenantStore`, the constrained filesystem layer that walks the
   tenants root and surfaces artifacts. All paths are resolved relative to the
   tenants root and validated to stay inside it (and inside the expected
   subtree), so the HTTP layer cannot read arbitrary files on disk.
 - **`frontend.py`** — the single-page `INDEX_HTML` document that calls the JSON
   API to render Explorer.
-- **`evaluation_assets_frontend.py`** — the separate
-  `EVALUATION_ASSET_HTML` document that renders creation and pipeline progress.
 
 ### JSON API
 
-The frontend is backed by these read-only endpoints (useful for scripting too):
+The Explorer uses the read endpoints below. Evaluation-asset endpoints are
+retained for CLI/API automation even though V3 has no corresponding frontend.
 
 | Endpoint | Returns |
 |---|---|
@@ -281,8 +168,8 @@ The frontend is backed by these read-only endpoints (useful for scripting too):
 
 ## Notes
 
-- **Narrow writes:** the UI only creates, extends, resumes, adopts, decides
-  exact current review items, or finalizes evaluation assets. All other
+- **Narrow writes:** evaluation-asset APIs only create, extend, resume, adopt,
+  decide exact current review items, or finalize evaluation assets. All other
   tenant views remain read-only. Inputs must be regular `.jsonl` files beneath
   the selected tenant's `source_artifacts/` or ordinary `datasets/` directory;
   generated evaluation-asset datasets and symlink escapes are rejected before
@@ -303,21 +190,22 @@ The frontend is backed by these read-only endpoints (useful for scripting too):
   and an exact released-finalization replay is idempotent.
 - **Review polling:** asset summaries contain only the safe
   `review_authority_revision`, not review bodies. It changes when the resolved
-  decisions or current finalization identity changes, telling the Studio to
+  decisions or current finalization identity changes, telling API clients to
   fetch a fresh bounded review page.
-- **Loopback only:** the server rejects non-loopback bind hosts. Studio routes
-  also require a loopback `Host`; mutation requests require an absent `Origin`
-  or an HTTP origin matching `Host`. Studio HTML and JSON responses use
-  `Cache-Control: no-store`. Explorer's generic dataset list/read endpoints and
+- **Loopback only:** the server rejects non-loopback bind hosts.
+  Evaluation-asset APIs also require a loopback `Host`; mutation requests
+  require an absent `Origin` or an HTTP origin matching `Host`. Their JSON
+  responses use `Cache-Control: no-store`. Explorer's generic dataset list/read
+  endpoints and
   case details inherit the loopback-Host and no-store policy whenever they can
   expose a published `datasets/evaluation_assets/` file. Dataset discovery
-  lists ordinary files plus only the four files from each Studio asset's
+  lists ordinary files plus only the four files from each evaluation asset's
   strictly resolved `release.json`; it never recursively exposes old
   generations, hidden temporaries, or legacy top-level copies. An explicit
   immutable historical generation path remains readable only after its complete
   generation manifest and file hashes validate. Corrupt pointers or generations
   fail closed without hiding ordinary datasets.
-- **Local Studio state:** copied inputs, checkpoints, state, events, and stage
+- **Local evaluation-asset state:** copied inputs, checkpoints, state, events, and stage
   artifacts under `evaluation_assets/` are local-only. Published Stage 8
   generations and their sole `release.json` authority under
   `datasets/evaluation_assets/` are ordinary local derived datasets; only

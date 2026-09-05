@@ -178,7 +178,6 @@ def _studio_persistence_paths(source_root: Path) -> tuple[Path, ...]:
         source_root / "datasets" / "intent_assets.py",
         source_root / "cli.py",
         source_root / "webui" / "data.py",
-        source_root / "webui" / "evaluation_assets_frontend.py",
         source_root / "webui" / "server.py",
         source_root / "webui" / "frontend.py",
         *(source_root / "evaluation_assets").rglob("*.py"),
@@ -609,10 +608,9 @@ _PERSISTENCE_NAMED_SINKS = {
 }
 _AUDITED_PIPELINE_PARTIAL_TARGETS = {
     "_normalize_aliased_guideline_response",
-    "_normalize_applicability_response",
     "_normalize_feedback_evidence_response",
+    "_normalize_full_catalog_rubric_response",
     "_normalize_guideline_response",
-    "_normalize_inferred_rubric_response",
     "_normalize_synthetic_response",
     (
         "src.hephaestus.evaluation_assets.stage_three_contract."
@@ -2069,7 +2067,6 @@ def test_studio_production_scope_has_no_direct_file_writers() -> None:
         "datasets/intent_assets.py",
         "cli.py",
         "webui/data.py",
-        "webui/evaluation_assets_frontend.py",
         "webui/server.py",
         "webui/frontend.py",
     } <= relative
@@ -3288,7 +3285,7 @@ def test_studio_writer_guard_rejects_writers_outside_exact_audited_functions(
             "from functools import partial\n"
             "partial(_normalize_feedback_evidence_response, batch=batch)\n"
             "partial(_normalize_guideline_response, route=route)\n"
-            "partial(_normalize_inferred_rubric_response, batch=batch)\n"
+            "partial(_normalize_full_catalog_rubric_response, record_id=record_id)\n"
             "partial(_normalize_synthetic_response, batch=batch)",
         ),
     ],
@@ -3423,24 +3420,37 @@ class _SuccessfulRubricProvider:
                     }
                 ]
             }
+        if payload.get("mode") == "full_catalog_episode_rubric":
+            record_id = str(payload["episode"]["record_id"])
+            guideline_ids = [
+                str(row["guideline_id"])
+                for row in payload["evaluation_guidelines"]
+            ]
+            return {
+                "rubrics": [
+                    {
+                        "record_id": record_id,
+                        "applicable_guideline_ids": guideline_ids,
+                        "provenance": (
+                            "guideline_grounded"
+                            if guideline_ids
+                            else "trace_inferred"
+                        ),
+                        "intent_label": "answer request",
+                        "confidence": 0.8,
+                        "must": ["Answer the stated request."],
+                        "must_not": [],
+                        "should": [],
+                        "deterministic_checks": [],
+                        "tool_expectations": {},
+                        "reference_output": None,
+                        "evidence_pointers": ["episode.user_messages[0]"],
+                    }
+                ]
+            }
         if "synthetic evaluation input" in system_prompt:
             return {"cases": []}
-        return {
-            "rubrics": [
-                {
-                    "cluster_id": row["cluster_id"],
-                    "intent_label": "answer request",
-                    "confidence": 0.8,
-                    "must": ["Answer the stated request."],
-                    "must_not": [],
-                    "should": [],
-                    "deterministic_checks": [],
-                    "tool_expectations": {},
-                    "reference_output": None,
-                }
-                for row in payload["clusters"]
-            ]
-        }
+        raise AssertionError(f"unexpected rubric payload: {sorted(payload)}")
 
 
 class _SuccessfulDefaultRubricProvider(_SuccessfulRubricProvider):
@@ -4368,7 +4378,7 @@ def test_injected_provider_identity_is_receipted_and_manifested_as_actual(
     inferred = _read_jsonl(
         pipeline.layout.artifact_path(
             PipelineStage.LABEL_INFERENCE,
-            "inferred_unlabeled_cluster_rubrics.jsonl",
+            "episode_rubrics.jsonl",
         )
     )
     assert {row["guideline_provider"] for row in evidence} == {"injected-rubric"}
@@ -4459,7 +4469,6 @@ def test_released_verification_reaggregates_authenticated_provider_ledgers(
     assert set(seen) == {
         "rubric_extraction",
         "intent_clustering",
-        "coverage_decisions",
         "label_inference",
         "synthetic_coverage",
     }
@@ -5134,27 +5143,18 @@ def test_stage_specification_exhaustively_declares_required_artifacts() -> None:
             "feedback_evidence.jsonl",
             "candidate_guidelines.jsonl",
             "evaluation_guidelines.jsonl",
-            "trusted_intents.jsonl",
-            "trusted_cases.jsonl",
             "protected_feedback_evidence.jsonl",
             "protected_candidate_guidelines.jsonl",
             "protected_evaluation_guidelines.jsonl",
-            "protected_trusted_cases.jsonl",
         },
         PipelineStage.INTENT_CLUSTERING: {"intent_inventory.jsonl"},
-        PipelineStage.COVERAGE_DECISIONS: {
-            "intent_matches.jsonl",
-            "coverage_report.md",
-            "review_queue/labeling_queue.jsonl",
-        },
+        PipelineStage.COVERAGE_DECISIONS: {"cluster_sampling_metadata.jsonl"},
         PipelineStage.LABEL_INFERENCE: {
-            "inferred_unlabeled_cluster_rubrics.jsonl",
-            "inferred_unlabeled_labels.jsonl",
-            "missing_labeled_feedback_clusters.jsonl",
-            "missing_labeled_feedback_report.md",
+            "episode_rubrics.jsonl",
+            "trusted_cases.jsonl",
             "inferred_cases.jsonl",
-            "inference_dependencies.jsonl",
-            "held_inference_outputs.jsonl",
+            "case_dependencies.jsonl",
+            "held_rubric_outputs.jsonl",
         },
         PipelineStage.SYNTHETIC_COVERAGE: {
             "synthetic_candidates.jsonl",
@@ -5267,7 +5267,11 @@ def test_pipeline_writes_receipt_commit_markers_and_releases(tmp_path: Path) -> 
             for name in STAGE_SPECIFICATIONS[stage].required_outputs
         }
     ledger_rows = []
-    provider_stages = tuple(PipelineStage)[2:7]
+    provider_stages = tuple(
+        stage
+        for stage in PipelineStage
+        if STAGE_SPECIFICATIONS[stage].provider_roles
+    )
     for stage in provider_stages:
         ledger_path = pipeline.layout.artifact_path(stage, "provider_calls.jsonl")
         assert ledger_path.is_file()
@@ -5310,7 +5314,7 @@ def test_pipeline_writes_receipt_commit_markers_and_releases(tmp_path: Path) -> 
         "evaluation_guidelines": "active_from_trusted_evidence",
         "guideline_calibration": "uncalibrated",
         "derived_cases": "approved_only",
-        "coverage_labeling_queue": "human_label_required",
+        "episode_rubrics": "case_specific_with_explicit_provenance",
         "trusted_split_assignment": "before_guideline_authoring",
         "exact_duplicate_conflicts": "triage_hold",
     }
@@ -5321,7 +5325,7 @@ _STAGE_MUTATION_TARGETS = {
     PipelineStage.PREPARED_INPUTS: "normalized_feedback.jsonl",
     PipelineStage.RUBRIC_EXTRACTION: "feedback_evidence.jsonl",
     PipelineStage.INTENT_CLUSTERING: "intent_inventory.jsonl",
-    PipelineStage.COVERAGE_DECISIONS: "coverage_report.md",
+    PipelineStage.COVERAGE_DECISIONS: "cluster_sampling_metadata.jsonl",
     PipelineStage.LABEL_INFERENCE: "inferred_cases.jsonl",
     PipelineStage.SYNTHETIC_COVERAGE: "synthetic_cases.jsonl",
     PipelineStage.DATASET_SPLITS: "train.jsonl",
@@ -7103,7 +7107,7 @@ def test_rehashed_checkpoint_journal_semantics_fail_before_writes(
     _make_released_checkpoint_mutable(layout)
     target = layout.artifact_path(
         PipelineStage.COVERAGE_DECISIONS,
-        "intent_matches.jsonl",
+        "cluster_sampling_metadata.jsonl",
     )
     target.write_bytes(target.read_bytes() + b" \n")
 
@@ -7291,7 +7295,7 @@ def test_revision_recovery_rolls_forward_after_each_interruption(
     }
     stale_stage_five = layout.artifact_path(
         PipelineStage.COVERAGE_DECISIONS,
-        "intent_matches.jsonl",
+        "cluster_sampling_metadata.jsonl",
     )
 
     def inject_fault(name: str) -> None:
@@ -7414,7 +7418,7 @@ def test_checkpoint_rebuild_recovery_marks_stale_suffix_nonauthoritative(
     _make_released_checkpoint_mutable(layout)
     target = layout.artifact_path(
         PipelineStage.COVERAGE_DECISIONS,
-        "intent_matches.jsonl",
+        "cluster_sampling_metadata.jsonl",
     )
     target.write_bytes(target.read_bytes() + b" \n")
     prior_state = layout.state_path.read_bytes()
@@ -8797,10 +8801,10 @@ def test_legacy_adoption_accepts_exact_native_synthetic_filter_outputs(
     verify_released_asset(layout, adopted)
 
 
-def test_legacy_adoption_reconstructs_exact_keep_mode_inherited_synthetic_output(
+def test_legacy_adoption_rejects_v3_keep_mode_snapshot_as_historical(
     tmp_path: Path,
 ) -> None:
-    """Keep-mode adoption retains only the self-contained unchanged parent case."""
+    """V3-only parent evidence cannot be invented as historical keep-mode input."""
     pipeline, _ = _create_synthetic_pipeline(tmp_path)
     _run_to_release(pipeline)
     parent = pipeline.layout
@@ -8834,17 +8838,25 @@ def test_legacy_adoption_reconstructs_exact_keep_mode_inherited_synthetic_output
         )
     ) == 1
     _downgrade_to_legacy_completed(child)
-    assert not _read_jsonl(
-        child.artifact_path(
-            PipelineStage.SYNTHETIC_COVERAGE,
-            "synthetic_candidates.jsonl",
+    assert len(
+        _read_jsonl(
+            child.artifact_path(
+                PipelineStage.SYNTHETIC_COVERAGE,
+                "synthetic_candidates.jsonl",
+            )
         )
-    )
+    ) == 1
+    before = _authority_bytes(child)
 
-    adopted = child.adopt_legacy()
+    with pytest.raises(
+        EvaluationAssetLegacyError,
+        match=r"Run assets adopt after repair, or create a new asset version",
+    ):
+        child.adopt_legacy()
 
-    assert adopted.status == "released"
-    verify_released_asset(child, adopted)
+    assert _authority_bytes(child) == before
+    assert child.load_state().legacy_completed
+    assert not child.recovery_journal_path.exists()
 
 
 @pytest.mark.parametrize("layout_kind", ["old_staged", "pre_stage_layout"])
@@ -8956,6 +8968,7 @@ def test_legacy_adoption_rejects_ambiguous_complete_stage_three_profiles(
     pipeline, _, _ = _create_pipeline(tmp_path)
     _run_to_release(pipeline)
     layout = pipeline.layout
+    _downgrade_to_legacy_completed(layout)
     old_directory = layout.stages_root / "03_rubric_extraction"
     old_directory.mkdir()
     artifact_io.atomic_write_jsonl(
@@ -8967,7 +8980,6 @@ def test_legacy_adoption_rejects_ambiguous_complete_stage_three_profiles(
             layout.artifact_path(PipelineStage.RUBRIC_EXTRACTION, name),
             old_directory / name,
         )
-    _downgrade_to_legacy_completed(layout)
     before = _authority_bytes(layout)
 
     with pytest.raises(EvaluationAssetLegacyError):
@@ -9016,7 +9028,10 @@ def test_legacy_adoption_rejects_invalid_required_artifact_without_authority_cha
     _run_to_release(pipeline)
     layout = pipeline.layout
     _downgrade_to_legacy_completed(layout)
-    target = layout.artifact_path(stage, _STAGE_MUTATION_TARGETS[stage])
+    target_name = _STAGE_MUTATION_TARGETS[stage]
+    if stage == PipelineStage.COVERAGE_DECISIONS:
+        target_name = "intent_matches.jsonl"
+    target = layout.artifact_path(stage, target_name)
     if mutation == "missing":
         target.unlink()
     elif target.suffix == ".md":
@@ -9659,18 +9674,16 @@ def test_extension_receipts_anchor_lineage_and_every_parent_snapshot_input(
             "parent_feedback_evidence.jsonl",
             "parent_candidate_guidelines.jsonl",
             "parent_evaluation_guidelines.jsonl",
-            "parent_trusted_intents.jsonl",
-            "parent_trusted_cases.jsonl",
+            "parent_protected_feedback_evidence.jsonl",
+            "parent_protected_candidate_guidelines.jsonl",
+            "parent_protected_evaluation_guidelines.jsonl",
         },
         PipelineStage.INTENT_CLUSTERING: {"parent_intent_inventory.jsonl"},
-        PipelineStage.COVERAGE_DECISIONS: {"parent_intent_matches.jsonl"},
-        PipelineStage.LABEL_INFERENCE: {
-            "parent_intent_matches.jsonl",
-            "parent_inferred_cluster_rubrics.jsonl",
-        },
+        PipelineStage.COVERAGE_DECISIONS: set(),
+        PipelineStage.LABEL_INFERENCE: set(),
         PipelineStage.SYNTHETIC_COVERAGE: {
-            "parent_intent_matches.jsonl",
-            "parent_synthetic_cases.jsonl",
+            "parent_derived_review_items.jsonl",
+            "parent_review_decisions.jsonl",
         },
         PipelineStage.DATASET_SPLITS: {
             "parent_train.jsonl",
@@ -9732,13 +9745,11 @@ def test_historical_extension_override_map_is_closed_and_exhaustive(
         )
 
 
-@pytest.mark.parametrize("release_kind", ["native", "adopted"])
 def test_released_extension_uses_frozen_stage_profile_after_registry_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    release_kind: str,
 ) -> None:
-    """Live stage changes cannot strand native or adopted extension history."""
+    """Live stage changes cannot strand native V3 extension history."""
     pipeline, _, _ = _create_pipeline(tmp_path)
     _run_to_release(pipeline)
     parent = pipeline.layout
@@ -9756,9 +9767,6 @@ def test_released_extension_uses_frozen_stage_profile_after_registry_drift(
             embedding_provider=_SuccessfulEmbeddingProvider(),
         )
     )
-    if release_kind == "adopted":
-        _downgrade_to_legacy_completed(child)
-        child.adopt_legacy()
     for module in (
         evaluation_asset_models,
         durability_module,
@@ -9975,12 +9983,13 @@ def test_extension_rejects_each_corrupt_lineage_field_before_grandchild_creation
         "parent_feedback_evidence.jsonl",
         "parent_candidate_guidelines.jsonl",
         "parent_evaluation_guidelines.jsonl",
-        "parent_trusted_intents.jsonl",
-        "parent_trusted_cases.jsonl",
+        "parent_protected_feedback_evidence.jsonl",
+        "parent_protected_candidate_guidelines.jsonl",
+        "parent_protected_evaluation_guidelines.jsonl",
+        "parent_trusted_split_plan.jsonl",
         "parent_intent_inventory.jsonl",
-        "parent_intent_matches.jsonl",
-        "parent_inferred_cluster_rubrics.jsonl",
-        "parent_synthetic_cases.jsonl",
+        "parent_derived_review_items.jsonl",
+        "parent_review_decisions.jsonl",
         "parent_train.jsonl",
         "parent_validation.jsonl",
         "parent_test.jsonl",
@@ -10460,7 +10469,7 @@ def test_final_release_verification_validates_every_stage_provenance(
     assert {
         stage
         for stage, profile in calls
-        if profile == provenance_module.HISTORICAL_PROVENANCE_PROFILE_V3
+        if profile == provenance_module.HISTORICAL_PROVENANCE_PROFILE_V4
     } == {
         stage.value for stage in PipelineStage
     }
@@ -15044,7 +15053,7 @@ def _layout_after_final_committed_mutation(
         config_updates = None
         target = pipeline.layout.artifact_path(
             PipelineStage.COVERAGE_DECISIONS,
-            "intent_matches.jsonl",
+            "cluster_sampling_metadata.jsonl",
         )
         target.write_bytes(target.read_bytes() + b" \n")
     else:
@@ -15288,6 +15297,7 @@ def _convert_to_legacy_rubric_profile(layout: EvaluationAssetLayout) -> None:
         ),
         [trusted_case],
     )
+    _rewrite_stage_five_and_six_as_historical(layout, [trusted_intent])
     matches_path = layout.artifact_path(
         PipelineStage.COVERAGE_DECISIONS,
         "intent_matches.jsonl",
@@ -15953,9 +15963,6 @@ def _rewrite_stage_three_as_historical_native(
             )
         ),
     ]
-    old_intents = _read_jsonl(
-        layout.artifact_path(stage_three, "trusted_intents.jsonl")
-    )
     replayed = stage_three_contract.replay_native_stage_three(
         normalized,
         evidence,
@@ -15964,6 +15971,7 @@ def _rewrite_stage_three_as_historical_native(
         identity_profile="historical_v1",
         text_profile="historical_v1",
     )
+    old_intents = replayed["trusted_intents"]
 
     def guideline_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
         return (
@@ -16007,6 +16015,10 @@ def _rewrite_stage_three_as_historical_native(
             layout.artifact_path(stage_three, name),
             rows,
         )
+    _rewrite_stage_five_and_six_as_historical(
+        layout,
+        replayed["trusted_intents"],
+    )
     for stage in tuple(PipelineStage)[3:]:
         stage_root = layout.artifact_path(stage, "placeholder").parent
         for path in stage_root.rglob("*"):
@@ -16044,6 +16056,152 @@ def _rewrite_stage_three_as_historical_native(
 
     _rewrite_stage_seven_as_historical(layout)
     _rewrite_stage_eight_as_historical(layout)
+
+
+def _rewrite_stage_five_and_six_as_historical(
+    layout: EvaluationAssetLayout,
+    trusted_intents: Sequence[Mapping[str, Any]],
+) -> None:
+    """Reconstruct the retired cluster-match artifacts for legacy-only tests."""
+    clusters = _read_jsonl(
+        layout.artifact_path(
+            PipelineStage.INTENT_CLUSTERING,
+            "intent_inventory.jsonl",
+        )
+    )
+    intents = {
+        str(row["record_id"]): row
+        for row in _read_jsonl(
+            layout.artifact_path(
+                PipelineStage.PREPARED_INPUTS,
+                "intent_records.jsonl",
+            )
+        )
+    }
+    trusted_by_route = {
+        str(row["route"]): row for row in trusted_intents
+    }
+    matches: list[dict[str, Any]] = []
+    for cluster in clusters:
+        route = str(cluster["route"])
+        trusted = trusted_by_route[route]
+        metadata = trusted["metadata"]
+        trusted_count = int(metadata["trusted_example_count"])
+        matches.append(
+            {
+                "cluster_id": str(cluster["cluster_id"]),
+                "cluster_size": int(cluster["size"]),
+                "status": "matched_trusted_intent",
+                "matched_intent_id": str(trusted["intent_id"]),
+                "matched_label": str(trusted["label"]),
+                "score": 1.0,
+                "trusted_example_count": trusted_count,
+                "trusted_group_count": int(metadata["trusted_group_count"]),
+                "unlabeled_to_trusted_ratio": float(cluster["size"])
+                / trusted_count,
+            }
+        )
+    artifact_io.atomic_write_jsonl(
+        layout.artifact_path(
+            PipelineStage.COVERAGE_DECISIONS,
+            "intent_matches.jsonl",
+        ),
+        matches,
+    )
+    artifact_io.atomic_write_text(
+        layout.artifact_path(
+            PipelineStage.COVERAGE_DECISIONS,
+            "coverage_report.md",
+        ),
+        "# Historical coverage\n\nAll test clusters are matched.\n",
+    )
+    artifact_io.atomic_write_jsonl(
+        layout.artifact_path(
+            PipelineStage.COVERAGE_DECISIONS,
+            "review_queue/labeling_queue.jsonl",
+        ),
+        [],
+    )
+
+    episode_rubrics = {
+        str(row["record_id"]): row
+        for row in _read_jsonl(
+            layout.artifact_path(
+                PipelineStage.LABEL_INFERENCE,
+                "episode_rubrics.jsonl",
+            )
+        )
+    }
+    current_cases = {
+        str((row.get("metadata") or {}).get("request_id")): row
+        for row in _read_jsonl(
+            layout.artifact_path(
+                PipelineStage.LABEL_INFERENCE,
+                "inferred_cases.jsonl",
+            )
+        )
+    }
+    historical_rubrics: list[dict[str, Any]] = []
+    labels: list[dict[str, Any]] = []
+    cases: list[dict[str, Any]] = []
+    for cluster, match in zip(clusters, matches, strict=True):
+        cluster_id = str(cluster["cluster_id"])
+        representative_id = str(cluster["representative_ids"][0])
+        rubric = dict(episode_rubrics[representative_id])
+        rubric.pop("record_id", None)
+        rubric.update(
+            {
+                "cluster_id": cluster_id,
+                "label_source": "inferred_from_trusted_feedback",
+                "review_status": "review_required",
+            }
+        )
+        historical_rubrics.append(rubric)
+        expected = stage_three_contract.expected_from_rubric(rubric)
+        for record_id in cluster["record_ids"]:
+            record_id = str(record_id)
+            labels.append(
+                {
+                    "record_id": record_id,
+                    "cluster_id": cluster_id,
+                    "matched_intent_id": match["matched_intent_id"],
+                    "match_score": 1.0,
+                    "review_status": "review_required",
+                    "expected": expected,
+                }
+            )
+            case = dict(current_cases[record_id])
+            case["expected"] = expected
+            metadata = dict(case["metadata"])
+            metadata.update(
+                {
+                    "source_cluster": cluster_id,
+                    "matched_intent_id": match["matched_intent_id"],
+                    "review_status": "review_required",
+                    "group_id": intents[record_id]["group_id"],
+                    "request_id": intents[record_id]["request_id"],
+                }
+            )
+            case["metadata"] = metadata
+            cases.append(case)
+    stage_six = PipelineStage.LABEL_INFERENCE
+    for name, rows in (
+        ("inferred_unlabeled_cluster_rubrics.jsonl", historical_rubrics),
+        ("inferred_unlabeled_labels.jsonl", labels),
+        ("missing_labeled_feedback_clusters.jsonl", []),
+        ("inferred_cases.jsonl", cases),
+    ):
+        artifact_io.atomic_write_jsonl(
+            layout.artifact_path(stage_six, name),
+            rows,
+        )
+    artifact_io.atomic_write_text(
+        layout.artifact_path(
+            stage_six,
+            "missing_labeled_feedback_report.md",
+        ),
+        "# Missing feedback\n\nNo unmatched clusters.\n",
+    )
 
 
 def _rewrite_stage_seven_as_historical(

@@ -184,7 +184,8 @@ For backward compatibility, the existing flat fields remain required.
 Adapters should populate `user_input`, `conversation_context`, `tool_calls`,
 and, when applicable, `assistant_output` with their conventional summary view
 of the same interaction. Canonical user messages are separated by newlines in
-the text supplied for clustering and trusted-intent matching.
+the text supplied for clustering. Clusters are sampling and analysis metadata;
+they do not select guidelines or determine rubric correctness.
 
 An episode is observed context, not correctness evidence or an answer key.
 Only the canonical feedback on a labeled record supports evaluation-guideline
@@ -342,6 +343,5 @@ adapter must preserve equality and grouping relationships while doing so; core
 content redaction is not identifier pseudonymization.
 
 Adapters must not implement evaluation-guideline creation, clustering,
-coverage decisions, label inference, synthetic generation, or dataset
-splitting. Those operations remain in the shared core after the contract
-boundary.
+case-specific rubric generation, synthetic generation, or dataset splitting.
+Those operations remain in the shared core after the contract boundary.

@@ -22,7 +22,6 @@ from src.hephaestus.datasets.evaluation_assets import (
 from src.hephaestus.datasets.intent_assets import IntentCluster, IntentMatch
 from src.hephaestus.evaluation_assets import workspace as workspace_module
 from src.hephaestus.evaluation_assets.models import EvaluationAssetConfig, PipelineState
-from src.hephaestus.evaluation_assets.pipeline import _write_missing_report
 from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
 
 
@@ -240,13 +239,11 @@ def test_layout_writers_preserve_previous_artifact_when_replace_fails(
     assert retained == []
 
 
-@pytest.mark.parametrize("report_kind", ["coverage", "missing"])
 def test_markdown_reports_preserve_previous_artifact_when_replace_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    report_kind: str,
 ) -> None:
-    path = tmp_path / f"{report_kind}.md"
+    path = tmp_path / "coverage.md"
     original = b"original report\n"
     path.write_bytes(original)
 
@@ -255,10 +252,7 @@ def test_markdown_reports_preserve_previous_artifact_when_replace_fails(
 
     monkeypatch.setattr(os, "replace", fail_replace)
     with pytest.raises(OSError, match="replace failed"):
-        if report_kind == "coverage":
-            write_coverage_report(path, [], [])
-        else:
-            _write_missing_report(path, [])
+        write_coverage_report(path, [], [])
 
     assert path.read_bytes() == original
     assert list(tmp_path.glob(f".{path.name}.*.tmp")) == []

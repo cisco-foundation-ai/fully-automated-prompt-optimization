@@ -192,9 +192,15 @@ def _prepare_review_layout(
     layout._write_authority_jsonl(
         layout.artifact_path(
             PipelineStage.LABEL_INFERENCE,
-            "inference_dependencies.jsonl",
+            "case_dependencies.jsonl",
         ),
-        [{"cluster_id": "cluster-1", "dependency": dependency}],
+        [
+            {
+                "case_id": "inferred-u1",
+                "record_id": "u1",
+                "dependency": dependency,
+            }
+        ],
     )
     layout._write_authority_jsonl(
         layout.artifact_path(
@@ -229,17 +235,10 @@ def _prepare_review_layout(
     )
     layout._write_authority_jsonl(
         layout.artifact_path(
-            PipelineStage.RUBRIC_EXTRACTION,
+            PipelineStage.LABEL_INFERENCE,
             "trusted_cases.jsonl",
         ),
         [_case("trusted-visible", "trusted_feedback"), held_case],
-    )
-    layout._write_authority_jsonl(
-        layout.artifact_path(
-            PipelineStage.RUBRIC_EXTRACTION,
-            "protected_trusted_cases.jsonl",
-        ),
-        [],
     )
     state = layout.load_state()
     state.status = "awaiting_review"
@@ -482,9 +481,15 @@ def test_review_workspace_rejects_tampered_dependency_before_resolution(
     layout._write_authority_jsonl(
         layout.artifact_path(
             PipelineStage.LABEL_INFERENCE,
-            "inference_dependencies.jsonl",
+            "case_dependencies.jsonl",
         ),
-        [{"cluster_id": "cluster-1", "dependency": dependency}],
+        [
+            {
+                "case_id": "inferred-u1",
+                "record_id": "u1",
+                "dependency": dependency,
+            }
+        ],
     )
 
     with pytest.raises(EvaluationAssetIntegrityError, match="dependency"):

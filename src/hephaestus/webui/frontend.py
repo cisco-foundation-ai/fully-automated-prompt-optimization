@@ -6,7 +6,7 @@
 
 The entire frontend is one self-contained HTML document (inline CSS + vanilla
 JS, no build step and no external CDN) served at ``/``. It calls the JSON API
-in :mod:`server` to create evaluation assets and navigate tenant outputs.
+in :mod:`server` to navigate tenant outputs.
 """
 
 from __future__ import annotations
@@ -36,13 +36,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .brand h1 { font-size: 15px; margin: 0 0 2px; letter-spacing: .5px; line-height: 1.15; }
   .brand .sub { font-size: 11px; color: var(--muted); margin: 0; }
   .brand:hover h1 { color: var(--accent); }
-  .studio-nav { display: flex; align-items: center; justify-content: space-between; gap: 10px;
-    margin: 0 12px 16px; padding: 11px 12px; border: 1px solid #577fe0; border-radius: 8px;
-    color: #fff; background: linear-gradient(135deg, #315fc9, #694fc2);
-    box-shadow: 0 8px 22px rgba(51,91,194,.28); text-decoration: none;
-    font-size: 13px; font-weight: 700; }
-  .studio-nav:hover { border-color: #8aa9ff; filter: brightness(1.08); }
-  .studio-nav span { color: #dce6ff; font-size: 16px; }
   .tenant { padding: 10px 16px; cursor: pointer; border-left: 3px solid transparent; }
   .tenant:hover { background: var(--panel-2); }
   .tenant.active { background: var(--panel-2); border-left-color: var(--accent); }
@@ -222,8 +215,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .chart-labels { display: flex; gap: 8px; padding: 5px 4px 0; }
   .chart-labels .cl { flex: 1; text-align: center; font-size: 9px; color: var(--muted);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-  .asset-state-line { display: flex; align-items: center; gap: 7px; margin-top: 9px;
-    color: var(--muted); font-size: 11px; }
 </style>
 </head>
 <body>
@@ -236,9 +227,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <div class="sub">tenant outputs &amp; iterations</div>
       </div>
     </div>
-    <a class="studio-nav" href="/evaluation-assets/">
-      Open Evaluation Asset Studio <span aria-hidden="true">→</span>
-    </a>
     <div id="tenant-list"></div>
   </div>
   <div id="main"></div>
@@ -358,7 +346,7 @@ async function loadTenants() {
   box.innerHTML = tenants.map(t => `
     <div class="tenant" data-id="${esc(t.tenant_id)}">
       <div class="name">${esc(t.tenant_id)}</div>
-      <div class="meta">${t.evaluation_asset_count || 0} assets · ${t.run_count} runs · ${t.prompt_count} prompts · ${t.dataset_count} legacy datasets</div>
+      <div class="meta">${t.run_count} runs · ${t.prompt_count} prompts · ${t.dataset_count} datasets</div>
     </div>`).join('');
   box.querySelectorAll('.tenant').forEach(node => {
     node.classList.toggle('active', node.dataset.id === S.tenant);
@@ -397,15 +385,6 @@ function msLabel() {
   if (n === 0) return 'No tenants';
   if (n === 1) return [...DASH.selected][0];
   return `${n} of ${total} tenants`;
-}
-
-function assetStage(asset) {
-  if (!asset || !asset.state) return 'Not started';
-  const s = asset.state;
-  if (s.status === 'completed') return 'Pipeline complete';
-  if (s.status === 'failed') return 'Failed at ' + (s.current_stage || 'unknown stage');
-  const stage = (s.stages || []).find(x => x.stage === s.current_stage);
-  return stage ? stage.label : (s.status || 'Queued');
 }
 
 async function renderDashboard() {
@@ -480,16 +459,12 @@ async function renderDashboard() {
     <div class="tenant-grid">${tenants.map(tc => {
       const lr = tc.latest_run;
       const sc = lr ? lr.avg_composite_score : null;
-      const asset = tc.evaluation_asset;
-      const assetStatus = asset && asset.state ? asset.state.status : 'not-started';
       return `<div class="tcard" data-id="${esc(tc.tenant_id)}">
         <div class="tname"><span>${esc(tc.tenant_id)}</span>
           ${lr ? `<div class="ring" style="--p:${Math.max(0,Math.min(100,sc||0))};--ring-c:${scoreColorVar(sc)}">
             <span>${fmtScore(sc)}</span></div>` : ''}
         </div>
-        <div class="counts">${tc.evaluation_asset_count || 0} evaluation assets · ${tc.run_count} runs · ${tc.prompt_count} prompts</div>
-        <div class="asset-state-line"><span class="dot ${esc(assetStatus)}"></span>
-          ${esc(assetStage(asset))}</div>
+        <div class="counts">${tc.run_count} runs · ${tc.prompt_count} prompts</div>
         <div class="latest">${lr
           ? `<span class="dot ${esc(lr.status||'unknown')}"></span> latest verified: <b>${esc(lr.name)}</b>
              <span class="muted">· ${esc(lr.model||'—')} · ${esc((lr.updated_at||'').replace('T',' ').slice(0,16))}</span>`

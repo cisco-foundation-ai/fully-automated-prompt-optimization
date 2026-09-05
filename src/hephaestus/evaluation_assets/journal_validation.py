@@ -44,6 +44,8 @@ from src.hephaestus.evaluation_assets.models import (
     StageState,
 )
 from src.hephaestus.evaluation_assets.provenance import (
+    HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3,
+    HISTORICAL_PROVENANCE_PROFILE_V3,
     build_legacy_stage_provenance,
     validate_build_provenance,
     validate_stage_provenance,
@@ -862,9 +864,12 @@ def _validate_adoption(
         validate_stage_provenance(
             payload,
             expected_stage=stage,
-            profile="legacy",
+            profile=HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3,
         )
-    build = validate_build_provenance(_mapping(provenance["build"]))
+    build = validate_build_provenance(
+        _mapping(provenance["build"]),
+        profile=HISTORICAL_PROVENANCE_PROFILE_V3,
+    )
     identity = _mapping(build["identity"])
     resolved_configuration = _mapping(identity["resolved_configuration"])
     if (

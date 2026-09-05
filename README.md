@@ -189,7 +189,6 @@ tenants/<tenant_id>/evaluation_assets/<asset_id>/
     ├── 03_evaluation_guidelines/
     ├── 04_intent_clustering/
     ├── 05_coverage_decisions/
-    │   └── review_queue/
     ├── 06_label_inference/
     ├── 07_synthetic_coverage/
     └── 08_dataset_splits/
@@ -197,9 +196,9 @@ tenants/<tenant_id>/evaluation_assets/<asset_id>/
 
 After creation, every stage reads from this workspace rather than the original
 files or other tenant resources. Each stage owns only its outputs and reads
-inputs from earlier stage folders. The Studio runtime, copied inputs,
+inputs from earlier stage folders. The evaluation-asset runtime, copied inputs,
 checkpoints, events, and stage artifacts in `evaluation_assets/` are local-only;
-the Studio has no remote persistence backend for this workspace.
+the pipeline has no remote persistence backend for this workspace.
 
 ### Eight-stage workflow
 
@@ -207,11 +206,11 @@ the Studio has no remote persistence backend for this workspace.
 |---|---|
 | 1. Validate raw inputs | Validate the canonical contract and record source counts and hashes. |
 | 2. Prepare inputs | Redact sensitive values, apply canonical defaults, assign connected trusted groups to train, validation, test, or regression from the split seed, record minimum correctness-evidence eligibility, and build intent text without renaming fields. |
-| 3. Create evaluation guidelines | Build the reusable guideline library from eligible training feedback only. Build held-out trusted cases with protected split-local/group-local criteria that are never exposed to downstream authoring or UI previews. |
-| 4. Cluster intents | Embed unlabeled intent records and build the requested number of route-aware clusters. |
-| 5. Decide coverage | Match traffic semantics to training-derived trusted intents and select centroid-near coverage-gap traces for a non-probability correctness-labeling queue. |
-| 6. Infer labels | Infer reviewable case rubrics and evaluation cases only for supported clusters; hold an output that has no scoreable rule, check, reference, or tool expectation. |
-| 7. Expand coverage and prepare review | Optionally generate cases for supported clusters, apply the documented mechanical filters, fingerprint every eligible derived case and its complete dependencies, build exact-context duplicate/conflict families, and pause at `awaiting_review`. |
+| 3. Create evaluation guidelines | Correlate eligible trusted feedback with messages, tool activity, outcomes, and runtime; recognize supported mistake/success patterns; and compile the reusable training-only guideline library. Keep held-out guidance protected and case-local. |
+| 4. Cluster intents | Embed unlabeled intent records and build route-aware clusters used only as batch-sampling and analysis metadata. |
+| 5. Record sampling context | Persist cluster membership, representatives, routes, and task types without making correctness or guideline-applicability decisions. |
+| 6. Build episode rubrics | For every feedback and unlabeled episode, give the model the complete split-permitted guideline catalog and trace analysis in one call. Select zero, one, or many guidelines and create one scoreable case rubric; if none applies, infer the rubric from the trace and available constraints. |
+| 7. Expand coverage and prepare review | Optionally synthesize only from clusters whose episodes share one identical guideline-grounded rubric, apply the documented mechanical filters, fingerprint every eligible derived case and its complete dependencies, build exact-context duplicate/conflict families, and pause at `awaiting_review`. |
 | 8. Build splits after finalization | After explicit review finalization, publish trusted cases plus exact-fingerprint-approved derived cases only. Pending, rejected, and held cases remain auditable but unpublished. |
 
 Stage 2 preserves each source `group_id` and adds a derived `split_group_id`
@@ -224,29 +223,23 @@ no trusted case. This is a minimum evidence gate, not a general factual,
 safety, privacy, or contradiction validator.
 
 Stage 3 uses one shared producer/verification contract. Its public evidence,
-candidate, guideline, trusted-intent, and trusted-case inventories contain
-eligible training feedback only. Validation, test, and regression evidence is
-compiled separately within its assigned split, `split_group_id`, original
-`group_id`, and route; those protected artifacts are used only to make the
-corresponding held-out trusted cases. They never enter trusted-intent matching,
-label inference, synthetic generation, later provider payloads, or previewable
-Studio content. Supported candidate domains are validated before persistence,
-compiled guidelines and their trusted intent/case derivatives are
-deterministic, and legacy adoption replays the exact native or historical
-transformation before accepting existing bytes.
-Exact duplicate candidates and duplicate or colliding guideline, criterion,
-trusted-intent, and trusted-case identifiers fail before any Stage 3 derivative
-or receipt is persisted; live compilation and both adoption profiles apply the
-same identity check.
+candidate, and guideline inventories contain eligible training feedback only.
+The extractor must link a claimed mistake or success to both the feedback and
+an observable trace location, state the expected repair, distinguish agent
+behavior from environment failure, and preserve uncertainty when causality is
+not supported. Validation, test, and regression evidence is compiled separately
+within its assigned split, `split_group_id`, original `group_id`, and route.
+Those protected guidelines are visible only while generating the corresponding
+held-out episode rubric; they never enter reusable training guidance or other
+episodes' provider payloads.
 
-Current trusted-intent matching text contains source request/context semantics
-and observed tool names; normative guideline criterion statements are not
-embedded as traffic semantics. Stages 6 and 7 persist complete,
-self-authenticating dependency descriptors covering cluster/match membership,
-guideline or rubric content, source membership, provider/model/settings, prompt
-identity, and the relevant algorithm revision. Extension reuse requires exact
-dependency equality, and any changed dependency produces a new pending review
-fingerprint.
+Stage 6 persists one rubric and one self-authenticating dependency descriptor
+per episode. The dependency covers the full permitted guideline catalog, the
+episode evidence, selected guideline IDs (possibly empty), provider/model/
+settings, prompt identity, and algorithm revision. Cluster identity is excluded
+from rubric correctness and remains available only for sampling and optional
+synthesis. Extension reuse requires exact dependency equality, and any changed
+dependency produces a new pending review fingerprint.
 
 The top-level lifecycle is exactly `draft`, `queued`, `running`,
 `awaiting_review`, `released`, or `failed`. Each completed stage has an atomic
@@ -309,7 +302,7 @@ receipts, not from receipt origin labels. Version 1 or mixed-version journals
 require explicit repair because they lack the complete before-state evidence
 needed for safe roll-forward.
 One cross-process per-asset hard lock protects create, run/resume, revision,
-adoption, and extension mutations across library, CLI, and Studio callers.
+adoption, and extension mutations across library, CLI, and service callers.
 `filelock` supplies bounded acquisition and reentrancy over the already
 identity-bound handle: POSIX uses `flock`, while Windows uses `LockFileEx`.
 Process-global exact-identity ownership distinguishes same-thread recursion
@@ -318,7 +311,7 @@ opening process and fail closed if inherited across `fork`; child work must
 reopen the literal path and revalidate its identity.
 Missing native hard-lock or atomic-CAS support fails explicitly instead of
 selecting a soft lock or check-then-replace fallback.
-Every Evaluation Asset Studio authority-root, authority-ancestor, stage,
+Every evaluation-asset authority-root, authority-ancestor, stage,
 receipt, publication-catalog, generation, and generation-staging directory
 creator also locks the already-open parent and uses the same platform adapter
 with private names, no-follow POSIX descriptors or reparse-rejecting Windows
@@ -338,18 +331,18 @@ literal persistence attributes constructed through `operator.attrgetter` or
 finite claim. Its authority adapter audits only named native create, write,
 CAS, and exact-owned reclamation functions. The remaining directory-creation
 compatibility seams are the generic parent bootstraps in
-`_atomic_write_text` and `_atomic_write_binary`, and the deprecated non-Studio
+`_atomic_write_text` and `_atomic_write_binary`, and the deprecated non-pipeline
 `assemble_dataset_bundle`; a live release check verifies that the latter three
 never bootstrap the authority or generation directories listed above.
 This boundary fails closed on preexisting or detectably substituted nodes.
 POSIX provides neither an atomic `mkdirat`-and-return-descriptor operation nor
 handle-conditional `unlink`/`rmdir`; Windows uses an identity-keyed parent mutex
 around create/open/install. Exact-owned POSIX reclamation is therefore safe
-against cooperating Studio writers that honor the same parent lock, not an
+against cooperating evaluation-asset writers that honor the same parent lock, not an
 arbitrary noncooperating same-identity namespace swap. The
 workspace must not be concurrently mutated by an unaudited process running as
 the same OS identity during authority mutation; use an exclusive trusted OS
-identity and filesystem permissions for the Studio workspace.
+identity and filesystem permissions for the evaluation-asset workspace.
 Default providers are constructed only after that lock, recovery, lifecycle
 and immutable raw-snapshot checks, revision, and configuration reload. Injected
 providers must pass the strict provider/model/settings allowlists and
@@ -400,7 +393,7 @@ not interpret `release.json`; set `dataset.path` to the exact generation file
 path recorded in a manifest. These paths are relative to the explicit
 repository/invocation base; CLI and service entry points reject a tenants root
 outside that base or traversing an intermediate symlink before writing. These local derived files are not uploaded by the
-Studio. A separate `customer-data --scope derived` operation can sync them only
+pipeline. A separate `customer-data --scope derived` operation can sync them only
 when the tenant storage configuration includes `datasets/` in its configured
 `derived_local` tree.
 
@@ -431,77 +424,6 @@ dependency descriptor, and source provenance. A child may inherit a parent
 approval or rejection only when both that fingerprint and the canonical case
 bytes are identical; changed content or dependencies return the child item to
 pending.
-
-### Use the Evaluation Asset Studio
-
-Start the shared FAPO UI:
-
-```bash
-python -m hephaestus.cli ui --host 127.0.0.1 --port 8765
-```
-
-Open `http://127.0.0.1:8765/evaluation-assets/`. The Studio lets you choose:
-
-- Tenant and asset IDs.
-- Canonical labeled and unlabeled JSONL files.
-- The evaluation-guideline creation and label-inference model.
-- An OpenAI embedding model or the local `tfidf` fallback.
-- The exact cluster count.
-- The Stage 5 intent-match threshold (default `0.6`).
-- Whether Stage 7 synthetic coverage is enabled and how many candidates to
-  request per supported cluster.
-
-The tenant pipeline view shows the status, inputs, processing, outputs, and a
-bounded example for every stage, including cluster exploration and the rendered
-coverage report. Its artifact guide groups stable technical files into **Key
-outputs**, **Needs attention**, **Supporting data**, and **Diagnostics**, with a
-friendly name and purpose beside every filename. Protected held-out correctness
-artifacts and derived case/dependency bodies have previews disabled; only safe
-audit metadata is projected. At `awaiting_review`, the Studio shows a paged
-fingerprint-bound queue, pending/approved/rejected/held counts, exact per-item
-approve/reject actions, and an explicit finalization action. One deterministic
-page window covers eligible and held rows together, and contains at most the
-requested limit across both collections. The review page exposes separate
-review-set and decision-set fingerprints plus the safe current finalization.
-Asset summaries expose a body-free `review_authority_revision`, so polling can
-reload the panel after a decision or finalization made by another client.
-Finalization warns that pending, rejected, and held derived cases are excluded.
-If a run fails, the Studio can resume with the existing configuration or edit
-it first. FAPO automatically reruns from the earliest affected stage and
-preserves earlier checkpoints.
-
-Released assets also expose **Extend asset**, which creates a new immutable
-version from additional canonical data:
-
-- **Keep original clustering** accepts labeled additions only. It reuses the
-  parent's Stage 4 inventory from the child's verified self-contained snapshot,
-  including after an earlier-stage resume, extracts evidence only for new
-  eligible training feedback, and rebuilds the reusable Stage 3 guidelines
-  across the complete eligible training-evidence pool. It never silently
-  reclusters or exposes protected parent criteria to authoring.
-- **Rerun clustering** accepts new unlabeled records, rebuilds Stage 4 over the
-  combined traffic, and writes `cluster_lineage.jsonl` to relate previous and
-  current clusters.
-
-Both modes recalculate coverage, inferred labels, optional synthesis, and
-review authority before the new version can finalize complete dataset splits.
-They preserve every verified parent trusted-group assignment and use the
-inherited split seed for new groups; a component that would bridge incompatible
-parent splits fails closed. Parent and child locks are acquired
-in deterministic order; the parent receipt and source-lineage evidence must
-verify before the child root is created. Stages 3–8 receipt the exact lineage,
-reuse, and parent-snapshot inputs they consume, and Stage 8 anchors the lineage
-and reuse manifests as required outputs. Producing provider identities come
-from verified parent receipts. Both modes retain the guideline identity, and
-keep mode also retains the producing embedding identity. Refresh may choose a
-complete new embedding provider/model pair; if receipt evidence differs from
-stale configuration, omission or a partial pair is rejected instead of
-inheriting that configuration. A historically unavailable identity likewise
-requires an explicit complete child provider/model selection. The parent asset
-is never changed. Stage 6/7 outputs are reused only for exact complete
-dependency matches. An unchanged child review item may inherit the parent's
-terminal decision; a case or dependency change creates a new pending
-fingerprint.
 
 ### Use the CLI
 
@@ -653,12 +575,12 @@ Then uncomment the `try`/`import truststore`/
 - `src/hephaestus/datasets/rubric_providers.py`, lines 85–89.
 - `src/hephaestus/datasets/embedding_providers.py`, lines 61–65.
 
-Restart the FAPO UI or CLI process after changing the environment or source,
+Restart the FAPO CLI or service process after changing the environment or source,
 then resume the failed asset run.
 Use this procedure only for an SSL/certificate error; it does not fix
 an invalid API key, unavailable model, rate limit, or malformed response.
 
-The UI, CLI, and evaluation-asset assistants all trigger and monitor the same
+The CLI, service API, and evaluation-asset assistants all trigger and monitor the same
 core implementation under `src/hephaestus/evaluation_assets/`; agents do not
 implement the data transformations themselves. See the full
 [feedback and unlabeled trace flow](docs/processes/feedback-dataset-flow.md)

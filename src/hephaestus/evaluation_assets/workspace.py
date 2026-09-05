@@ -50,6 +50,7 @@ from src.hephaestus.evaluation_assets.dependencies import (
 )
 from src.hephaestus.evaluation_assets.durability import (
     STAGE_SPECIFICATIONS,
+    STAGE_RECEIPT_SCHEMA_VERSION,
     EvaluationAssetBusyError,
     EvaluationAssetImmutableError,
     EvaluationAssetIntegrityError,
@@ -1442,13 +1443,16 @@ class EvaluationAssetLayout:
             "candidate_guidelines.jsonl",
             "evaluation_guidelines.jsonl",
         )
-        compatibility_artifacts = ("feedback_rubrics.jsonl",)
-        shared_artifacts = ("trusted_intents.jsonl", "trusted_cases.jsonl")
+        compatibility_artifacts = (
+            "trusted_intents.jsonl",
+            "trusted_cases.jsonl",
+            "protected_trusted_cases.jsonl",
+        )
+        shared_artifacts: tuple[str, ...] = ()
         protected_artifacts = (
             "protected_feedback_evidence.jsonl",
             "protected_candidate_guidelines.jsonl",
             "protected_evaluation_guidelines.jsonl",
-            "protected_trusted_cases.jsonl",
         )
         stage_three_paths = {
             name: parent.artifact_path(PERSISTED_STAGE_VALUES_V2[2], name)
@@ -1565,37 +1569,65 @@ class EvaluationAssetLayout:
                 parent.receipt_path(PERSISTED_STAGE_VALUES_V2[1])
             ]
         )
-        current_profile = (
+        current_text_profile = (
             stage_three_text_profile_for_receipt_schema(
                 stage_two_receipt.get("schema_version"),
                 origin=stage_two_receipt.get("origin"),
             )
             == "current"
         )
-        if current_profile:
+        current_v3_profile = (
+            stage_two_receipt.get("schema_version")
+            == STAGE_RECEIPT_SCHEMA_VERSION
+            and stage_two_receipt.get("origin") == "native"
+        )
+        if current_v3_profile:
             stage_three_artifacts = (
                 guideline_artifacts + shared_artifacts + protected_artifacts
             )
-            snapshot_source_paths = {
-                **{
-                    f"parent_{name}": stage_three_paths[name]
-                    for name in stage_three_artifacts
-                },
-                **fixed_snapshot_sources,
-            }
-            required_profile_paths = {
-                *(stage_three_paths[name] for name in stage_three_artifacts),
-                *fixed_snapshot_sources.values(),
-            }
+            snapshot_names = (
+                "parent_trusted_split_plan.jsonl",
+                "parent_intent_inventory.jsonl",
+                "parent_derived_review_items.jsonl",
+                "parent_review_decisions.jsonl",
+                "parent_train.jsonl",
+                "parent_validation.jsonl",
+                "parent_test.jsonl",
+                "parent_regression_trusted.jsonl",
+            )
             seeded_stage_three_operation = APPEND_STAGE_THREE_EVIDENCE_OPERATION
-            snapshot_payloads = {
-                name: parent_authority_snapshot[source]
-                for name, source in snapshot_source_paths.items()
-                if parent_authority_presence.get(source, False)
-            }
+        elif current_text_profile:
+            stage_three_artifacts = (
+                *guideline_artifacts,
+                "trusted_intents.jsonl",
+                "trusted_cases.jsonl",
+                *protected_artifacts,
+                "protected_trusted_cases.jsonl",
+            )
+            snapshot_names = (
+                "parent_intent_inventory.jsonl",
+                "parent_intent_matches.jsonl",
+                "parent_inferred_cluster_rubrics.jsonl",
+                "parent_synthetic_cases.jsonl",
+                "parent_train.jsonl",
+                "parent_validation.jsonl",
+                "parent_test.jsonl",
+                "parent_regression_trusted.jsonl",
+                "parent_trusted_split_plan.jsonl",
+                "parent_inferred_cases.jsonl",
+                "parent_inference_dependencies.jsonl",
+                "parent_held_inference_outputs.jsonl",
+                "parent_synthetic_dependencies.jsonl",
+                "parent_derived_review_items.jsonl",
+                "parent_duplicate_families.jsonl",
+                "parent_held_derived_cases.jsonl",
+                "parent_review_decisions.jsonl",
+                "parent_review_finalizations.jsonl",
+            )
+            seeded_stage_three_operation = APPEND_STAGE_THREE_EVIDENCE_OPERATION
         else:
             stage_three_artifacts = ()
-            historical_snapshot_names = (
+            snapshot_names = (
                 "parent_intent_inventory.jsonl",
                 "parent_intent_matches.jsonl",
                 "parent_inferred_cluster_rubrics.jsonl",
@@ -1605,16 +1637,37 @@ class EvaluationAssetLayout:
                 "parent_test.jsonl",
                 "parent_regression_trusted.jsonl",
             )
-            required_profile_paths = {
-                fixed_snapshot_sources[name]
-                for name in historical_snapshot_names
-            }
             seeded_stage_three_operation = (
                 REBUILD_STAGE_THREE_WITHOUT_PARENT_SEEDS_OPERATION
             )
+        if current_text_profile:
+            snapshot_source_paths = {
+                **{
+                    f"parent_{name}": stage_three_paths[name]
+                    for name in stage_three_artifacts
+                },
+                **{
+                    name: fixed_snapshot_sources[name]
+                    for name in snapshot_names
+                },
+            }
+            required_profile_paths = {
+                *(stage_three_paths[name] for name in stage_three_artifacts),
+                *(fixed_snapshot_sources[name] for name in snapshot_names),
+            }
+            snapshot_payloads = {
+                name: parent_authority_snapshot[source]
+                for name, source in snapshot_source_paths.items()
+                if parent_authority_presence.get(source, False)
+            }
+        else:
+            required_profile_paths = {
+                fixed_snapshot_sources[name]
+                for name in snapshot_names
+            }
             snapshot_payloads = {
                 name: parent_authority_snapshot[fixed_snapshot_sources[name]]
-                for name in historical_snapshot_names
+                for name in snapshot_names
                 if parent_authority_presence.get(
                     fixed_snapshot_sources[name],
                     False,
@@ -1629,7 +1682,7 @@ class EvaluationAssetLayout:
                 parent.asset_id,
                 "released parent extension authority is incomplete",
             )
-        if not current_profile:
+        if not current_text_profile:
             feedback_rows_for_plan = _jsonl_rows_from_bytes(
                 parent.historical_feedback_path,
                 parent_authority_snapshot[parent.historical_feedback_path],
@@ -2784,12 +2837,6 @@ class EvaluationAssetLayout:
         try:
             for stage, name, schema, trust_tier in (
                 (
-                    PipelineStage.LABEL_INFERENCE,
-                    "inference_dependencies.jsonl",
-                    STAGE_SIX_DEPENDENCY_SCHEMA_VERSION,
-                    INFERRED_FROM_TRUSTED_FEEDBACK,
-                ),
-                (
                     PipelineStage.SYNTHETIC_COVERAGE,
                     "synthetic_dependencies.jsonl",
                     STAGE_SEVEN_DEPENDENCY_SCHEMA_VERSION,
@@ -2816,30 +2863,28 @@ class EvaluationAssetLayout:
                     dependency_fingerprint(dependency)
                     catalog[cluster_id] = dict(dependency)
                 dependency_catalogs[trust_tier] = catalog
-            inferred_case_path = self.artifact_path(
-                PipelineStage.SYNTHETIC_COVERAGE,
-                "inferred_review_dependencies.jsonl",
-            )
-            if inferred_case_path.is_file():
-                for row in self._read_required_review_rows(
-                    inferred_case_path,
-                    "inferred review dependency",
+            for row in self._read_required_review_rows(
+                self.artifact_path(
+                    PipelineStage.LABEL_INFERENCE,
+                    "case_dependencies.jsonl",
+                ),
+                "case rubric dependency",
+            ):
+                if set(row) != {"case_id", "record_id", "dependency"}:
+                    raise ValueError("case rubric dependency fields are invalid")
+                case_id = row.get("case_id")
+                dependency = row.get("dependency")
+                if (
+                    not isinstance(case_id, str)
+                    or not case_id
+                    or not isinstance(dependency, Mapping)
+                    or dependency.get("schema_version")
+                    != STAGE_SIX_DEPENDENCY_SCHEMA_VERSION
+                    or case_id in inferred_case_dependencies
                 ):
-                    if set(row) != {"case_id", "dependency"}:
-                        raise ValueError("inferred review dependency fields are invalid")
-                    case_id = row.get("case_id")
-                    dependency = row.get("dependency")
-                    if (
-                        not isinstance(case_id, str)
-                        or not case_id
-                        or not isinstance(dependency, Mapping)
-                        or dependency.get("schema_version")
-                        != STAGE_SIX_DEPENDENCY_SCHEMA_VERSION
-                        or case_id in inferred_case_dependencies
-                    ):
-                        raise ValueError("inferred review dependency identity is invalid")
-                    dependency_fingerprint(dependency)
-                    inferred_case_dependencies[case_id] = dict(dependency)
+                    raise ValueError("case rubric dependency identity is invalid")
+                dependency_fingerprint(dependency)
+                inferred_case_dependencies[case_id] = dict(dependency)
         except (TypeError, ValueError) as exc:
             raise EvaluationAssetIntegrityError(
                 self.tenant_id,
@@ -2879,7 +2924,6 @@ class EvaluationAssetLayout:
                 dependency = (
                     inferred_case_dependencies.get(raw_case_id)
                     if trust_tier == INFERRED_FROM_TRUSTED_FEEDBACK
-                    and inferred_case_dependencies
                     else catalog.get(str(cluster_id))
                     if catalog is not None
                     else None
@@ -2933,14 +2977,13 @@ class EvaluationAssetLayout:
                     raise ValueError("held review trust_tier is invalid")
                 if not isinstance(reason, str) or not reason:
                     raise ValueError("held review reason is invalid")
-            trusted_rows = []
-            for name in ("trusted_cases.jsonl", "protected_trusted_cases.jsonl"):
-                trusted_rows.extend(
-                    self._read_required_review_rows(
-                        self.artifact_path(PipelineStage.RUBRIC_EXTRACTION, name),
-                        "trusted review",
-                    )
-                )
+            trusted_rows = self._read_required_review_rows(
+                self.artifact_path(
+                    PipelineStage.LABEL_INFERENCE,
+                    "trusted_cases.jsonl",
+                ),
+                "trusted review",
+            )
             trusted_case_ids: set[str] = set()
             for row in trusted_rows:
                 case_id = row.get("case_id")

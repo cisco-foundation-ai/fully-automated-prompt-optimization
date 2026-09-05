@@ -1383,7 +1383,7 @@ def test_missing_label_artifacts_belong_to_label_inference(
         for item in coverage["artifacts"]
         if item["name"] == "labeling_queue.jsonl"
     )
-    assert labeling_queue["display_name"] == "Traces to label"
+    assert labeling_queue["display_name"] == "Legacy traces-to-label queue"
     assert labeling_queue["group"] == "Needs attention"
     coverage_report = next(
         item
@@ -1434,6 +1434,18 @@ def test_evaluation_asset_stage_disables_protected_content_previews(
         ),
         "stages/03_evaluation_guidelines/protected_trusted_cases.jsonl": (
             "PROTECTED-CASE-CANARY"
+        ),
+        "stages/06_label_inference/episode_rubrics.jsonl": (
+            "EPISODE-RUBRIC-CANARY"
+        ),
+        "stages/06_label_inference/trusted_cases.jsonl": (
+            "TRUSTED-CASE-CANARY"
+        ),
+        "stages/06_label_inference/case_dependencies.jsonl": (
+            "CASE-DEPENDENCY-CANARY"
+        ),
+        "stages/06_label_inference/held_rubric_outputs.jsonl": (
+            "HELD-RUBRIC-CANARY"
         ),
         "stages/06_label_inference/inferred_unlabeled_cluster_rubrics.jsonl": (
             "INFERRED-RUBRIC-CANARY"

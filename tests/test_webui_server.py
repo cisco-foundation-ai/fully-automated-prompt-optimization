@@ -711,8 +711,8 @@ def test_serve_binds_ipv6_loopback_and_prints_bracketed_url(
     assert "http://[::1]:" in capsys.readouterr().out
 
 
-def test_studio_http_policy_and_cache_headers(tmp_path: Path) -> None:
-    """Studio routes enforce local authority, same origin, and no-store."""
+def test_evaluation_asset_api_policy_and_cache_headers(tmp_path: Path) -> None:
+    """Asset APIs enforce local authority, same origin, and no-store."""
     class FakeManager:
         def is_running(self, tenant_id, asset_id):
             return False
@@ -757,8 +757,8 @@ def test_studio_http_policy_and_cache_headers(tmp_path: Path) -> None:
             "/evaluation-assets/",
             headers={"Host": "example.com"},
         )
-        assert status == 403
-        assert headers["cache-control"] == "no-store"
+        assert status == 404
+        assert "cache-control" not in headers
 
         status, headers = _http_request(
             port,
@@ -775,8 +775,8 @@ def test_studio_http_policy_and_cache_headers(tmp_path: Path) -> None:
             "/evaluation-assets/",
             headers={"Host": local_host},
         )
-        assert status == 200
-        assert headers["cache-control"] == "no-store"
+        assert status == 404
+        assert "cache-control" not in headers
 
         status, headers = _http_request(
             port,
@@ -993,9 +993,11 @@ def test_dataset_routes_use_one_data_and_policy_snapshot() -> None:
     instance = object.__new__(handler)
     authorized = []
     sent = []
-    instance._authorize_studio_request = lambda no_store: authorized.append(
-        no_store
-    ) or order.append("authorize") or True
+    instance._authorize_evaluation_asset_request = (
+        lambda no_store: authorized.append(no_store)
+        or order.append("authorize")
+        or True
+    )
     instance._send_json = lambda body, no_store=False: sent.append(
         (body, no_store)
     )
@@ -1043,9 +1045,11 @@ def test_case_route_uses_one_joined_data_and_policy_snapshot() -> None:
     instance = object.__new__(handler)
     authorized = []
     sent = []
-    instance._authorize_studio_request = lambda no_store: authorized.append(
-        no_store
-    ) or order.append("authorize") or True
+    instance._authorize_evaluation_asset_request = (
+        lambda no_store: authorized.append(no_store)
+        or order.append("authorize")
+        or True
+    )
     instance._send_json_or_404 = lambda body, no_store=False: sent.append(
         (body, no_store)
     )

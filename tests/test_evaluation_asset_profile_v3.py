@@ -29,6 +29,7 @@ _JOURNAL_V2 = "fapo-recovery-journal-v2"
 _JOURNAL_V3 = "fapo-recovery-journal-v3"
 _RECEIPT_V2 = "fapo-stage-receipt-v2"
 _RECEIPT_V3 = "fapo-stage-receipt-v3"
+_RECEIPT_V4 = "fapo-stage-receipt-v4"
 
 
 def _completed_state(config: EvaluationAssetConfig) -> dict[str, Any]:
@@ -123,39 +124,35 @@ def test_journal_schema_sequence_allows_only_a_v2_prefix_then_v3() -> None:
         journal_validation._validate_journal_schema_sequence(downgraded)
 
 
-def test_receipt_v3_specs_freeze_v2_and_bind_new_stage_authority() -> None:
-    """Keep old receipt inventories exact while declaring Task 5-7 authority."""
-    assert durability_module.STAGE_RECEIPT_SCHEMA_VERSION == _RECEIPT_V3
+def test_receipt_v4_specs_freeze_v3_and_bind_episode_rubric_authority() -> None:
+    """Keep v3 inventories exact while declaring the V3 pipeline authority."""
+    assert durability_module.STAGE_RECEIPT_SCHEMA_VERSION == _RECEIPT_V4
     old_stage_two = durability_module.stage_specification_for_receipt_schema(
-        _RECEIPT_V2,
+        _RECEIPT_V3,
         PipelineStage.PREPARED_INPUTS,
     )
     stage_two = durability_module.stage_specification_for_receipt_schema(
-        _RECEIPT_V3,
+        _RECEIPT_V4,
         PipelineStage.PREPARED_INPUTS,
     )
     stage_three = durability_module.stage_specification_for_receipt_schema(
-        _RECEIPT_V3,
+        _RECEIPT_V4,
         PipelineStage.RUBRIC_EXTRACTION,
     )
     stage_six = durability_module.stage_specification_for_receipt_schema(
-        _RECEIPT_V3,
+        _RECEIPT_V4,
         PipelineStage.LABEL_INFERENCE,
     )
     stage_seven = durability_module.stage_specification_for_receipt_schema(
-        _RECEIPT_V3,
+        _RECEIPT_V4,
         PipelineStage.SYNTHETIC_COVERAGE,
     )
     stage_eight = durability_module.stage_specification_for_receipt_schema(
-        _RECEIPT_V3,
+        _RECEIPT_V4,
         PipelineStage.DATASET_SPLITS,
     )
 
-    assert old_stage_two.required_outputs == (
-        "normalized_feedback.jsonl",
-        "intent_records.jsonl",
-    )
-    assert "split_seed" not in old_stage_two.config_fields
+    assert "trusted_split_plan.jsonl" in old_stage_two.required_outputs
     assert {
         "trusted_split_plan.jsonl",
         "feedback_eligibility.jsonl",
@@ -165,15 +162,18 @@ def test_receipt_v3_specs_freeze_v2_and_bind_new_stage_authority() -> None:
         "protected_feedback_evidence.jsonl",
         "protected_candidate_guidelines.jsonl",
         "protected_evaluation_guidelines.jsonl",
-        "protected_trusted_cases.jsonl",
     } <= set(stage_three.required_outputs)
+    assert "protected_trusted_cases.jsonl" not in stage_three.required_outputs
     assert {
         "trusted_split_plan.jsonl",
         "feedback_eligibility.jsonl",
     } <= {name for _, name in stage_three.direct_inputs}
     assert {
-        "inference_dependencies.jsonl",
-        "held_inference_outputs.jsonl",
+        "episode_rubrics.jsonl",
+        "trusted_cases.jsonl",
+        "inferred_cases.jsonl",
+        "case_dependencies.jsonl",
+        "held_rubric_outputs.jsonl",
     } <= set(stage_six.required_outputs)
     assert {
         "synthetic_dependencies.jsonl",
@@ -190,9 +190,9 @@ def test_receipt_v3_specs_freeze_v2_and_bind_new_stage_authority() -> None:
     assert {
         "trusted_split_plan.jsonl",
         "trusted_cases.jsonl",
-        "protected_trusted_cases.jsonl",
-        "inference_dependencies.jsonl",
-        "held_inference_outputs.jsonl",
+        "inferred_cases.jsonl",
+        "case_dependencies.jsonl",
+        "held_rubric_outputs.jsonl",
         "synthetic_dependencies.jsonl",
         "derived_review_items.jsonl",
         "duplicate_families.jsonl",
@@ -207,9 +207,10 @@ def test_stage_three_replay_text_profile_is_explicit_by_receipt_generation() -> 
     assert selector("fapo-stage-receipt-v1") == "historical_v1"
     assert selector(_RECEIPT_V2) == "historical_v1"
     assert selector(_RECEIPT_V3) == "current"
+    assert selector(_RECEIPT_V4) == "current"
     assert selector(_RECEIPT_V3, origin="legacy_adoption") == "historical_v1"
     with pytest.raises(ValueError, match="receipt schema is unsupported"):
-        selector("fapo-stage-receipt-v4")
+        selector("fapo-stage-receipt-v5")
 
 
 def test_historical_v3_receipt_profile_ignores_live_v4_registry_drift(
@@ -300,34 +301,37 @@ def test_historical_receipt_fields_survive_live_v4_source_evolution(
     assert future._HISTORICAL_STAGE_RECEIPT_FIELDS_V3 == historical_fields
 
 
-def test_provenance_v3_selectors_preserve_v2_and_provider_call_v2() -> None:
-    """Use v3 build profiles without changing the provider-call row schema."""
+def test_provenance_v4_selectors_preserve_v3_and_provider_call_v2() -> None:
+    """Use v4 build profiles without changing the provider-call row schema."""
     assert provenance_module.PROVIDER_CALL_SCHEMA_VERSION == "fapo-provider-call-v2"
-    assert provenance_module.STAGE_PROVENANCE_SCHEMA_VERSION == ("fapo-stage-provenance-v3")
-    assert provenance_module.BUILD_PROVENANCE_SCHEMA_VERSION == ("fapo-evaluation-build-provenance-v3")
-    assert provenance_module.BUILD_IDENTITY_SCHEMA_VERSION == ("fapo-evaluation-build-identity-v3")
+    assert provenance_module.STAGE_PROVENANCE_SCHEMA_VERSION == ("fapo-stage-provenance-v4")
+    assert provenance_module.BUILD_PROVENANCE_SCHEMA_VERSION == ("fapo-evaluation-build-provenance-v4")
+    assert provenance_module.BUILD_IDENTITY_SCHEMA_VERSION == ("fapo-evaluation-build-identity-v4")
 
     v2_stage = {"schema_version": "fapo-stage-provenance-v2"}
-    v3_stage = {"schema_version": provenance_module.STAGE_PROVENANCE_SCHEMA_VERSION}
+    v3_stage = {"schema_version": "fapo-stage-provenance-v3"}
+    v4_stage = {"schema_version": provenance_module.STAGE_PROVENANCE_SCHEMA_VERSION}
     assert provenance_module.historical_stage_provenance_profile(v2_stage) == (
         provenance_module.HISTORICAL_PROVENANCE_PROFILE_V2
     )
     assert provenance_module.historical_stage_provenance_profile(v3_stage) == (
         provenance_module.HISTORICAL_PROVENANCE_PROFILE_V3
     )
+    assert provenance_module.historical_stage_provenance_profile(v4_stage) == (
+        provenance_module.HISTORICAL_PROVENANCE_PROFILE_V4
+    )
 
-    v3_build = {
+    v4_build = {
         "schema_version": provenance_module.BUILD_PROVENANCE_SCHEMA_VERSION,
         "identity": {
             "schema_version": provenance_module.BUILD_IDENTITY_SCHEMA_VERSION,
         },
     }
-    profile = provenance_module.historical_build_provenance_profile(v3_build)
-    assert profile == provenance_module.HISTORICAL_PROVENANCE_PROFILE_V3
+    profile = provenance_module.historical_build_provenance_profile(v4_build)
+    assert profile == provenance_module.HISTORICAL_PROVENANCE_PROFILE_V4
     assert provenance_module.historical_provider_call_stages(profile) == (
         "rubric_extraction",
         "intent_clustering",
-        "coverage_decisions",
         "label_inference",
         "synthetic_coverage",
     )
@@ -358,21 +362,25 @@ def test_historical_v3_provenance_registries_are_source_literals() -> None:
         )
 
 
-def test_provenance_v3_freezes_acquisition_and_source_semantics() -> None:
-    """Bind the Task 5-7 modules and non-probability queue claim only in v3."""
+def test_provenance_v4_retires_matching_and_keeps_v3_frozen() -> None:
+    """Use clustering only as sampling metadata while preserving v3 evidence."""
     config = EvaluationAssetConfig(tenant_id="profile-test").to_dict()
     current = provenance_module.build_algorithm_inventory(config, extension=False)
-    frozen_v2 = provenance_module.historical_algorithm_inventory_v2(
+    frozen_v3 = provenance_module.historical_algorithm_inventory_v3(
         config,
         extension=False,
     )
 
-    assert current["coverage_decisions"]["queue_acquisition"] == {
+    assert current["coverage_decisions"] == {
+        "algorithm": "cluster-sampling-metadata-v1",
+        "correctness_role": "none",
+        "purpose": "batch_sampling_and_analysis",
+    }
+    assert frozen_v3["coverage_decisions"]["queue_acquisition"] == {
         "purpose": "correctness_label_acquisition",
         "method": "deterministic_centroid_nearest",
         "sampling_semantics": "non_probability",
     }
-    assert "queue_acquisition" not in frozen_v2["coverage_decisions"]
     assert "src/hephaestus/evaluation_assets/dependencies.py" in (provenance_module.SOURCE_FIXED_MEMBERS)
     assert "src/hephaestus/evaluation_assets/dependencies.py" not in (
         provenance_module._HISTORICAL_SOURCE_FIXED_MEMBERS_V2
@@ -380,10 +388,10 @@ def test_provenance_v3_freezes_acquisition_and_source_semantics() -> None:
 
 
 @pytest.mark.parametrize("extension", [False, True], ids=["native", "extension"])
-def test_provenance_v3_names_pr3_generation_semantics(
+def test_provenance_v4_names_full_catalog_generation_semantics(
     extension: bool,
 ) -> None:
-    """Describe PR3 isolation, dependencies, review, and publication exactly."""
+    """Describe split isolation, episode rubrics, review, and publication."""
     config = EvaluationAssetConfig(tenant_id="profile-test").to_dict()
     current = provenance_module.build_algorithm_inventory(
         config,
@@ -403,9 +411,12 @@ def test_provenance_v3_names_pr3_generation_semantics(
         "protected_scope": "split_group_group_route_local",
     }
     assert current["label_inference"] == {
-        "algorithm": "trusted-guideline-inference-v1",
-        "dependency": "stage-six-dependency-v1",
-        "scoreability": "scoreable-rubric-or-hold-v1",
+        "algorithm": "full-catalog-episode-rubric-v1",
+        "call_granularity": "one-provider-call-per-episode",
+        "guideline_selection": "inside-rubric-generation-call",
+        "fallback": "trace-inferred-rubric-when-no-guideline-applies",
+        "dependency": "case-scoped-stage-six-dependency-v1",
+        "scoreability": "scoreable-episode-rubric-or-hold-v1",
         "extension_reuse": (
             {"authorization": "exact-stage-six-dependency-match-v1"}
             if extension
@@ -450,10 +461,14 @@ def test_provenance_v3_names_pr3_generation_semantics(
         "hold_policy": "exclude-held-cases-and-families-v1",
         "regression_fraction": 0.2,
     }
-    assert provenance_module.historical_algorithm_inventory_v3(
+    assert provenance_module.historical_algorithm_inventory_v4(
         config,
         extension=extension,
     ) == current
+    assert provenance_module.historical_algorithm_inventory_v3(
+        config,
+        extension=extension,
+    )["label_inference"]["algorithm"] == "trusted-guideline-inference-v1"
 
     frozen_v1 = provenance_module.historical_algorithm_inventory_v1(
         config,
@@ -497,18 +512,19 @@ def test_historical_v3_algorithm_profile_ignores_live_v4_drift(
     ) == expected
 
 
-def test_extension_v2_profile_keeps_v1_snapshot_semantics_frozen() -> None:
+def test_extension_v3_profile_keeps_older_snapshot_semantics_frozen() -> None:
     """Select parent-snapshot inventories from persisted reuse schema versions."""
     assert lineage_validation.LINEAGE_SCHEMA_VERSION == ("fapo-evaluation-asset-lineage-v1")
-    assert lineage_validation.REUSE_SCHEMA_VERSION == "fapo-evaluation-asset-reuse-v2"
-    assert lineage_validation.SNAPSHOT_SCHEMA_VERSION == ("fapo-evaluation-asset-parent-snapshot-v2")
+    assert lineage_validation.REUSE_SCHEMA_VERSION == "fapo-evaluation-asset-reuse-v3"
+    assert lineage_validation.SNAPSHOT_SCHEMA_VERSION == ("fapo-evaluation-asset-parent-snapshot-v3")
 
     v1 = lineage_validation.extension_persistence_profile("fapo-evaluation-asset-reuse-v1")
-    v2 = lineage_validation.extension_persistence_profile(lineage_validation.REUSE_SCHEMA_VERSION)
+    v2 = lineage_validation.extension_persistence_profile("fapo-evaluation-asset-reuse-v2")
+    v3 = lineage_validation.extension_persistence_profile(lineage_validation.REUSE_SCHEMA_VERSION)
     assert v1.snapshot_schema_version == "fapo-evaluation-asset-parent-snapshot-v1"
     assert "parent_trusted_split_plan.jsonl" not in v1.common_parent_snapshot_files
     assert "prepared_inputs" not in v1.static_snapshot_inputs
-    assert v2.snapshot_schema_version == lineage_validation.SNAPSHOT_SCHEMA_VERSION
+    assert v2.snapshot_schema_version == "fapo-evaluation-asset-parent-snapshot-v2"
     assert v2.static_snapshot_inputs["prepared_inputs"] == ("parent_trusted_split_plan.jsonl",)
     assert {
         "parent_inferred_cases.jsonl",
@@ -527,11 +543,20 @@ def test_extension_v2_profile_keeps_v1_snapshot_semantics_frozen() -> None:
         "protected_evaluation_guidelines.jsonl",
         "protected_trusted_cases.jsonl",
     } <= set(v2.native_stage_three_seeds)
+    assert v3.snapshot_schema_version == lineage_validation.SNAPSHOT_SCHEMA_VERSION
+    assert v3.static_snapshot_inputs["label_inference"] == ()
+    assert v3.static_snapshot_inputs["coverage_decisions"] == ()
+    assert v3.static_snapshot_inputs["synthetic_coverage"] == (
+        "parent_derived_review_items.jsonl",
+        "parent_review_decisions.jsonl",
+    )
+    assert "trusted_cases.jsonl" not in v3.native_stage_three_seeds
+    assert "parent_intent_matches.jsonl" not in v3.common_parent_snapshot_files
     with pytest.raises(ValueError, match="reuse schema is unsupported"):
-        lineage_validation.extension_persistence_profile("fapo-evaluation-asset-reuse-v3")
+        lineage_validation.extension_persistence_profile("fapo-evaluation-asset-reuse-v4")
 
 
-def test_extension_v2_profile_survives_live_v3_source_evolution(
+def test_extension_v3_profile_survives_live_v4_source_evolution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A future extension writer cannot remove or redefine persisted reuse-v2."""
@@ -552,9 +577,9 @@ def test_extension_v2_profile_survives_live_v3_source_evolution(
             },
         }
 
-    frozen_v2 = projection(
+    frozen_v3 = projection(
         lineage_validation.extension_persistence_profile(
-            "fapo-evaluation-asset-reuse-v2"
+            "fapo-evaluation-asset-reuse-v3"
         )
     )
 
@@ -567,12 +592,12 @@ def test_extension_v2_profile_survives_live_v3_source_evolution(
             }
             if "REUSE_SCHEMA_VERSION" in names:
                 node.value = ast.copy_location(
-                    ast.Constant(value="fapo-evaluation-asset-reuse-v3"),
+                    ast.Constant(value="fapo-evaluation-asset-reuse-v4"),
                     node.value,
                 )
             elif "SNAPSHOT_SCHEMA_VERSION" in names:
                 node.value = ast.copy_location(
-                    ast.Constant(value="fapo-evaluation-asset-parent-snapshot-v3"),
+                    ast.Constant(value="fapo-evaluation-asset-parent-snapshot-v4"),
                     node.value,
                 )
             elif names & {
@@ -616,20 +641,17 @@ def test_extension_v2_profile_survives_live_v3_source_evolution(
     monkeypatch.setitem(sys.modules, module_name, future)
     exec(compile(tree, future.__file__, "exec"), future.__dict__)
 
-    live_v3 = future.extension_persistence_profile(
-        "fapo-evaluation-asset-reuse-v3"
+    live_v4 = future.extension_persistence_profile(
+        "fapo-evaluation-asset-reuse-v4"
     )
-    assert live_v3.snapshot_schema_version == (
-        "fapo-evaluation-asset-parent-snapshot-v3"
+    assert live_v4.snapshot_schema_version == (
+        "fapo-evaluation-asset-parent-snapshot-v4"
     )
-    assert "future-only.jsonl" in live_v3.native_stage_three_seeds
-    assert "future-only.jsonl" in live_v3.legacy_stage_three_seeds
-    assert "future-only.jsonl" in live_v3.common_parent_snapshot_files
-    assert live_v3.static_snapshot_inputs["future_stage"] == (
-        "future-only.jsonl",
-    )
+    assert "future-only.jsonl" in live_v4.native_stage_three_seeds
+    assert "future-only.jsonl" in live_v4.legacy_stage_three_seeds
+    assert "future-only.jsonl" in live_v4.common_parent_snapshot_files
     assert projection(
         future.extension_persistence_profile(
-            "fapo-evaluation-asset-reuse-v2"
+            "fapo-evaluation-asset-reuse-v3"
         )
-    ) == frozen_v2
+    ) == frozen_v3

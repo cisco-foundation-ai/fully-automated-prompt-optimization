@@ -21,10 +21,10 @@ DEFAULT_MAX_OUTPUT_TOKENS = 4096
 
 
 class OpenAIRubricProvider:
-    """OpenAI JSON generator for guidelines and episode applicability decisions."""
+    """OpenAI JSON generator for guidelines and case-specific episode rubrics."""
 
     provider_name = "openai"
-    supports_episode_guideline_applicability = True
+    supports_case_specific_episode_rubrics = True
 
     def __init__(
         self,

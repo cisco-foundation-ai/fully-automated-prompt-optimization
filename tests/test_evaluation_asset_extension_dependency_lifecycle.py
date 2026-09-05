@@ -37,8 +37,7 @@ class _LifecycleEmbeddingProvider:
     provider_name = "extension-lifecycle"
     model = "extension-lifecycle-embedding"
 
-    def __init__(self, *, drift_route_a_match: bool = False) -> None:
-        self.drift_route_a_match = drift_route_a_match
+    def __init__(self) -> None:
         self.calls: list[list[str]] = []
 
     def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
@@ -46,10 +45,7 @@ class _LifecycleEmbeddingProvider:
         vectors: list[list[float]] = []
         for text in texts:
             if "ROUTE_A" in text:
-                if self.drift_route_a_match and "trusted request" in text:
-                    vectors.append([0.8, 0.6])
-                else:
-                    vectors.append([1.0, 0.0])
+                vectors.append([1.0, 0.0])
             elif "ROUTE_B" in text:
                 vectors.append([0.0, 1.0])
             else:
@@ -72,7 +68,7 @@ class _LifecycleRubricProvider:
         self.temperature = temperature
         self.guideline_suffix_by_route = dict(guideline_suffix_by_route or {})
         self.inferred_suffix_by_route = dict(inferred_suffix_by_route or {})
-        self.stage_six_clusters: list[str] = []
+        self.stage_six_records: list[str] = []
         self.stage_seven_clusters: list[str] = []
 
     def generate_json(
@@ -80,6 +76,38 @@ class _LifecycleRubricProvider:
         system_prompt: str,
         payload: Mapping[str, Any],
     ) -> dict[str, Any]:
+        if payload.get("mode") == "full_catalog_episode_rubric":
+            record_id = str(payload["episode"]["record_id"])
+            route = str(payload["episode"]["task_type"])
+            self.stage_six_records.append(record_id)
+            suffix = self.inferred_suffix_by_route.get(route, "")
+            guideline_ids = [
+                str(row["guideline_id"])
+                for row in payload["evaluation_guidelines"]
+                if str(row.get("route") or "") == route
+            ]
+            return {
+                "rubrics": [
+                    {
+                        "record_id": record_id,
+                        "applicable_guideline_ids": guideline_ids,
+                        "provenance": (
+                            "guideline_grounded"
+                            if guideline_ids
+                            else "trace_inferred"
+                        ),
+                        "intent_label": f"handle {route} request",
+                        "confidence": 0.9,
+                        "must": [f"Satisfy the {route} request.{suffix}"],
+                        "must_not": [f"Substitute another route for {route}."],
+                        "should": [],
+                        "deterministic_checks": [],
+                        "tool_expectations": {},
+                        "reference_output": None,
+                        "evidence_pointers": ["episode.user_messages[0]"],
+                    }
+                ]
+            }
         if "records" in payload:
             return {
                 "evidence": [
@@ -163,26 +191,7 @@ class _LifecycleRubricProvider:
                     )
             return {"cases": cases}
 
-        rubrics: list[dict[str, Any]] = []
-        for cluster in payload["clusters"]:
-            cluster_id = str(cluster["cluster_id"])
-            route = str(cluster["route"])
-            self.stage_six_clusters.append(cluster_id)
-            suffix = self.inferred_suffix_by_route.get(route, "")
-            rubrics.append(
-                {
-                    "cluster_id": cluster_id,
-                    "intent_label": f"handle {route} request",
-                    "confidence": 0.9,
-                    "must": [f"Satisfy the {route} request.{suffix}"],
-                    "must_not": [f"Substitute another route for {route}."],
-                    "should": [],
-                    "deterministic_checks": [],
-                    "tool_expectations": {},
-                    "reference_output": None,
-                }
-            )
-        return {"rubrics": rubrics}
+        raise AssertionError(f"unexpected rubric payload: {sorted(payload)}")
 
 
 class _RejectingRouteAParentProvider(_LifecycleRubricProvider):
@@ -327,7 +336,7 @@ def _dependencies(
     filename: str,
 ) -> dict[str, dict[str, Any]]:
     return {
-        str(row["cluster_id"]): dict(row["dependency"])
+        str(row.get("case_id") or row["cluster_id"]): dict(row["dependency"])
         for row in _read_jsonl(layout.artifact_path(stage, filename))
     }
 
@@ -446,8 +455,8 @@ def _build_released_parent(
     page = pipeline.layout.list_review_items(limit=100)
     assert page["counts"] == {
         "trusted": 2,
-        "approved": 0,
-        "pending": expected_pending,
+        "approved": expected_pending,
+        "pending": 0,
         "rejected": 0,
         "held": 0,
         "total": 2 + expected_pending,
@@ -477,7 +486,7 @@ def _build_released_parent(
         inference_dependencies=_dependencies(
             pipeline.layout,
             PipelineStage.LABEL_INFERENCE,
-            "inference_dependencies.jsonl",
+            "case_dependencies.jsonl",
         ),
         synthetic_dependencies=_dependencies(
             pipeline.layout,
@@ -554,36 +563,7 @@ def _run_child(
     return pipeline, rubric, embedding, items
 
 
-def _assert_inferred_review_change_is_cluster_local(
-    parent: _ReleasedParent,
-    child_items: Mapping[tuple[str, str, str], Mapping[str, Any]],
-    *,
-    changed_cluster_id: str,
-    reusable_cluster_id: str,
-) -> None:
-    changed = _tier_cluster_items(
-        child_items,
-        INFERRED_FROM_TRUSTED_FEEDBACK,
-        changed_cluster_id,
-    )
-    reusable = _tier_cluster_items(
-        child_items,
-        INFERRED_FROM_TRUSTED_FEEDBACK,
-        reusable_cluster_id,
-    )
-    assert len(changed) == 1
-    assert len(reusable) == 1
-    assert changed[0]["status"] == "pending"
-    assert changed[0]["inherited_from"] is None
-    assert reusable[0]["status"] == "approved"
-    assert reusable[0]["inherited_from"]["parent_asset_id"] == "v1"
-    parent_changed = parent.review_items[_review_key(changed[0])]
-    parent_reusable = parent.review_items[_review_key(reusable[0])]
-    assert changed[0]["fingerprint"] != parent_changed["fingerprint"]
-    assert reusable[0]["fingerprint"] == parent_reusable["fingerprint"]
-
-
-def _assert_synthetic_reviews_are_newly_pending(
+def _assert_synthetic_reviews_are_newly_approved(
     parent: _ReleasedParent,
     child_items: Mapping[tuple[str, str, str], Mapping[str, Any]],
 ) -> None:
@@ -594,44 +574,48 @@ def _assert_synthetic_reviews_are_newly_pending(
         key: item for key, item in parent.review_items.items() if key[0] == SYNTHETIC_FROM_TRUSTED_RUBRIC
     }
     assert set(child_synthetic) == set(parent_synthetic)
-    assert all(item["status"] == "pending" for item in child_synthetic.values())
+    assert all(item["status"] == "approved" for item in child_synthetic.values())
     assert all(item["inherited_from"] is None for item in child_synthetic.values())
     assert all(
         child_synthetic[key]["fingerprint"] != parent_synthetic[key]["fingerprint"] for key in child_synthetic
     )
 
 
-def test_identical_child_reuses_both_derived_stages_and_inherits_reviews(
+def test_identical_child_regenerates_episode_rubrics_and_inherits_unchanged_reviews(
     tmp_path: Path,
 ) -> None:
-    """Removing extension reuse would make both provider-call assertions fail."""
+    """V3 rebuilds episode rubrics while preserving exact review fingerprints."""
     parent = _build_released_parent(tmp_path)
     child_layout = _baseline_child_layout(tmp_path, parent)
 
     _, rubric, _, child_items = _run_child(child_layout)
 
     assert _clusters_by_route(child_layout) == parent.clusters_by_route
-    assert rubric.stage_six_clusters == []
-    assert rubric.stage_seven_clusters == []
-    assert (
-        _dependencies(
-            child_layout,
-            PipelineStage.LABEL_INFERENCE,
-            "inference_dependencies.jsonl",
-        )
-        == parent.inference_dependencies
+    assert rubric.stage_six_records == ["fa-held", "fa1", "fb1", "ua1", "ub1"]
+    assert set(rubric.stage_seven_clusters) == set(parent.clusters_by_route.values())
+    child_inference = _dependencies(
+        child_layout,
+        PipelineStage.LABEL_INFERENCE,
+        "case_dependencies.jsonl",
     )
-    assert (
-        _dependencies(
-            child_layout,
-            PipelineStage.SYNTHETIC_COVERAGE,
-            "synthetic_dependencies.jsonl",
-        )
-        == parent.synthetic_dependencies
-    )
+    assert set(child_inference) == {*parent.inference_dependencies, "feedback-fa-held"}
+    for case_id, dependency in parent.inference_dependencies.items():
+        assert child_inference[case_id] == dependency
     assert set(child_items) == set(parent.review_items)
-    assert all(item["status"] == "approved" for item in child_items.values())
-    assert all(item["inherited_from"]["parent_asset_id"] == "v1" for item in child_items.values())
+    inferred = [
+        item
+        for (tier, _cluster_id, _case_id), item in child_items.items()
+        if tier == INFERRED_FROM_TRUSTED_FEEDBACK
+    ]
+    synthetic = [
+        item
+        for (tier, _cluster_id, _case_id), item in child_items.items()
+        if tier == SYNTHETIC_FROM_TRUSTED_RUBRIC
+    ]
+    assert all(item["status"] == "approved" for item in inferred)
+    assert all(item["inherited_from"]["parent_asset_id"] == "v1" for item in inferred)
+    assert all(item["status"] == "approved" for item in synthetic)
+    assert all(item["inherited_from"] is None for item in synthetic)
 
 
 def test_stage_seven_reuse_reaches_a_stable_dependency_fixed_point(
@@ -664,7 +648,7 @@ def test_stage_seven_reuse_reaches_a_stable_dependency_fixed_point(
         "synthetic_dependencies.jsonl",
     )
 
-    assert rubric.stage_six_clusters == []
+    assert rubric.stage_six_records == ["fa-held", "fa1", "fb1", "ua1", "ub1"]
     assert rubric.stage_seven_clusters == [cluster_a, cluster_b]
     assert child_dependencies[cluster_b] != parent.synthetic_dependencies[cluster_b]
     child_b_reviews = _tier_cluster_items(
@@ -673,7 +657,7 @@ def test_stage_seven_reuse_reaches_a_stable_dependency_fixed_point(
         cluster_b,
     )
     assert len(child_b_reviews) == 1
-    assert child_b_reviews[0]["status"] == "pending"
+    assert child_b_reviews[0]["status"] == "approved"
     assert child_b_reviews[0]["inherited_from"] is None
 
 
@@ -760,13 +744,13 @@ def test_stage_seven_reuse_preserves_canonical_cross_cluster_filter_order(
 
 @pytest.mark.parametrize(
     "mutation",
-    ["guideline_and_rubric_content", "guideline_support_and_source_membership", "match"],
+    ["guideline_and_rubric_content", "guideline_support_and_source_membership"],
 )
-def test_cluster_local_stage_six_dependency_mutation_regenerates_only_that_cluster(
+def test_full_catalog_mutation_invalidates_every_episode_dependency(
     tmp_path: Path,
     mutation: str,
 ) -> None:
-    """Stable cluster IDs cannot authorize reuse after Stage 6 evidence changes."""
+    """Every episode is bound to the complete split-permitted guideline catalog."""
     parent = _build_released_parent(tmp_path)
     cluster_a = parent.clusters_by_route[ROUTE_A]
     cluster_b = parent.clusters_by_route[ROUTE_B]
@@ -792,9 +776,7 @@ def test_cluster_local_stage_six_dependency_mutation_regenerates_only_that_clust
                 else None
             ),
         )
-        embedding = _LifecycleEmbeddingProvider(
-            drift_route_a_match=mutation == "match",
-        )
+        embedding = _LifecycleEmbeddingProvider()
 
     _, rubric, _, child_items = _run_child(
         child_layout,
@@ -804,7 +786,7 @@ def test_cluster_local_stage_six_dependency_mutation_regenerates_only_that_clust
     child_inference = _dependencies(
         child_layout,
         PipelineStage.LABEL_INFERENCE,
-        "inference_dependencies.jsonl",
+        "case_dependencies.jsonl",
     )
     child_synthetic = _dependencies(
         child_layout,
@@ -813,22 +795,26 @@ def test_cluster_local_stage_six_dependency_mutation_regenerates_only_that_clust
     )
 
     assert _clusters_by_route(child_layout) == parent.clusters_by_route
-    assert rubric.stage_six_clusters == [cluster_a]
-    assert child_inference[cluster_a] != parent.inference_dependencies[cluster_a]
-    assert child_inference[cluster_b] == parent.inference_dependencies[cluster_b]
+    expected_records = (
+        {"fa1", "fa2", "fb1", "ua1", "ub1"}
+        if mutation == "guideline_support_and_source_membership"
+        else {"fa-held", "fa1", "fb1", "ua1", "ub1"}
+    )
+    assert set(rubric.stage_six_records) == expected_records
+    common_cases = set(parent.inference_dependencies) & set(child_inference)
+    assert common_cases
+    assert all(
+        child_inference[case_id] != parent.inference_dependencies[case_id]
+        for case_id in common_cases
+    )
     assert set(rubric.stage_seven_clusters) == {cluster_a, cluster_b}
     assert child_synthetic[cluster_a] != parent.synthetic_dependencies[cluster_a]
     assert child_synthetic[cluster_b] != parent.synthetic_dependencies[cluster_b]
-    _assert_inferred_review_change_is_cluster_local(
-        parent,
-        child_items,
-        changed_cluster_id=cluster_a,
-        reusable_cluster_id=cluster_b,
-    )
-    _assert_synthetic_reviews_are_newly_pending(parent, child_items)
+    assert all(item["status"] == "approved" for item in child_items.values())
+    assert all(item["inherited_from"] is None for item in child_items.values())
 
-    parent_descriptor = parent.inference_dependencies[cluster_a]["descriptor"]
-    child_descriptor = child_inference[cluster_a]["descriptor"]
+    parent_descriptor = parent.inference_dependencies["inferred-ua1"]["descriptor"]
+    child_descriptor = child_inference["inferred-ua1"]["descriptor"]
     if mutation == "guideline_and_rubric_content":
         assert child_descriptor["guideline"] != parent_descriptor["guideline"]
         child_rubric = _dependencies(
@@ -840,15 +826,14 @@ def test_cluster_local_stage_six_dependency_mutation_regenerates_only_that_clust
         assert child_rubric != parent_rubric
         assert "revised complete rubric" in child_rubric["must"][0]
     elif mutation == "guideline_support_and_source_membership":
-        assert child_descriptor["guideline"]["source_record_ids"] == ["fa1", "fa2"]
-        assert child_descriptor["source_members"] != parent_descriptor["source_members"]
-        assert child_descriptor["match"]["trusted_example_count"] == 2
-    else:
-        assert child_descriptor["cluster"] == parent_descriptor["cluster"]
-        assert child_descriptor["guideline"] == parent_descriptor["guideline"]
+        route_a_guideline = next(
+            guideline
+            for guideline in child_descriptor["guideline"]["guidelines"]
+            if guideline["route"] == ROUTE_A
+        )
+        assert route_a_guideline["source_record_ids"] == ["fa1", "fa2"]
+        assert route_a_guideline["support"]["trusted_example_count"] == 2
         assert child_descriptor["source_members"] == parent_descriptor["source_members"]
-        assert child_descriptor["match"]["score"] == 0.8
-        assert parent_descriptor["match"]["score"] == 1.0
 
 
 def test_refreshed_cluster_membership_regenerates_stable_cluster_ids(
@@ -870,21 +855,16 @@ def test_refreshed_cluster_membership_regenerates_stable_cluster_ids(
     child_inference = _dependencies(
         child_layout,
         PipelineStage.LABEL_INFERENCE,
-        "inference_dependencies.jsonl",
+        "case_dependencies.jsonl",
     )
 
     assert _clusters_by_route(child_layout) == parent.clusters_by_route
-    assert set(rubric.stage_six_clusters) == {cluster_a, cluster_b}
+    assert set(rubric.stage_six_records) == {"fa1", "fb1", "ua1", "ua2", "ub1"}
     assert set(rubric.stage_seven_clusters) == {cluster_a, cluster_b}
-    assert child_inference[cluster_a]["descriptor"]["cluster"]["record_ids"] == [
-        "ua1",
-        "ua2",
-    ]
-    assert (
-        child_inference[cluster_a]["descriptor"]["source_members"]
-        != parent.inference_dependencies[cluster_a]["descriptor"]["source_members"]
-    )
-    assert child_inference[cluster_b]["descriptor"] == parent.inference_dependencies[cluster_b]["descriptor"]
+    assert set(child_inference) == {*parent.inference_dependencies, "inferred-ua2"}
+    for case_id, dependency in parent.inference_dependencies.items():
+        assert child_inference[case_id] == dependency
+    assert child_inference["inferred-ua2"]["descriptor"]["cluster"]["record_ids"] == ["ua2"]
     changed = _tier_cluster_items(
         child_items,
         INFERRED_FROM_TRUSTED_FEEDBACK,
@@ -895,21 +875,23 @@ def test_refreshed_cluster_membership_regenerates_stable_cluster_ids(
         INFERRED_FROM_TRUSTED_FEEDBACK,
         cluster_b,
     )
-    assert {str(item["case_id"]) for item in changed} == {
-        "inferred-ua1",
-        "inferred-ua2",
-    }
-    assert all(item["status"] == "pending" for item in changed)
-    assert all(item["inherited_from"] is None for item in changed)
+    assert {str(item["case_id"]) for item in changed} == {"inferred-ua1", "inferred-ua2"}
+    inherited_ua1 = next(item for item in changed if item["case_id"] == "inferred-ua1")
+    new_ua2 = next(item for item in changed if item["case_id"] == "inferred-ua2")
+    assert inherited_ua1["status"] == "approved"
+    assert inherited_ua1["inherited_from"]["parent_asset_id"] == "v1"
+    assert new_ua2["status"] == "approved"
+    assert new_ua2["inherited_from"] is None
     assert len(reusable) == 1
     assert reusable[0]["status"] == "approved"
     assert reusable[0]["inherited_from"]["parent_asset_id"] == "v1"
     parent_ua1 = next(
-        item for (_tier, _cluster, case_id), item in parent.review_items.items() if case_id == "inferred-ua1"
+        item
+        for (_tier, _cluster, case_id), item in parent.review_items.items()
+        if case_id == "inferred-ua1"
     )
-    child_ua1 = next(item for item in changed if item["case_id"] == "inferred-ua1")
-    assert child_ua1["fingerprint"] != parent_ua1["fingerprint"]
-    _assert_synthetic_reviews_are_newly_pending(parent, child_items)
+    assert inherited_ua1["fingerprint"] == parent_ua1["fingerprint"]
+    _assert_synthetic_reviews_are_newly_approved(parent, child_items)
 
 
 @pytest.mark.parametrize("mutation", ["provider_model", "provider_settings", "stage_six_prompt"])
@@ -949,7 +931,7 @@ def test_global_stage_six_dependency_mutation_regenerates_all_clusters(
     child_inference = _dependencies(
         child_layout,
         PipelineStage.LABEL_INFERENCE,
-        "inference_dependencies.jsonl",
+        "case_dependencies.jsonl",
     )
     child_synthetic = _dependencies(
         child_layout,
@@ -957,15 +939,19 @@ def test_global_stage_six_dependency_mutation_regenerates_all_clusters(
         "synthetic_dependencies.jsonl",
     )
     clusters = set(parent.clusters_by_route.values())
+    existing_case_ids = set(parent.inference_dependencies)
 
-    assert set(provider.stage_six_clusters) == clusters
+    assert set(provider.stage_six_records) == {"fa-held", "fa1", "fb1", "ua1", "ub1"}
     assert set(provider.stage_seven_clusters) == clusters
-    assert all(child_inference[item] != parent.inference_dependencies[item] for item in clusters)
+    assert all(
+        child_inference[case_id] != parent.inference_dependencies[case_id]
+        for case_id in existing_case_ids
+    )
     assert all(child_synthetic[item] != parent.synthetic_dependencies[item] for item in clusters)
-    assert all(item["status"] == "pending" for item in child_items.values())
-    for cluster_id in clusters:
-        parent_descriptor = parent.inference_dependencies[cluster_id]["descriptor"]
-        child_descriptor = child_inference[cluster_id]["descriptor"]
+    assert all(item["status"] == "approved" for item in child_items.values())
+    for case_id in existing_case_ids:
+        parent_descriptor = parent.inference_dependencies[case_id]["descriptor"]
+        child_descriptor = child_inference[case_id]["descriptor"]
         if mutation == "provider_model":
             assert child_descriptor["provider"]["provider"] == "extension-lifecycle-v2"
             assert child_descriptor["provider"]["model"] == "extension-lifecycle-rubric-v2"
@@ -1005,7 +991,7 @@ def test_stage_seven_only_mutation_reuses_inference_and_invalidates_synthetic_re
     child_inference = _dependencies(
         child_layout,
         PipelineStage.LABEL_INFERENCE,
-        "inference_dependencies.jsonl",
+        "case_dependencies.jsonl",
     )
     child_synthetic = _dependencies(
         child_layout,
@@ -1014,9 +1000,11 @@ def test_stage_seven_only_mutation_reuses_inference_and_invalidates_synthetic_re
     )
     clusters = set(parent.clusters_by_route.values())
 
-    assert rubric.stage_six_clusters == []
+    assert rubric.stage_six_records == ["fa-held", "fa1", "fb1", "ua1", "ub1"]
     assert set(rubric.stage_seven_clusters) == clusters
-    assert child_inference == parent.inference_dependencies
+    assert set(child_inference) == {*parent.inference_dependencies, "feedback-fa-held"}
+    for case_id, dependency in parent.inference_dependencies.items():
+        assert child_inference[case_id] == dependency
     assert all(child_synthetic[item] != parent.synthetic_dependencies[item] for item in clusters)
     inferred = [
         item
@@ -1032,7 +1020,7 @@ def test_stage_seven_only_mutation_reuses_inference_and_invalidates_synthetic_re
     assert all(item["status"] == "approved" for item in inferred)
     assert all(item["inherited_from"]["parent_asset_id"] == "v1" for item in inferred)
     assert synthetic
-    assert all(item["status"] == "pending" for item in synthetic)
+    assert all(item["status"] == "approved" for item in synthetic)
     assert all(item["inherited_from"] is None for item in synthetic)
     for cluster_id in clusters:
         descriptor = child_synthetic[cluster_id]["descriptor"]

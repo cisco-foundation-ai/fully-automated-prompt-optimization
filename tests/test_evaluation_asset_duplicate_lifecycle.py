@@ -54,6 +54,39 @@ class _DuplicateLifecycleRubricProvider:
         system_prompt: str,
         payload: Mapping[str, Any],
     ) -> dict[str, Any]:
+        if payload.get("mode") == "full_catalog_episode_rubric":
+            guideline_ids = [
+                row["guideline_id"]
+                for row in payload["evaluation_guidelines"]
+            ]
+            reference_output = (
+                self._inferred_reference
+                if self._inferred_reference is not None
+                and payload.get("trusted_feedback") is None
+                else _ACCEPTED_REFERENCE
+            )
+            return {
+                "rubrics": [
+                    {
+                        "record_id": payload["episode"]["record_id"],
+                        "applicable_guideline_ids": guideline_ids,
+                        "provenance": (
+                            "guideline_grounded"
+                            if guideline_ids
+                            else "trace_inferred"
+                        ),
+                        "intent_label": "return the accepted answer",
+                        "confidence": 0.9,
+                        "must": ["Return the canonical accepted answer."],
+                        "must_not": [],
+                        "should": [],
+                        "deterministic_checks": [],
+                        "tool_expectations": {"guidelines": []},
+                        "reference_output": reference_output,
+                        "evidence_pointers": ["episode.user_messages[0]"],
+                    }
+                ]
+            }
         if "records" in payload:
             return {
                 "evidence": [
@@ -362,20 +395,12 @@ def _assert_review_manifests(
         row["case_id"]: row["fingerprint"]
         for row in [*review_page["items"], *review_page["held"]]
     }
-    trusted_cases = [
-        *_read_jsonl(
-            pipeline.layout.artifact_path(
-                PipelineStage.RUBRIC_EXTRACTION,
-                "trusted_cases.jsonl",
-            )
-        ),
-        *_read_jsonl(
-            pipeline.layout.artifact_path(
-                PipelineStage.RUBRIC_EXTRACTION,
-                "protected_trusted_cases.jsonl",
-            )
-        ),
-    ]
+    trusted_cases = _read_jsonl(
+        pipeline.layout.artifact_path(
+            PipelineStage.LABEL_INFERENCE,
+            "trusted_cases.jsonl",
+        )
+    )
     held_ids = {row["case_id"] for row in review_page["held"]}
     expected_inventory = {
         "trusted": sorted(

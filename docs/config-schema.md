@@ -35,10 +35,10 @@ Evaluation configs use the **LangGraph chain** format. The chain is a compiled `
 | `path` | string | yes | — | Literal repository-relative path to one JSONL dataset file |
 
 The evaluation runtime does not resolve catalog pointers or directory aliases.
-For an Evaluation Asset Studio release, use the exact immutable file path from
+For an evaluation-asset release, use the exact immutable file path from
 the asset manifest, for example
 `tenants/<tenant_id>/datasets/evaluation_assets/<asset_id>/generations/sha256-<hash>/test.jsonl`.
-Studio computes that literal path from the explicit repository/invocation base;
+The pipeline computes that literal path from the explicit repository/invocation base;
 CLI and service entry points reject a tenants root outside that base before
 creating or adopting an asset.
 `release.json` identifies the current generation for catalog readers, but it is

@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 
-from src.hephaestus.datasets.intent_assets import IntentCluster, IntentMatch
 from src.hephaestus.evaluation_assets import pipeline as pipeline_module
 from src.hephaestus.evaluation_assets.models import EvaluationAssetConfig, PipelineStage
 from src.hephaestus.evaluation_assets.pipeline import EvaluationAssetPipeline
@@ -36,6 +35,32 @@ class _RecordingRubricProvider:
         self.requests.append(
             {"system_prompt": system_prompt, "payload": copied}
         )
+        if payload.get("mode") == "full_catalog_episode_rubric":
+            guidelines = payload["evaluation_guidelines"]
+            guideline_ids = [row["guideline_id"] for row in guidelines]
+            episode = payload["episode"]
+            return {
+                "rubrics": [
+                    {
+                        "record_id": episode["record_id"],
+                        "applicable_guideline_ids": guideline_ids,
+                        "provenance": (
+                            "guideline_grounded"
+                            if guideline_ids
+                            else "trace_inferred"
+                        ),
+                        "intent_label": "answer",
+                        "confidence": 0.8,
+                        "must": ["Answer the traffic request."],
+                        "must_not": [],
+                        "should": [],
+                        "deterministic_checks": [],
+                        "tool_expectations": {},
+                        "reference_output": None,
+                        "evidence_pointers": ["episode.user_messages[0]"],
+                    }
+                ]
+            }
         if "records" in payload:
             return {
                 "evidence": [
@@ -203,52 +228,6 @@ def test_generated_model_response_rejects_duplicate_identity(
         pipeline_module._indexed_items(response, array_key, identity_key)
 
 
-def test_labeling_queue_marks_non_probability_acquisition_semantics() -> None:
-    """The deterministic queue-size ratio is not presented as a probability."""
-    cluster = IntentCluster(
-        cluster_id="route-a-001",
-        route="route_a",
-        record_ids=["u1"],
-        representative_ids=["u1"],
-        top_terms=["request"],
-    )
-    match = IntentMatch(
-        cluster_id=cluster.cluster_id,
-        status="missing_or_weak_labels",
-        score=0.1,
-        matched_intent_id=None,
-        matched_label=None,
-        cluster_size=1,
-        trusted_example_count=0,
-        trusted_group_count=0,
-        unlabeled_to_trusted_ratio=None,
-        reason="no trusted label",
-    )
-
-    queue = pipeline_module._build_labeling_queue(
-        [cluster],
-        [match],
-        [
-            {
-                "record_id": "u1",
-                "request_id": "request-u1",
-                "group_id": "group-u1",
-                "route": "route_a",
-                "task_type": "route_a",
-                "user_input": "Request",
-            }
-        ],
-        sample_ratio=0.1,
-        max_per_cluster=3,
-    )
-
-    assert queue[0]["acquisition"] == {
-        "purpose": "correctness_label_acquisition",
-        "method": "deterministic_centroid_nearest",
-        "sampling_semantics": "non_probability",
-    }
-
-
 def test_stage_three_isolates_held_out_canaries_and_skips_ineligible_feedback(
     tmp_path: Path,
 ) -> None:
@@ -318,12 +297,9 @@ def test_stage_three_isolates_held_out_canaries_and_skips_ineligible_feedback(
             "feedback_evidence.jsonl",
             "candidate_guidelines.jsonl",
             "evaluation_guidelines.jsonl",
-            "trusted_intents.jsonl",
-            "trusted_cases.jsonl",
             "protected_feedback_evidence.jsonl",
             "protected_candidate_guidelines.jsonl",
             "protected_evaluation_guidelines.jsonl",
-            "protected_trusted_cases.jsonl",
         )
     }
     reusable_text = json.dumps(
@@ -336,21 +312,15 @@ def test_stage_three_isolates_held_out_canaries_and_skips_ineligible_feedback(
     assert {row["record_id"] for row in artifacts["feedback_evidence.jsonl"]} == {
         "train"
     }
-    assert {row["case_id"] for row in artifacts["trusted_cases.jsonl"]} == {
-        "feedback-train"
-    }
     assert {
         row["record_id"]
         for row in artifacts["protected_feedback_evidence.jsonl"]
     } == {"validation", "test", "regression"}
     assert {
-        row["metadata"]["trusted_split"]
-        for row in artifacts["protected_trusted_cases.jsonl"]
+        source_id
+        for row in artifacts["protected_evaluation_guidelines.jsonl"]
+        for source_id in row["source_record_ids"]
     } == {"validation", "test", "regression"}
-    assert all(
-        row["metadata"]["correctness_visibility"] == "protected_held_out"
-        for row in artifacts["protected_trusted_cases.jsonl"]
-    )
     protected_text = json.dumps(
         {
             name: rows
@@ -370,18 +340,18 @@ def test_stage_three_isolates_held_out_canaries_and_skips_ineligible_feedback(
             for key in ("records", "evidence")
             for row in payload.get(key, [])
         }
-        assert visible_ids in (
+        assert not visible_ids or visible_ids in (
             {"train"},
             {"validation"},
             {"test"},
             {"regression"},
-        )
+        ) or all(record_id.startswith("source-") for record_id in visible_ids)
 
 
-def test_held_out_canaries_never_reach_later_authoring_or_ui_previews(
+def test_held_out_canaries_are_isolated_to_their_own_episode_rubrics(
     tmp_path: Path,
 ) -> None:
-    """Protected split-local criteria stay out of every later authoring view."""
+    """Protected criteria never enter clustering, unlabeled, or synthesis inputs."""
     feedback_rows = [
         _row_for_split("train", "train", rationale="RATIONALE-CANARY-train"),
         _row_for_split(
@@ -440,21 +410,20 @@ def test_held_out_canaries_never_reach_later_authoring_or_ui_previews(
     paused = pipeline.run()
 
     assert paused.status == "awaiting_review"
-    later_requests = [
+    synthetic_requests = [
         row
         for row in provider.requests
         if "clusters" in row["payload"]
     ]
-    assert len(later_requests) == 2
+    assert len(synthetic_requests) == 1
     held_out_canaries = {
         f"{field}-CANARY-{split}"
         for split in ("validation", "test", "regression")
         for field in ("USER", "OUTPUT", "RATIONALE")
     }
-    assert len(embedding_provider.payloads) == 2
+    assert len(embedding_provider.payloads) == 1
     embedding_payloads = {
         PipelineStage.INTENT_CLUSTERING: embedding_provider.payloads[0],
-        PipelineStage.COVERAGE_DECISIONS: embedding_provider.payloads[1],
     }
     for stage, payload in embedding_payloads.items():
         payload_text = json.dumps(payload, sort_keys=True)
@@ -463,21 +432,32 @@ def test_held_out_canaries_never_reach_later_authoring_or_ui_previews(
             canary not in payload_text
             for canary in held_out_canaries
         ), stage.value
-    later_payload_text = json.dumps(later_requests, sort_keys=True)
+    later_payload_text = json.dumps(synthetic_requests, sort_keys=True)
     assert all(canary not in later_payload_text for canary in held_out_canaries)
 
-    downstream_text = "\n".join(
-        path.read_text(encoding="utf-8")
-        for stage in (
-            PipelineStage.INTENT_CLUSTERING,
-            PipelineStage.COVERAGE_DECISIONS,
-            PipelineStage.LABEL_INFERENCE,
-            PipelineStage.SYNTHETIC_COVERAGE,
+    rubric_requests = {
+        row["payload"]["episode"]["record_id"]: row["payload"]
+        for row in provider.requests
+        if row["payload"].get("mode") == "full_catalog_episode_rubric"
+    }
+    assert set(rubric_requests) == {
+        "train",
+        "validation",
+        "test",
+        "regression",
+        "unlabeled",
+    }
+    for record_id, payload in rubric_requests.items():
+        payload_text = json.dumps(payload, sort_keys=True)
+        permitted = (
+            {f"{field}-CANARY-{record_id}" for field in ("USER", "OUTPUT", "RATIONALE")}
+            if record_id in {"validation", "test", "regression"}
+            else set()
         )
-        for path in pipeline.layout.stage_directory(stage).rglob("*")
-        if path.is_file() and path.suffix in {".json", ".jsonl", ".md"}
-    )
-    assert all(canary not in downstream_text for canary in held_out_canaries)
+        assert all(
+            canary in permitted or canary not in payload_text
+            for canary in held_out_canaries
+        )
 
     store = TenantStore(tenants_root, repository_base=tmp_path)
     ui_projection = json.dumps(
@@ -487,8 +467,11 @@ def test_held_out_canaries_never_reach_later_authoring_or_ui_previews(
                 "v1",
                 stage.value,
             )
-            for stage in PipelineStage
-            if stage is not PipelineStage.DATASET_SPLITS
+            for stage in (
+                PipelineStage.INTENT_CLUSTERING,
+                PipelineStage.COVERAGE_DECISIONS,
+                PipelineStage.SYNTHETIC_COVERAGE,
+            )
         ],
         sort_keys=True,
     )

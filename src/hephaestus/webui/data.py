@@ -349,6 +349,8 @@ _EVALUATION_STAGE_PATTERNS = {
         "decision_assets/intent_inventory.jsonl",
     ),
     "coverage_decisions": (
+        "stages/05_coverage_decisions/cluster_sampling_metadata.jsonl",
+        # Historical V1/V2 asset paths remain readable.
         "stages/05_coverage_decisions/intent_matches.jsonl",
         "stages/05_coverage_decisions/episode_guideline_candidates.jsonl",
         "stages/05_coverage_decisions/coverage_report.md",
@@ -358,13 +360,18 @@ _EVALUATION_STAGE_PATTERNS = {
         "review_queues/labeling_queue.jsonl",
     ),
     "label_inference": (
+        "stages/06_label_inference/episode_rubrics.jsonl",
+        "stages/06_label_inference/trusted_cases.jsonl",
+        "stages/06_label_inference/inferred_cases.jsonl",
+        "stages/06_label_inference/case_dependencies.jsonl",
+        "stages/06_label_inference/held_rubric_outputs.jsonl",
+        # Historical V1/V2 asset paths remain readable.
         "stages/06_label_inference/inferred_unlabeled_cluster_rubrics.jsonl",
         "stages/06_label_inference/inferred_unlabeled_episode_rubrics.jsonl",
         "stages/06_label_inference/episode_guideline_applicability.jsonl",
         "stages/06_label_inference/inferred_unlabeled_labels.jsonl",
         "stages/06_label_inference/missing_labeled_feedback_clusters.jsonl",
         "stages/06_label_inference/missing_labeled_feedback_report.md",
-        "stages/06_label_inference/inferred_cases.jsonl",
         "stages/06_label_inference/inference_dependencies.jsonl",
         "stages/06_label_inference/held_inference_outputs.jsonl",
         "decision_assets/inferred_unlabeled_cluster_rubrics.jsonl",
@@ -494,44 +501,54 @@ _ARTIFACT_CATALOG = {
         "Previous-to-current cluster continuity after an intent refresh.",
         "Diagnostics",
     ),
+    "cluster_sampling_metadata.jsonl": (
+        "Cluster sampling metadata",
+        "Cluster membership and representatives retained only for batch sampling and analysis.",
+        "Supporting data",
+    ),
     "intent_matches.jsonl": (
-        "Cluster coverage decisions",
-        "Machine-readable trusted-intent match result for every cluster.",
+        "Legacy cluster coverage decisions",
+        "Historical V1/V2 trusted-intent match results.",
         "Supporting data",
     ),
     "episode_guideline_candidates.jsonl": (
-        "Episode guideline candidates",
-        "Bounded cluster-plus-episode retrieval candidates for every trace.",
+        "Legacy episode guideline candidates",
+        "Historical V2 cluster-plus-episode retrieval candidates.",
         "Supporting data",
     ),
     "coverage_report.md": (
-        "Coverage report",
-        "Readable summary of supported clusters and labeling gaps.",
+        "Legacy coverage report",
+        "Historical V1/V2 summary of cluster support and labeling gaps.",
         "Key outputs",
     ),
     "labeling_queue.jsonl": (
-        "Traces to label",
-        "Representative traces sampled from clusters lacking enough trusted evidence.",
+        "Legacy traces-to-label queue",
+        "Historical V1/V2 representative acquisition queue.",
         "Needs attention",
     ),
     "inferred_unlabeled_cluster_rubrics.jsonl": (
-        "Inferred cluster rubrics",
-        "Review-required rubrics inferred for supported clusters.",
+        "Legacy inferred cluster rubrics",
+        "Historical V1/V2 cluster-level rubrics.",
         "Supporting data",
     ),
     "inferred_unlabeled_episode_rubrics.jsonl": (
-        "Inferred episode rubrics",
-        "Review-required rubrics compiled from each episode's applicable guidelines.",
+        "Legacy inferred episode rubrics",
+        "Historical V2 episode rubrics produced after a separate applicability gate.",
+        "Key outputs",
+    ),
+    "episode_rubrics.jsonl": (
+        "Case-specific episode rubrics",
+        "One rubric per feedback or unlabeled episode, with zero or more selected guideline IDs and explicit provenance.",
         "Key outputs",
     ),
     "episode_guideline_applicability.jsonl": (
-        "Episode guideline applicability",
-        "Auditable zero, one, or many guideline decisions for each trace.",
+        "Legacy episode guideline applicability",
+        "Historical V2 standalone guideline decisions.",
         "Key outputs",
     ),
     "inferred_unlabeled_labels.jsonl": (
-        "Inferred trace labels",
-        "Review-required labels attached to real supported traces.",
+        "Legacy inferred trace labels",
+        "Historical V1/V2 labels attached after cluster support checks.",
         "Key outputs",
     ),
     "missing_labeled_feedback_clusters.jsonl": (
@@ -546,12 +563,22 @@ _ARTIFACT_CATALOG = {
     ),
     "inferred_cases.jsonl": (
         "Inferred evaluation cases",
-        "Evaluation cases created from supported real traces.",
+        "Evaluation cases created from real traces after case-specific rubric generation.",
         "Key outputs",
+    ),
+    "case_dependencies.jsonl": (
+        "Case rubric dependencies",
+        "Protected per-episode dependencies over the full permitted guideline catalog, trace, provider, and prompt.",
+        "Diagnostics",
+    ),
+    "held_rubric_outputs.jsonl": (
+        "Held rubric outputs",
+        "Episodes whose generated rubric was not scoreable or whose feedback could not become a trusted case.",
+        "Needs attention",
     ),
     "synthetic_candidates.jsonl": (
         "Generated candidates",
-        "Unfiltered synthetic candidates produced for supported clusters.",
+        "Unfiltered synthetic candidates produced for eligible homogeneous clusters.",
         "Supporting data",
     ),
     "synthetic_cases.jsonl": (
@@ -585,18 +612,18 @@ _ARTIFACT_CATALOG = {
         "Needs attention",
     ),
     "inference_dependencies.jsonl": (
-        "Inference dependencies",
-        "Protected full-content dependency descriptors; previews are disabled.",
+        "Legacy inference dependencies",
+        "Historical V2 cluster/match dependency descriptors.",
         "Diagnostics",
     ),
     "inferred_review_dependencies.jsonl": (
-        "Inferred review dependencies",
-        "Protected per-case dependencies bound to episode applicability decisions.",
+        "Legacy inferred review dependencies",
+        "Historical V2 per-case dependencies bound to standalone applicability decisions.",
         "Diagnostics",
     ),
     "held_inference_outputs.jsonl": (
-        "Held inference outputs",
-        "Protected invalid inference outputs; previews are disabled.",
+        "Legacy held inference outputs",
+        "Historical V2 invalid inference outputs.",
         "Needs attention",
     ),
     "synthetic_dependencies.jsonl": (
@@ -739,6 +766,10 @@ _PROTECTED_STAGE_THREE_ARTIFACTS = frozenset(
 
 _PROTECTED_DERIVED_ARTIFACTS = frozenset(
     {
+        "episode_rubrics.jsonl",
+        "trusted_cases.jsonl",
+        "case_dependencies.jsonl",
+        "held_rubric_outputs.jsonl",
         "inferred_unlabeled_cluster_rubrics.jsonl",
         "inferred_unlabeled_episode_rubrics.jsonl",
         "episode_guideline_applicability.jsonl",
