@@ -1,0 +1,866 @@
+{
+  "schema_version": "tau3-fafo-split-v2",
+  "status": "frozen_for_baseline_v1",
+  "freeze_id": "tau3-retail-fafo-baseline-v1",
+  "frozen_on": "2026-08-26",
+  "benchmark": "tau3-bench",
+  "repository": "https://github.com/sierra-research/tau2-bench",
+  "release": "v1.0.1",
+  "release_commit": "fc0055dc4e0a316c3f83133267fbd6faaa770992",
+  "domain": "retail",
+  "task_count": 114,
+  "scenario_family_count": 73,
+  "split_seed": 20260826,
+  "target_fractions": {
+    "development": 0.8,
+    "final_holdout": 0.2
+  },
+  "source_files": {
+    "tasks": {
+      "path_at_release": "data/tau2/domains/retail/tasks.json",
+      "sha256": "8e03ebce7901bd6218e7a7dc3105faa9324091a68058f7fe61c65262868812e8"
+    },
+    "policy": {
+      "path_at_release": "data/tau2/domains/retail/policy.md",
+      "sha256": "2c9652afbce57d6e087768d37cda64d31c53d50b3e3225cfdb791bac66466467"
+    }
+  },
+  "split_method": {
+    "unit": "scenario_family_id",
+    "family_method": "manual semantic grouping with lexical-variant review",
+    "assignment_method": "deterministic seeded greedy balance over task count, native consequential-action topics, and task complexity",
+    "native_tau_train_test_split_reused": false
+  },
+  "fafo_internal_split": {
+    "scope": "development partition only",
+    "authority": "FAFO evaluation-asset pipeline",
+    "required_source_group_id": "scenario_family_id",
+    "trusted_feedback_expected_fractions": {
+      "regression": 0.2,
+      "train": 0.48,
+      "validation": 0.16,
+      "test": 0.16
+    },
+    "unanchored_approved_derived_expected_fractions": {
+      "train": 0.6,
+      "validation": 0.2,
+      "test": 0.2
+    },
+    "note": "Expected fractions follow FAFO's deterministic hash intervals; actual counts vary with whole split groups. Derived cases attached to trusted authority retain that early split."
+  },
+  "leakage_audit": {
+    "family_cross_partition_count": 0,
+    "cross_partition_family_ids": [],
+    "all_114_task_ids_assigned_exactly_once": true
+  },
+  "partitions": {
+    "development": {
+      "task_count": 92,
+      "task_fraction": 0.807,
+      "family_count": 59,
+      "task_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        23,
+        24,
+        25,
+        26,
+        27,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        59,
+        62,
+        63,
+        67,
+        68,
+        70,
+        71,
+        72,
+        73,
+        74,
+        75,
+        76,
+        77,
+        78,
+        79,
+        81,
+        82,
+        83,
+        84,
+        85,
+        86,
+        87,
+        88,
+        90,
+        91,
+        92,
+        93,
+        94,
+        95,
+        96,
+        97,
+        100,
+        101,
+        102,
+        105,
+        106,
+        107,
+        108,
+        109,
+        110,
+        111,
+        112,
+        113
+      ],
+      "scenario_family_ids": [
+        "retail_f001",
+        "retail_f002",
+        "retail_f003",
+        "retail_f004",
+        "retail_f006",
+        "retail_f007",
+        "retail_f008",
+        "retail_f009",
+        "retail_f010",
+        "retail_f011",
+        "retail_f012",
+        "retail_f014",
+        "retail_f015",
+        "retail_f016",
+        "retail_f017",
+        "retail_f019",
+        "retail_f020",
+        "retail_f021",
+        "retail_f022",
+        "retail_f025",
+        "retail_f026",
+        "retail_f027",
+        "retail_f028",
+        "retail_f029",
+        "retail_f030",
+        "retail_f031",
+        "retail_f032",
+        "retail_f033",
+        "retail_f034",
+        "retail_f035",
+        "retail_f037",
+        "retail_f039",
+        "retail_f042",
+        "retail_f044",
+        "retail_f045",
+        "retail_f046",
+        "retail_f047",
+        "retail_f048",
+        "retail_f049",
+        "retail_f050",
+        "retail_f051",
+        "retail_f052",
+        "retail_f054",
+        "retail_f055",
+        "retail_f056",
+        "retail_f057",
+        "retail_f059",
+        "retail_f060",
+        "retail_f061",
+        "retail_f062",
+        "retail_f064",
+        "retail_f065",
+        "retail_f067",
+        "retail_f068",
+        "retail_f069",
+        "retail_f070",
+        "retail_f071",
+        "retail_f072",
+        "retail_f073"
+      ],
+      "complexity_counts": {
+        "compound": 37,
+        "read_only_or_refusal": 6,
+        "single_consequential_action": 49
+      },
+      "native_action_topic_counts": {
+        "cancel": 14,
+        "exchange": 24,
+        "modify_order_address": 17,
+        "modify_order_items": 28,
+        "modify_order_payment": 1,
+        "modify_user_address": 8,
+        "read_only_or_refusal": 6,
+        "return": 25,
+        "transfer": 3
+      }
+    },
+    "final_holdout": {
+      "task_count": 22,
+      "task_fraction": 0.193,
+      "family_count": 14,
+      "task_ids": [
+        12,
+        13,
+        14,
+        22,
+        28,
+        36,
+        37,
+        38,
+        39,
+        58,
+        60,
+        61,
+        64,
+        65,
+        66,
+        69,
+        80,
+        89,
+        98,
+        99,
+        103,
+        104
+      ],
+      "scenario_family_ids": [
+        "retail_f005",
+        "retail_f013",
+        "retail_f018",
+        "retail_f023",
+        "retail_f024",
+        "retail_f036",
+        "retail_f038",
+        "retail_f040",
+        "retail_f041",
+        "retail_f043",
+        "retail_f053",
+        "retail_f058",
+        "retail_f063",
+        "retail_f066"
+      ],
+      "complexity_counts": {
+        "compound": 8,
+        "read_only_or_refusal": 1,
+        "single_consequential_action": 13
+      },
+      "native_action_topic_counts": {
+        "cancel": 4,
+        "exchange": 5,
+        "modify_order_address": 3,
+        "modify_order_items": 7,
+        "modify_user_address": 2,
+        "read_only_or_refusal": 1,
+        "return": 6,
+        "transfer": 1
+      }
+    }
+  },
+  "task_assignments": [
+    {
+      "task_id": 0,
+      "scenario_family_id": "retail_f001",
+      "partition": "development"
+    },
+    {
+      "task_id": 1,
+      "scenario_family_id": "retail_f001",
+      "partition": "development"
+    },
+    {
+      "task_id": 2,
+      "scenario_family_id": "retail_f002",
+      "partition": "development"
+    },
+    {
+      "task_id": 3,
+      "scenario_family_id": "retail_f002",
+      "partition": "development"
+    },
+    {
+      "task_id": 4,
+      "scenario_family_id": "retail_f002",
+      "partition": "development"
+    },
+    {
+      "task_id": 5,
+      "scenario_family_id": "retail_f003",
+      "partition": "development"
+    },
+    {
+      "task_id": 6,
+      "scenario_family_id": "retail_f003",
+      "partition": "development"
+    },
+    {
+      "task_id": 7,
+      "scenario_family_id": "retail_f003",
+      "partition": "development"
+    },
+    {
+      "task_id": 8,
+      "scenario_family_id": "retail_f003",
+      "partition": "development"
+    },
+    {
+      "task_id": 9,
+      "scenario_family_id": "retail_f003",
+      "partition": "development"
+    },
+    {
+      "task_id": 10,
+      "scenario_family_id": "retail_f004",
+      "partition": "development"
+    },
+    {
+      "task_id": 11,
+      "scenario_family_id": "retail_f004",
+      "partition": "development"
+    },
+    {
+      "task_id": 12,
+      "scenario_family_id": "retail_f005",
+      "partition": "final_holdout"
+    },
+    {
+      "task_id": 13,
+      "scenario_family_id": "retail_f005",
+      "partition": "final_holdout"
+    },
+    {
+      "task_id": 14,
+      "scenario_family_id": "retail_f005",
+      "partition": "final_holdout"
+    },
+    {
+      "task_id": 15,
+      "scenario_family_id": "retail_f006",
+      "partition": "development"
+    },
+    {
+      "task_id": 16,
+      "scenario_family_id": "retail_f007",
+      "partition": "development"
+    },
+    {
+      "task_id": 17,
+      "scenario_family_id": "retail_f008",
+      "partition": "development"
+    },
+    {
+      "task_id": 18,
+      "scenario_family_id": "retail_f009",
+      "partition": "development"
+    },
+    {
+      "task_id": 19,
+      "scenario_family_id": "retail_f010",
+      "partition": "development"
+    },
+    {
+      "task_id": 20,
+      "scenario_family_id": "retail_f011",
+      "partition": "development"
+    },
+    {
+      "task_id": 21,
+      "scenario_family_id": "retail_f012",
+      "partition": "development"
+    },
+    {
+      "task_id": 22,
+      "scenario_family_id": "retail_f013",
+      "partition": "final_holdout"
+    },
+    {
+      "task_id": 23,
+      "scenario_family_id": "retail_f014",
+      "partition": "development"
+    },
+    {
+      "task_id": 24,
+      "scenario_family_id": "retail_f015",
+      "partition": "development"
+    },
+    {
+      "task_id": 25,
+      "scenario_family_id": "retail_f016",
+      "partition": "development"
+    },
+    {
+      "task_id": 26,
+      "scenario_family_id": "retail_f016",
+      "partition": "development"
+    },
+    {
+      "task_id": 27,
+      "scenario_family_id": "retail_f017",
+      "partition": "development"
+    },
+    {
+      "task_id": 28,
+      "scenario_family_id": "retail_f018",
+      "partition": "final_holdout"
+    },
+    {
+      "task_id": 29,
+      "scenario_family_id": "retail_f019",
+      "partition": "development"
+    },
+    {
+      "task_id": 30,
+      "scenario_family_id": "retail_f020",
+      "partition": "development"
+    },
+    {
+      "task_id": 31,
+      "scenario_family_id": "retail_f020",
+      "partition": "development"
+    },
+    {
+      "task_id": 32,
+      "scenario_family_id": "retail_f020",
+      "partition": "development"
+    },
+    {
+      "task_id": 33,
+      "scenario_family_id": "retail_f021",
+      "partition": "development"
+    },
+    {
+      "task_id": 34,
+      "scenario_family_id": "retail_f021",
+      "partition": "development"
+    },
+    {
+      "task_id": 35,
+      "scenario_family_id": "retail_f022",
+      "partition": "development"
+    },
+    {
+      "task_id": 36,
+      "scenario_family_id": "retail_f023",
+      "partition": "final_holdout"
+    },
+    {
+      "task_id": 37,
+      "scenario_family_id": "retail_f023",
+      "partition": "final_holdout"
+    },
+    {
+      "task_id": 38,
+      "scenario_family_id": "retail_f023",
+      "partition": "final_holdout"
+    },
+    {
+      "task_id": 39,
+      "scenario_family_id": "retail_f024",
+      "partition": "final_holdout"
+    },
+    {
+      "task_id": 40,
+      "scenario_family_id": "retail_f025",
+      "partition": "development"
+    },
+    {
+      "task_id": 41,
+      "scenario_family_id": "retail_f026",
+      "partition": "development"
+    },
+    {
+      "task_id": 42,
+      "scenario_family_id": "retail_f026",
+      "partition": "development"
+    },
+    {
+      "task_id": 43,
+      "scenario_family_id": "retail_f027",
+      "partition": "development"
+    },
+    {
+      "task_id": 44,
+      "scenario_family_id": "retail_f028",
+      "partition": "development"
+    },
+    {
+      "task_id": 45,
+      "scenario_family_id": "retail_f029",
+      "partition": "development"
+    },
+    {
+      "task_id": 46,
+      "scenario_family_id": "retail_f029",
+      "partition": "development"
+    },
+    {
+      "task_id": 47,
+      "scenario_family_id": "retail_f029",
+      "partition": "development"
+    },
+    {
+      "task_id": 48,
+      "scenario_family_id": "retail_f029",
+      "partition": "development"
+    },
+    {
+      "task_id": 49,
+      "scenario_family_id": "retail_f030",
+      "partition": "development"
+    },
+    {
+      "task_id": 50,
+      "scenario_family_id": "retail_f031",
+      "partition": "development"
+    },
+    {
+      "task_id": 51,
+      "scenario_family_id": "retail_f032",
+      "partition": "development"
+    },
+    {
+      "task_id": 52,
+      "scenario_family_id": "retail_f032",
+      "partition": "development"
+    },
+    {
+      "task_id": 53,
+      "scenario_family_id": "retail_f033",
+      "partition": "development"
+    },
+    {
+      "task_id": 54,
+      "scenario_family_id": "retail_f034",
+      "partition": "development"
+    },
+    {
+      "task_id": 55,
+      "scenario_family_id": "retail_f034",
+      "partition": "development"
+    },
+    {
+      "task_id": 56,
+      "scenario_family_id": "retail_f035",
+      "partition": "development"
+    },
+    {
+      "task_id": 57,
+      "scenario_family_id": "retail_f035",
+      "partition": "development"
+    },
+    {
+      "task_id": 58,
+      "scenario_family_id": "retail_f036",
+      "partition": "final_holdout"
+    },
+    {
+      "task_id": 59,
+      "scenario_family_id": "retail_f037",
+      "partition": "development"
+    },
+    {
+      "task_id": 60,
+      "scenario_family_id": "retail_f038",
+      "partition": "final_holdout"
+    },
+    {
+      "task_id": 61,
+      "scenario_family_id": "retail_f038",
+      "partition": "final_holdout"
+    },
+    {
+      "task_id": 62,
+      "scenario_family_id": "retail_f039",
+      "partition": "development"
+    },
+    {
+      "task_id": 63,
+      "scenario_family_id": "retail_f039",
+      "partition": "development"
+    },
+    {
+      "task_id": 64,
+      "scenario_family_id": "retail_f040",
+      "partition": "final_holdout"
+    },
+    {
+      "task_id": 65,
+      "scenario_family_id": "retail_f041",
+      "partition": "final_holdout"
+    },
+    {
+      "task_id": 66,
+      "scenario_family_id": "retail_f041",
+      "partition": "final_holdout"
+    },
+    {
+      "task_id": 67,
+      "scenario_family_id": "retail_f042",
+      "partition": "development"
+    },
+    {
+      "task_id": 68,
+      "scenario_family_id": "retail_f042",
+      "partition": "development"
+    },
+    {
+      "task_id": 69,
+      "scenario_family_id": "retail_f043",
+      "partition": "final_holdout"
+    },
+    {
+      "task_id": 70,
+      "scenario_family_id": "retail_f044",
+      "partition": "development"
+    },
+    {
+      "task_id": 71,
+      "scenario_family_id": "retail_f045",
+      "partition": "development"
+    },
+    {
+      "task_id": 72,
+      "scenario_family_id": "retail_f045",
+      "partition": "development"
+    },
+    {
+      "task_id": 73,
+      "scenario_family_id": "retail_f046",
+      "partition": "development"
+    },
+    {
+      "task_id": 74,
+      "scenario_family_id": "retail_f047",
+      "partition": "development"
+    },
+    {
+      "task_id": 75,
+      "scenario_family_id": "retail_f048",
+      "partition": "development"
+    },
+    {
+      "task_id": 76,
+      "scenario_family_id": "retail_f049",
+      "partition": "development"
+    },
+    {
+      "task_id": 77,
+      "scenario_family_id": "retail_f050",
+      "partition": "development"
+    },
+    {
+      "task_id": 78,
+      "scenario_family_id": "retail_f051",
+      "partition": "development"
+    },
+    {
+      "task_id": 79,
+      "scenario_family_id": "retail_f052",
+      "partition": "development"
+    },
+    {
+      "task_id": 80,
+      "scenario_family_id": "retail_f053",
+      "partition": "final_holdout"
+    },
+    {
+      "task_id": 81,
+      "scenario_family_id": "retail_f054",
+      "partition": "development"
+    },
+    {
+      "task_id": 82,
+      "scenario_family_id": "retail_f055",
+      "partition": "development"
+    },
+    {
+      "task_id": 83,
+      "scenario_family_id": "retail_f055",
+      "partition": "development"
+    },
+    {
+      "task_id": 84,
+      "scenario_family_id": "retail_f055",
+      "partition": "development"
+    },
+    {
+      "task_id": 85,
+      "scenario_family_id": "retail_f056",
+      "partition": "development"
+    },
+    {
+      "task_id": 86,
+      "scenario_family_id": "retail_f056",
+      "partition": "development"
+    },
+    {
+      "task_id": 87,
+      "scenario_family_id": "retail_f056",
+      "partition": "development"
+    },
+    {
+      "task_id": 88,
+      "scenario_family_id": "retail_f057",
+      "partition": "development"
+    },
+    {
+      "task_id": 89,
+      "scenario_family_id": "retail_f058",
+      "partition": "final_holdout"
+    },
+    {
+      "task_id": 90,
+      "scenario_family_id": "retail_f059",
+      "partition": "development"
+    },
+    {
+      "task_id": 91,
+      "scenario_family_id": "retail_f060",
+      "partition": "development"
+    },
+    {
+      "task_id": 92,
+      "scenario_family_id": "retail_f060",
+      "partition": "development"
+    },
+    {
+      "task_id": 93,
+      "scenario_family_id": "retail_f061",
+      "partition": "development"
+    },
+    {
+      "task_id": 94,
+      "scenario_family_id": "retail_f061",
+      "partition": "development"
+    },
+    {
+      "task_id": 95,
+      "scenario_family_id": "retail_f061",
+      "partition": "development"
+    },
+    {
+      "task_id": 96,
+      "scenario_family_id": "retail_f062",
+      "partition": "development"
+    },
+    {
+      "task_id": 97,
+      "scenario_family_id": "retail_f062",
+      "partition": "development"
+    },
+    {
+      "task_id": 98,
+      "scenario_family_id": "retail_f063",
+      "partition": "final_holdout"
+    },
+    {
+      "task_id": 99,
+      "scenario_family_id": "retail_f063",
+      "partition": "final_holdout"
+    },
+    {
+      "task_id": 100,
+      "scenario_family_id": "retail_f064",
+      "partition": "development"
+    },
+    {
+      "task_id": 101,
+      "scenario_family_id": "retail_f065",
+      "partition": "development"
+    },
+    {
+      "task_id": 102,
+      "scenario_family_id": "retail_f065",
+      "partition": "development"
+    },
+    {
+      "task_id": 103,
+      "scenario_family_id": "retail_f066",
+      "partition": "final_holdout"
+    },
+    {
+      "task_id": 104,
+      "scenario_family_id": "retail_f066",
+      "partition": "final_holdout"
+    },
+    {
+      "task_id": 105,
+      "scenario_family_id": "retail_f067",
+      "partition": "development"
+    },
+    {
+      "task_id": 106,
+      "scenario_family_id": "retail_f068",
+      "partition": "development"
+    },
+    {
+      "task_id": 107,
+      "scenario_family_id": "retail_f069",
+      "partition": "development"
+    },
+    {
+      "task_id": 108,
+      "scenario_family_id": "retail_f070",
+      "partition": "development"
+    },
+    {
+      "task_id": 109,
+      "scenario_family_id": "retail_f071",
+      "partition": "development"
+    },
+    {
+      "task_id": 110,
+      "scenario_family_id": "retail_f071",
+      "partition": "development"
+    },
+    {
+      "task_id": 111,
+      "scenario_family_id": "retail_f072",
+      "partition": "development"
+    },
+    {
+      "task_id": 112,
+      "scenario_family_id": "retail_f072",
+      "partition": "development"
+    },
+    {
+      "task_id": 113,
+      "scenario_family_id": "retail_f073",
+      "partition": "development"
+    }
+  ]
+}

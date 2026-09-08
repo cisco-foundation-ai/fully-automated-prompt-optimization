@@ -1,0 +1,75 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 55a9d9c..4b80c1e 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -33,6 +33,7 @@ dependencies = [
+     "requests>=2.31.0",
+     "numpy>=1.24.0",
+     "httpx>=0.24.0",
++    "truststore==0.10.4",
+ ]
+
+ [project.optional-dependencies]
+diff --git a/src/tau2/utils/llm_utils.py b/src/tau2/utils/llm_utils.py
+index e9d8156..9d25483 100644
+--- a/src/tau2/utils/llm_utils.py
++++ b/src/tau2/utils/llm_utils.py
+@@ -10,6 +10,13 @@ from datetime import datetime
+ from pathlib import Path
+ from typing import Any, Optional
+
++try:
++    import truststore
++
++    truststore.inject_into_ssl()
++except ImportError:
++    pass
++
+ import httpx
+ import litellm
+ from litellm import completion, completion_cost
+diff --git a/uv.lock b/uv.lock
+index 09f0b4a..d8c3296 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -2741,7 +2741,7 @@ wheels = [
+
+ [[package]]
+ name = "tau2"
+-version = "1.0.0"
++version = "1.0.1"
+ source = { editable = "." }
+ dependencies = [
+     { name = "addict" },
+@@ -2761,6 +2761,7 @@ dependencies = [
+     { name = "tabulate" },
+     { name = "tenacity" },
+     { name = "toml" },
++    { name = "truststore" },
+     { name = "typer" },
+     { name = "uvicorn" },
+ ]
+@@ -2882,6 +2883,7 @@ requires-dist = [
+     { name = "tenacity", specifier = ">=9.0.0" },
+     { name = "toml", specifier = ">=0.10.2" },
+     { name = "tqdm", marker = "extra == 'voice'", specifier = ">=4.0" },
++    { name = "truststore", specifier = "==0.10.4" },
+     { name = "typer", specifier = ">=0.12.5" },
+     { name = "uvicorn", specifier = ">=0.34.0" },
+     { name = "websockets", marker = "extra == 'voice'", specifier = ">=13.0" },
+@@ -2985,6 +2987,15 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/d0/30/dc54f88dd4a2b5dc8a0279bdd7270e735851848b762aeb1c1184ed1f6b14/tqdm-4.67.1-py3-none-any.whl", hash = "sha256:26445eca388f82e72884e0d580d5464cd801a3ea01e63e5601bdff9ba6a48de2", size = 78540, upload-time = "2024-11-24T20:12:19.698Z" },
+ ]
+
++[[package]]
++name = "truststore"
++version = "0.10.4"
++source = { registry = "https://pypi.org/simple" }
++sdist = { url = "https://files.pythonhosted.org/packages/53/a3/1585216310e344e8102c22482f6060c7a6ea0322b63e026372e6dcefcfd6/truststore-0.10.4.tar.gz", hash = "sha256:9d91bd436463ad5e4ee4aba766628dd6cd7010cf3e2461756b3303710eebc301", size = 26169, upload-time = "2025-08-12T18:49:02.73Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/19/97/56608b2249fe206a67cd573bc93cd9896e1efb9e98bce9c163bcdc704b88/truststore-0.10.4-py3-none-any.whl", hash = "sha256:adaeaecf1cbb5f4de3b1959b42d41f6fab57b2b1666adb59e89cb0b53361d981", size = 18660, upload-time = "2025-08-12T18:49:01.46Z" },
++]
++
+ [[package]]
+ name = "typer"
+ version = "0.20.0"

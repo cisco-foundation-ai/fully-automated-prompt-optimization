@@ -1,0 +1,13 @@
+version: 1
+tenant_id: tau3_retail
+canonical_docs:
+  tenant_profile: docs/tenant-profile.md
+  data_contract: docs/data-contract.md
+  prompt_contract: docs/prompt-contract.md
+  eval_operations: docs/eval-operations.md
+  iteration_playbook: docs/iteration-playbook.md
+  change_log: docs/change-log.md
+  recipe: docs/recipe.md
+  experiment_report: docs/v3-experiment-report.md
+  iteration_memory: docs/iteration-memory.jsonl
+last_validated: 2026-09-08
