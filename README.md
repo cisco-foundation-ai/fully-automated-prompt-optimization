@@ -157,6 +157,32 @@ optimization. It can be the first step in creating a tenant: the pipeline does
 not require an existing chain, prompt, config, adapter, or legacy
 `tenants/<tenant_id>/datasets/` directory.
 
+FAFO V3 is the final evaluation-asset workflow:
+
+```mermaid
+flowchart LR
+    A[Trusted feedback episodes] --> P[Validate, redact, and preassign splits]
+    U[Unlabeled episodes] --> P
+    P --> G[Extract and consolidate evidence-backed guidelines]
+    P --> C[Cluster user-message intents]
+    G --> R[One full-catalog rubric call per episode]
+    C -. sampling metadata .-> R
+    R --> V[Fingerprint and review derived cases]
+    V --> D[Finalize immutable dataset splits]
+    D --> O[FAPO optimization and held-out evaluation]
+```
+
+Guidelines come only from eligible trusted training feedback correlated with
+the complete trace, including tool activity and outcomes. For every trusted or
+unlabeled episode, one rubric-generation call considers all guidelines allowed
+for that split, selects zero, one, or many, and writes a case-specific rubric.
+When none applies, the rubric is explicitly trace-inferred. Intent clusters are
+retained for sampling and analysis, not correctness or guideline matching.
+See the
+[comprehensive FAFO V3 data-pipeline guide](docs/processes/feedback-dataset-flow.md)
+for the trust model, stage contracts, artifacts, split isolation, scaling, and
+operational workflow.
+
 For the historical `ce7f832f` audit, successor remediation checklist, and
 remaining research gates, see the
 [Evaluation Asset Studio stress test](docs/processes/evaluation-asset-studio-stress-test.md).
@@ -439,8 +465,7 @@ python -m hephaestus.cli assets create \
   --unlabeled <unlabeled.jsonl> \
   --rubric-model gpt-5.5 \
   --embedding-model text-embedding-3-small \
-  --clusters 20 \
-  --match-threshold 0.6
+  --clusters 20
 
 python -m hephaestus.cli assets run \
   --tenant <tenant_id> \
@@ -452,8 +477,10 @@ python -m hephaestus.cli assets status \
 ```
 
 The first `assets run` returns after Stage 7 with `status: awaiting_review`.
-List the current bounded review page and retain both its
-`review_set_fingerprint` and `decision_set_fingerprint`:
+Scoreable inferred cases and mechanically accepted synthetic cases are
+automatically approved by the V3 pipeline. List the bounded review snapshot to
+inspect approvals and holds, and retain its `review_set_fingerprint` and
+`decision_set_fingerprint`:
 
 ```bash
 python -m hephaestus.cli assets reviews list \
@@ -467,8 +494,9 @@ never exceeds `--limit`. The limit must be from 1 through 100. The `--status`
 option accepts `pending`, `approved`, `rejected`, or `held` and filters that
 projection before pagination.
 
-Approve or reject an eligible item using both its exact case fingerprint and
-the current review-set fingerprint:
+The `approve` and `reject` commands remain available for pending items in
+compatible or historical workflows. Each decision must use both the item's
+exact case fingerprint and the current review-set fingerprint:
 
 ```bash
 python -m hephaestus.cli assets reviews approve \
@@ -480,10 +508,10 @@ python -m hephaestus.cli assets reviews approve \
   --review-set <sha256:review_set_fingerprint>
 ```
 
-Use `assets reviews reject` with the same arguments for a rejection. Re-list
-after the final decision to obtain the new decision-set fingerprint, then
-explicitly freeze that exact item/dependency and resolved-decision snapshot and
-synchronously build/publish Stage 8:
+Use `assets reviews reject` with the same arguments for a rejection. For normal
+V3 runs, inspect the automatic decisions and holds, then explicitly freeze the
+exact item/dependency and resolved-decision snapshot and synchronously
+build/publish Stage 8:
 
 ```bash
 python -m hephaestus.cli assets reviews finalize \
@@ -546,14 +574,14 @@ python -m hephaestus.cli assets run \
   --tenant <tenant_id> \
   --asset-id v1 \
   --clusters 12 \
-  --match-threshold 0.5 \
   --embedding-model tfidf
 ```
 
 Split-seed changes restart at Stage 2 because trusted assignment precedes
 authoring. Guideline-model changes restart at Stage 3; embedding or
-cluster-count changes at Stage 4; matching changes at Stage 5; and synthetic
-settings at Stage 7. Each revision is prepared in the recovery journal,
+cluster-count changes at Stage 4; and synthetic settings at Stage 7. Legacy
+matching/support options remain readable for older configurations but do not
+drive V3 rubric generation. Each revision is prepared in the recovery journal,
 then applied to `config.json`, `pipeline_state.json`, `config_history.jsonl`,
 and `events.jsonl`; stale downstream outputs are cleaned only after their state
 and receipt references are nonauthoritative.
@@ -1280,6 +1308,7 @@ The companion paper is the canonical reference for the concepts, the GEPA compar
 | [docs/tenant-docs-contract.md](docs/tenant-docs-contract.md) | Required documentation for each tenant |
 | [docs/style-guide.md](docs/style-guide.md) | Coding standards (Python 3.10+, pytest, type hints) |
 | [docs/github-hygiene.md](docs/github-hygiene.md) | Commit, branch, and PR conventions |
+| [docs/processes/feedback-dataset-flow.md](docs/processes/feedback-dataset-flow.md) | Comprehensive FAFO V3 evaluation-asset data pipeline |
 | [docs/processes/prompt-iteration-loop.md](docs/processes/prompt-iteration-loop.md) | Optimization system architecture reference |
 | [docs/processes/chain-variant-conventions.md](docs/processes/chain-variant-conventions.md) | Standards for creating and naming chain variants |
 | [docs/prompting-guides/](docs/prompting-guides/) | Prompting best practices, agentic chain patterns, and evaluation benchmarks |
