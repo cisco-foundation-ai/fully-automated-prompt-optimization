@@ -113,11 +113,12 @@ class OpenAIRubricProvider:
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is not set.")
-        try:
-            import truststore
-            truststore.inject_into_ssl()
-        except ImportError:
-            pass
+        # Optional local truststore workaround; intentionally disabled.
+        # try:
+        #     import truststore
+        #     truststore.inject_into_ssl()
+        # except ImportError:
+        #     pass
         return OpenAI(
             api_key=api_key,
             timeout=self.timeout_seconds,
