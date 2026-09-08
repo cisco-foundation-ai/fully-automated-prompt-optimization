@@ -6,9 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # V3 Prompt Lineages
 
-These are the exact Tau agent instructions evaluated in the recorded FAFO V3
-experiment. Files use `.txt` so a repository comment is never injected into the
-model prompt.
+These files preserve the exact Tau agent instructions evaluated in the recorded
+FAFO V3 experiment. Every variant includes repository license metadata; the Tau
+launchers remove that exact header before sending the instruction to the model.
 
 | Arm | Sequence | Winner |
 |---|---|---|
@@ -17,7 +17,9 @@ model prompt.
 | Staged inferred | `v3/staged/inferred/s000.txt` through `s016.txt` | `s015.txt`; S016 was interrupted |
 | Staged trusted | `v3/staged/trusted/t000.txt` through `t004.txt` | `t001.txt` |
 
-Each file is immutable experiment evidence. Start a new lineage for a new Tau
-revision, model, rubric asset, or dataset membership. See
+The recorded hashes cover the license-header-stripped prompt bodies, so they
+remain comparable to the original experiment artifacts. Each file is immutable
+experiment evidence. Start a new lineage for a new Tau revision, model, rubric
+asset, or dataset membership. See
 [`docs/prompt-contract.md`](../docs/prompt-contract.md) and
 [`docs/iteration-memory.jsonl`](../docs/iteration-memory.jsonl) for provenance.

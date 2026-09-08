@@ -26,8 +26,8 @@ SPDX-License-Identifier: Apache-2.0
    pattern; do not copy case facts, identifiers, answers, or rubric wording.
 6. Run the independent variant review.
 7. Evaluate every case in the arm's fixed training view.
-8. Record prompt hash, parent, hypothesis, counts, agent inferences, passes,
-   critical violations, mean, decision, and plateau state in
+8. Record the license-header-stripped prompt-body hash, parent, hypothesis,
+   counts, agent inferences, passes, critical violations, mean, decision, and plateau state in
    `iteration-memory.jsonl` and `change-log.md`.
 9. At plateau, evaluate the declared candidate set on validation and freeze the
    winner before test, regression, or native holdout.

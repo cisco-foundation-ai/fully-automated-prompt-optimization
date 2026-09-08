@@ -20,11 +20,27 @@ from tau2.runner.helpers import get_tasks
 
 AGENT_MODEL = "gpt-4.1-2025-04-14"
 USER_MODEL = "gpt-4.1-2025-04-14"
+_PROMPT_LICENSE_HEADER = (
+    "# Copyright 2026 Cisco Systems, Inc. and its affiliates\n"
+    "#\n"
+    "# SPDX-License-Identifier: Apache-2.0\n\n"
+)
 
 
 def _sha256(path: Path) -> str:
     """Return the SHA-256 digest for a file."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _read_prompt(path: Path) -> tuple[str, str]:
+    """Return the executable prompt and its license-header-stripped body."""
+    body = path.read_text(encoding="utf-8")
+    if body.startswith(_PROMPT_LICENSE_HEADER):
+        body = body.removeprefix(_PROMPT_LICENSE_HEADER)
+    prompt = body.strip()
+    if not prompt:
+        raise ValueError("The Tau agent prompt must not be empty")
+    return prompt, body
 
 
 def _message_payload(message: Any) -> dict[str, Any]:
@@ -34,9 +50,7 @@ def _message_payload(message: Any) -> dict[str, Any]:
 
 def run(task_id: str, seed: int, prompt_path: Path) -> dict[str, Any]:
     """Run and sanitize one pinned Tau episode."""
-    prompt_text = prompt_path.read_text(encoding="utf-8").strip()
-    if not prompt_text:
-        raise ValueError("The Tau agent prompt must not be empty")
+    prompt_text, prompt_body = _read_prompt(prompt_path)
 
     llm_agent.AGENT_INSTRUCTION = prompt_text
     config = TextRunConfig(
@@ -82,7 +96,7 @@ def run(task_id: str, seed: int, prompt_path: Path) -> dict[str, Any]:
         "agent_temperature": 0.0,
         "user_simulator_model": USER_MODEL,
         "user_simulator_temperature": 0.0,
-        "prompt_sha256": _sha256(prompt_path),
+        "prompt_sha256": hashlib.sha256(prompt_body.encode("utf-8")).hexdigest(),
         "policy_sha256": _sha256(policy_path),
         "tools_sha256": _sha256(tools_path),
         "termination_reason": simulation.termination_reason.value,

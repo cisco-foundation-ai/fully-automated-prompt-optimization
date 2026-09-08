@@ -55,9 +55,9 @@ T008's task success distribution was one task at 0/4, one at 1/4, two at 2/4, si
 - Agent, user simulator, and native NL judge: `gpt-4.1-2025-04-14`; temperature `0.0`.
 - Fixed Retail policy, tools, 22-task membership, four seeds (`626729`, `373753`, `361454`, `1567`), and concurrency of three.
 - All four runs completed 88/88 trajectories with normal user-stop termination, zero missing rewards, zero duplicate task/trial/seed identities, zero abnormal terminations, and no explicit retries.
-- T008 prompt SHA-256: `7dfa48cf9c8857b02bb9fb3647b1d6d1d5fe86e1df7cbfe65a0b17ede104dafd`.
-- M004 prompt SHA-256: `492d414fc5b99a802cffb42deecb7de60bdc154abfd89a0707cecb2ceb293ca8`.
-- T001 prompt SHA-256: `1f84c4605f86f107942d1432613ce31a3f6208f74de99952341ddb3737aa6447`.
+- T008 license-header-stripped prompt-body SHA-256: `7dfa48cf9c8857b02bb9fb3647b1d6d1d5fe86e1df7cbfe65a0b17ede104dafd`.
+- M004 license-header-stripped prompt-body SHA-256: `492d414fc5b99a802cffb42deecb7de60bdc154abfd89a0707cecb2ceb293ca8`.
+- T001 license-header-stripped prompt-body SHA-256: `1f84c4605f86f107942d1432613ce31a3f6208f74de99952341ddb3737aa6447`.
 - B0 results SHA-256: `0a12af4d6a668664288315a06ac03a3c837339a729ff1d7bf097bdcf0a0e6d33`.
 - T008 results SHA-256: `44cb8ff2d13c396760ea46d8d2f92dcb83667ac329cc0639bfe578cddace4172`.
 - M004 results SHA-256: `12d7a6ccce5fbaaf136fd42b86017cf08b014479d6f62be0e355e76398486c13`.

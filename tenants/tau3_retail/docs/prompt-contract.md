@@ -16,8 +16,9 @@ SPDX-License-Identifier: Apache-2.0
 - The final natural-language message must report only outcomes supported by
   returned tool evidence.
 
-Prompt artifacts use `.txt` so the exact experiment text can be retained
-without inserting repository license comments into the model instruction.
+Prompt artifacts include a standard repository license header. The Tau
+launchers remove that exact header before execution, leaving the experiment
+instruction unchanged.
 
 ## Decision Policy
 
@@ -56,7 +57,10 @@ The V3 lineages are retained exactly under `prompts/v3/`:
 Create a new file for every attempted candidate. Change one evidence-backed,
 reusable behavior at a time. Never edit a historical prompt in place.
 
-Selected prompt hashes:
+Selected license-header-stripped prompt-body hashes:
+
+For compatibility, existing `prompt_sha256` fields use this prompt-body digest
+rather than the hash of the licensed file as stored in the repository.
 
 - Trusted T008: `7dfa48cf9c8857b02bb9fb3647b1d6d1d5fe86e1df7cbfe65a0b17ede104dafd`
 - Mixed M004: `492d414fc5b99a802cffb42deecb7de60bdc154abfd89a0707cecb2ceb293ca8`
