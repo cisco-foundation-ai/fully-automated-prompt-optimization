@@ -614,6 +614,46 @@ implement the data transformations themselves. See the full
 [feedback and unlabeled trace flow](docs/processes/feedback-dataset-flow.md)
 for artifact details, trust boundaries, and split semantics.
 
+### Build runtime memory cards
+
+After an evaluation asset is released, FAFO can compile each reusable trusted
+guideline and a bounded sample of its supporting traces into a compact
+procedural memory card for direct runtime injection:
+
+```bash
+python -m hephaestus.cli memory build \
+  --tenant <tenant_id> \
+  --asset-id <released_evaluation_asset_id> \
+  --memory-id <memory_asset_id>
+```
+
+Trusted-only construction is the default and recommended runtime-memory mode.
+The command writes a separate
+`tenants/<tenant_id>/memory_assets/<memory_asset_id>/` artifact. It does not
+modify the released evaluation asset or the agent's base prompt. The first
+version produces one card per trusted guideline, excludes protected and
+inferred cases, and requires every procedural instruction to cite a source
+criterion. See [Runtime memory card construction](docs/processes/runtime-memory-cards.md)
+for the schema, trust boundary, outputs, and intended guideline-versus-memory
+experiment.
+
+To deliberately incorporate approved inferred training episodes, first build
+the trusted-only asset above, then run the additive extension with the explicit
+opt-in flag:
+
+```bash
+python -m hephaestus.cli memory build-additive \
+  --tenant <tenant_id> \
+  --asset-id <released_evaluation_asset_id> \
+  --base-memory-id <trusted_only_memory_asset_id> \
+  --memory-id <additive_memory_asset_id> \
+  --include-approved-inferred
+```
+
+The extension preserves the trusted card as a frozen spine and appends only
+bounded, criterion-grounded additions. Inferred evidence is never read by the
+default `memory build` command.
+
 ---
 
 ## How it works

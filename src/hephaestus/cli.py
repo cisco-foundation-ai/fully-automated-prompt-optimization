@@ -108,6 +108,59 @@ def build_parser() -> argparse.ArgumentParser:
         help="Required confirmation for local data removal.",
     )
 
+    memory_parser = subparsers.add_parser(
+        "memory",
+        help="Build runtime memory assets from released FAFO evaluation assets",
+    )
+    memory_subparsers = memory_parser.add_subparsers(
+        dest="memory_command",
+        required=True,
+    )
+    build_memory_parser = memory_subparsers.add_parser(
+        "build",
+        help="Compile trusted-only runtime memory cards (the default)",
+    )
+    build_memory_parser.add_argument("--tenant", required=True)
+    build_memory_parser.add_argument(
+        "--asset-id",
+        required=True,
+        help="Released FAFO evaluation asset to use as the source",
+    )
+    build_memory_parser.add_argument("--memory-id", required=True)
+    build_memory_parser.add_argument("--tenants-root", default="tenants")
+    build_memory_parser.add_argument(
+        "--model",
+        help="Generation model; defaults to the source evaluation asset's rubric model",
+    )
+    build_memory_parser.add_argument(
+        "--max-source-traces",
+        type=_positive_int,
+        default=5,
+        help="Maximum supporting trusted traces supplied for each guideline",
+    )
+    additive_memory_parser = memory_subparsers.add_parser(
+        "build-additive",
+        help="Explicitly extend trusted cards with approved inferred evidence",
+    )
+    additive_memory_parser.add_argument("--tenant", required=True)
+    additive_memory_parser.add_argument("--asset-id", required=True)
+    additive_memory_parser.add_argument("--base-memory-id", required=True)
+    additive_memory_parser.add_argument("--memory-id", required=True)
+    additive_memory_parser.add_argument("--tenants-root", default="tenants")
+    additive_memory_parser.add_argument("--model")
+    additive_memory_parser.add_argument(
+        "--include-approved-inferred",
+        action="store_true",
+        required=True,
+        help="Explicit consent to use the released inferred training split",
+    )
+    additive_memory_parser.add_argument("--batch-size", type=_positive_int, default=8)
+    additive_memory_parser.add_argument(
+        "--max-additions-per-card",
+        type=_positive_int,
+        default=3,
+    )
+
     assets_parser = subparsers.add_parser(
         "assets",
         help="Create generic evaluation assets from prepared tenant-local data",
@@ -394,6 +447,41 @@ def main() -> None:
             return
 
         raise ValueError(f"Unsupported customer-data command: {args.customer_data_command}")
+
+    if args.command == "memory":
+        if args.memory_command == "build":
+            import json as json_mod
+
+            from src.hephaestus.memory_assets import build_memory_asset
+
+            manifest = build_memory_asset(
+                tenants_root=Path(args.tenants_root),
+                tenant_id=args.tenant,
+                source_asset_id=args.asset_id,
+                memory_asset_id=args.memory_id,
+                model=args.model,
+                max_source_traces=args.max_source_traces,
+            )
+            print(json_mod.dumps(manifest, indent=2, sort_keys=True))
+            return
+        if args.memory_command == "build-additive":
+            import json as json_mod
+
+            from src.hephaestus.memory_evidence import build_additive_memory_asset
+
+            manifest = build_additive_memory_asset(
+                tenants_root=Path(args.tenants_root),
+                tenant_id=args.tenant,
+                source_asset_id=args.asset_id,
+                base_memory_asset_id=args.base_memory_id,
+                memory_asset_id=args.memory_id,
+                model=args.model,
+                batch_size=args.batch_size,
+                max_additions_per_card=args.max_additions_per_card,
+            )
+            print(json_mod.dumps(manifest, indent=2, sort_keys=True))
+            return
+        raise ValueError(f"Unsupported memory command: {args.memory_command}")
 
     if args.command == "assets":
         if args.assets_command == "reviews":
