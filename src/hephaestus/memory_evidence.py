@@ -16,7 +16,10 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from src.hephaestus.artifact_io import atomic_write_json, atomic_write_jsonl
-from src.hephaestus.datasets.rubric_providers import OpenAIRubricProvider
+from src.hephaestus.datasets.rubric_providers import (
+    DEFAULT_OPENAI_RUBRIC_MODEL,
+    OpenAIRubricProvider,
+)
 from src.hephaestus.memory_assets import (
     MEMORY_ASSET_SCHEMA_VERSION,
     MEMORY_CARD_SCHEMA_VERSION,
@@ -651,7 +654,9 @@ def build_additive_memory_asset(
     if any(not ids for ids in criterion_ids_by_guideline.values()):
         raise ValueError("every guideline must contain criteria")
 
-    selected_model = model or str(source_config.get("rubric_model") or "gpt-5.5")
+    selected_model = model or str(
+        source_config.get("rubric_model") or DEFAULT_OPENAI_RUBRIC_MODEL
+    )
     active_provider = provider or OpenAIRubricProvider(model=selected_model)
     if model is not None and active_provider.model != model:
         raise ValueError("injected provider model does not match requested model")

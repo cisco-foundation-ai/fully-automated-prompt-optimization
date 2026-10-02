@@ -350,7 +350,7 @@ def test_publish_installs_a_hash_bound_manifest_after_all_terminal_artifacts(
     }
     manifest = json.loads((output_dir / "run_manifest.json").read_text())
     assert manifest == published.manifest
-    assert manifest["schema_version"] == "fapo-run-bundle-manifest-v1"
+    assert manifest["schema_version"] == "fafo-run-bundle-manifest-v1"
     assert manifest["hash_algorithm"] == "sha256"
     assert manifest["run_id"] == "run-001"
     assert manifest["status"] == "completed"

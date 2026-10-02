@@ -144,7 +144,7 @@ def test_stage_seven_dependency_binds_every_declared_input(mutate) -> None:
         {},
         {"schema_version": "unknown"},
         {
-            "schema_version": "fapo-stage-six-dependency-v1",
+            "schema_version": "fafo-stage-six-dependency-v1",
             "dependency_sha256": "0" * 64,
             "descriptor": {},
         },

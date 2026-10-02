@@ -4,15 +4,15 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAFO V3 Luna Experiment Report
+# FAFO Luna Experiment Report
 
 ## Purpose
 
-This experiment tested whether a small set of manually reviewed Tau Retail episodes with trusted user feedback could be turned into reusable evaluation guidance, extended into case-specific rubrics for a much larger unlabeled trace set, and then used by FAPO to improve the Tau agent prompt.
+This experiment tested whether a small set of manually reviewed Tau Retail episodes with trusted user feedback could be turned into reusable evaluation guidance, extended into case-specific rubrics for a much larger unlabeled trace set, and then used by FAFO to improve the Tau agent prompt.
 
 The independent outcome measure was native Tau scoring on a sealed, group-disjoint held-out set. FAFO guideline-judge scores were used for prompt optimization and selection, not as the final effectiveness measure.
 
-## 1. Build the FAFO v3 evaluation asset
+## 1. Build the FAFO evaluation asset
 
 ### Inputs
 
@@ -24,7 +24,7 @@ The independent outcome measure was native Tau scoring on a sealed, group-disjoi
 
 Split membership was fixed before guideline extraction. Only the 20 trusted training episodes were used to create reusable training guidelines; trusted validation, test, and regression feedback remained protected.
 
-### Simplified v3 pipeline
+### Simplified FAFO data pipeline
 
 1. Normalize each complete Tau episode as one FAFO case, retaining user and assistant messages, tool calls, tool results, runtime information, and trusted feedback when present.
 2. Correlate trusted feedback with the trace and tool evidence to identify recurring mistakes and extract evaluation guidelines.
@@ -131,7 +131,7 @@ All four result files contain 88 unique task/trial/seed identities, 88 normal us
 
 ## 5. Conclusion
 
-All three FAFO v3 optimization arms improved native Tau `pass^1` over B0 on this held-out matrix. The full mixed arm was the descriptive winner, gaining 10 passes over B0 and two over each of the other optimized prompts. It also had the strongest `pass^2`, `pass^3`, `pass^4`, database, write-action, and complete-NL results.
+All three FAFO optimization arms improved native Tau `pass^1` over B0 on this held-out matrix. The full mixed arm was the descriptive winner, gaining 10 passes over B0 and two over each of the other optimized prompts. It also had the strongest `pass^2`, `pass^3`, `pass^4`, database, write-action, and complete-NL results.
 
 The staged arm produced the strongest trusted-set judge result, but this did not translate into a native advantage over trusted-only optimization. T001 tied T008 on total native passes and trailed M004 by two. This suggests that jointly exposing optimization to trusted and inferred cases was more useful here than optimizing the two sources sequentially.
 

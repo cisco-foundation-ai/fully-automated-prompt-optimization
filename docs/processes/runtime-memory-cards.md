@@ -6,9 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # Runtime memory card construction
 
-The runtime-memory pipeline is an optional downstream step after a FAFO V3
+The runtime-memory pipeline is an optional downstream step after a FAFO
 evaluation asset is released. It does not modify the evaluation asset and is
-separate from FAPO prompt optimization.
+separate from FAFO prompt optimization.
 
 The initial contract is intentionally small:
 

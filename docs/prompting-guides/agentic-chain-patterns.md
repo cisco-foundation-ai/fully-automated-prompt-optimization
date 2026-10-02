@@ -203,7 +203,7 @@ Patterns are composable. Common combinations:
 - **Reflexion + any pattern**: Add reflection memory to any pattern for retry improvement.
 - **Least-to-Most + Tool-Augmented**: Decompose, then use tools for each subproblem.
 
-## FAPO Mapping
+## FAFO Mapping
 
 | Pattern | Current chain support | How to apply |
 |---|---|---|

@@ -70,9 +70,14 @@ class _RecordingRubricProvider:
                         "confidence": 0.9,
                         "observations": [
                             {
-                                "claim": row["feedback"]["rationale"],
+                                "claim": row["feedback"].get("rationale")
+                                or f"The episode received {row['feedback']['polarity']} feedback.",
                                 "evidence_type": "explicit_feedback",
-                                "evidence_pointer": "feedback.rationale",
+                                "evidence_pointer": (
+                                    "feedback.rationale"
+                                    if row["feedback"].get("rationale")
+                                    else ""
+                                ),
                                 "polarity": row["feedback"]["polarity"],
                             }
                         ],
@@ -160,7 +165,7 @@ class _RecordingEmbeddingProvider:
 
 def _feedback_row(record_id: str, group_id: str, *, rationale: str) -> dict:
     return {
-        "schema_version": "fapo-evaluation-input-v1",
+        "schema_version": "fafo-evaluation-input-v1",
         "record_id": record_id,
         "group_id": group_id,
         "request_id": record_id,
@@ -228,7 +233,43 @@ def test_generated_model_response_rejects_duplicate_identity(
         pipeline_module._indexed_items(response, array_key, identity_key)
 
 
-def test_stage_three_isolates_held_out_canaries_and_skips_ineligible_feedback(
+def test_polarity_only_evidence_discards_unsupported_model_claims() -> None:
+    source = _feedback_row("rating-only", "group-1", rationale="")
+    source["feedback"] = {"polarity": "negative"}
+    raw = {
+        "intent_label": "answer",
+        "confidence": 0.9,
+        "observations": [
+            {
+                "claim": "The agent chose the wrong tool.",
+                "evidence_type": "feedback_trace_mistake_pattern",
+                "evidence_pointer": "feedback.polarity; assistant_output",
+                "polarity": "negative",
+            }
+        ],
+        "requested_corrections": ["Use a different tool."],
+        "uncertainties": [],
+    }
+
+    evidence = pipeline_module._normalize_feedback_evidence(
+        raw, source, "recording", "recording-rubric"
+    )
+
+    assert evidence["observations"] == [
+        {
+            "claim": "The episode received negative feedback.",
+            "evidence_type": "explicit_feedback",
+            "evidence_pointer": "feedback.polarity",
+            "polarity": "negative",
+        }
+    ]
+    assert evidence["requested_corrections"] == []
+    assert evidence["uncertainties"] == [
+        "The rating does not identify a specific cause or repair."
+    ]
+
+
+def test_stage_three_isolates_held_out_canaries(
     tmp_path: Path,
 ) -> None:
     feedback_rows = [
@@ -244,7 +285,6 @@ def test_stage_three_isolates_held_out_canaries_and_skips_ineligible_feedback(
             "regression",
             rationale="RATIONALE-CANARY-regression",
         ),
-        _row_for_split("held", "train", rationale=""),
     ]
     tenants_root = tmp_path / "tenants"
     source_root = tenants_root / "tenant_a" / "source_artifacts"
@@ -332,8 +372,6 @@ def test_stage_three_isolates_held_out_canaries_and_skips_ineligible_feedback(
     for split in ("validation", "test", "regression"):
         assert f"RATIONALE-CANARY-{split}" in protected_text
 
-    payload_text = json.dumps(provider.payloads, sort_keys=True)
-    assert "CANARY-held" not in payload_text
     for payload in provider.payloads:
         visible_ids = {
             str(row["record_id"])
@@ -346,6 +384,84 @@ def test_stage_three_isolates_held_out_canaries_and_skips_ineligible_feedback(
             {"test"},
             {"regression"},
         ) or all(record_id.startswith("source-") for record_id in visible_ids)
+
+
+@pytest.mark.parametrize("polarity", ["positive", "negative", "mixed"])
+def test_polarity_only_feedback_builds_guidelines_and_trusted_rubric(
+    tmp_path: Path,
+    polarity: str,
+) -> None:
+    feedback_row = _row_for_split("rating-only", "train", rationale="")
+    feedback_row["feedback"] = {"polarity": polarity}
+    unlabeled_row = {
+        key: value
+        for key, value in _feedback_row(
+            "unlabeled",
+            "unlabeled-group",
+            rationale="unused",
+        ).items()
+        if key not in {"assistant_output", "feedback"}
+    }
+    tenants_root = tmp_path / "tenants"
+    source_root = tenants_root / "tenant_a" / "source_artifacts"
+    source_root.mkdir(parents=True)
+    feedback = source_root / "feedback.jsonl"
+    unlabeled = source_root / "unlabeled.jsonl"
+    _write_jsonl(feedback, [feedback_row])
+    _write_jsonl(unlabeled, [unlabeled_row])
+    provider = _RecordingRubricProvider()
+    pipeline = EvaluationAssetPipeline.create(
+        tenants_root,
+        EvaluationAssetConfig(
+            tenant_id="tenant_a",
+            asset_id="v1",
+            rubric_provider=provider.provider_name,
+            rubric_model=provider.model,
+            embedding_provider="tfidf",
+            embedding_model="tfidf-v1",
+            cluster_count=1,
+        ),
+        feedback,
+        unlabeled,
+        rubric_provider=provider,
+        repository_base=tmp_path,
+    )
+
+    state = pipeline.run()
+
+    assert state.status == "awaiting_review"
+    prepared = pipeline_module._load_jsonl(
+        pipeline.layout.artifact_path(
+            PipelineStage.PREPARED_INPUTS, "normalized_feedback.jsonl"
+        )
+    )
+    assert prepared[0]["feedback"] == {"polarity": polarity, "rationale": ""}
+    assert prepared[0]["evidence_eligible"] is True
+    guidelines = pipeline_module._load_jsonl(
+        pipeline.layout.artifact_path(
+            PipelineStage.RUBRIC_EXTRACTION, "evaluation_guidelines.jsonl"
+        )
+    )
+    trusted_cases = pipeline_module._load_jsonl(
+        pipeline.layout.artifact_path(
+            PipelineStage.LABEL_INFERENCE, "trusted_cases.jsonl"
+        )
+    )
+    assert len(guidelines) == 1
+    assert guidelines[0]["source_record_ids"] == ["rating-only"]
+    assert [case["case_id"] for case in trusted_cases] == ["feedback-rating-only"]
+    evidence = pipeline_module._load_jsonl(
+        pipeline.layout.artifact_path(
+            PipelineStage.RUBRIC_EXTRACTION, "feedback_evidence.jsonl"
+        )
+    )
+    assert evidence[0]["observations"][0]["evidence_pointer"] == "feedback.polarity"
+    assert any(
+        row.get("evidence_pointer") == "feedback.polarity"
+        for request in provider.requests
+        for evidence in request["payload"].get("evidence", [])
+        for row in evidence.get("observations", [])
+    )
 
 
 def test_held_out_canaries_are_isolated_to_their_own_episode_rubrics(

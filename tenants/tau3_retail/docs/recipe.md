@@ -4,7 +4,7 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Tau-3 Retail FAFO V3 Recipe
+# Tau-3 Retail FAFO Data Pipeline Recipe
 
 ## Goal
 
@@ -22,11 +22,11 @@ Use this layout:
 
 ```text
 workspace/
-├── fapo/
+├── fafo/
 └── tau2-bench/
 ```
 
-The FAPO and Tau environments stay independent. From the FAPO root:
+The FAFO and Tau environments stay independent. From the FAFO root:
 
 Install Git and [`uv`](https://docs.astral.sh/uv/) first. Tau `v1.0.1`
 requires Python 3.12 or 3.13; `uv sync` selects a compatible interpreter.
@@ -117,7 +117,7 @@ python tenants/tau3_retail/code/export_fafo_traces.py \
   --output tenants/tau3_retail/source_artifacts/all_unlabeled.jsonl
 ```
 
-Each complete Tau episode becomes exactly one `fapo-evaluation-input-v1`
+Each complete Tau episode becomes exactly one `fafo-evaluation-input-v1`
 record. The adapter preserves:
 
 - ordered user and assistant messages;
@@ -129,7 +129,7 @@ It explicitly omits native reward, reward components, expected actions,
 database assertions, natural-language assertions, hidden task state, and all
 other Tau correctness-oracle fields. The exported file contains no feedback.
 
-The full episode is important: V3 guideline extraction correlates feedback with
+The full episode is important: FAFO guideline extraction correlates feedback with
 assistant behavior, tool calls, tool results, and runtime evidence. Clustering,
 however, embeds only the ordered user messages.
 
@@ -188,7 +188,7 @@ The command writes `labeled_feedback.jsonl` and `unlabeled_traffic.jsonl` under
 missing trust decisions, missing rationales, altered selected records, overlap,
 and protected native scoring fields.
 
-## 7. Run the FAFO V3 Pipeline
+## 7. Run the FAFO Data Pipeline
 
 ```bash
 python -m hephaestus.cli assets create \
@@ -216,7 +216,7 @@ python -m hephaestus.cli assets run \
   --split-seed 42
 ```
 
-V3 performs these relevant operations:
+The FAFO data pipeline performs these relevant operations:
 
 1. Validate, redact, and split trusted connected groups before authoring.
 2. Correlate eligible training feedback with full trace/tool evidence.
@@ -255,7 +255,7 @@ python -m hephaestus.cli assets reviews finalize \
 
 ## 8. Run FAFO-Guided Evaluation
 
-The evaluation chain starts one fresh Tau environment for every FAPO case. The
+The evaluation chain starts one fresh Tau environment for every FAFO case. The
 case context supplies only task ID and seed; Tau supplies policy, tools, user
 simulator, and fresh database. The scorer gives the resulting episode and its
 case-specific FAFO rubric to the fixed judge and aggregates criterion statuses
@@ -336,5 +336,5 @@ iteration memory, and changelog. Never commit:
 - raw or converted episodes;
 - annotation review files or feedback;
 - FAFO evaluation-asset workspaces or published dataset payloads;
-- FAPO/Tau eval output directories; or
+- FAFO/Tau eval output directories; or
 - `.env` files, API keys, or provider request logs.

@@ -3390,6 +3390,14 @@ class _SuccessfulRubricProvider:
                 ]
             }
         if "evidence" in payload:
+            statement = (
+                "Answer the other stated request."
+                if any(
+                    "another supplied input" in row["user_input"].lower()
+                    for row in payload["examples"]
+                )
+                else "Answer the stated request."
+            )
             return {
                 "guidelines": [
                     {
@@ -3403,7 +3411,7 @@ class _SuccessfulRubricProvider:
                         "criteria": [
                             {
                                 "kind": "required",
-                                "statement": "Answer the stated request.",
+                                "statement": statement,
                                 "dimension": "task_success",
                                 "severity": "critical",
                                 "applicability": "always",
@@ -3584,7 +3592,7 @@ def test_pre_v2_completed_remains_an_explicit_legacy_sentinel() -> None:
 def test_completed_is_rejected_for_an_explicit_future_state_schema() -> None:
     """Only the known pre-v2 representation may carry the legacy sentinel."""
     raw = {
-        "schema_version": "fapo-evaluation-asset-state-v3",
+        "schema_version": "fafo-evaluation-asset-state-v3",
         "tenant_id": "tenant_a",
         "asset_id": "v1",
         "status": "completed",
@@ -5604,7 +5612,7 @@ def test_released_verification_authenticates_config_and_terminal_state(
     else:
         payload = json.loads(layout.state_path.read_text(encoding="utf-8"))
         if corruption == "state_schema":
-            payload["schema_version"] = "fapo-evaluation-asset-state-v1"
+            payload["schema_version"] = "fafo-evaluation-asset-state-v1"
         elif corruption == "state_tenant":
             payload["tenant_id"] = "other_tenant"
         elif corruption == "state_asset":
@@ -5811,9 +5819,9 @@ def test_standalone_release_verification_uses_complete_journal_authority(
         rows.append(
             {
                 "schema_version": (
-                    "fapo-recovery-journal-v1"
+                    "fafo-recovery-journal-v1"
                     if ledger_damage != "nonrevision_v2_row"
-                    else "fapo-recovery-journal-v2"
+                    else "fafo-recovery-journal-v2"
                 ),
                 "kind": "checkpoint_rebuild",
                 "phase": "prepared",
@@ -6255,7 +6263,7 @@ def test_recovery_journal_corruption_fails_closed_before_any_roll_forward(
     elif corruption == "orphan_committed":
         rows = [
             {
-                "schema_version": "fapo-recovery-journal-v1",
+                "schema_version": "fafo-recovery-journal-v1",
                 "operation_id": prepared["operation_id"],
                 "kind": prepared["kind"],
                 "phase": "committed",
@@ -6879,11 +6887,11 @@ def test_recovery_journal_v1_authority_requires_explicit_repair(
     with pytest.raises(_InjectedFault):
         layout.revise_config({"match_threshold": 0.2})
     rows = _read_jsonl(layout.recovery_journal_path)
-    rows[0]["schema_version"] = "fapo-recovery-journal-v1"
+    rows[0]["schema_version"] = "fafo-recovery-journal-v1"
     if journal_form == "mixed_v1_v2":
         rows.append(
             {
-                "schema_version": "fapo-recovery-journal-v2",
+                "schema_version": "fafo-recovery-journal-v2",
                 "operation_id": rows[0]["operation_id"],
                 "kind": rows[0]["kind"],
                 "phase": "committed",
@@ -7581,7 +7589,7 @@ def test_legacy_adoption_builds_honest_receipts_then_releases(
     _downgrade_to_legacy_completed(layout)
     if schema_mode == "explicit-v1":
         raw_state = json.loads(layout.state_path.read_text(encoding="utf-8"))
-        raw_state["schema_version"] = "fapo-evaluation-asset-state-v1"
+        raw_state["schema_version"] = "fafo-evaluation-asset-state-v1"
         artifact_io.atomic_write_json(layout.state_path, raw_state)
 
     adopted = layout.adopt_legacy()
@@ -10817,7 +10825,7 @@ def test_stage_and_build_historical_profiles_cannot_be_hybridized(
     stage_payload = json.loads(
         layout.stage_provenance_path(stage).read_text(encoding="utf-8")
     )
-    stage_payload["schema_version"] = "fapo-stage-provenance-v1"
+    stage_payload["schema_version"] = "fafo-stage-provenance-v1"
 
     with pytest.raises(ValueError, match="provenance profiles differ"):
         durability_module._validate_stage_provenance_evidence(
@@ -10844,7 +10852,7 @@ def test_receipt_and_stage_historical_profiles_cannot_be_hybridized(
     layout = pipeline.layout
     stage = PipelineStage.RUBRIC_EXTRACTION
     receipt = json.loads(layout.receipt_path(stage).read_text(encoding="utf-8"))
-    receipt["schema_version"] = "fapo-stage-receipt-v1"
+    receipt["schema_version"] = "fafo-stage-receipt-v1"
     artifact_io.atomic_write_json(layout.receipt_path(stage), receipt)
     next(
         item for item in released.stages if item.stage == stage.value
@@ -12099,7 +12107,7 @@ def test_native_handoff_schema_downgrade_fails_without_writes_or_calls(
         del payload["schema_version"]
     else:
         assert schema_damage == "explicit-v1"
-        payload["schema_version"] = "fapo-evaluation-asset-state-v1"
+        payload["schema_version"] = "fafo-evaluation-asset-state-v1"
     if missing_stage_receipt:
         del payload["stages"][-1]["receipt_sha256"]
     artifact_io.atomic_write_json(layout.state_path, payload)
@@ -12208,7 +12216,7 @@ def test_receipt_free_legacy_status_checkpoint_remains_mutable(
     if schema_mode == "removed":
         del payload["schema_version"]
     else:
-        payload["schema_version"] = "fapo-evaluation-asset-state-v1"
+        payload["schema_version"] = "fafo-evaluation-asset-state-v1"
     artifact_io.atomic_write_json(layout.state_path, payload)
     if legacy_event is not None:
         artifact_io.atomic_append_jsonl(
@@ -12457,7 +12465,7 @@ def test_semantically_impossible_legacy_event_fails_before_writes_or_calls(
     if schema_mode == "removed":
         del raw_state["schema_version"]
     else:
-        raw_state["schema_version"] = "fapo-evaluation-asset-state-v1"
+        raw_state["schema_version"] = "fafo-evaluation-asset-state-v1"
     artifact_io.atomic_write_json(layout.state_path, raw_state)
     artifact_io.atomic_append_jsonl(layout.events_path, malformed_event)
     before = _authority_bytes(layout)
@@ -12510,7 +12518,7 @@ def test_current_extension_event_is_native_before_any_authority_write_or_call(
     if schema_mode == "removed":
         del raw_state["schema_version"]
     else:
-        raw_state["schema_version"] = "fapo-evaluation-asset-state-v1"
+        raw_state["schema_version"] = "fafo-evaluation-asset-state-v1"
     if entrypoint == "adopt":
         raw_state["status"] = "completed"
         raw_state["current_stage"] = None
@@ -13239,7 +13247,7 @@ def test_incomplete_checkpoint_normalizes_to_current_authoring_registry(
     layout = pipeline.layout
     raw = json.loads(layout.state_path.read_text(encoding="utf-8"))
     if schema_version == "v1":
-        raw["schema_version"] = "fapo-evaluation-asset-state-v1"
+        raw["schema_version"] = "fafo-evaluation-asset-state-v1"
     artifact_io.atomic_write_json(layout.state_path, raw)
     _install_drifted_authoring_registry(monkeypatch)
 
@@ -13522,7 +13530,7 @@ def test_default_provider_handoff_uses_only_versioned_historical_provenance(
             extension: bool,
         ) -> dict[str, Any]:
             inventory = current_inventory(config, extension=extension)
-            inventory["raw_inputs"] = "fapo-evaluation-input-v2"
+            inventory["raw_inputs"] = "fafo-evaluation-input-v2"
             return inventory
 
         monkeypatch.setattr(
@@ -13560,7 +13568,7 @@ def test_default_provider_handoff_uses_only_versioned_historical_provenance(
         monkeypatch.setattr(
             durability_module,
             "STAGE_RECEIPT_SCHEMA_VERSION",
-            "fapo-stage-receipt-v4",
+            "fafo-stage-receipt-v6",
         )
         monkeypatch.setattr(
             durability_module,
@@ -13571,39 +13579,39 @@ def test_default_provider_handoff_uses_only_versioned_historical_provenance(
         monkeypatch.setattr(
             provenance_module,
             "PROVIDER_CALL_SCHEMA_VERSION",
-            "fapo-provider-call-v3",
+            "fafo-provider-call-v3",
         )
         monkeypatch.setattr(
             provenance_module,
             "STAGE_PROVENANCE_SCHEMA_VERSION",
-            "fapo-stage-provenance-v4",
+            "fafo-stage-provenance-v4",
         )
         monkeypatch.setattr(
             provenance_module,
             "BUILD_PROVENANCE_SCHEMA_VERSION",
-            "fapo-evaluation-build-provenance-v4",
+            "fafo-evaluation-build-provenance-v4",
         )
         monkeypatch.setattr(
             durability_module,
             "BUILD_PROVENANCE_SCHEMA_VERSION",
-            "fapo-evaluation-build-provenance-v4",
+            "fafo-evaluation-build-provenance-v4",
             raising=False,
         )
         monkeypatch.setattr(
             provenance_module,
             "BUILD_IDENTITY_SCHEMA_VERSION",
-            "fapo-evaluation-build-identity-v4",
+            "fafo-evaluation-build-identity-v4",
         )
     elif registry_drift == "review-schema":
         monkeypatch.setattr(
             review_module,
             "REVIEW_FINALIZATION_SCHEMA_VERSION",
-            "fapo-review-finalization-v2",
+            "fafo-review-finalization-v2",
         )
         monkeypatch.setattr(
             review_module,
             "REVIEW_FINALIZATION_IDENTITY_SCHEMA_VERSION",
-            "fapo-review-finalization-identity-v2",
+            "fafo-review-finalization-identity-v2",
         )
         monkeypatch.setattr(
             review_module,
@@ -13613,7 +13621,7 @@ def test_default_provider_handoff_uses_only_versioned_historical_provenance(
         monkeypatch.setattr(
             review_module,
             "DERIVED_CASE_CONTENT_SCHEMA_VERSION",
-            "fapo-derived-case-content-v2",
+            "fafo-derived-case-content-v2",
         )
     elif registry_drift == "stage-membership-order":
         monkeypatch.setattr(
@@ -14759,6 +14767,7 @@ def _create_synthetic_pipeline(
             embedding_model=embedding.model,
             cluster_count=1,
             synthetic_coverage_enabled=True,
+            split_seed=2,
         ),
         feedback,
         unlabeled,
@@ -14775,7 +14784,7 @@ def _write_input_pair(tenants_root: Path) -> tuple[Path, Path]:
     feedback = sources / "feedback.jsonl"
     unlabeled = sources / "unlabeled.jsonl"
     common = {
-        "schema_version": "fapo-evaluation-input-v1",
+        "schema_version": "fafo-evaluation-input-v1",
         "group_id": "group-train-0",
         "task_type": "generic",
         "user_input": "Process the supplied input.",
@@ -14809,7 +14818,7 @@ def _write_input_pair(tenants_root: Path) -> tuple[Path, Path]:
 def _write_additional_feedback(tenants_root: Path) -> Path:
     path = tenants_root / "tenant_a" / "source_artifacts" / "additional.jsonl"
     payload = {
-        "schema_version": "fapo-evaluation-input-v1",
+        "schema_version": "fafo-evaluation-input-v1",
         "record_id": "feedback-2",
         "group_id": "group-2",
         "task_type": "generic",
@@ -14831,7 +14840,7 @@ def _write_additional_feedback(tenants_root: Path) -> Path:
 def _write_additional_feedback_v3(tenants_root: Path) -> Path:
     path = tenants_root / "tenant_a" / "source_artifacts" / "additional-v3.jsonl"
     payload = {
-        "schema_version": "fapo-evaluation-input-v1",
+        "schema_version": "fafo-evaluation-input-v1",
         "record_id": "feedback-3",
         "group_id": "group-3",
         "task_type": "generic",
@@ -15267,7 +15276,7 @@ def _convert_to_legacy_rubric_profile(layout: EvaluationAssetLayout) -> None:
         "label_source": "human_feedback",
         "rubric_provider": "openai",
         "rubric_model": "fake-rubric",
-        "oracle_version": "fapo-evaluation-asset-v1",
+        "oracle_version": "fafo-evaluation-asset-v1",
     }
     replayed = stage_three_contract.replay_legacy_stage_three(
         [normalized],
@@ -17595,7 +17604,7 @@ def test_type_coerced_pre_v2_history_fails_before_calls_or_writes(
     if schema_mode == "missing":
         state.pop("schema_version")
     else:
-        state["schema_version"] = "fapo-evaluation-asset-state-v1"
+        state["schema_version"] = "fafo-evaluation-asset-state-v1"
     artifact_io.atomic_write_jsonl(layout.config_history_path, rows)
     artifact_io.atomic_write_json(layout.config_path, config)
     artifact_io.atomic_write_json(layout.state_path, state)
@@ -18183,7 +18192,7 @@ def test_malformed_inherited_pre_v2_history_fails_before_calls_or_writes(
     if schema_mode == "missing":
         state.pop("schema_version")
     else:
-        state["schema_version"] = "fapo-evaluation-asset-state-v1"
+        state["schema_version"] = "fafo-evaluation-asset-state-v1"
     artifact_io.atomic_write_jsonl(layout.config_history_path, rows)
     artifact_io.atomic_write_json(layout.state_path, state)
     before = _authority_bytes(layout)
@@ -18320,7 +18329,7 @@ def test_pr2_final_committed_mutation_binds_stable_state_identity(
     replacements: dict[str, Any] = {
         "tenant_id": "other_tenant",
         "asset_id": "other_asset",
-        "schema_version": "fapo-evaluation-asset-state-v1",
+        "schema_version": "fafo-evaluation-asset-state-v1",
         "created_at": "2026-08-01T00:00:00+00:00",
         "mutation_sequence": raw["mutation_sequence"] + 1,
         "last_operation_id": "f" * 32,

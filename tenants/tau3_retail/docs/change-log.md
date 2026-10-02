@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Change Log
 
-## 2026-09-08 — Publishable Tau-3 FAFO V3 recipe
+## 2026-09-08 — Publishable Tau-3 FAFO data pipeline recipe
 
 - Added a pinned, side-by-side Tau `v1.0.1` setup with an optional version-bound
   system-truststore patch.
@@ -15,12 +15,12 @@ SPDX-License-Identifier: Apache-2.0
 - Added outcome-blind feedback sampling, conversation-only review forms, and an
   explicit manual-trust join gate.
 - Added the Tau episode chain, case-rubric judge, trusted/mixed/staged configs,
-  exact V3 prompt lineages, experiment reports, and machine-readable iteration
+  exact prompt lineages, experiment reports, and machine-readable iteration
   memory.
 - Kept raw benchmark data, episodes, feedback, generated assets, evaluations,
   and credentials outside the published tenant.
 
-## Recorded FAFO V3 evaluation asset
+## Recorded FAFO evaluation asset
 
 - Input: 37 manually reviewed trusted-feedback episodes plus 331 unlabeled
   episodes from 92 Tau Retail development tasks and four trials.
@@ -86,7 +86,7 @@ M004 was the descriptive leader, but no exact paired McNemar comparison crossed
 0.05. Native outcomes were not used for prompt creation or selection. See
 [`v3-native-holdout.md`](v3-native-holdout.md).
 
-## V3 lessons retained
+## Lessons retained
 
 - Full-episode tool results are essential; agent wording alone cannot establish
   mutation success.

@@ -4,7 +4,7 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAPO Optimization Workflow for Codex
+# FAFO Optimization Workflow for Codex
 
 Use this workflow when the user wants to improve eval scores, analyze failures, iterate on prompt quality, optimize prompt variants, adjust chain parameters, or improve chain architecture.
 

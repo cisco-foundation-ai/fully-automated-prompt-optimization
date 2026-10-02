@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 cff-version: 1.2.0
-title: Fully Autonomous Prompt Optimization (FAPO)
+title: Fully Automated Flow Optimization (FAFO)
 message: >-
   If you use this software, please cite the paper below
   (see preferred-citation).
@@ -29,7 +29,7 @@ authors:
     given-names: Amin
 preferred-citation:
   type: article
-  title: "FAPO: Fully Autonomous Prompt Optimization of Multi-Step LLM Pipelines"
+  title: "FAPO: Fully Automated Prompt Optimization of Multi-Step LLM Pipelines"
   year: 2026
   month: 6
   url: https://arxiv.org/abs/2606.19605

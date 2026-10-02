@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run one fresh Tau episode for each FAPO evaluation case."""
+"""Run one fresh Tau episode for each FAFO evaluation case."""
 
 from __future__ import annotations
 

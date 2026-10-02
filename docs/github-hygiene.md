@@ -4,9 +4,9 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAPO GitHub Hygiene Guide
+# FAFO GitHub Hygiene Guide
 
-Standards for commits, branches, and pull requests in the FAPO project. These conventions are derived from actual commit history and branch patterns.
+Standards for commits, branches, and pull requests in the FAFO project. These conventions are derived from actual commit history and branch patterns.
 
 ## Commit Discipline
 

@@ -26,7 +26,6 @@ from typing import (
     TypeVar,
 )
 
-from src.hephaestus.artifact_io import atomic_write_text
 from src.hephaestus.datasets.embedding_providers import (
     OpenAIEmbeddingProvider,
     validate_embedding_vectors,
@@ -36,7 +35,7 @@ from src.hephaestus.datasets.evaluation_assets import (
     has_scoreable_rubric,
     sha256_file,
     split_cases_by_group,
-    validate_fapo_case,
+    validate_fafo_case,
     write_jsonl,
 )
 from src.hephaestus.datasets.intent_assets import (
@@ -123,6 +122,7 @@ from src.hephaestus.evaluation_assets.review import (
     validate_review_finalization,
 )
 from src.hephaestus.evaluation_assets.split_isolation import (
+    assess_correctness_eligibility,
     assess_correctness_eligibility_records,
     build_trusted_split_plan,
     eligibility_by_record_id,
@@ -143,7 +143,7 @@ from src.hephaestus.evaluation_assets.stage_three_contract import (
     normalize_guideline_response as _normalize_guideline_response,
 )
 from src.hephaestus.evaluation_assets.stage_three_contract import (
-    rubric_from_guidelines as _rubric_from_guidelines,
+    rubric_from_guidelines as _rubric_from_guidelines,  # noqa: F401
 )
 from src.hephaestus.evaluation_assets.stage_three_contract import (
     trusted_case as _trusted_case,
@@ -227,6 +227,12 @@ that an outcome was observed; it does not prove that the tool choice, arguments,
 state change, or overall behavior was correct. Record ambiguity as uncertainty.
 
 Explicitly correlate the feedback with the trace to recognize behavior patterns.
+If feedback contains only a polarity, treat it as a coarse judgment of the
+episode. Record the rating with a `feedback.polarity` evidence pointer. Use the
+explicit user request and observable trace to describe what can be checked,
+but do not infer a specific cause of dissatisfaction or endorse every observed
+step from the rating alone. State those limits in uncertainties. Never invent
+a missing rationale or cite `feedback.rationale` when it is absent or empty.
 For negative or corrective feedback, emit one atomic observation for each
 supported mistake pattern using evidence_type
 `feedback_trace_mistake_pattern`. Its claim must describe the behavior that was
@@ -263,6 +269,11 @@ conditions actually observed. Use `feedback_trace_success_pattern` observations
 as requirements only when the feedback clearly endorses them. Prefer behavioral
 criteria that a judge can observe in messages, tool arguments, tool outcomes, or
 runtime state. Do not encode an environment failure as an agent prohibition.
+For polarity-only feedback, keep the guideline within requirements stated by
+the user or supplied constraints and record uncertainty about the rating's
+cause. A rating alone does not identify a correct tool choice, exact repair, or
+reference answer. Do not make the rating itself a criterion. Use human review
+when the resulting criterion cannot be verified from the available evidence.
 The examples include compact trace_analysis so claims can be checked against
 assistant actions and tool outcomes before they become reusable guidelines.
 Only group records when every criterion is supported by every source record in
@@ -314,6 +325,10 @@ guidelines apply, write a `guideline_grounded` rubric using only their
 requirements; the trace supplies case facts and evidence, never new policy.
 If no guideline applies, write a `trace_inferred` rubric from the explicit
 user request, available policy/tool constraints, and tool-backed outcomes.
+When trusted feedback contains only polarity, use it as a coarse episode-level
+signal and write requirements from the user request, supplied constraints, and
+applicable guidelines. Do not invent a rationale or infer which observed step
+caused the rating.
 Never treat the observed agent behaviour or a plausible final response as
 correctness evidence. Do not invent policy requirements.
 
@@ -894,7 +909,7 @@ class EvaluationAssetPipeline:
                 STAGE_PROMPTS,
                 {stage: self._provider_identity_for_stage(stage) for stage in PipelineStage},
             )
-            state.schema_version = "fapo-evaluation-asset-state-v2"
+            state.schema_version = "fafo-evaluation-asset-state-v2"
         if boundary is not None:
             boundary_index = list(PipelineStage).index(boundary)
             suffix_states = state.stages[boundary_index:]
@@ -1370,7 +1385,8 @@ class EvaluationAssetPipeline:
             path=self.layout.unlabeled_path,
             row_numbers=unlabeled_row_numbers,
         )
-        _validate_stage_one_feasibility(unlabeled, self.config.cluster_count)
+        if self.config.cluster_count:
+            _validate_stage_one_feasibility(unlabeled, self.config.cluster_count)
         manifest = {
             "inputs": {
                 "labeled_feedback": {
@@ -1699,6 +1715,11 @@ class EvaluationAssetPipeline:
             PipelineStage.INTENT_CLUSTERING,
             "cluster_lineage.jsonl",
         )
+        if self.config.cluster_count == 0:
+            write_jsonl(inventory_path, [])
+            if self.lineage:
+                write_jsonl(lineage_path, [])
+            return {"intent_clusters": 0}
         if self.lineage.get("clustering_mode") == "keep":
             snapshot = self.layout.parent_snapshot / "parent_intent_inventory.jsonl"
             snapshot_authority = resolve_local_authority_file(
@@ -1793,6 +1814,21 @@ class EvaluationAssetPipeline:
 
     def _prepare_cluster_sampling_metadata(self) -> Dict[str, int]:
         """Persist clusters as sampling metadata without making label decisions."""
+        if self.config.cluster_count == 0:
+            write_jsonl(
+                self.layout.artifact_path(
+                    PipelineStage.COVERAGE_DECISIONS,
+                    "cluster_sampling_metadata.jsonl",
+                ),
+                [],
+            )
+            return {
+                "matched_clusters": 0,
+                "needs_more_feedback_clusters": 0,
+                "missing_label_clusters": 0,
+                "labeling_queue_clusters": 0,
+                "labeling_queue_traces": 0,
+            }
         intent_rows = _load_jsonl(
             self.layout.artifact_path(
                 PipelineStage.PREPARED_INPUTS,
@@ -1869,20 +1905,6 @@ class EvaluationAssetPipeline:
                 "protected_evaluation_guidelines.jsonl",
             )
         )
-        clusters = [
-            _intent_cluster(row)
-            for row in _load_jsonl(
-                self.layout.artifact_path(
-                    PipelineStage.INTENT_CLUSTERING,
-                    "intent_inventory.jsonl",
-                )
-            )
-        ]
-        cluster_by_record = {
-            record_id: cluster
-            for cluster in clusters
-            for record_id in cluster.record_ids
-        }
         protected_by_record: Dict[str, List[Dict[str, Any]]] = {}
         for guideline in protected_guidelines:
             for record_id in guideline.get("source_record_ids") or []:
@@ -1996,17 +2018,13 @@ class EvaluationAssetPipeline:
                 metadata = dict(case["metadata"])
                 metadata.update(_episode_rubric_metadata(rubric))
                 case["metadata"] = metadata
-                validate_fapo_case(case)
+                validate_fafo_case(case)
                 trusted_cases.append(case)
                 continue
-            cluster = cluster_by_record.get(record_id)
-            if cluster is None:
-                raise ValueError(f"unlabeled episode {record_id} is absent from clustering metadata")
             inferred_cases.append(
                 _full_catalog_inferred_case(
                     row=row,
                     rubric=rubric,
-                    cluster=cluster,
                     config=self.config,
                 )
             )
@@ -2139,7 +2157,7 @@ class EvaluationAssetPipeline:
             },
             "evaluation_guidelines": {
                 "schema_version": (
-                    "fapo-evaluation-guideline-v1"
+                    "fafo-evaluation-guideline-v1"
                     if guideline_path.is_file()
                     else "legacy-feedback-rubric-v1"
                 ),
@@ -2458,7 +2476,7 @@ class EvaluationAssetPipeline:
                     review_case,
                     dependency,
                 ),
-                reviewer="fapo_pipeline",
+                reviewer="fafo_pipeline",
                 timestamp=timestamp,
             )
             case_id = str(review_case["case_id"])
@@ -2572,7 +2590,7 @@ class EvaluationAssetPipeline:
                 item,
                 decisions,
                 status="approved",
-                reviewer="fapo_pipeline",
+                reviewer="fafo_pipeline",
                 timestamp=timestamp,
                 note="Automatically approved by the evaluation-asset pipeline.",
             )
@@ -2613,7 +2631,7 @@ class EvaluationAssetPipeline:
                 child_item=item,
                 parent_decisions=parent_decisions,
                 parent_asset_id=parent_asset_id,
-                reviewer="fapo_pipeline",
+                reviewer="fafo_pipeline",
                 timestamp=timestamp,
             )
             if inherited is not None:
@@ -2688,7 +2706,7 @@ def _case_for_review(case: Mapping[str, Any]) -> Dict[str, Any]:
     ):
         metadata.pop(field, None)
     copied["metadata"] = metadata
-    validate_fapo_case(copied)
+    validate_fafo_case(copied)
     return copied
 
 
@@ -2786,11 +2804,11 @@ def _review_source_provenance(
     if not isinstance(descriptor, Mapping) or not isinstance(metadata, Mapping):
         raise ReviewIntegrityError("review source dependency is malformed")
     schema_version = dependency.get("schema_version")
-    if schema_version == "fapo-stage-six-dependency-v1":
+    if schema_version == "fafo-stage-six-dependency-v1":
         record_ids = [str(case["case_id"]).removeprefix("inferred-")]
         members = descriptor.get("source_members")
         match = descriptor.get("match")
-    elif schema_version == "fapo-stage-seven-dependency-v1":
+    elif schema_version == "fafo-stage-seven-dependency-v1":
         cluster = descriptor.get("cluster")
         nested = descriptor.get("stage_six_dependency")
         nested_descriptor = nested.get("descriptor") if isinstance(nested, Mapping) else None
@@ -2841,7 +2859,11 @@ def _review_source_provenance(
         or episode_guideline_id
         or ""
     )
-    source_cluster = str(metadata.get("source_cluster") or "")
+    # The review schema still requires this field; inferred cases use an
+    # episode-local identity so rubric construction never depends on Stage 4.
+    source_cluster = str(
+        metadata.get("source_cluster") or f"episode-{record_ids[0]}"
+    )
     if not matched_intent_id or not source_cluster:
         raise ReviewIntegrityError("review source identity is incomplete")
     return {
@@ -2885,7 +2907,7 @@ def _trusted_case_with_split_metadata(
         }
     )
     case["metadata"] = metadata
-    validate_fapo_case(case)
+    validate_fafo_case(case)
     return case
 
 
@@ -2952,6 +2974,10 @@ def _cluster_lineage(
 
 def _normalize_feedback(row: Mapping[str, Any]) -> Dict[str, Any]:
     prepared = _redact_record(row)
+    feedback = dict(prepared["feedback"])
+    if feedback.get("rationale") is None:
+        feedback["rationale"] = ""
+    prepared["feedback"] = feedback
     if "request_id" not in prepared:
         prepared["request_id"] = prepared["record_id"]
     prepared["route"] = effective_route(prepared)
@@ -3162,9 +3188,39 @@ def _normalize_feedback_evidence(
     rubric_provider: str,
     rubric_model: str,
 ) -> Dict[str, Any]:
+    if assess_correctness_eligibility(source).evidence_sources == ("feedback_polarity",):
+        polarity = str(source["feedback"]["polarity"])
+        return {
+            "record_id": str(source["record_id"]),
+            "group_id": str(source["group_id"]),
+            "route": str(source["route"]),
+            "task_type": str(source["task_type"]),
+            "intent_label": _string(raw.get("intent_label")) or "unclassified",
+            "confidence": _confidence(raw.get("confidence")),
+            "observations": [
+                {
+                    "claim": f"The episode received {polarity} feedback.",
+                    "evidence_type": "explicit_feedback",
+                    "evidence_pointer": "feedback.polarity",
+                    "polarity": polarity,
+                }
+            ],
+            "requested_corrections": [],
+            "uncertainties": [
+                "The rating does not identify a specific cause or repair."
+            ],
+            "evidence_source": "trusted_feedback",
+            "guideline_provider": rubric_provider,
+            "guideline_model": rubric_model,
+        }
     observations = []
     mistake_pattern_count = 0
     feedback_polarity = _string(source["feedback"].get("polarity"))
+    default_feedback_pointer = (
+        "feedback.rationale"
+        if _string(source["feedback"].get("rationale"))
+        else "feedback.polarity"
+    )
     for item in list(raw.get("observations") or []):
         if not isinstance(item, Mapping) or not _string(item.get("claim")):
             continue
@@ -3172,7 +3228,7 @@ def _normalize_feedback_evidence(
             _string(item.get("evidence_type")) or "explicit_feedback"
         )
         evidence_pointer = (
-            _string(item.get("evidence_pointer")) or "feedback.rationale"
+            _string(item.get("evidence_pointer")) or default_feedback_pointer
         )
         if evidence_type in {
             "feedback_trace_mistake_pattern",
@@ -3294,7 +3350,7 @@ def _normalize_rubric(
         "label_source": label_source,
         "rubric_provider": rubric_provider,
         "rubric_model": rubric_model,
-        "oracle_version": "fapo-evaluation-asset-v1",
+        "oracle_version": "fafo-evaluation-asset-v1",
     }
     if review_status is not None:
         rubric["review_status"] = review_status
@@ -3428,7 +3484,7 @@ def _synthetic_case(
             "review_status": "review_required",
         },
     }
-    validate_fapo_case(case)
+    validate_fafo_case(case)
     return case
 
 
@@ -3863,7 +3919,6 @@ def _full_catalog_inferred_case(
     *,
     row: Mapping[str, Any],
     rubric: Mapping[str, Any],
-    cluster: IntentCluster,
     config: EvaluationAssetConfig,
 ) -> Dict[str, Any]:
     record_id = str(row["record_id"])
@@ -3879,7 +3934,6 @@ def _full_catalog_inferred_case(
         "expected": _expected(rubric),
         "metadata": {
             "source": "unlabeled_trace",
-            "source_cluster": cluster.cluster_id,
             "dataset_version": config.asset_id,
             "group_id": str(row["group_id"]),
             "request_id": str(row["request_id"]),
@@ -3888,7 +3942,7 @@ def _full_catalog_inferred_case(
             **_episode_rubric_metadata(rubric),
         },
     }
-    validate_fapo_case(case)
+    validate_fafo_case(case)
     return case
 
 
@@ -3986,7 +4040,7 @@ def _approved_case_for_release(
         }
     )
     copied["metadata"] = metadata
-    validate_fapo_case(copied)
+    validate_fafo_case(copied)
     return copied
 
 
@@ -4039,7 +4093,7 @@ def _review_split_payloads(
             }
         )
         copied["metadata"] = metadata
-        validate_fapo_case(copied)
+        validate_fafo_case(copied)
         return copied
 
     trusted_published: List[Dict[str, Any]] = []
@@ -4103,7 +4157,7 @@ def _review_split_payloads(
         metadata = dict(copied.get("metadata") or {})
         metadata["hold_reason"] = str(row.get("reason") or row.get("hold_reason") or "")
         copied["metadata"] = metadata
-        validate_fapo_case(copied)
+        validate_fafo_case(copied)
         triage.append(copied)
     payloads["triage_hold"] = sorted(
         triage,
@@ -4350,7 +4404,7 @@ def _string_list(value: Any) -> List[str]:
 
 
 def _normalize_tool_expectations(value: Any) -> Dict[str, Any]:
-    """Preserve model expectations in the object shape required by FAPO cases."""
+    """Preserve model expectations in the object shape required by FAFO cases."""
     if value is None:
         return {}
     if isinstance(value, Mapping):

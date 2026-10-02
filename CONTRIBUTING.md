@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # How to Contribute
 
-Thanks for your interest in contributing to `Fully Automated Prompt Optimization`! Here are a few
+Thanks for your interest in contributing to `Fully Automated Flow Optimization`! Here are a few
 general guidelines on contributing and reporting bugs that we ask you to review.
 Following these guidelines helps to communicate that you respect the time of the
 contributors managing and developing this open source project. In return, they
@@ -45,7 +45,7 @@ major version release.
 
 ## Other Ways to Contribute
 
-We welcome anyone that wants to contribute to `Fully Automated Prompt Optimization` to triage and
+We welcome anyone that wants to contribute to `Fully Automated Flow Optimization` to triage and
 reply to open issues to help troubleshoot and fix existing bugs. Here is what
 you can do:
 
@@ -56,9 +56,9 @@ you can do:
   [Wiki](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/wiki) with up-to-date
   instructions and code samples.
 - Review existing pull requests, and testing patches against real existing
-  applications that use `Fully Automated Prompt Optimization`.
+  applications that use `Fully Automated Flow Optimization`.
 - Write a test, or add a missing test case to an existing test.
 
-Thanks again for your interest on contributing to `Fully Automated Prompt Optimization`!
+Thanks again for your interest on contributing to `Fully Automated Flow Optimization`!
 
 :heart:

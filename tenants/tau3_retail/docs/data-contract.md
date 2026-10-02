@@ -30,7 +30,7 @@ The repository tracks only the split metadata in `recipe/retail-split.json`.
 
 ## Case Schema
 
-Input records follow `fapo-evaluation-input-v1`:
+Input records follow `fafo-evaluation-input-v1`:
 
 - `record_id`: `tau3-retail-task-<task>-trial-<trial>`.
 - `request_id`: same stable episode-level ID.
@@ -47,7 +47,7 @@ Input records follow `fapo-evaluation-input-v1`:
 - `feedback`: trusted records only; polarity, rationale, optional correction,
   and `human_review` source.
 
-Published evaluation cases use FAPO's `EvalCase` schema and contain the Tau
+Published evaluation cases use FAFO's `EvalCase` schema and contain the Tau
 task/seed runtime context plus FAFO evaluation guidelines, rubric, tool
 expectations, provenance, confidence, and trust tier.
 
@@ -68,7 +68,7 @@ expectations, provenance, confidence, and trust tier.
 - Tool calls have unique IDs and exactly one linked result.
 - Protected Tau correctness keys never appear in FAFO inputs.
 - Every trusted feedback record has a rationale and explicit human trust.
-- FAPO split families do not cross partitions; derived cases never enter
+- FAFO split families do not cross partitions; derived cases never enter
   `regression_trusted`.
 - `GuidelineJudgeScorer` returns `guideline_score`, `guideline_pass`,
   `critical_violations`, and `applicable_criteria`.

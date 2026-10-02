@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Status
 
-MCP integration is **complete and working**. FAPO can evaluate agentic workflows
+MCP integration is **complete and working**. FAFO can evaluate agentic workflows
 where the model calls tools exposed by [Model Context Protocol](https://modelcontextprotocol.io/)
 servers, using a real ReAct loop. The protocol is implemented with the official
 `mcp` Python SDK — there is nothing left to stub in.

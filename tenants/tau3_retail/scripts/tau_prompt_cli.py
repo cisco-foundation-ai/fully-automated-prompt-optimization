@@ -10,7 +10,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-
 _PROMPT_LICENSE_HEADER = (
     "# Copyright 2026 Cisco Systems, Inc. and its affiliates\n"
     "#\n"

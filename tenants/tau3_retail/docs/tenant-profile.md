@@ -11,14 +11,14 @@ SPDX-License-Identifier: Apache-2.0
 - External agentic benchmark tenant based on Tau-3 Retail.
 - Evaluates a tool-using customer-service agent interacting with a simulated
   user and a stateful Retail environment.
-- Uses FAFO V3 to author evaluation guidelines and case rubrics from sparse
-  trusted feedback plus unlabeled traffic, then uses FAPO for prompt-only
+- Uses the FAFO data pipeline to author evaluation guidelines and case rubrics from sparse
+  trusted feedback plus unlabeled traffic, then uses FAFO for prompt-only
   optimization.
 
 ## Security Environment Assumptions
 
 - Tau is installed in a pinned sibling checkout and isolated virtual
-  environment; it is not vendored into FAPO.
+  environment; it is not vendored into FAFO.
 - Runtime credentials are supplied through environment variables or Tau's
   ignored `.env` file.
 - Raw episodes, feedback, evaluation assets, datasets, and eval outputs are
@@ -53,7 +53,7 @@ SPDX-License-Identifier: Apache-2.0
   environment state.
 - **Native score**: Tau's environment/evaluator result, kept outside FAFO input.
 - **Trusted case**: an episode with manually reviewed user feedback.
-- **Inferred case**: an unlabeled episode with a V3 case-specific rubric.
+- **Inferred case**: an unlabeled episode with a FAFO case-specific rubric.
 - **Scenario family**: experiment-created leakage-control grouping; not a native
   Tau field.
 - **Mixed arm**: prompt optimization over trusted and approved inferred cases

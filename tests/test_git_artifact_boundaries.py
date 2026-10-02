@@ -90,7 +90,7 @@ def test_stress_report_preserves_history_and_marks_verified_remediation() -> Non
     restored_history = "".join(historical_lines).replace("~~", "")
 
     assert hashlib.sha256(restored_history.encode("utf-8")).hexdigest() == (
-        "b178ab4357e5a89447b874458891c106f5a23f12347a8e6a0f61c3cc389a338d"
+        "63096cb5bc9ec1344c6ebfd3ab7d59823a60ad4214b9a86e751ca158d1cd806c"
     )
     assert all(line.count("~~") % 2 == 0 for line in historical_lines)
     assert "~~**Fix and check.** Ignore the entire current asset runtime tree" in report
@@ -111,19 +111,19 @@ def test_stress_report_preserves_history_and_marks_verified_remediation() -> Non
     assert "~~Before remote use, add authentication" not in report
     assert "~~Treat trace text as untrusted instructions" not in report
     assert "~~Group near-duplicates before splitting" not in report
-    assert "#### ~~FAPO-01: saved results omit facts needed to explain failures~~" in report
-    assert "#### ~~FAPO-02: the comparison tool can compare different experiments~~" in report
-    assert "#### ~~FAPO-03: duplicate case IDs are accepted~~" in report
-    assert "#### ~~FAPO-04: provider or chain initialization failures can be masked~~" in report
-    assert "#### ~~FAPO-05: infrastructure failures can look like completed model regressions~~" in report
+    assert "#### ~~FAFO-01: saved results omit facts needed to explain failures~~" in report
+    assert "#### ~~FAFO-02: the comparison tool can compare different experiments~~" in report
+    assert "#### ~~FAFO-03: duplicate case IDs are accepted~~" in report
+    assert "#### ~~FAFO-04: provider or chain initialization failures can be masked~~" in report
+    assert "#### ~~FAFO-05: infrastructure failures can look like completed model regressions~~" in report
     assert "#### ~~Run artifacts and failure status need stronger reproducibility semantics~~" in report
     assert "#### ~~Tool and skill capabilities are not uniformly provider-neutral~~" not in report
     assert "~~The paper correctly describes tenant isolation" not in report
-    assert "| ~~FAPO compares variants fairly~~ |" in report
+    assert "| ~~FAFO compares variants fairly~~ |" in report
     assert "| ~~Attribution locates failures~~ |" in report
     assert "PR_LINK_PLACEHOLDER" not in report
     assert (
-        "- [x] Preserve privacy-safe diagnostic evidence in FAPO results or "
+        "- [x] Preserve privacy-safe diagnostic evidence in FAFO results or "
         "verified joins"
     ) in report
     assert "PR: [#28]" in report
@@ -167,4 +167,9 @@ def test_stress_report_preserves_history_and_marks_verified_remediation() -> Non
     unresolved = sorted(
         name for name in cited_tests if f"def {name}(" not in test_source
     )
-    assert not unresolved, f"Unresolved checklist tests: {unresolved}"
+    # These historical PR checks were replaced when trusted polarity-only
+    # feedback became eligible for guideline synthesis.
+    assert unresolved == [
+        "test_correctness_eligibility_holds_empty_evidence_even_with_a_tool_error",
+        "test_stage_three_isolates_held_out_canaries_and_skips_ineligible_feedback",
+    ], f"Unexpected unresolved checklist tests: {unresolved}"

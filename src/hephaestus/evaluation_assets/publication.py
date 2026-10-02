@@ -34,10 +34,10 @@ from src.hephaestus.evaluation_assets.control_jsonl import (
 from src.hephaestus.evaluation_assets.provenance import canonical_sha256
 
 GENERATION_DESCRIPTOR_SCHEMA_VERSION = (
-    "fapo-evaluation-generation-descriptor-v1"
+    "fafo-evaluation-generation-descriptor-v1"
 )
-GENERATION_MANIFEST_SCHEMA_VERSION = "fapo-evaluation-generation-manifest-v1"
-RELEASE_SCHEMA_VERSION = "fapo-evaluation-release-v1"
+GENERATION_MANIFEST_SCHEMA_VERSION = "fafo-evaluation-generation-manifest-v1"
+RELEASE_SCHEMA_VERSION = "fafo-evaluation-release-v1"
 LOGICAL_SPLITS = ("train", "validation", "test", "regression_trusted")
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")

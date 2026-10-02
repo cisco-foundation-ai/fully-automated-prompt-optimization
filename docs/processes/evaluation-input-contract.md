@@ -4,11 +4,11 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAPO Evaluation Input Contract
+# FAFO Evaluation Input Contract
 
 ## Purpose
 
-`fapo-evaluation-input-v1` is the vendor-neutral boundary between source data
+`fafo-evaluation-input-v1` is the vendor-neutral boundary between source data
 systems and the evaluation-asset pipeline. Both labeled and unlabeled JSONL
 files must conform before asset creation. The core never contains field-name
 mappings for observability vendors, products, or tenants.
@@ -21,7 +21,7 @@ Vendor or application export
         ↓
 Source-specific conversion
         ↓
-FAPO Evaluation Input v1 JSONL
+FAFO Evaluation Input v1 JSONL
         ↓
 Eight-stage evaluation-asset pipeline
 ```
@@ -50,7 +50,7 @@ Every labeled and unlabeled row is one JSON object with these required fields:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | string | Must equal `fapo-evaluation-input-v1` |
+| `schema_version` | string | Must equal `fafo-evaluation-input-v1` |
 | `record_id` | nonempty string | Stable unique identifier within the file |
 | `group_id` | nonempty string | Conversation or leakage-boundary group used for splitting |
 | `task_type` | nonempty string | Application-defined task family |
@@ -200,11 +200,11 @@ Labeled rows additionally require:
   produced no response.
 - `feedback`, as an object containing:
   - `polarity`: `positive`, `negative`, or `mixed`.
-  - `rationale`: a string, which may be empty when only categorical feedback
-    exists.
 
 Optional feedback fields include:
 
+- `rationale`: a string or `null`; it may be omitted when only categorical
+  feedback exists. Stage 2 normalizes an absent or null value to an empty string.
 - `correction`: corrected output or structured correction evidence.
 - `source`: nonempty source category such as `user`, `annotator`, or `sme`.
 - `correctness_signals`: an array of closed objects requiring `kind`
@@ -216,20 +216,20 @@ Optional feedback fields include:
 - Additional provenance that does not change the meaning of the canonical
   fields.
 
-A labeled row remains contract-valid when `rationale` is empty and both
-`correction` and `correctness_signals` are absent. Stage 2 handles that separate
-semantic boundary: the row remains auditable but is marked
-`insufficient_correctness_evidence`, causes no guideline provider call when it
-is the only evidence in its visibility unit, and creates no active trusted
-case. A nonempty rationale, a material correction, or a well-formed declared
-correctness signal satisfies only this minimum eligibility gate; it does not
-prove factual correctness, safety, privacy, or absence of contradiction.
+A labeled row with only a valid polarity remains eligible for guideline and
+rubric creation. Polarity is a coarse assessment of the episode; it does not
+identify a particular mistake, correct tool choice, or reference answer.
+Guidelines and case rubrics must use the explicit request and observable trace
+without inventing the missing rationale. A rationale, material correction, or
+declared check supplies more specific evidence when available. None of these
+signals alone proves factual correctness, safety, privacy, or absence of
+contradiction.
 
 Example:
 
 ```json
 {
-  "schema_version": "fapo-evaluation-input-v1",
+  "schema_version": "fafo-evaluation-input-v1",
   "record_id": "feedback-000001",
   "group_id": "conversation-000001",
   "request_id": "request-000001",
@@ -267,7 +267,7 @@ Example:
 
 ```json
 {
-  "schema_version": "fapo-evaluation-input-v1",
+  "schema_version": "fafo-evaluation-input-v1",
   "record_id": "trace-000001",
   "group_id": "conversation-000002",
   "request_id": "request-000002",
@@ -313,9 +313,11 @@ Stage 1 rejects:
   IDs, non-boolean outcomes, or unsupported fields; `content` is the only
   optional field.
 - Unlabeled records containing feedback.
-- A requested cluster count greater than the copied unlabeled row count.
-- A requested cluster count smaller than the number of distinct effective
-  routes, using the exact routing identity defined above.
+- When clustering is enabled, a requested cluster count greater than the
+  copied unlabeled row count.
+- When clustering is enabled, a requested cluster count smaller than the
+  number of distinct effective routes, using the exact routing identity
+  defined above. A count of zero skips Stages 4 and 5.
 
 Stage 1 performs these checks against the copied Stage 1 files before any
 evaluation-guideline or embedding provider call.
@@ -331,8 +333,8 @@ GET /api/evaluation-assets/input-contract
 An external adapter is responsible for joining vendor-specific trace and
 feedback resources, traversing child spans, extracting messages, standardizing
 tool calls, constructing an ordered episode when the source provides one,
-assigning stable groups, and mapping feedback into canonical polarity and
-rationale. If an adapter emits `correctness_signals`, it is also responsible
+assigning stable groups, and mapping feedback into canonical polarity and any
+available rationale. If an adapter emits `correctness_signals`, it is also responsible
 for assigning a stable `check_id` and ensuring that the recorded boolean is the
 actual outcome of that deterministic or executable check.
 

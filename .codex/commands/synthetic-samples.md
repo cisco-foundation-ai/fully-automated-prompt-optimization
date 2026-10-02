@@ -4,7 +4,7 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAPO Synthetic Samples for Codex
+# FAFO Synthetic Samples for Codex
 
 Use this when the user wants to create synthetic test cases, add edge cases, augment eval datasets, expand test coverage, or generate hard examples.
 

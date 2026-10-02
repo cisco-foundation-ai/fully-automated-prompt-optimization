@@ -13,7 +13,7 @@ import time
 from copy import deepcopy
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
-DEFAULT_OPENAI_RUBRIC_MODEL = "gpt-5.5"
+DEFAULT_OPENAI_RUBRIC_MODEL = "gpt-6-luna"
 DEFAULT_TIMEOUT_SECONDS = 300
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_BACKOFF_SECONDS = 2
@@ -134,7 +134,10 @@ def _is_reasoning_model(model: str) -> bool:
     model_lower = model.lower()
     if any(model_lower.startswith(prefix) for prefix in ("o1", "o3", "o4")):
         return True
-    return any(model_lower.startswith(prefix) for prefix in ("gpt-5", "gpt5"))
+    return any(
+        model_lower.startswith(prefix)
+        for prefix in ("gpt-5", "gpt5", "gpt-6")
+    )
 
 
 def not_applicable(reason: str) -> Dict[str, str]:

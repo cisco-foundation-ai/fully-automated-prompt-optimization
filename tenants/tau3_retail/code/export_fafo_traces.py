@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Convert Tau result episodes into unlabeled FAFO V3 input records."""
+"""Convert Tau result episodes into unlabeled FAFO input records."""
 
 from __future__ import annotations
 
@@ -17,8 +17,7 @@ from typing import Any
 
 from src.hephaestus.evaluation_assets.input_contract import validate_input_records
 
-
-SCHEMA_VERSION = "fapo-evaluation-input-v1"
+SCHEMA_VERSION = "fafo-evaluation-input-v1"
 TENANT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SPLIT = TENANT_ROOT / "recipe/retail-split.json"
 DEFAULT_OUTPUT = TENANT_ROOT / "source_artifacts/all_unlabeled.jsonl"

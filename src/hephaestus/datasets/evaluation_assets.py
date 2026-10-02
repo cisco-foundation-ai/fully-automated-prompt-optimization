@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Build versioned evaluation assets from prepared FAPO cases."""
+"""Build versioned evaluation assets from prepared FAFO cases."""
 
 from __future__ import annotations
 
@@ -89,12 +89,12 @@ class SyntheticCaseGenerator(Protocol):
         cluster: IntentCluster,
         trusted_oracles: Sequence[Mapping[str, Any]],
     ) -> Sequence[Mapping[str, Any]]:
-        """Return synthetic FAPO case dictionaries for a matched intent cluster."""
+        """Return synthetic FAFO case dictionaries for a matched intent cluster."""
 
 
 @dataclass(frozen=True)
 class FeedbackRecord:
-    """Normalized feedback-bearing trace used before FAPO JSONL conversion."""
+    """Normalized feedback-bearing trace used before FAFO JSONL conversion."""
 
     record_id: str
     task_type: str
@@ -125,7 +125,7 @@ class RubricOracle:
     reference_output: Optional[str] = None
 
     def to_expected(self) -> Dict[str, Any]:
-        """Serialize this oracle into a FAPO case ``expected`` payload."""
+        """Serialize this oracle into a FAFO case ``expected`` payload."""
         return {
             "label_source": self.label_source,
             "confidence": self.confidence,
@@ -193,16 +193,16 @@ def load_jsonl_dicts(path: Path) -> List[Dict[str, Any]]:
     return rows
 
 
-def load_fapo_cases(path: Path) -> List[Dict[str, Any]]:
-    """Load and validate raw FAPO case dictionaries from JSONL."""
+def load_fafo_cases(path: Path) -> List[Dict[str, Any]]:
+    """Load and validate raw FAFO case dictionaries from JSONL."""
     cases = load_jsonl_dicts(path)
     for index, case in enumerate(cases, start=1):
-        validate_fapo_case(case, source=f"{path}:{index}")
+        validate_fafo_case(case, source=f"{path}:{index}")
     return cases
 
 
-def validate_fapo_case(case: Mapping[str, Any], source: str = "case") -> None:
-    """Validate the generic FAPO JSONL case shape."""
+def validate_fafo_case(case: Mapping[str, Any], source: str = "case") -> None:
+    """Validate the generic FAFO JSONL case shape."""
     missing = REQUIRED_CASE_KEYS - set(case)
     if missing:
         raise ValueError(f"Invalid {source}: missing keys {sorted(missing)}")
@@ -447,7 +447,7 @@ def _synthetic_case_issues(
 ) -> List[SyntheticFilterIssue]:
     issues: List[SyntheticFilterIssue] = []
     try:
-        validate_fapo_case(case, source=case_id)
+        validate_fafo_case(case, source=case_id)
     except ValueError as exc:
         issues.append(SyntheticFilterIssue(case_id=case_id, code="invalid_schema", message=str(exc)))
         return issues

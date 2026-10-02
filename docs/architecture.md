@@ -4,7 +4,7 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAPO Architecture
+# FAFO Architecture
 
 ## Contributor Quickstart
 
@@ -30,7 +30,7 @@ run_evaluation(config)
 
 ## Overview
 
-FAPO has two layers:
+FAFO has two layers:
 1. Core (`src/hephaestus`): dataset loading, prompt rendering, skill loading, provider invocation, scoring, and eval run output writing.
 2. Tenant (`tenants/<tenant_id>`): prompt variants, agent skill files (for agentic tenants), tenant conversion code, local data caches, and run outputs.
 

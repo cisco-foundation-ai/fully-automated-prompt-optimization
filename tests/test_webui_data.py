@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the FAPO web UI filesystem store."""
+"""Tests for the FAFO web UI filesystem store."""
 
 from __future__ import annotations
 
@@ -478,7 +478,7 @@ def test_authenticated_terminal_run_uses_manifest_validated_facts(tmp_path: Path
     assert listed[0]["run_id"] == "run-authenticated"
     assert run is not None
     assert run["authority"] == "authoritative"
-    assert run["run_manifest"]["schema_version"] == "fapo-run-bundle-manifest-v1"
+    assert run["run_manifest"]["schema_version"] == "fafo-run-bundle-manifest-v1"
     assert run["run_manifest"]["hash_algorithm"] == "sha256"
     assert run["run_manifest"]["run_id"] == "run-authenticated"
     assert run["run_manifest"]["status"] == "completed"
@@ -1556,7 +1556,7 @@ def test_evaluation_asset_stage_projects_split_and_review_metadata_only(
     )
     metadata_files = {
         "stages/02_prepared_inputs/trusted_split_plan.jsonl": {
-            "schema_version": "fapo-trusted-split-assignment-v1",
+            "schema_version": "fafo-trusted-split-assignment-v1",
             "record_id": "record-1",
             "group_id": "group-1",
             "split_group_id": "split-group-1",

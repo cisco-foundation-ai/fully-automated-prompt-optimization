@@ -9,6 +9,8 @@ import os
 import re
 from pathlib import Path
 
+from src.hephaestus.datasets.rubric_providers import DEFAULT_OPENAI_RUBRIC_MODEL
+
 _CANONICAL_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -175,26 +177,31 @@ def build_parser() -> argparse.ArgumentParser:
     create_asset_parser.add_argument(
         "--feedback",
         required=True,
-        help="Labeled JSONL using fapo-evaluation-input-v1",
+        help="Labeled JSONL using fafo-evaluation-input-v1",
     )
     create_asset_parser.add_argument(
         "--unlabeled",
         required=True,
-        help="Unlabeled JSONL using fapo-evaluation-input-v1",
+        help="Unlabeled JSONL using fafo-evaluation-input-v1",
     )
     create_asset_parser.add_argument("--asset-id", default="v1")
     create_asset_parser.add_argument("--tenants-root", default="tenants")
-    create_asset_parser.add_argument("--rubric-model", default="gpt-5.5")
+    create_asset_parser.add_argument(
+        "--rubric-model", default=DEFAULT_OPENAI_RUBRIC_MODEL
+    )
     create_asset_parser.add_argument(
         "--embedding-model",
         default="text-embedding-3-small",
     )
-    create_asset_parser.add_argument("--clusters", type=int, default=50)
+    create_asset_parser.add_argument(
+        "--clusters", type=int, default=50,
+        help="Number of intent clusters; 0 skips optional Stages 4 and 5",
+    )
     create_asset_parser.add_argument(
         "--match-threshold",
         type=float,
         default=0.6,
-        help="Minimum Stage 5 cluster-to-trusted-intent cosine score",
+        help="Legacy matching setting; Stage 5 does not score or select rubrics",
     )
     create_asset_parser.add_argument(
         "--enable-synthetic-coverage",

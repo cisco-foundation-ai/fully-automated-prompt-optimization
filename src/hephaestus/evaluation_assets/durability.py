@@ -99,11 +99,12 @@ _RELEASE_AUTHORITY_SNAPSHOT: ContextVar[Mapping[Path, bytes] | None] = ContextVa
     default=None,
 )
 
-STAGE_RECEIPT_SCHEMA_VERSION = "fapo-stage-receipt-v4"
-_HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V1 = "fapo-stage-receipt-v1"
-_HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V2 = "fapo-stage-receipt-v2"
-_HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V3 = "fapo-stage-receipt-v3"
-_HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V4 = "fapo-stage-receipt-v4"
+STAGE_RECEIPT_SCHEMA_VERSION = "fafo-stage-receipt-v5"
+_HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V1 = "fafo-stage-receipt-v1"
+_HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V2 = "fafo-stage-receipt-v2"
+_HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V3 = "fafo-stage-receipt-v3"
+_HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V4 = "fafo-stage-receipt-v4"
+_HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V5 = "fafo-stage-receipt-v5"
 UNAVAILABLE_PROVENANCE = {
     "status": "unavailable",
     "reason": "provider_call_metadata_not_recorded",
@@ -115,13 +116,13 @@ LEGACY_UNAVAILABLE_PROVENANCE = {
 _OPERATION_ID = re.compile(r"^[0-9a-f]{32}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _HISTORICAL_REVIEW_FINALIZATION_SCHEMA_VERSION_V1 = (
-    "fapo-review-finalization-v1"
+    "fafo-review-finalization-v1"
 )
 _HISTORICAL_REVIEW_FINALIZATION_IDENTITY_SCHEMA_VERSION_V1 = (
-    "fapo-review-finalization-identity-v1"
+    "fafo-review-finalization-identity-v1"
 )
 _HISTORICAL_DERIVED_CASE_CONTENT_SCHEMA_VERSION_V1 = (
-    "fapo-derived-case-content-v1"
+    "fafo-derived-case-content-v1"
 )
 _HISTORICAL_REVIEW_FINALIZATION_FIELDS_V1 = frozenset(
     {
@@ -214,6 +215,7 @@ _HISTORICAL_STAGE_RECEIPT_FIELDS_V3 = frozenset(
 )
 _HISTORICAL_STAGE_RECEIPT_FIELDS_V4 = _HISTORICAL_STAGE_RECEIPT_FIELDS_V3
 _STAGE_RECEIPT_FIELDS = set(_HISTORICAL_STAGE_RECEIPT_FIELDS_V4)
+_HISTORICAL_STAGE_RECEIPT_FIELDS_V5 = frozenset(_STAGE_RECEIPT_FIELDS)
 _CREATED_HISTORY_FIELDS = {
     "timestamp",
     "revision",
@@ -673,6 +675,24 @@ _stage_specifications_v4[_HistoricalPipelineStageV2.DATASET_SPLITS] = replace(
 _HISTORICAL_STAGE_SPECIFICATIONS_V4 = MappingProxyType(
     dict(_stage_specifications_v4)
 )
+_stage_specifications_v5 = {
+    stage: replace(specification)
+    for stage, specification in _stage_specifications_v4.items()
+}
+_stage_specifications_v5[_HistoricalPipelineStageV2.LABEL_INFERENCE] = replace(
+    _stage_specifications_v5[_HistoricalPipelineStageV2.LABEL_INFERENCE],
+    direct_inputs=tuple(
+        item
+        for item in _stage_specifications_v4[_HistoricalPipelineStageV2.LABEL_INFERENCE].direct_inputs
+        if item[0] != _HistoricalPipelineStageV2.INTENT_CLUSTERING
+    ),
+    upstream_stages=(
+        _HistoricalPipelineStageV2.RAW_INPUTS,
+        _HistoricalPipelineStageV2.PREPARED_INPUTS,
+        _HistoricalPipelineStageV2.RUBRIC_EXTRACTION,
+    ),
+)
+_STAGE_SPECIFICATIONS_V5 = MappingProxyType(_stage_specifications_v5)
 _live_stage_by_value = {stage.value: stage for stage in PipelineStage}
 if set(_live_stage_by_value) == set(PERSISTED_STAGE_VALUES_V2):
     STAGE_SPECIFICATIONS = {
@@ -691,7 +711,7 @@ if set(_live_stage_by_value) == set(PERSISTED_STAGE_VALUES_V2):
                 for input_stage, name in specification.legacy_direct_inputs
             ),
         )
-        for stage, specification in _stage_specifications_v4.items()
+        for stage, specification in _stage_specifications_v5.items()
     }
 else:
     STAGE_SPECIFICATIONS = {}
@@ -726,6 +746,13 @@ def stage_specification_for_receipt_schema(
             ]
         except (KeyError, ValueError) as exc:
             raise ValueError("receipt stage is unsupported") from exc
+    elif schema_version == _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V5:
+        try:
+            return _STAGE_SPECIFICATIONS_V5[
+                _HistoricalPipelineStageV2(stage_value)
+            ]
+        except (KeyError, ValueError) as exc:
+            raise ValueError("receipt stage is unsupported") from exc
     else:
         raise ValueError("receipt schema is unsupported")
     try:
@@ -753,6 +780,7 @@ def stage_three_text_profile_for_receipt_schema(
     if schema_version in {
         _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V3,
         _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V4,
+        _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V5,
     }:
         return "current"
     raise ValueError("receipt schema is unsupported")
@@ -1968,7 +1996,7 @@ def current_dependency_hashes(
 def verify_released_asset(layout: Any, state: PipelineState) -> None:
     """Verify a released receipt/artifact chain without current-code equality."""
     if (
-        state.schema_version == "fapo-evaluation-asset-state-v2"
+        state.schema_version == "fafo-evaluation-asset-state-v2"
         and state.status == "released"
         and not layout.release_pointer_path.is_file()
     ):
@@ -2051,7 +2079,7 @@ def _verify_completed_release_candidate(
             != canonical_json_bytes(state.to_dict())
             or canonical_json_bytes(persisted_state)
             != canonical_json_bytes(exact_state.to_dict())
-            or state.schema_version != "fapo-evaluation-asset-state-v2"
+            or state.schema_version != "fafo-evaluation-asset-state-v2"
             or state.status != "running"
             or state.error is not None
             or state.current_stage not in {None, "dataset_splits"}
@@ -3616,6 +3644,11 @@ def _require_receipt_stage_profile(
         "native": STAGE_RECEIPT_SCHEMA_VERSION,
         "legacy": STAGE_RECEIPT_SCHEMA_VERSION,
     }.get(stage_profile)
+    if (
+        stage_profile == HISTORICAL_PROVENANCE_PROFILE_V4
+        and receipt.get("schema_version") == _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V5
+    ):
+        return
     if expected_schema is None or receipt.get("schema_version") != expected_schema:
         raise ValueError("receipt and stage provenance profiles differ")
 
@@ -3826,6 +3859,10 @@ def verify_stage_receipt(
         _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V4
     ):
         expected_receipt_fields = _HISTORICAL_STAGE_RECEIPT_FIELDS_V4
+    elif historical and persisted_receipt_schema == (
+        _HISTORICAL_STAGE_RECEIPT_SCHEMA_VERSION_V5
+    ):
+        expected_receipt_fields = _HISTORICAL_STAGE_RECEIPT_FIELDS_V5
     elif not historical and persisted_receipt_schema == (
         STAGE_RECEIPT_SCHEMA_VERSION
     ):
@@ -4132,7 +4169,7 @@ def _validate_released_control_state(
     *,
     require_persisted_state: bool,
 ) -> EvaluationAssetConfig:
-    if state.schema_version != "fapo-evaluation-asset-state-v2" or (
+    if state.schema_version != "fafo-evaluation-asset-state-v2" or (
         state.status != "released"
     ):
         raise EvaluationAssetIntegrityError(

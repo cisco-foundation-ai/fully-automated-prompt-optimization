@@ -153,7 +153,7 @@ class _DeterministicRubricProvider:
 
 def _feedback_row(record_id: str, group_id: str) -> dict[str, Any]:
     return {
-        "schema_version": "fapo-evaluation-input-v1",
+        "schema_version": "fafo-evaluation-input-v1",
         "record_id": record_id,
         "group_id": group_id,
         "request_id": record_id,
@@ -183,7 +183,7 @@ def _feedback_for_split(record_id: str, split: str) -> dict[str, Any]:
 
 def _unlabeled_row(record_id: str) -> dict[str, Any]:
     return {
-        "schema_version": "fapo-evaluation-input-v1",
+        "schema_version": "fafo-evaluation-input-v1",
         "record_id": record_id,
         "group_id": f"group-{record_id}",
         "request_id": record_id,

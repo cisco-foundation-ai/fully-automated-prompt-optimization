@@ -267,7 +267,7 @@ def _feedback_row(
 ) -> dict[str, Any]:
     marker = route.upper()
     return {
-        "schema_version": "fapo-evaluation-input-v1",
+        "schema_version": "fafo-evaluation-input-v1",
         "record_id": record_id,
         "group_id": group_id,
         "request_id": record_id,
@@ -305,7 +305,7 @@ def _feedback_for_split(
 
 def _unlabeled_row(record_id: str, route: str) -> dict[str, Any]:
     return {
-        "schema_version": "fapo-evaluation-input-v1",
+        "schema_version": "fafo-evaluation-input-v1",
         "record_id": record_id,
         "group_id": f"group-{record_id}",
         "request_id": record_id,
@@ -353,19 +353,23 @@ def _clusters_by_route(layout: EvaluationAssetLayout) -> dict[str, str]:
     }
 
 
-def _review_key(item: Mapping[str, Any]) -> tuple[str, str, str]:
+def _review_key(
+    item: Mapping[str, Any], clusters_by_route: Mapping[str, str]
+) -> tuple[str, str, str]:
     case = item["case"]
     metadata = case["metadata"]
+    cluster_id = metadata.get("source_cluster") or clusters_by_route[str(case["task_type"])]
     return (
         str(metadata["trust_tier"]),
-        str(metadata["source_cluster"]),
+        str(cluster_id),
         str(item["case_id"]),
     )
 
 
 def _review_items(layout: EvaluationAssetLayout) -> dict[tuple[str, str, str], dict[str, Any]]:
     page = layout.list_review_items(limit=100)
-    return {_review_key(item): dict(item) for item in page["items"]}
+    clusters_by_route = _clusters_by_route(layout)
+    return {_review_key(item, clusters_by_route): dict(item) for item in page["items"]}
 
 
 def _raw_review_items(
@@ -377,6 +381,7 @@ def _raw_review_items(
         for row in _read_jsonl(layout.review_decisions_path)
     }
     projected: dict[tuple[str, str, str], dict[str, Any]] = {}
+    clusters_by_route = _clusters_by_route(layout)
     for row in _read_jsonl(
         layout.artifact_path(
             PipelineStage.SYNTHETIC_COVERAGE,
@@ -387,7 +392,7 @@ def _raw_review_items(
         decision = decisions.get((str(item["case_id"]), str(item["fingerprint"])))
         item["status"] = str(decision["status"]) if decision is not None else "pending"
         item["inherited_from"] = decision.get("inherited_from") if decision is not None else None
-        projected[_review_key(item)] = item
+        projected[_review_key(item, clusters_by_route)] = item
     return projected
 
 

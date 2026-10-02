@@ -13,8 +13,8 @@ from typing import Any, Dict, List, Mapping, Optional
 from src.hephaestus.datasets.embedding_providers import DEFAULT_OPENAI_EMBEDDING_MODEL
 from src.hephaestus.datasets.rubric_providers import DEFAULT_OPENAI_RUBRIC_MODEL
 
-STATE_SCHEMA_VERSION = "fapo-evaluation-asset-state-v2"
-LEGACY_STATE_SCHEMA_VERSION = "fapo-evaluation-asset-state-v1"
+STATE_SCHEMA_VERSION = "fafo-evaluation-asset-state-v2"
+LEGACY_STATE_SCHEMA_VERSION = "fafo-evaluation-asset-state-v1"
 TOP_LEVEL_STATUSES = (
     "draft",
     "queued",
@@ -120,8 +120,10 @@ class EvaluationAssetConfig:
     split_seed: int = 42
 
     def __post_init__(self) -> None:
-        if self.cluster_count < 1:
-            raise ValueError("cluster_count must be at least 1")
+        if self.cluster_count < 0:
+            raise ValueError("cluster_count must be non-negative (0 disables Stages 4 and 5)")
+        if self.synthetic_coverage_enabled and self.cluster_count == 0:
+            raise ValueError("synthetic coverage requires at least one intent cluster")
         if self.batch_size < 1:
             raise ValueError("batch_size must be at least 1")
         if not 0.0 <= self.match_threshold <= 1.0:

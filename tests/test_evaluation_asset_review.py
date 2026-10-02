@@ -40,7 +40,7 @@ def _case(case_id: str = "inferred-u1") -> dict[str, Any]:
 
 def _dependency() -> dict[str, Any]:
     return {
-        "schema_version": "fapo-stage6-dependency-v1",
+        "schema_version": "fafo-stage6-dependency-v1",
         "trusted_split_plan_sha256": "sha256:" + "a" * 64,
         "cluster": {
             "cluster_id": "route-001",
@@ -100,7 +100,7 @@ def _review_item(
         case=_case(),
         dependency=dependency or _dependency(),
         source_provenance=_source_provenance(),
-        reviewer="fapo_pipeline",
+        reviewer="fafo_pipeline",
         timestamp=timestamp,
     )
 
@@ -117,7 +117,7 @@ def _review_item_for(case_id: str) -> dict[str, Any]:
         case=case,
         dependency={**_dependency(), "case_id": case_id},
         source_provenance=source,
-        reviewer="fapo_pipeline",
+        reviewer="fafo_pipeline",
         timestamp="2026-08-21T12:00:00Z",
     )
 
@@ -211,7 +211,7 @@ def test_review_fingerprint_changes_for_complete_case_dependency_and_source() ->
         case=_case(),
         dependency=_dependency(),
         source_provenance=_source_provenance(),
-        reviewer="fapo_pipeline",
+        reviewer="fafo_pipeline",
         timestamp="2026-08-21T12:00:00Z",
     )
     case_mutations = {
@@ -231,7 +231,7 @@ def test_review_fingerprint_changes_for_complete_case_dependency_and_source() ->
             case=changed_case,
             dependency=_dependency(),
             source_provenance=_source_provenance(),
-            reviewer="fapo_pipeline",
+            reviewer="fafo_pipeline",
             timestamp="2026-08-21T12:00:00Z",
         )
         assert changed["fingerprint"] != base["fingerprint"], field
@@ -243,7 +243,7 @@ def test_review_fingerprint_changes_for_complete_case_dependency_and_source() ->
             case=_case(),
             dependency=changed_dependency,
             source_provenance=_source_provenance(),
-            reviewer="fapo_pipeline",
+            reviewer="fafo_pipeline",
             timestamp="2026-08-21T12:00:00Z",
         )["fingerprint"]
         != base["fingerprint"]
@@ -256,7 +256,7 @@ def test_review_fingerprint_changes_for_complete_case_dependency_and_source() ->
             case=_case(),
             dependency=_dependency(),
             source_provenance=changed_source,
-            reviewer="fapo_pipeline",
+            reviewer="fafo_pipeline",
             timestamp="2026-08-21T12:00:00Z",
         )["fingerprint"]
         != base["fingerprint"]
@@ -321,7 +321,7 @@ def test_review_item_scoreability_hook_fails_closed() -> None:
         case=_case(),
         dependency=_dependency(),
         source_provenance=_source_provenance(),
-        reviewer="fapo_pipeline",
+        reviewer="fafo_pipeline",
         timestamp="2026-08-21T12:00:00Z",
         scoreability=scoreable,
     )
@@ -333,7 +333,7 @@ def test_review_item_scoreability_hook_fails_closed() -> None:
             case=_case(),
             dependency=_dependency(),
             source_provenance=_source_provenance(),
-            reviewer="fapo_pipeline",
+            reviewer="fafo_pipeline",
             timestamp="2026-08-21T12:00:00Z",
             scoreability=lambda _expected: False,
         )
@@ -348,7 +348,7 @@ def test_review_item_rejects_incomplete_dependency_or_source_provenance() -> Non
             case=_case(),
             dependency={"x": 1},
             source_provenance=_source_provenance(),
-            reviewer="fapo_pipeline",
+            reviewer="fafo_pipeline",
             timestamp="2026-08-21T12:00:00Z",
         )
     with pytest.raises(ValueError, match="source_provenance"):
@@ -356,7 +356,7 @@ def test_review_item_rejects_incomplete_dependency_or_source_provenance() -> Non
             case=_case(),
             dependency=_dependency(),
             source_provenance={"x": 1},
-            reviewer="fapo_pipeline",
+            reviewer="fafo_pipeline",
             timestamp="2026-08-21T12:00:00Z",
         )
 
@@ -492,7 +492,7 @@ def test_missing_stale_or_malformed_terminal_decision_resolves_pending() -> None
         "fingerprint": item["fingerprint"],
         "status": "pending",
         "decision_id": None,
-        "reviewer": "fapo_pipeline",
+        "reviewer": "fafo_pipeline",
         "timestamp": "2026-08-21T12:00:00Z",
         "note": None,
         "inherited_from": None,
@@ -686,7 +686,7 @@ def test_child_inherits_only_an_identical_fingerprint_and_case() -> None:
         child_item=identical_child,
         parent_decisions=[parent_decision],
         parent_asset_id="v1",
-        reviewer="fapo_pipeline",
+        reviewer="fafo_pipeline",
         timestamp="2026-08-22T13:00:00Z",
     )
     assert inherited is not None
@@ -707,7 +707,7 @@ def test_child_inherits_only_an_identical_fingerprint_and_case() -> None:
             child_item=changed_child,
             parent_decisions=[parent_decision],
             parent_asset_id="v1",
-            reviewer="fapo_pipeline",
+            reviewer="fafo_pipeline",
             timestamp="2026-08-22T13:00:00Z",
         )
         is None

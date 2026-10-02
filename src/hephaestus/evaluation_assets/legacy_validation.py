@@ -15,7 +15,7 @@ from typing import Any, Mapping, Sequence
 from src.hephaestus.datasets.evaluation_assets import (
     SCOREABLE_EXPECTED_KEYS,
     filter_synthetic_cases,
-    validate_fapo_case,
+    validate_fafo_case,
 )
 from src.hephaestus.evaluation_assets.input_contract import (
     effective_route,
@@ -1024,7 +1024,7 @@ def _case_rows(
 ) -> list[dict[str, Any]]:
     rows = _rows(layout, path, artifact_snapshot)
     for row in rows:
-        validate_fapo_case(row)
+        validate_fafo_case(row)
         _nonempty_string(row, "task_type")
         _case_metadata(row)
     return rows

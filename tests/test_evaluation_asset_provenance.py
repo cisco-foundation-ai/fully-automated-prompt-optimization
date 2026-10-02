@@ -1126,9 +1126,9 @@ def test_call_backed_injected_settings_survive_current_and_historical_validation
     )
 
     v2_payload = json.loads(json.dumps(payload))
-    v2_payload["schema_version"] = "fapo-evaluation-build-provenance-v2"
+    v2_payload["schema_version"] = "fafo-evaluation-build-provenance-v2"
     v2_payload["identity"]["schema_version"] = (
-        "fapo-evaluation-build-identity-v2"
+        "fafo-evaluation-build-identity-v2"
     )
     v2_payload["identity"]["source"] = _historical_source(
         v2_payload["identity"]["source"],
@@ -1154,11 +1154,11 @@ def test_call_backed_injected_settings_survive_current_and_historical_validation
 
     v1_payload = json.loads(json.dumps(payload))
     v1_call = json.loads(json.dumps(call))
-    v1_call["schema_version"] = "fapo-provider-call-v1"
+    v1_call["schema_version"] = "fafo-provider-call-v1"
     del v1_call["settings_sha256"]
-    v1_payload["schema_version"] = "fapo-evaluation-build-provenance-v1"
+    v1_payload["schema_version"] = "fafo-evaluation-build-provenance-v1"
     v1_payload["identity"]["schema_version"] = (
-        "fapo-evaluation-build-identity-v1"
+        "fafo-evaluation-build-identity-v1"
     )
     v1_payload["identity"]["source"] = _historical_source(
         v1_payload["identity"]["source"],
@@ -1391,7 +1391,7 @@ def test_stage_provenance_validator_accepts_exact_native_and_legacy_profiles(
     ) == payload
 
     v2_payload = json.loads(json.dumps(payload))
-    v2_payload["schema_version"] = "fapo-stage-provenance-v2"
+    v2_payload["schema_version"] = "fafo-stage-provenance-v2"
     for prompt in v2_payload["prompts"]:
         prompt["revision"] = "v1"
     v2_source = _historical_source(
@@ -1411,7 +1411,7 @@ def test_stage_provenance_validator_accepts_exact_native_and_legacy_profiles(
     ) == v2_payload
 
     v1_payload = json.loads(json.dumps(payload))
-    v1_payload["schema_version"] = "fapo-stage-provenance-v1"
+    v1_payload["schema_version"] = "fafo-stage-provenance-v1"
     for prompt in v1_payload["prompts"]:
         prompt["revision"] = "v1"
     v1_provider = {
@@ -1423,7 +1423,7 @@ def test_stage_provenance_validator_accepts_exact_native_and_legacy_profiles(
     }
     v1_payload["provider_identity"] = v1_provider
     for call in v1_payload["calls"]:
-        call["schema_version"] = "fapo-provider-call-v1"
+        call["schema_version"] = "fafo-provider-call-v1"
         del call["settings_sha256"]
     v1_source = _historical_source(
         v1_payload["source"],

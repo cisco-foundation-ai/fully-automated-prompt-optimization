@@ -4,12 +4,12 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAPO Web UI
+# FAFO Web UI
 
-FAPO Explorer browses the artifacts a tenant accumulates during optimization:
+FAFO Explorer browses the artifacts a tenant accumulates during optimization:
 eval runs, per-case outputs, iteration history, prompt variants and agent
 skills, datasets, and tenant docs. Evaluation-asset creation and review are
-CLI/API workflows in V3 and have no web frontend.
+CLI/API workflows and have no web frontend.
 
 It is intentionally zero-dependency — the server is built on Python's standard
 library `http.server`, and the frontend is a single self-contained HTML
@@ -24,7 +24,7 @@ From the repository root, with the project installed (`python -m pip install -e 
 python -m hephaestus.cli ui
 ```
 
-This serves FAPO Explorer at <http://127.0.0.1:8765/> and reads from the
+This serves FAFO Explorer at <http://127.0.0.1:8765/> and reads from the
 `tenants/` directory by default. Press `Ctrl+C` to stop.
 
 ### Options
@@ -136,7 +136,7 @@ The UI has three small modules under `src/hephaestus/webui/`:
 ### JSON API
 
 The Explorer uses the read endpoints below. Evaluation-asset endpoints are
-retained for CLI/API automation even though V3 has no corresponding frontend.
+retained for CLI/API automation even though there is no corresponding frontend.
 
 | Endpoint | Returns |
 |---|---|

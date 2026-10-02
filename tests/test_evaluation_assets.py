@@ -15,7 +15,7 @@ from src.hephaestus.datasets.evaluation_assets import (
     RubricOracle,
     assemble_dataset_bundle,
     filter_synthetic_cases,
-    load_fapo_cases,
+    load_fafo_cases,
     split_cases_by_group,
     write_coverage_report,
 )
@@ -110,8 +110,8 @@ def test_assemble_dataset_bundle_writes_manifest_and_split_files(tmp_path: Path)
 
     manifest_path = tmp_path / "dataset_manifest.json"
     loaded_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    train_cases = load_fapo_cases(tmp_path / "train.jsonl")
-    regression_cases = load_fapo_cases(tmp_path / "regression_trusted.jsonl")
+    train_cases = load_fafo_cases(tmp_path / "train.jsonl")
+    regression_cases = load_fafo_cases(tmp_path / "regression_trusted.jsonl")
 
     assert manifest.dataset_version == "v1"
     assert loaded_manifest["dataset_version"] == "v1"

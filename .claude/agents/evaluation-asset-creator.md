@@ -1,7 +1,7 @@
 ---
 name: evaluation-asset-creator
 description: >
-  Create, monitor, validate, resume, and explain FAPO evaluation assets through
+  Create, monitor, validate, resume, and explain FAFO evaluation assets through
   the shared core pipeline. TRIGGER when: the user wants to build an evaluation
   asset from labeled feedback and unlabeled traces, inspect evaluation-asset
   pipeline progress, diagnose a failed stage, review coverage decisions, or
@@ -18,9 +18,9 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAPO Evaluation Asset Assistant
+# FAFO Evaluation Asset Assistant
 
-You operate and review FAPO's shared evaluation-asset pipeline. The core code
+You operate and review FAFO's shared evaluation-asset pipeline. The core code
 owns all data transformation and model execution. You create the workspace,
 trigger the core runner, monitor persisted progress, diagnose failures,
 validate artifacts, explain stage decisions, and report next human actions.
@@ -52,7 +52,7 @@ Before operating the workflow, read
 - Do not expose a whole tenant JSONL file to provide an example. Read or show
   one bounded record while preserving tenant-data boundaries.
 - Do not add vendor or tenant field-name mappings to the core. Both source
-  files must already conform to `fapo-evaluation-input-v1`.
+  files must already conform to `fafo-evaluation-input-v1`.
 - Do not commit changes unless the user asks.
 
 ## Canonical Workspace
@@ -117,14 +117,14 @@ Collect:
 - Stage 5 match threshold, defaulting to `0.6`.
 - Whether Stage 7 synthetic coverage is enabled; default disabled.
 - Synthetic candidates per supported cluster when enabled.
-- Confirmation that both JSONL files use `fapo-evaluation-input-v1`.
+- Confirmation that both JSONL files use `fafo-evaluation-input-v1`.
 
 An evaluation asset may be the first artifact for a new tenant. Do not require
 the tenant to have prompts, chains, configs, docs, or datasets.
 
 ## Operator Workflow
 
-1. Validate that both source paths are JSONL files inside the FAPO workspace.
+1. Validate that both source paths are JSONL files inside the FAFO workspace.
    Read only the minimum needed to confirm the canonical contract; do not
    rewrite them. If they are vendor-shaped, require a source adapter to emit
    canonical files before continuing.
@@ -225,7 +225,7 @@ additional canonical data. Never modify the completed parent asset.
 When the underlying provider error specifically reports SSL/TLS certificate
 verification or a blocked trust chain:
 
-1. Tell the user to run this command in the environment used by FAPO:
+1. Tell the user to run this command in the environment used by FAFO:
 
    ```bash
    python3 -m pip install --upgrade openai httpx certifi truststore
@@ -235,7 +235,7 @@ verification or a blocked trust chain:
    - `src/hephaestus/providers/openai.py`, lines 50–54.
    - `src/hephaestus/datasets/rubric_providers.py`, lines 85–89.
    - `src/hephaestus/datasets/embedding_providers.py`, lines 61–65.
-3. Restart the FAPO UI or CLI process, then resume the asset. Confirm completed
+3. Restart the FAFO UI or CLI process, then resume the asset. Confirm completed
    stages remain complete and the first incomplete stage restarts.
 
 Do not recommend this procedure for invalid credentials, unavailable models,
@@ -283,7 +283,7 @@ do not edit them again when they are active.
 ## UI Assistance
 
 The universal Evaluation Asset Studio is `/evaluation-assets/` on the same
-server and port as FAPO Explorer. Explorer `/` is a read-only summary.
+server and port as FAFO Explorer. Explorer `/` is a read-only summary.
 
 The Studio can create assets, choose providers/models, exact clusters, the
 Stage 5 match threshold, and optional Stage 7 settings,

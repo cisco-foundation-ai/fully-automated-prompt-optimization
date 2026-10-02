@@ -24,8 +24,8 @@ from src.hephaestus.evaluation_assets.models import (
     PipelineStage,
 )
 
-HISTORICAL_JOURNAL_SCHEMA_VERSION_V2 = "fapo-recovery-journal-v2"
-HISTORICAL_JOURNAL_SCHEMA_VERSION_V3 = "fapo-recovery-journal-v3"
+HISTORICAL_JOURNAL_SCHEMA_VERSION_V2 = "fafo-recovery-journal-v2"
+HISTORICAL_JOURNAL_SCHEMA_VERSION_V3 = "fafo-recovery-journal-v3"
 JOURNAL_SCHEMA_VERSION = HISTORICAL_JOURNAL_SCHEMA_VERSION_V3
 PERSISTED_STAGE_VALUES_V2 = (
     "raw_inputs",

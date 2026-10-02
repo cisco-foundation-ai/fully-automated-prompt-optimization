@@ -119,7 +119,7 @@ Paper reference: GPT-5 = 72.8% on full 1000-case set.
 
 ## 2026-03-17
 - Summary: Initial tenant setup with faith-based data loading and scoring.
-- Why: Add CTI-CWE benchmark as a FAPO tenant for prompt optimization.
+- Why: Add CTI-CWE benchmark as a FAFO tenant for prompt optimization.
 - Files/configs: Full tenant scaffold, `variant-001.md`, `local-classify-variant001.json`.
 - Eval impact: Baseline 69.2% exact match (gpt-4.1-mini, 1000 cases).
 - Rollback notes: N/A (initial setup).

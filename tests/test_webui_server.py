@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the FAPO web UI HTTP routing helpers."""
+"""Tests for the FAFO web UI HTTP routing helpers."""
 
 from __future__ import annotations
 

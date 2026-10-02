@@ -4,11 +4,11 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAFO v3 staged optimization results
+# FAFO staged optimization results
 
 ## Experiment
 
-This arm optimized the Tau Retail prompt in two stages using the FAFO v3 Luna evaluation assets:
+This arm optimized the Tau Retail prompt in two stages using the FAFO Luna evaluation assets:
 
 1. Optimize on all 216 inferred training cases until the inferred-stage search was stopped.
 2. Start from the best inferred-stage prompt and refine on all 20 trusted-feedback training cases until plateau.
@@ -115,4 +115,4 @@ Agent cost was $6.661982 in total ($0.075704 per episode), user-simulator cost w
 
 ## Final artifact
 
-The staged winner is [`prompts/v3/staged/trusted/t001.txt`](../prompts/v3/staged/trusted/t001.txt). No protected result was used to create or select it. Native Tau results and FAPO evaluation outputs remain local and are not published with this recipe.
+The staged winner is [`prompts/v3/staged/trusted/t001.txt`](../prompts/v3/staged/trusted/t001.txt). No protected result was used to create or select it. Native Tau results and FAFO evaluation outputs remain local and are not published with this recipe.

@@ -56,6 +56,20 @@ def test_canonical_labeled_and_unlabeled_records_validate() -> None:
     )
 
 
+@pytest.mark.parametrize("rationale", ["missing", None, ""])
+def test_labeled_feedback_accepts_a_rating_without_rationale(rationale: object) -> None:
+    feedback = {"polarity": "negative"}
+    if rationale != "missing":
+        feedback["rationale"] = rationale
+    labeled = {
+        **_record(),
+        "assistant_output": "A response",
+        "feedback": feedback,
+    }
+
+    validate_input_records([labeled], labeled=True, path=Path("labeled.jsonl"))
+
+
 def test_contract_accepts_an_ordered_episode() -> None:
     """A full episode can supplement the backward-compatible flat fields."""
     episode = {
@@ -270,7 +284,9 @@ def test_contract_document_is_versioned_and_explicit() -> None:
         "assistant_output",
         "feedback",
     ]
+    assert contract["feedback"]["required"] == ["polarity"]
     assert contract["feedback"]["optional"] == [
+        "rationale",
         "correction",
         "source",
         "correctness_signals",

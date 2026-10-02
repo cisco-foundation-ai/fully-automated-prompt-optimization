@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Create and validate a pinned Tau-3 checkout beside the FAPO repository."""
+"""Create and validate a pinned Tau-3 checkout beside the FAFO repository."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ import argparse
 import shlex
 import subprocess
 from pathlib import Path
-
 
 TAU_REPOSITORY = "https://github.com/sierra-research/tau2-bench.git"
 TAU_RELEASE = "v1.0.1"

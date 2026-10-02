@@ -4,11 +4,13 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAFO v3 Luna — trusted-only prompt optimization
+# FAFO Luna — trusted-only prompt optimization
 
 ## Data asset
 
-The `fafo-v3-luna-v1` pipeline used the same trusted split plan as the previous Tau asset (split-plan SHA-256 `f30b3a3aa4ff43ff4664259b9f83b1e4d0ed08af031b766f36f35518ab5ca265`).
+The recorded evaluation asset used the same trusted split plan as the previous
+Tau asset (split-plan SHA-256
+`f30b3a3aa4ff43ff4664259b9f83b1e4d0ed08af031b766f36f35518ab5ca265`).
 
 | Item | Count |
 |---|---:|
@@ -90,7 +92,7 @@ The regression runner initially received one invalid judge response. That judge 
 
 After T008 was frozen, it was evaluated once on the same 22 native Tau Retail held-out tasks, four fixed trial seeds, and fixed runtime controls as the baseline and prior trusted-only run.
 
-| Native metric | Baseline B0 | Prior trusted V019 | FAFO v3 trusted T008 |
+| Native metric | Baseline B0 | Prior trusted V019 | FAFO trusted T008 |
 |---|---:|---:|---:|
 | Passes | 63/88 | 71/88 | 71/88 |
 | `pass^1` | 0.7159 | 0.8068 | 0.8068 |

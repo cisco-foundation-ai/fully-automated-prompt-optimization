@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 
 from src.hephaestus import artifact_io
-from src.hephaestus.datasets.intent_assets import IntentCluster
 from src.hephaestus.datasets.jsonl_loader import load_cases
 from src.hephaestus.evaluation_assets import pipeline as pipeline_module
 from src.hephaestus.evaluation_assets.durability import (
@@ -29,14 +28,14 @@ from src.hephaestus.evaluation_assets.pipeline import (
     FULL_CATALOG_RUBRIC_PROMPT,
     GUIDELINE_SYNTHESIS_PROMPT,
     EvaluationAssetPipeline,
-    _compile_evaluation_guidelines,
     _compact_tool_result,
+    _compile_evaluation_guidelines,
     _feedback_provider_record,
     _full_catalog_episode_payload,
     _guideline_provider_example,
     _normalize_aliased_guideline_response,
-    _normalize_feedback_evidence,
     _normalize_feedback,
+    _normalize_feedback_evidence,
     _normalize_full_catalog_rubric_response,
     _normalize_intent,
     _normalize_rubric,
@@ -466,7 +465,7 @@ def _approve_and_finalize(pipeline: EvaluationAssetPipeline) -> PipelineState:
 def test_normalization_preserves_structural_fields_and_redacts_content() -> None:
     """Schema structure survives while content-bearing PII is redacted."""
     row = {
-        "schema_version": "fapo-evaluation-input-v1",
+        "schema_version": "fafo-evaluation-input-v1",
         "record_id": " record.owner@example.com ",
         "group_id": " group.owner@example.com ",
         "request_id": " request.owner@example.com ",
@@ -618,7 +617,7 @@ def test_normalization_preserves_structural_fields_and_redacts_content() -> None
 def test_normalized_intent_includes_all_prior_user_messages() -> None:
     intent = _normalize_intent(
         {
-            "schema_version": "fapo-evaluation-input-v1",
+            "schema_version": "fafo-evaluation-input-v1",
             "record_id": "record-1",
             "group_id": "group-1",
             "task_type": "answer",
@@ -687,7 +686,7 @@ def test_normalized_intent_includes_all_prior_user_messages() -> None:
 def test_episode_redaction_preserves_structure_and_redacts_content() -> None:
     """Episode links remain usable without leaking content-bearing PII."""
     row = {
-        "schema_version": "fapo-evaluation-input-v1",
+        "schema_version": "fafo-evaluation-input-v1",
         "record_id": "record-1",
         "group_id": "group-1",
         "task_type": "answer",
@@ -905,7 +904,10 @@ def test_feedback_trace_mistake_patterns_require_correlation_and_repair() -> Non
         "group_id": "group-1",
         "route": "answer",
         "task_type": "answer",
-        "feedback": {"polarity": "negative"},
+        "feedback": {
+            "polarity": "negative",
+            "rationale": "The agent claimed success after the tool failed.",
+        },
     }
     raw = {
         "intent_label": "complete the request",
@@ -959,7 +961,13 @@ def test_feedback_trace_mistake_patterns_require_correlation_and_repair() -> Non
     with pytest.raises(ValueError, match="must agree with feedback"):
         _normalize_feedback_evidence(
             raw,
-            {**source, "feedback": {"polarity": "positive"}},
+            {
+                **source,
+                "feedback": {
+                    "polarity": "positive",
+                    "rationale": "The user praised the result.",
+                },
+            },
             "fake",
             "fake-model",
         )
@@ -972,7 +980,10 @@ def test_feedback_trace_success_pattern_does_not_require_a_repair() -> None:
         "group_id": "group-1",
         "route": "answer",
         "task_type": "answer",
-        "feedback": {"polarity": "positive"},
+        "feedback": {
+            "polarity": "positive",
+            "rationale": "The agent confirmed the requested option before acting.",
+        },
     }
     raw = {
         "intent_label": "complete the request",
@@ -1071,7 +1082,7 @@ def test_guideline_synthesis_restores_opaque_source_aliases() -> None:
 def test_normalization_defaults_preserve_exact_canonical_source_strings() -> None:
     """Omitted request and route fields inherit source strings without trimming."""
     row = {
-        "schema_version": "fapo-evaluation-input-v1",
+        "schema_version": "fafo-evaluation-input-v1",
         "record_id": " exact-record-id ",
         "group_id": " exact-group-id ",
         "task_type": " exact-task-type ",
@@ -1096,7 +1107,7 @@ def test_normalization_defaults_preserve_exact_canonical_source_strings() -> Non
 def test_normalization_recurses_through_composite_structural_fields() -> None:
     """Structural keys preserve scalars, never whole content-bearing subtrees."""
     row = {
-        "schema_version": "fapo-evaluation-input-v1",
+        "schema_version": "fafo-evaluation-input-v1",
         "record_id": "record-1",
         "group_id": "group-1",
         "task_type": "answer",
@@ -1219,7 +1230,7 @@ def test_normalization_recurses_through_composite_structural_fields() -> None:
 def test_normalization_traverses_nested_tool_name_collections() -> None:
     """Tool collections keep names exact while redacting descriptive content."""
     row = {
-        "schema_version": "fapo-evaluation-input-v1",
+        "schema_version": "fafo-evaluation-input-v1",
         "record_id": "record-1",
         "group_id": "group-1",
         "task_type": "answer",
@@ -1261,7 +1272,7 @@ def test_normalization_traverses_nested_tool_name_collections() -> None:
 def test_normalization_preserves_name_only_in_structural_descriptor_context() -> None:
     """Descriptor-local names stay exact without globally exempting `name`."""
     row = {
-        "schema_version": "fapo-evaluation-input-v1",
+        "schema_version": "fafo-evaluation-input-v1",
         "record_id": "record-1",
         "group_id": "group-1",
         "task_type": "answer",
@@ -1369,7 +1380,7 @@ def test_normalization_preserves_name_only_in_structural_descriptor_context() ->
 def test_normalization_routes_singular_tool_descriptor_by_context() -> None:
     """A singular tool descriptor preserves only its structural name fields."""
     row = {
-        "schema_version": "fapo-evaluation-input-v1",
+        "schema_version": "fafo-evaluation-input-v1",
         "record_id": "record-1",
         "group_id": "group-1",
         "task_type": "answer",
@@ -1457,7 +1468,7 @@ def test_normalization_redacts_every_descendant_of_explicit_content_fields(
 ) -> None:
     """Structural-looking descendants cannot escape explicit content context."""
     row = {
-        "schema_version": "fapo-evaluation-input-v1",
+        "schema_version": "fafo-evaluation-input-v1",
         "record_id": " canonical-record.owner@example.com ",
         "group_id": " canonical-group.owner@example.com ",
         "task_type": " canonical-task.owner@example.com ",
@@ -1868,7 +1879,7 @@ def test_malformed_rubric_responses_never_persist_provider_content(
             cluster_count=1,
             rubric_model="safe-rubric-model",
             synthetic_coverage_enabled=malformed_response == "synthetic",
-            split_seed=0,
+            split_seed=1,
         ),
         feedback,
         unlabeled,
@@ -2808,7 +2819,7 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
         "\n".join(
             json.dumps(
                 {
-                    "schema_version": "fapo-evaluation-input-v1",
+                    "schema_version": "fafo-evaluation-input-v1",
                     "record_id": f"f{index}",
                     "group_id": (
                         "feedback-thread"
@@ -2837,7 +2848,7 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
         "\n".join(
             json.dumps(
                 {
-                    "schema_version": "fapo-evaluation-input-v1",
+                    "schema_version": "fafo-evaluation-input-v1",
                     "record_id": f"u{index}",
                     "group_id": (
                         "feedback-thread"
@@ -3020,12 +3031,12 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
 
     assert prepared_feedback["record_id"] == "f1"
     assert prepared_feedback["group_id"] == "feedback-thread"
-    assert prepared_feedback["schema_version"] == "fapo-evaluation-input-v1"
+    assert prepared_feedback["schema_version"] == "fafo-evaluation-input-v1"
     assert "feedback_id" not in prepared_feedback
     assert "thread_id" not in prepared_feedback
     assert prepared_intent["record_id"] == "u1"
     assert prepared_intent["group_id"] == "feedback-thread"
-    assert prepared_intent["schema_version"] == "fapo-evaluation-input-v1"
+    assert prepared_intent["schema_version"] == "fafo-evaluation-input-v1"
     assert "feedback_id" not in prepared_intent
     assert "thread_id" not in prepared_intent
     assert feedback_evidence["record_id"] == "f1"
@@ -3060,7 +3071,7 @@ def test_pipeline_is_self_contained_and_writes_canonical_layout(
     )
     assert dataset_manifest["clustering"]["correctness_role"] == "none"
     assert dataset_manifest["evaluation_guidelines"] == {
-        "schema_version": "fapo-evaluation-guideline-v1",
+        "schema_version": "fafo-evaluation-guideline-v1",
         "count": 1,
         "activation_status": "active_from_trusted_evidence",
         "calibration_status": "uncalibrated",
@@ -3285,7 +3296,7 @@ def test_layout_rejects_unsafe_tenant_and_asset_names(tmp_path: Path) -> None:
 def _write_extension_feedback(path: Path, record_ids: list[str]) -> None:
     rows = [
         {
-            "schema_version": "fapo-evaluation-input-v1",
+            "schema_version": "fafo-evaluation-input-v1",
             "record_id": record_id,
             "group_id": f"group-{record_id}",
             "task_type": "answer",
@@ -3312,7 +3323,7 @@ def _write_extension_feedback(path: Path, record_ids: list[str]) -> None:
 def _write_extension_unlabeled(path: Path, record_ids: list[str]) -> None:
     rows = [
         {
-            "schema_version": "fapo-evaluation-input-v1",
+            "schema_version": "fafo-evaluation-input-v1",
             "record_id": record_id,
             "group_id": f"group-{record_id}",
             "task_type": "answer",
@@ -3334,7 +3345,7 @@ def _write_extension_unlabeled(path: Path, record_ids: list[str]) -> None:
 def _write_unlabeled_routes(path: Path, routes: list[str]) -> None:
     rows = [
         {
-            "schema_version": "fapo-evaluation-input-v1",
+            "schema_version": "fafo-evaluation-input-v1",
             "record_id": f"u{index}",
             "group_id": f"group-u{index}",
             "task_type": route,

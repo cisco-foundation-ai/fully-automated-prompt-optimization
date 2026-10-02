@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
-SCHEMA_VERSION = "fapo-evaluation-input-v1"
+SCHEMA_VERSION = "fafo-evaluation-input-v1"
 FEEDBACK_POLARITIES = frozenset({"positive", "negative", "mixed"})
 CORRECTNESS_SIGNAL_KINDS = frozenset({"deterministic", "executable"})
 CORRECTNESS_SIGNAL_REQUIRED_FIELDS = ("kind", "check_id", "passed")
@@ -120,9 +120,9 @@ def input_contract_document() -> Dict[str, Any]:
         ],
         "labeled_required_fields": ["assistant_output", "feedback"],
         "feedback": {
-            "required": ["polarity", "rationale"],
-            "types": {"polarity": "string", "rationale": "string"},
-            "optional": ["correction", "source", "correctness_signals"],
+            "required": ["polarity"],
+            "types": {"polarity": "string", "rationale": "string or null"},
+            "optional": ["rationale", "correction", "source", "correctness_signals"],
         },
         "correctness_signal": {
             "required": list(CORRECTNESS_SIGNAL_REQUIRED_FIELDS),
@@ -387,16 +387,17 @@ def _validate_episode(value: Any, location: str) -> None:
 def _validate_feedback(value: Any, location: str) -> None:
     if not isinstance(value, Mapping):
         raise ValueError(f"{location}: labeled records require a 'feedback' object")
-    for field in ("polarity", "rationale"):
-        if field not in value:
-            raise ValueError(f"{location}: 'feedback.{field}' is required")
-    if value["polarity"] not in FEEDBACK_POLARITIES:
+    if "polarity" not in value:
+        raise ValueError(f"{location}: 'feedback.polarity' is required")
+    if not isinstance(value["polarity"], str) or value["polarity"] not in FEEDBACK_POLARITIES:
         allowed = ", ".join(sorted(FEEDBACK_POLARITIES))
         raise ValueError(
             f"{location}: 'feedback.polarity' must be one of: {allowed}"
         )
-    if not isinstance(value["rationale"], str):
-        raise ValueError(f"{location}: 'feedback.rationale' must be a string")
+    if "rationale" in value and value["rationale"] is not None and not isinstance(
+        value["rationale"], str
+    ):
+        raise ValueError(f"{location}: 'feedback.rationale' must be a string or null")
     if "source" in value:
         _require_nonempty_string(value["source"], location, "feedback.source")
     if "correctness_signals" in value:

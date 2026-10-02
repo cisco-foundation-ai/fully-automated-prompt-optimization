@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 # Security Policies and Procedures
 
 This document outlines security procedures and general policies for the
-`Fully Automated Prompt Optimization` project.
+`Fully Automated Flow Optimization` project.
 
 - [Disclosing a security issue](#disclosing-a-security-issue)
 - [Vulnerability management](#vulnerability-management)
@@ -15,12 +15,12 @@ This document outlines security procedures and general policies for the
 
 ## Disclosing a security issue
 
-The `Fully Automated Prompt Optimization` maintainers take all security issues in the project
-seriously. Thank you for improving the security of `Fully Automated Prompt Optimization`. We
+The `Fully Automated Flow Optimization` maintainers take all security issues in the project
+seriously. Thank you for improving the security of `Fully Automated Flow Optimization`. We
 appreciate your dedication to responsible disclosure and will make every effort
 to acknowledge your contributions.
 
-`Fully Automated Prompt Optimization` leverages GitHub's private vulnerability reporting.
+`Fully Automated Flow Optimization` leverages GitHub's private vulnerability reporting.
 
 To learn more about this feature and how to submit a vulnerability report,
 review [GitHub's documentation on private reporting](https://docs.github.com/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability).

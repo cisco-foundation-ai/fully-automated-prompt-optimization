@@ -19,7 +19,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-RUN_IDENTITY_SCHEMA_VERSION = "fapo-run-identity-v1"
+RUN_IDENTITY_SCHEMA_VERSION = "fafo-run-identity-v1"
 
 ALLOWED_VARIANT_DIMENSIONS = (
     "prompts",

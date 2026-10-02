@@ -31,7 +31,7 @@ from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
 
 def _input_row(record_id: str, *, labeled: bool) -> dict:
     row = {
-        "schema_version": "fapo-evaluation-input-v1",
+        "schema_version": "fafo-evaluation-input-v1",
         "record_id": record_id,
         "group_id": f"group-{record_id}",
         "task_type": "answer",
@@ -104,14 +104,14 @@ def test_journal_commit_preserves_the_prepared_schema_version(tmp_path: Path) ->
 
     layout._commit_journal_operation(
         {
-            "schema_version": "fapo-recovery-journal-v2",
+            "schema_version": "fafo-recovery-journal-v2",
             "operation_id": "a" * 32,
             "kind": "configuration_revision",
         }
     )
 
     committed = json.loads(layout.recovery_journal_path.read_text(encoding="utf-8"))
-    assert committed["schema_version"] == "fapo-recovery-journal-v2"
+    assert committed["schema_version"] == "fafo-recovery-journal-v2"
 
 
 def _case(case_id: str, trust_tier: str) -> dict[str, Any]:
@@ -184,7 +184,7 @@ def _prepare_review_layout(
             "source_cluster": "cluster-1",
             "matched_intent_id": "guideline-1",
         },
-        reviewer="fapo_pipeline",
+        reviewer="fafo_pipeline",
         timestamp="2026-08-21T12:00:00Z",
     )
     held_case = _case("trusted-held", "trusted_feedback")
@@ -258,7 +258,7 @@ def _accept_stage_seven_receipt(
 
     def verify_stage_receipt(*args: Any, **kwargs: Any) -> dict[str, Any]:
         calls.append({"args": args, "kwargs": kwargs})
-        return {"schema_version": "fapo-evaluation-stage-receipt-v3"}
+        return {"schema_version": "fafo-evaluation-stage-receipt-v3"}
 
     monkeypatch.setattr(
         workspace_module,
@@ -512,7 +512,7 @@ def test_review_workspace_requires_the_dependency_stage_for_each_trust_tier(
             "source_cluster": "cluster-1",
             "matched_intent_id": "guideline-1",
         },
-        reviewer="fapo_pipeline",
+        reviewer="fafo_pipeline",
         timestamp="2026-08-21T12:00:00Z",
     )
     layout._write_authority_jsonl(

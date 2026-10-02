@@ -1291,7 +1291,7 @@ def _validate_before_state_shape(
         _exact_keys(raw, _STATE_FIELDS)
     if (
         raw.get("schema_version")
-        not in {"fapo-evaluation-asset-state-v1", STATE_SCHEMA_VERSION}
+        not in {"fafo-evaluation-asset-state-v1", STATE_SCHEMA_VERSION}
         or raw.get("status")
         not in {
             "draft",

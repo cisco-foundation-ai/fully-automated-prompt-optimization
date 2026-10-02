@@ -4,23 +4,31 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Fully Automated Prompt Optimization and Evaluation Asset Studio: Tutorial and Stress Test
+# Fully Automated Flow Optimization and Evaluation Asset Studio: Tutorial and Stress Test
 
-This report analyzes the [FAPO paper, arXiv v2](https://arxiv.org/html/2606.19605), the repository's `main` snapshot at [`ed965ae5`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/tree/ed965ae5a08c8f04cfb36cb5170c0734cc1e3d6d), and the proposed `evaluation-asset-studio` snapshot at [`ce7f832f`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/tree/ce7f832fc96a4e8e7a5ef46fad49d1c24e15c50c). The feature branch is a direct five-commit descendant of `main`, changing 38 files by 12,928 insertions and 27 deletions. All runtime tests in this audit were offline; no live rubric-model, task-model, embedding, or tenant-data call was made.
+This report analyzes the [original paper, arXiv v2](https://arxiv.org/html/2606.19605), the repository's `main` snapshot at [`ed965ae5`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/tree/ed965ae5a08c8f04cfb36cb5170c0734cc1e3d6d), and the proposed `evaluation-asset-studio` snapshot at [`ce7f832f`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/tree/ce7f832fc96a4e8e7a5ef46fad49d1c24e15c50c). The feature branch is a direct five-commit descendant of `main`, changing 38 files by 12,928 insertions and 27 deletions. All runtime tests in this audit were offline; no live rubric-model, task-model, embedding, or tenant-data call was made.
 
-The report has two parts. Part I is a concise tutorial: it explains FAPO, the new upstream evaluation-asset workflow, and their relationship. Part II is the stress test: it separates reproduced defects from immediate engineering improvements, open empirical questions, inherited FAPO limitations, and properties that already work correctly.
+> **Current FAFO data pipeline behavior:** A trusted record with valid feedback polarity
+> can generate guidelines and a case rubric even when rationale is absent.
+> Polarity alone records an overall rating; the pipeline discards unsupported
+> claims about a specific cause or repair. The notes below about holding such
+> ratings describe the historical snapshots and remediation work audited here.
+> See the current [input contract](evaluation-input-contract.md) and
+> [pipeline guide](feedback-dataset-flow.md) for operational requirements.
+
+The report has two parts. Part I is a concise tutorial: it explains FAFO, the new upstream evaluation-asset workflow, and their relationship. Part II is the stress test: it separates reproduced defects from immediate engineering improvements, open empirical questions, inherited FAFO limitations, and properties that already work correctly.
 
 Part I explains the intended workflow and the verified happy path; it does not imply that every documented guardrail is enforced in the audited snapshot. Part II identifies those gaps, assigns release gates, and ends with a remediation and research program. Readers seeking only the decision can start with Section 12; readers implementing fixes should continue through Sections 13, 14, and 19.
 
 ## Part I — Tutorial
 
-### 1. FAPO in one sentence
+### 1. FAFO in one sentence
 
-Fully Automated Prompt Optimization (FAPO) is an evidence-guided search procedure over versions of a large language model (LLM) workflow: run the workflow, inspect where it failed, make one allowed change at the cheapest useful level, review the change, measure it on held-out data, and repeat.
+Fully Automated Flow Optimization (FAFO) is an evidence-guided search procedure over versions of a large language model (LLM) workflow: run the workflow, inspect where it failed, make one allowed change at the cheapest useful level, review the change, measure it on held-out data, and repeat.
 
-The key idea is that the object being optimized is a pipeline, not necessarily one prompt. A pipeline may contain retrieval, several LLM calls, deterministic processing, tool use, and final formatting. If retrieval never found the relevant document, rewriting the final-answer prompt is unlikely to solve the problem. Conversely, if the correct answer is present but wrapped in unparseable prose, a prompt or formatting fix may be sufficient. FAPO records intermediate outputs so that the optimizer can distinguish these cases.
+The key idea is that the object being optimized is a pipeline, not necessarily one prompt. A pipeline may contain retrieval, several LLM calls, deterministic processing, tool use, and final formatting. If retrieval never found the relevant document, rewriting the final-answer prompt is unlikely to solve the problem. Conversely, if the correct answer is present but wrapped in unparseable prose, a prompt or formatting fix may be sufficient. FAFO records intermediate outputs so that the optimizer can distinguish these cases.
 
-An intuitive mathematical view is useful. Let `v` be one allowed pipeline variant, `D` a set of evaluation cases, and `S` the tenant-defined scorer. For case `i`, `x_i` is the model-visible input, `y_i` is protected expected evidence supplied only to the scorer, and `z_i(v)` is the recorded sequence of intermediate outputs. FAPO measures
+An intuitive mathematical view is useful. Let `v` be one allowed pipeline variant, `D` a set of evaluation cases, and `S` the tenant-defined scorer. For case `i`, `x_i` is the model-visible input, `y_i` is protected expected evidence supplied only to the scorer, and `z_i(v)` is the recorded sequence of intermediate outputs. FAFO measures
 
 $$
 Q(v; D)=\frac{1}{|D|}\sum_{i=1}^{|D|}S(v(x_i), y_i, z_i(v)).
@@ -30,9 +38,9 @@ It then searches a discrete, tenant-constrained set of variants for a higher val
 
 ### 2. The four roles
 
-A tenant is one task-specific workspace containing the data, chain, scorer, configuration, and change policy used by the shared FAPO runtime. A guideline is an evidence-backed statement of desired behavior; a rubric turns guidelines into case-level scoring requirements; a scorer is executable code that applies those requirements; and an oracle is the broader source of trusted correctness evidence, which may include deterministic checks, references, tools, or calibrated human or model judgments.
+A tenant is one task-specific workspace containing the data, chain, scorer, configuration, and change policy used by the shared FAFO runtime. A guideline is an evidence-backed statement of desired behavior; a rubric turns guidelines into case-level scoring requirements; a scorer is executable code that applies those requirements; and an oracle is the broader source of trusted correctness evidence, which may include deterministic checks, references, tools, or calibrated human or model judgments.
 
-FAPO is easiest to understand by separating the roles that can otherwise be conflated.
+FAFO is easiest to understand by separating the roles that can otherwise be conflated.
 
 | Role | Responsibility | Trust boundary |
 | --- | --- | --- |
@@ -45,7 +53,7 @@ This separation matters. An optimizer can improve a pipeline that uses a differe
 
 ### 3. The tenant is the unit of work
 
-A FAPO tenant packages the task-specific material around a shared runtime. At minimum it supplies:
+A FAFO tenant packages the task-specific material around a shared runtime. At minimum it supplies:
 
 - A JSON Lines (JSONL) dataset containing `case_id`, `task_type`, `context`, `expected`, and `metadata`.
 - A LangGraph chain whose named nodes write intermediate `step_outputs` and a final `output_text`.
@@ -74,7 +82,7 @@ flowchart LR
 
 The engine enforces basic types, path existence, scorer inheritance, and numeric score validity. It does not understand the semantics of `expected`; only the tenant scorer does. It also does not technically enforce all research policies. Split visibility, scorer immutability, one-change discipline, validation-only selection, and reviewer independence primarily live in playbooks and agent instructions.
 
-### 5. The FAPO optimization loop
+### 5. The FAFO optimization loop
 
 The paper presents an operational six-stage loop rather than a formal optimizer with a fixed proposal distribution or stopping theorem.
 
@@ -104,7 +112,7 @@ The loop's scientific hygiene depends on three boundaries: individual held-out c
 
 | Scope | Reported result | Appropriate interpretation |
 | --- | --- | --- |
-| Six benchmarks × three task models | FAPO exceeds the reproduced GEPA baseline in 15 of 18 comparisons; mean FAPO–GEPA difference is +14.1 percentage points | Broad evidence for the evaluated package, not a component-level causal claim |
+| Six benchmarks × three task models | FAFO exceeds the reproduced GEPA baseline in 15 of 18 comparisons; mean FAFO–GEPA difference is +14.1 percentage points | Broad evidence for the evaluated package, not a component-level causal claim |
 | HoVer and IFBench, where permitted structural changes were used | 6 of 6 wins; mean gain +33.8 points | Strong evidence that the broader action space helped on these configurations |
 | Remaining prompt-only comparisons | 9 of 12 wins | More mixed evidence when the action spaces are closer |
 | CTIBench-RCM prompt-only experiment | Test gains of +4.0, +7.1, and +2.0 points across the three models | Positive task-specific result outside the six-benchmark aggregate |
@@ -114,7 +122,7 @@ These results support the narrower conclusion that an inspectable, attribution-g
 
 ### 7. What Evaluation Asset Studio adds
 
-FAPO assumes that someone has already built evaluation cases and a scorer. Evaluation Asset Studio works earlier: it tries to build versioned cases (named, saved revisions) from a small file of trusted feedback traces (records with human feedback) and a larger file of unlabeled traffic (ordinary application logs without correctness judgments).
+FAFO assumes that someone has already built evaluation cases and a scorer. Evaluation Asset Studio works earlier: it tries to build versioned cases (named, saved revisions) from a small file of trusted feedback traces (records with human feedback) and a larger file of unlabeled traffic (ordinary application logs without correctness judgments).
 
 Imagine a support bot. A complaint saying “the refund window is 30 days, not 60” can support a correctness rule. Ten thousand unlabeled refund questions show that refunds are common, but they do not reveal the correct policy. This gives the Studio three evidence rules:
 
@@ -122,7 +130,7 @@ Imagine a support bot. A complaint saying “the refund window is 30 days, not 6
 - Unlabeled traffic shows what users ask and whether the dataset covers it; it does not supply correct answers.
 - An earlier assistant answer provides context, not truth.
 
-Both JSONL source files must follow the `fapo-evaluation-input-v1` contract (the required field names, types, and allowed values). A source-specific adapter may first convert a vendor export—for example, joining trace fragments and standardizing tool names—into that common format. After this boundary, shared code, not an agent, performs every dataset-building step.
+Both JSONL source files must follow the `fafo-evaluation-input-v1` contract (the required field names, types, and allowed values). A source-specific adapter may first convert a vendor export—for example, joining trace fragments and standardizing tool names—into that common format. After this boundary, shared code, not an agent, performs every dataset-building step.
 
 ### 8. The eight Studio stages
 
@@ -143,7 +151,7 @@ The pipeline has eight stages. Each answers one practical question and saves art
 
 ### 9. How the two systems connect
 
-The Studio does not replace FAPO. It prepares evaluation data; FAPO then uses that data to improve a prompt or pipeline.
+The Studio does not replace FAFO. It prepares evaluation data; FAFO then uses that data to improve a prompt or pipeline.
 
 ```mermaid
 flowchart LR
@@ -155,32 +163,32 @@ flowchart LR
     G --> H[Tenant builds and checks scorer]
     D --> C[Tenant evaluation setup]
     H --> C
-    C --> O[FAPO optimization loop]
+    C --> O[FAFO optimization loop]
     O --> P[Pipeline chosen on validation data]
     P --> T[Trusted regression and final test]
 ```
 
-Studio does not create runnable scoring code. It writes rubric text, suggested checks, tool expectations, and reference outputs into each case's `expected` field—like writing an answer key and grading instructions. The tenant must still implement a scorer that applies those instructions and calibrate it (check its decisions against trusted human or programmatic judgments). The files therefore fit FAPO's input format, but they do not form a complete runnable tenant by themselves.
+Studio does not create runnable scoring code. It writes rubric text, suggested checks, tool expectations, and reference outputs into each case's `expected` field—like writing an answer key and grading instructions. The tenant must still implement a scorer that applies those instructions and calibrate it (check its decisions against trusted human or programmatic judgments). The files therefore fit FAFO's input format, but they do not form a complete runnable tenant by themselves.
 
 ### 10. Point-by-point comparison
 
-The simplest distinction is: **Studio builds the test; FAPO improves the system taking the test.**
+The simplest distinction is: **Studio builds the test; FAFO improves the system taking the test.**
 
-| Question | Original FAPO | Evaluation Asset Studio | Connection |
+| Question | Original FAFO | Evaluation Asset Studio | Connection |
 | --- | --- | --- | --- |
 | When does it run? | After a tenant already has data and scoring | Before evaluation and optimization | Studio is an earlier step |
 | What must already exist? | Dataset, chain, scorer, prompts, configuration, and change rules | Two contract-valid source files, Studio settings, and model access; a chain and scorer still come later | Studio reduces dataset setup, not all tenant setup |
 | What says an answer is correct? | The case's `expected` data plus executable scorer | Guidelines derived from trusted feedback | Studio helps define what “correct” means |
 | What shows user demand? | The existing evaluation cases | The kinds and volumes of requests found in unlabeled traffic | Studio adds a view of coverage |
 | What does it inspect? | Failed cases and pipeline steps | Feedback facts, guidelines, request types, and traffic groups | The two systems diagnose different layers |
-| Which models are involved? | An optimizer, task model, and sometimes a judging model | A guideline-writing model and an embedding model (which turns text into similarity vectors) | Studio adds model calls before FAPO runs |
+| Which models are involved? | An optimizer, task model, and sometimes a judging model | A guideline-writing model and an embedding model (which turns text into similarity vectors) | Studio adds model calls before FAFO runs |
 | What may the agent change? | Allowed prompts, skills, parameters, or chain structure | The agent operates and reviews; shared code performs data transformations | Studio gives the agent less direct authority |
 | What decisions vary? | Pipeline variants | Models, number of groups, match cutoffs, synthetic generation, and split seed (the value that makes the split repeatable) | Studio configures a build rather than searching pipeline variants |
 | How is review used? | A candidate pipeline change is reviewed before evaluation | Generated cases carry review labels and queues | Similar intent, but ~~Studio does not yet enforce approval before publication~~ |
 | How are splits protected? | Separate files/configs plus access rules followed by the optimizer | The main Stage 8 keeps each `group_id` in one split and builds a trusted regression set | Studio adds a useful core safeguard |
 | How is history saved? | Numbered variants and iteration records | Asset workspaces, checkpoints, histories, and parent–child versions | Both aim to make changes traceable |
-| What comes out? | A selected pipeline and score history | Dataset files, guidelines, reports, queues, and parent–child history | Studio's output feeds FAPO |
-| What is the main risk? | Improving the wrong or leaked score | Building a score from unsupported or leaked evidence | An early Studio error can be amplified by FAPO |
+| What comes out? | A selected pipeline and score history | Dataset files, guidelines, reports, queues, and parent–child history | Studio's output feeds FAFO |
+| What is the main risk? | Improving the wrong or leaked score | Building a score from unsupported or leaked evidence | An early Studio error can be amplified by FAFO |
 
 ## Part II — Stress Test and Analysis
 
@@ -189,17 +197,17 @@ The simplest distinction is: **Studio builds the test; FAPO improves the system 
 The audit used four checks:
 
 1. **Promises versus code.** We traced each documented guarantee into the implementation and tests.
-2. **Branch comparison.** We separated new Studio behavior from inherited FAPO behavior and later changes not covered by the paper.
+2. **Branch comparison.** We separated new Studio behavior from inherited FAFO behavior and later changes not covered by the paper.
 3. **Offline tests.** With API credentials removed, `main` passed 330 tests, skipped 2, and deselected 8 integration tests (tests that require external systems). The Studio branch passed 387, skipped 2, and deselected 8; its focused files passed 61.
-4. **Adversarial probes.** We supplied deliberately difficult inputs that normal tests omit—for example, deleting a file from an asset still marked `completed`. These probes reproduced the defects listed below and five inherited FAPO runtime gaps.
+4. **Adversarial probes.** We supplied deliberately difficult inputs that normal tests omit—for example, deleting a file from an asset still marked `completed`. These probes reproduced the defects listed below and five inherited FAFO runtime gaps.
 
 Passing the standard suite shows that expected paths work. It does not prove that harmful edge cases are impossible: most reproduced defects had no negative test, ~~and one end-to-end test checks the `review_required` label but still permits those cases to be published.~~
 
-We classify results as **confirmed defects** (reproduced or unavoidable from the code), **immediate improvements** (bounded fixes), **open research problems** (questions needing experiments), or **strengths** (properties already enforced). Release priorities are separate: **P0** blocks merge and use of protected tenant data; **P1** blocks claims that an asset is ready for FAPO; **P2** blocks broad empirical or production-effectiveness claims, but not a safely bounded prototype.
+We classify results as **confirmed defects** (reproduced or unavoidable from the code), **immediate improvements** (bounded fixes), **open research problems** (questions needing experiments), or **strengths** (properties already enforced). Release priorities are separate: **P0** blocks merge and use of protected tenant data; **P1** blocks claims that an asset is ready for FAFO; **P2** blocks broad empirical or production-effectiveness claims, but not a safely bounded prototype.
 
 ### 12. Consolidated verdict
 
-The idea is viable and tackles a real bottleneck: FAPO cannot optimize reliably until a tenant has useful cases and a meaningful scorer. Studio's basic evidence rule is good, and its main splitting step is stronger than FAPO's inherited split handling.
+The idea is viable and tackles a real bottleneck: FAFO cannot optimize reliably until a tenant has useful cases and a meaningful scorer. Studio's basic evidence rule is good, and its main splitting step is stronger than FAFO's inherited split handling.
 
 The audited code is not yet ready to promise ~~an independent regression set, enforced review,~~ ~~unchangeable versions~~, or identity-safe redaction. The largest research flaw is easy to state: ~~it learns grading rules from all trusted feedback and only afterward reserves some feedback for validation, test, and regression. A rule found only in saved test data can therefore appear in training.~~ The main engineering risks are ~~publication of unapproved AI-generated cases,~~ raw files that Git may track, redaction that changes IDs, and ~~unsafe resume behavior~~.
 
@@ -210,7 +218,7 @@ These are repairable problems, not proof that the idea is infeasible. Until they
 | ID | What goes wrong | Evidence | Why it matters | Gate |
 | --- | --- | --- | --- | --- |
 | ~~EA-01~~ | ~~Grading rules are learned before evaluation groups are reserved~~ | ~~Unique test phrase leaked from regression into training~~ | ~~Saved evaluation evidence can shape training~~ | ~~P0~~ |
-| ~~EA-02~~ | ~~`review_required` is only a label~~ | ~~Six unapproved derived cases were published~~ | ~~FAPO may train or select on unchecked labels~~ | ~~P0~~ |
+| ~~EA-02~~ | ~~`review_required` is only a label~~ | ~~Six unapproved derived cases were published~~ | ~~FAFO may train or select on unchecked labels~~ | ~~P0~~ |
 | EA-03 | The actual asset folders are not ignored by Git | Reproduced with `git check-ignore` | Protected feedback may be committed | P0 |
 | EA-04 | Redaction also rewrites IDs | Distinct email/IP-shaped IDs became identical | Records and split groups can collapse | P0 |
 | ~~EA-05~~ | ~~A completed asset can change or lose files unnoticed~~ | ~~Both behaviors reproduced~~ | ~~One version ID can mean different data~~ | ~~P0~~ |
@@ -226,7 +234,7 @@ EA-07 is absent because Section 14 reclassifies the scorer handoff as a P1 readi
 
 ~~**Example.** We placed the unique phrase `HOLDOUT_ONLY_CRITERION_7F3A` only in feedback record `f2`. The split put `f2` in `regression_trusted`, yet the phrase appeared in a training case's `expected` field. This is a canary test: a planted phrase reveals whether information crossed a boundary.~~
 
-~~**Why it matters.** Keeping each conversation in one split prevents direct duplication, but it does not keep the learned grading rules independent. FAPO can train against a rule learned from the very data later used to judge it.~~
+~~**Why it matters.** Keeping each conversation in one split prevents direct duplication, but it does not keep the learned grading rules independent. FAFO can train against a rule learned from the very data later used to judge it.~~
 
 **Fix and check.** ~~Assign trusted groups to train, validation, test, and regression before learning any guideline. Build training guidelines only from training feedback.~~ If every group needs its own rubric, use cross-fitting (build a group's rubric without using that group's evidence). Plant unique phrases in every held-out split (data saved for evaluation) and verify that none reaches any training guideline, inferred rubric, synthetic prompt, or `expected` field, even indirectly.
 
@@ -294,7 +302,7 @@ These issues do not disprove the research idea, but they limit safe use or repea
 
 #### Scorer handoff is a documented downstream boundary
 
-Studio writes scoring plans but does not run them. For example, `expected` may request a fixed programmatic check or an LLM judge (a model that grades another model), but FAPO still needs tenant-written scorer code. This is documented, so it is not a branch defect; it is the boundary between a draft dataset and an optimization-ready tenant.
+Studio writes scoring plans but does not run them. For example, `expected` may request a fixed programmatic check or an LLM judge (a model that grades another model), but FAFO still needs tenant-written scorer code. This is documented, so it is not a branch defect; it is the boundary between a draft dataset and an optimization-ready tenant.
 
 Before calling an asset ready, either compile supported plans into a shared scorer or verify that the tenant scorer implements every required check. Unsupported plans must remain human-review-only or fail closed (refuse to score). Calibration (comparison with trusted judgments) should report false positives (wrongly accepted cases), false negatives (wrongly rejected cases), and judge–human agreement.
 
@@ -330,11 +338,11 @@ The pipeline loads whole files, sends all evidence for one request type in one g
 
 The service accepts any source file in the workspace, so one tenant can copy another tenant's data. Its HTTP server has no authentication; it can preview files and change assets, and users may bind it beyond the local machine. ~~Restrict sources to the chosen tenant unless an explicit import is approved.~~ Before remote use, add authentication, ~~cross-site request forgery (CSRF) protection (which stops a malicious site from making the user's browser submit changes)~~, and ~~`Cache-Control: no-store`~~. Treat trace text as untrusted instructions when sending it to a model; JSON formatting does not make malicious text harmless.
 
-### 15. Inherited FAPO runtime findings
+### 15. Inherited FAFO runtime findings
 
-Studio feeds the existing FAPO runtime. Problems in that runtime can therefore distort the use of Studio data, even though the branch did not create them.
+Studio feeds the existing FAFO runtime. Problems in that runtime can therefore distort the use of Studio data, even though the branch did not create them.
 
-#### ~~FAPO-01: saved results omit facts needed to explain failures~~
+#### ~~FAFO-01: saved results omit facts needed to explain failures~~
 
 ~~Failure attribution means deciding which pipeline step caused an error. Saved `EvalCaseResult` rows contain outputs but omit the input `context` and protected expected answer. The diagnostic code still expects both: it compares retrieved text with the question and checks whether a correct answer was merely formatted badly. See [`types.py:38–54`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/blob/ed965ae5a08c8f04cfb36cb5170c0734cc1e3d6d/src/hephaestus/types.py#L38-L54), [`step_attribution.py:27–38`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/blob/ed965ae5a08c8f04cfb36cb5170c0734cc1e3d6d/src/hephaestus/analysis/step_attribution.py#L27-L38), [`step_attribution.py:51–73`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/blob/ed965ae5a08c8f04cfb36cb5170c0734cc1e3d6d/src/hephaestus/analysis/step_attribution.py#L51-L73), and [`step_attribution.py:321–333`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/blob/ed965ae5a08c8f04cfb36cb5170c0734cc1e3d6d/src/hephaestus/analysis/step_attribution.py#L321-L333).~~
 
@@ -342,23 +350,23 @@ Studio feeds the existing FAPO runtime. Problems in that runtime can therefore d
 
 ~~**Fix.** Save the minimum privacy-safe diagnostic evidence, or join results back to an unchanged dataset using a verified case ID and dataset fingerprint. Test diagnostics with actual saved rows, and count different failure types separately rather than letting the first error for a step describe all later errors.~~
 
-#### ~~FAPO-02: the comparison tool can compare different experiments~~
+#### ~~FAFO-02: the comparison tool can compare different experiments~~
 
 ~~`compare_runs` averages two result files without requiring the same cases, dataset, split, model, provider, scorer, or sampling settings. Two runs with disjoint case IDs and conflicting configs still produced differences of +100 composite-score points for both the mean and median; the case-by-case lists were empty because no IDs matched. See [`compare.py:21–79`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/blob/ed965ae5a08c8f04cfb36cb5170c0734cc1e3d6d/src/hephaestus/runs/compare.py#L21-L79).~~
 
 ~~**Fix.** Record fingerprints for the dataset, ordered cases, scorer, chain, prompts, skills, model settings, seed, split, and metric. Refuse a headline comparison when they differ, unless the user explicitly requests a clearly labeled exploratory comparison.~~
 
-#### ~~FAPO-03: duplicate case IDs are accepted~~
+#### ~~FAFO-03: duplicate case IDs are accepted~~
 
 ~~The loader accepted two rows with `case_id="dup"`; later comparison code stores rows by ID and can silently replace one with the other. Reject duplicates during loading and report both row numbers. Studio makes this especially important because redaction or extension mistakes can create collisions earlier.~~
 
-#### ~~FAPO-04: provider or chain initialization failures can be masked~~
+#### ~~FAFO-04: provider or chain initialization failures can be masked~~
 
 ~~The error handler assumes a progress tracker already exists, but provider or chain setup can fail before that tracker is created. A forced `provider boom` was replaced by an unrelated `UnboundLocalError`, hiding the useful cause. See [`eval_runner.py:312–393`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/blob/ed965ae5a08c8f04cfb36cb5170c0734cc1e3d6d/src/hephaestus/runs/eval_runner.py#L312-L393). Create the tracker earlier or guard its use while preserving the original error.~~
 
-#### ~~FAPO-05: infrastructure failures can look like completed model regressions~~
+#### ~~FAFO-05: infrastructure failures can look like completed model regressions~~
 
-~~A chain exception becomes an empty answer, receives a score, and counts as completed. Our probe produced score 0 with `Chain exception: chain boom`, yet the run status was `completed`. Continuing other cases is useful, but the run needs a `degraded` or partial-failure status, actual `failed_case_ids`, and a failure threshold. FAPO must not treat an outage as poor model quality.~~
+~~A chain exception becomes an empty answer, receives a score, and counts as completed. Our probe produced score 0 with `Chain exception: chain boom`, yet the run status was `completed`. Continuing other cases is useful, but the run needs a `degraded` or partial-failure status, actual `failed_case_ids`, and a failure threshold. FAFO must not treat an outage as poor model quality.~~
 
 #### ~~Policy guarantees are described more strongly than the runtime enforces~~
 
@@ -370,15 +378,15 @@ Studio feeds the existing FAPO runtime. Problems in that runtime can therefore d
 
 #### Tool and skill capabilities are not uniformly provider-neutral
 
-The repository supports tool-using nodes, but only the OpenAI provider implements native tool calls. Baseten and SageMaker use a fallback that ignores tool definitions. Global tool limits are not automatically connected to generic agent nodes, and a valid skill path still must be inserted by the tenant chain. These are provider capability limits to document and test, not failures of the central FAPO idea.
+The repository supports tool-using nodes, but only the OpenAI provider implements native tool calls. Baseten and SageMaker use a fallback that ignores tool definitions. Global tool limits are not automatically connected to generic agent nodes, and a valid skill path still must be inserted by the tenant chain. These are provider capability limits to document and test, not failures of the central FAFO idea.
 
-### 16. Methodological limits of the FAPO paper
+### 16. Methodological limits of the original paper
 
-These limits narrow what the paper proves; they do not imply that its numbers are fabricated or that FAPO failed.
+These limits narrow what the paper proves; they do not imply that its numbers are fabricated or that FAFO failed.
 
 #### Search-space and compute asymmetry
 
-GEPA may rewrite instructions inside a fixed program; FAPO may also change parameters and pipeline structure. That broader choice is part of FAPO's value, but it means the 15/18 result does not isolate a better prompt-search method. The reproduction also replaced GEPA's reflector (the model that critiques instructions) with Claude Opus 4.6, obtained scores different from GEPA's paper, and did not match tokens, model calls, time, or cost. The paper acknowledges that this is not an exact like-for-like comparison.
+GEPA may rewrite instructions inside a fixed program; FAFO may also change parameters and pipeline structure. That broader choice is part of FAFO's value, but it means the 15/18 result does not isolate a better prompt-search method. The reproduction also replaced GEPA's reflector (the model that critiques instructions) with Claude Opus 4.6, obtained scores different from GEPA's paper, and did not match tokens, model calls, time, or cost. The paper acknowledges that this is not an exact like-for-like comparison.
 
 #### Weak uncertainty resolution
 
@@ -394,11 +402,11 @@ Showing only an average validation score is safer than revealing validation case
 
 #### Construct and proxy validity
 
-FAPO optimizes one composite score—a proxy for the real goal. A valid number from 0 to 100 does not prove that the score measures the intended behavior. Pushing hard on an imperfect proxy can eventually reduce true quality, as shown in [Scaling Laws for Reward Model Overoptimization](https://proceedings.mlr.press/v202/gao23h.html). This is a general risk, not evidence that FAPO gamed the paper's exact-match tasks. When a tenant uses an LLM judge, known position, verbosity, self-enhancement, and familiarity biases ([Zheng et al.](https://arxiv.org/abs/2306.05685); [Wataoka et al.](https://arxiv.org/abs/2410.21819)) require comparison with humans or executable checks. They do not invalidate Table 2 without evidence that its headline metrics used such a judge.
+FAFO optimizes one composite score—a proxy for the real goal. A valid number from 0 to 100 does not prove that the score measures the intended behavior. Pushing hard on an imperfect proxy can eventually reduce true quality, as shown in [Scaling Laws for Reward Model Overoptimization](https://proceedings.mlr.press/v202/gao23h.html). This is a general risk, not evidence that FAFO gamed the paper's exact-match tasks. When a tenant uses an LLM judge, known position, verbosity, self-enhancement, and familiarity biases ([Zheng et al.](https://arxiv.org/abs/2306.05685); [Wataoka et al.](https://arxiv.org/abs/2410.21819)) require comparison with humans or executable checks. They do not invalidate Table 2 without evidence that its headline metrics used such a judge.
 
 #### External validity and scope of “fully automated”
 
-The experiments do not show performance on live or future traffic, transfer across providers, lower cost or latency, resistance to malicious traces, strong tenant security, or broad security performance beyond mapping software vulnerabilities to weakness categories. [WILDS](https://proceedings.mlr.press/v139/koh21a.html) shows generally that test performance can fall after real-world distribution shifts, but not that FAPO specifically fails. “Fully automated” describes the loop after setup; people still define the task, baseline, data, scorer, playbook, and allowed changes. The safest claim is therefore that FAPO beat the reproduced GEPA setup on the reported configurations.
+The experiments do not show performance on live or future traffic, transfer across providers, lower cost or latency, resistance to malicious traces, strong tenant security, or broad security performance beyond mapping software vulnerabilities to weakness categories. [WILDS](https://proceedings.mlr.press/v139/koh21a.html) shows generally that test performance can fall after real-world distribution shifts, but not that FAFO specifically fails. “Fully automated” describes the loop after setup; people still define the task, baseline, data, scorer, playbook, and allowed changes. The safest claim is therefore that FAFO beat the reproduced GEPA setup on the reported configurations.
 
 ### 17. Open research problems for Evaluation Asset Studio
 
@@ -459,7 +467,7 @@ Several important parts already work and should survive the fixes:
 - **Local algorithms are repeatable with unchanged inputs.** Group assignment, clustering after vectors exist, representative choice, and queue sampling follow fixed rules. Model and embedding calls may still change.
 - **Child versions are substantially self-contained.** They receive new IDs, verify a completed same-tenant parent, copy parent outputs, preserve group assignments, and can finish after the parent is removed. ~~The flaw is that `resume` can alter a completed asset, not that child copying is absent.~~
 - ~~**Most stage-file writes resist partial writes.** They replace temporary files in the same directory. Event/history appends and the full publication bundle still need one all-or-nothing save.~~
-- **FAPO separates optimizer and task model.** This permits one model to optimize a pipeline that runs another.
+- **FAFO separates optimizer and task model.** This permits one model to optimize a pipeline that runs another.
 - **Trying text changes first is a reasonable cost rule.** It avoids unnecessary structural edits, as long as escalation remains a documented judgment rather than a guarantee.
 
 The audit also found narrower problems than initially suspected:
@@ -490,7 +498,7 @@ The audit also found narrower problems than initially suspected:
 5. **Validate generated data deeply.** ~~Require unique guideline IDs, nonempty scoreable rubrics,~~ valid nested fields, ~~sound embedding shapes/indices~~, ~~and accurate filter labels.~~
 ~~6. **Record enough build history.** Save code and prompt fingerprints, resolved defaults, provider revisions, random settings, request/response IDs, usage, and stage fingerprints.~~
 7. **Handle large inputs.** Stream files, combine evidence in stages, reuse average group vectors, and enforce provider input/token limits before calls.
-~~8. **Repair inherited FAPO checks.** Preserve diagnostic evidence, reject duplicate case IDs, compare only compatible runs, keep original startup errors, and distinguish successful, degraded, and failed runs.~~
+~~8. **Repair inherited FAFO checks.** Preserve diagnostic evidence, reject duplicate case IDs, compare only compatible runs, keep original startup errors, and distinguish successful, degraded, and failed runs.~~
 
 #### P2: required before broad research claims
 
@@ -586,9 +594,9 @@ The eight integration tests were deselected. The two skips were a CTI-RCM scorer
 | ~~Groups stay in one split~~ | ~~Main Stage 8 does this; the alternate assembler does not~~ | ~~Main-path strength plus EA-09~~ |
 | Regression contains trusted cases only | Main Stage 8 reserves trusted cases and holds conflicting derived groups | ~~Strength, qualified by EA-01~~ |
 | Unsupported request types are not labeled | Inference accepts only groups matched to trusted feedback | Strength |
-| Published files can feed FAPO | They fit FAPO's format, but Studio does not run their scoring plans | Format compatibility; scorer still required |
-| ~~FAPO compares variants fairly~~ | ~~The comparison utility does not verify equal data or settings~~ | ~~Runtime gap FAPO-02~~ |
-| ~~Attribution locates failures~~ | ~~Saved rows omit two inputs used by the diagnostics~~ | ~~Runtime gap FAPO-01~~ |
+| Published files can feed FAFO | They fit FAFO's format, but Studio does not run their scoring plans | Format compatibility; scorer still required |
+| ~~FAFO compares variants fairly~~ | ~~The comparison utility does not verify equal data or settings~~ | ~~Runtime gap FAFO-02~~ |
+| ~~Attribution locates failures~~ | ~~Saved rows omit two inputs used by the diagnostics~~ | ~~Runtime gap FAFO-01~~ |
 
 ### 22. Audit limitations
 
@@ -600,7 +608,7 @@ This audit establishes offline code paths and information flow at two exact comm
 
 Evaluation Asset Studio is promising because it addresses the right earlier problem: building evaluation data before optimization begins. Its strongest ideas are clear—trusted evidence defines correctness, traffic shows coverage, shared code owns transformations, source history is saved, and records with the same exact `group_id` are split together. A traceable way to build evaluation data for a traceable optimizer is worth pursuing.
 
-**Decision for `evaluation-asset-studio@ce7f832f`: no-go for merge, protected-data use, or a claim that its output is safe for FAPO optimization.** Close every P0 item before either merge or protected-data use. First contain data and preserve IDs; ~~then prevent held-out feedback from shaping training and enforce approval;~~ ~~finally make versions and resume safe.~~ Rerun the EA-01 through EA-05 adversarial checks and the full offline suite. Close P1, including the executable scorer handoff, before calling an asset optimization-ready.
+**Decision for `evaluation-asset-studio@ce7f832f`: no-go for merge, protected-data use, or a claim that its output is safe for FAFO optimization.** Close every P0 item before either merge or protected-data use. First contain data and preserve IDs; ~~then prevent held-out feedback from shaping training and enforce approval;~~ ~~finally make versions and resume safe.~~ Rerun the EA-01 through EA-05 adversarial checks and the full offline suite. Close P1, including the executable scorer handoff, before calling an asset optimization-ready.
 
 After those fixes, the decisive question is simple: do Studio-built cases preserve model rankings and produce gains on later, untouched, expert-checked data at lower total cost than manual curation?
 
@@ -710,7 +718,7 @@ cross-fitting, broad contradiction/safety/privacy screening, executable scorer
 compilation, or empirical calibration. Those clauses remain unstruck and
 unchecked below.
 
-### FAPO runtime-integrity correction
+### FAFO runtime-integrity correction
 
 PR4 snapshots the complete dataset and declared executable/textual inputs before
 tenant callbacks, rejects duplicate physical `case_id` rows, records sanitized
@@ -768,12 +776,12 @@ unstruck or unchecked.
 - [x] Record code and prompt fingerprints, resolved defaults, provider/API revisions, request/response IDs, random settings, usage, and stage fingerprints. PR: [#26](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/pull/26); implementation commit: [`7acf4433`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/commit/7acf443339a2d1739f13acd1e225738900728f94); tests: `test_working_source_fingerprint_changes_for_every_declared_member`, `test_build_provenance_has_exact_schema_and_body_free_identity`, `test_provider_call_validator_rejects_nested_metadata_corruption`, `test_openai_embedding_metadata_preserves_ordered_batch_transports`.
 - [ ] Stream large files, hierarchically combine evidence, reuse centroid representations, enforce provider limits before calls, and benchmark 10,000, 100,000, and 1 million traces.
 - [x] Enforce loopback-only IPv4/IPv6 binds, same-origin evaluation-asset API mutations, and `Cache-Control: no-store`; apply the same boundary to generic dataset lists/reads and case joins that can expose published evaluation-asset datasets while preserving ordinary Explorer datasets. PR: [#25](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/pull/25); implementation commit: [`7a50a58f`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/commit/7a50a58f4262eb5ed31b76f24bd8638e0fbd73c3); tests: `test_serve_rejects_non_loopback_bind_before_server_start`, `test_serve_binds_ipv6_loopback_and_prints_bracketed_url`, `test_evaluation_asset_api_policy_and_cache_headers`, `test_published_studio_datasets_inherit_studio_http_boundary`, `test_ordinary_dataset_catalog_remains_available_to_explorer_hosts`.
-- [x] Preserve privacy-safe diagnostic evidence in FAPO results or verified joins so failure attribution has its required inputs (FAPO-01). PR: [#28](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/pull/28); implementation commit: [`78dd591f`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/commit/78dd591f6ac9d09080596a3fecf342de02ef1d6c); tests: `test_verified_run_joins_protected_evidence_only_after_full_authority`, `test_verified_run_rejects_dataset_fingerprint_mismatch`, `test_aggregates_every_heuristic_and_confidence_observation_per_step`, `test_published_bundle_never_contains_runtime_canaries`.
-- [x] Refuse headline comparisons across incompatible cases, datasets, scorers, chains, providers, models, seeds, splits, or metrics unless explicitly labeled exploratory (FAPO-02). PR: [#28](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/pull/28); implementation commit: [`78dd591f`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/commit/78dd591f6ac9d09080596a3fecf342de02ef1d6c); tests: `test_each_undeclared_dimension_must_remain_fixed`, `test_declared_variant_difference_is_reported_but_controlled`, `test_exploratory_mode_lists_all_uncontrolled_differences`, `test_non_completed_or_unauthenticated_bundles_reject_even_exploratory`.
-- [x] Reject duplicate FAPO evaluation `case_id` values with both source rows (FAPO-03). PR: [#28](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/pull/28); implementation commit: [`78dd591f`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/commit/78dd591f6ac9d09080596a3fecf342de02ef1d6c); tests: `test_load_cases_with_identity_rejects_duplicate_ids_with_physical_rows`, `test_duplicate_case_ids_report_physical_rows_before_any_runtime_factory`.
-- [x] Preserve original provider/chain initialization failures even before progress tracking exists (FAPO-04). PR: [#28](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/pull/28); implementation commit: [`78dd591f`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/commit/78dd591f6ac9d09080596a3fecf342de02ef1d6c); tests: `test_startup_failure_preserves_exact_exception_and_failed_progress`, `test_secondary_progress_failure_never_replaces_startup_exception`.
-- [x] Distinguish successful, degraded, and failed FAPO runs; populate failed-case IDs; and enforce the terminal threshold that any failed case prevents `completed` while zero successful cases is `failed` (FAPO-05). PR: [#28](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/pull/28); implementation commit: [`78dd591f`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/commit/78dd591f6ac9d09080596a3fecf342de02ef1d6c); tests: `test_mixed_execution_is_degraded_and_aggregates_successes_only`, `test_all_failed_results_produce_failed_terminal_status`, `test_successful_zero_score_is_completed`, `test_terminal_status_is_cross_linked_to_execution_outcomes`.
-- [x] Label runtime-enforced, agent-enforced, and recommended FAPO policy boundaries precisely; record available reproducibility facts with explicit unavailable markers and provider capability limits. PR: [#28](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/pull/28); implementation commit: [`78dd591f`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/commit/78dd591f6ac9d09080596a3fecf342de02ef1d6c); tests: `test_publish_installs_a_hash_bound_manifest_after_all_terminal_artifacts`, `test_faults_before_manifest_install_never_create_run_authority`, `test_progress_summarizes_only_allowlisted_trust_tiers`, `test_prompt_iteration_loop_is_the_canonical_exact_enforcement_table`, `test_runtime_behavior_docs_cover_attribution_provider_and_mcp_limits`, `test_base_baseten_and_sagemaker_tool_requests_remain_text_only`, `test_skill_paths_require_explicit_rendering_and_one_ordered_runtime_message`.
+- [x] Preserve privacy-safe diagnostic evidence in FAFO results or verified joins so failure attribution has its required inputs (FAFO-01). PR: [#28](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/pull/28); implementation commit: [`78dd591f`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/commit/78dd591f6ac9d09080596a3fecf342de02ef1d6c); tests: `test_verified_run_joins_protected_evidence_only_after_full_authority`, `test_verified_run_rejects_dataset_fingerprint_mismatch`, `test_aggregates_every_heuristic_and_confidence_observation_per_step`, `test_published_bundle_never_contains_runtime_canaries`.
+- [x] Refuse headline comparisons across incompatible cases, datasets, scorers, chains, providers, models, seeds, splits, or metrics unless explicitly labeled exploratory (FAFO-02). PR: [#28](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/pull/28); implementation commit: [`78dd591f`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/commit/78dd591f6ac9d09080596a3fecf342de02ef1d6c); tests: `test_each_undeclared_dimension_must_remain_fixed`, `test_declared_variant_difference_is_reported_but_controlled`, `test_exploratory_mode_lists_all_uncontrolled_differences`, `test_non_completed_or_unauthenticated_bundles_reject_even_exploratory`.
+- [x] Reject duplicate FAFO evaluation `case_id` values with both source rows (FAFO-03). PR: [#28](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/pull/28); implementation commit: [`78dd591f`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/commit/78dd591f6ac9d09080596a3fecf342de02ef1d6c); tests: `test_load_cases_with_identity_rejects_duplicate_ids_with_physical_rows`, `test_duplicate_case_ids_report_physical_rows_before_any_runtime_factory`.
+- [x] Preserve original provider/chain initialization failures even before progress tracking exists (FAFO-04). PR: [#28](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/pull/28); implementation commit: [`78dd591f`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/commit/78dd591f6ac9d09080596a3fecf342de02ef1d6c); tests: `test_startup_failure_preserves_exact_exception_and_failed_progress`, `test_secondary_progress_failure_never_replaces_startup_exception`.
+- [x] Distinguish successful, degraded, and failed FAFO runs; populate failed-case IDs; and enforce the terminal threshold that any failed case prevents `completed` while zero successful cases is `failed` (FAFO-05). PR: [#28](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/pull/28); implementation commit: [`78dd591f`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/commit/78dd591f6ac9d09080596a3fecf342de02ef1d6c); tests: `test_mixed_execution_is_degraded_and_aggregates_successes_only`, `test_all_failed_results_produce_failed_terminal_status`, `test_successful_zero_score_is_completed`, `test_terminal_status_is_cross_linked_to_execution_outcomes`.
+- [x] Label runtime-enforced, agent-enforced, and recommended FAFO policy boundaries precisely; record available reproducibility facts with explicit unavailable markers and provider capability limits. PR: [#28](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/pull/28); implementation commit: [`78dd591f`](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/commit/78dd591f6ac9d09080596a3fecf342de02ef1d6c); tests: `test_publish_installs_a_hash_bound_manifest_after_all_terminal_artifacts`, `test_faults_before_manifest_install_never_create_run_authority`, `test_progress_summarizes_only_allowlisted_trust_tiers`, `test_prompt_iteration_loop_is_the_canonical_exact_enforcement_table`, `test_runtime_behavior_docs_cover_attribution_provider_and_mcp_limits`, `test_base_baseten_and_sagemaker_tool_requests_remain_text_only`, `test_skill_paths_require_explicit_rendering_and_one_ordered_runtime_message`.
 
 ### Successor checklist: research-dependent validation
 
@@ -790,9 +798,9 @@ unstruck or unchecked.
 - [ ] Run the required ablations: all-data versus cross-fitted guidelines, human versus model guidelines, trusted-only versus derived sources, embedding/group-count choices, calibrated versus unchecked match thresholds, and same-family versus independent judges.
 - [ ] Reject or narrow claims if held-out canaries reach training, match/rubric thresholds fail, proxy gains do not transfer to gold, scorers change rankings, gains disappear under drift, validation reuse decouples proxy from gold, or total work does not beat manual curation.
 
-### FAFO V3 pipeline successor note
+### FAFO data pipeline successor note
 
-FAFO V3 removes the Evaluation Asset Studio frontend described in the
+The FAFO data pipeline removes the Evaluation Asset Studio frontend described in the
 historical audit while retaining the core pipeline, CLI, and programmatic API.
 It also replaces the separate cluster-support, retrieval, and applicability
 gates with one case-specific rubric-generation call per episode. The call sees

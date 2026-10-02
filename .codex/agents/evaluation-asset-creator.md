@@ -4,10 +4,10 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAPO Evaluation Asset Assistant for Codex
+# FAFO Evaluation Asset Assistant for Codex
 
 Use this phase when the user wants Codex to create or monitor an evaluation
-asset. The shared FAPO core owns pipeline logic. The agent is an operator and
+asset. The shared FAFO core owns pipeline logic. The agent is an operator and
 reviewer: it creates the workspace, triggers the core runner, polls persisted
 progress, checks artifacts, diagnoses failures, explains stage decisions, and
 reports results.
@@ -36,7 +36,7 @@ Before operating the workflow, read
 - Do not expose whole tenant JSONL files merely to provide an example; use one
   bounded record and preserve tenant-data boundaries.
 - Do not add vendor or tenant field-name mappings to the core. Both source
-  files must already conform to `fapo-evaluation-input-v1`.
+  files must already conform to `fafo-evaluation-input-v1`.
 
 ## Canonical Workspace
 
@@ -122,7 +122,7 @@ one output file.
    - Stage 5 match threshold, defaulting to `0.6`
    - whether Stage 7 synthetic coverage is enabled; default disabled
    - synthetic candidates per supported cluster when enabled
-   - confirmation that both JSONL files use `fapo-evaluation-input-v1`
+   - confirmation that both JSONL files use `fafo-evaluation-input-v1`
 2. Create the workspace through the core CLI:
 
    ```bash
@@ -203,7 +203,7 @@ one output file.
 When the underlying provider error specifically reports SSL/TLS certificate
 verification or a blocked trust chain:
 
-1. Tell the user to run this command in the environment used by FAPO:
+1. Tell the user to run this command in the environment used by FAFO:
 
    ```bash
    python3 -m pip install --upgrade openai httpx certifi truststore
@@ -213,7 +213,7 @@ verification or a blocked trust chain:
    - `src/hephaestus/providers/openai.py`, lines 50–54.
    - `src/hephaestus/datasets/rubric_providers.py`, lines 85–89.
    - `src/hephaestus/datasets/embedding_providers.py`, lines 61–65.
-3. Restart the FAPO UI or CLI process, then resume the asset. Confirm completed
+3. Restart the FAFO UI or CLI process, then resume the asset. Confirm completed
    stages remain complete and the first incomplete stage restarts.
 
 Do not recommend this procedure for invalid credentials, unavailable models,
@@ -254,7 +254,7 @@ do not edit them again when they are active.
   Stage 5; synthetic settings at Stage 7; and split seed at Stage 8. Confirm
   the revision appears in both `config_history.jsonl` and `events.jsonl`.
 - When the user wants a UI, use the universal Evaluation Asset Studio at
-  `/evaluation-assets/`. FAPO Explorer `/` is a read-only summary surface.
+  `/evaluation-assets/`. FAFO Explorer `/` is a read-only summary surface.
 - In UI or reports, show one syntax-highlighted example per artifact. Use the
   dedicated compact cluster feed for visualization rather than returning an
   entire file as example data.

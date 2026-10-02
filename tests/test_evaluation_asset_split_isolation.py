@@ -49,7 +49,7 @@ def test_model_visible_context_fingerprint_has_a_canonical_exact_boundary() -> N
     context = module.model_visible_context(row)
     fingerprint = module.model_visible_context_fingerprint(row)
 
-    assert module.MODEL_VISIBLE_CONTEXT_REVISION == "fapo-model-visible-context-v1"
+    assert module.MODEL_VISIBLE_CONTEXT_REVISION == "fafo-model-visible-context-v1"
     assert context == {
         "messages_json": (
             '[{"content": "Rules", "role": "system"}, '
@@ -60,7 +60,7 @@ def test_model_visible_context_fingerprint_has_a_canonical_exact_boundary() -> N
         ),
         "runtime_json": '{"temperature": 0}',
     }
-    assert fingerprint == "1670e828d22e3923a2d0423d4479127c39940897de79da001c6a4e7750e08aa1"
+    assert fingerprint == "81c492666645bd97c3d6e1d7f3901ae54ef67e76ea1cd05836f74e77a0363825"
     assert fingerprint == module.model_visible_context_fingerprint(
         {
             **_record("record-2", "different-group"),
@@ -104,12 +104,12 @@ def test_seeded_split_assignment_uses_one_stable_draw() -> None:
         "src.hephaestus.evaluation_assets.split_isolation"
     )
 
-    assert module.assign_split("split-group-0", split_seed=42) == "validation"
-    assert module.assign_split("split-group-1", split_seed=42) == "validation"
-    assert module.assign_split("split-group-2", split_seed=42) == "train"
-    assert module.assign_split("split-group-3", split_seed=42) == "regression"
-    assert module.assign_split("split-group-8", split_seed=42) == "test"
-    assert module.assign_split("split-group-0", split_seed=43) == "test"
+    assert module.assign_split("split-group-0", split_seed=42) == "train"
+    assert module.assign_split("split-group-1", split_seed=42) == "test"
+    assert module.assign_split("split-group-2", split_seed=42) == "validation"
+    assert module.assign_split("split-group-3", split_seed=42) == "validation"
+    assert module.assign_split("split-group-8", split_seed=42) == "train"
+    assert module.assign_split("split-group-0", split_seed=43) == "train"
 
 
 @pytest.mark.parametrize(
@@ -158,7 +158,7 @@ def test_trusted_split_plan_retains_parent_assignment_after_safe_component_growt
     assert plan[0].split == "validation"
     assert plan[0].assignment_source == "inherited"
     assert plan[0].to_dict() == {
-        "schema_version": "fapo-trusted-split-plan-v1",
+        "schema_version": "fafo-trusted-split-plan-v1",
         "split_group_id": plan[0].split_group_id,
         "group_ids": ["group-a", "group-b"],
         "record_ids": ["child-b", "parent-a"],
@@ -271,7 +271,7 @@ def test_split_plan_expands_to_unambiguous_record_and_parent_maps() -> None:
         ),
     ],
 )
-def test_correctness_eligibility_accepts_only_explicit_material_evidence(
+def test_correctness_eligibility_accepts_explicit_material_evidence(
     feedback: dict[str, Any],
     expected_source: str,
 ) -> None:
@@ -288,8 +288,8 @@ def test_correctness_eligibility_accepts_only_explicit_material_evidence(
     assert result.evidence_sources == (expected_source,)
 
 
-def test_correctness_eligibility_holds_empty_evidence_even_with_a_tool_error() -> None:
-    """Ordinary tool errors must never be promoted into correctness evidence."""
+def test_correctness_eligibility_uses_polarity_without_inventing_tool_evidence() -> None:
+    """A bare rating is eligible while an ordinary tool error adds no evidence."""
     module = importlib.import_module(
         "src.hephaestus.evaluation_assets.split_isolation"
     )
@@ -307,16 +307,16 @@ def test_correctness_eligibility_holds_empty_evidence_even_with_a_tool_error() -
 
     result = module.assess_correctness_eligibility(row)
 
-    assert result.eligible is False
-    assert result.hold_reason == "insufficient_correctness_evidence"
-    assert result.evidence_sources == ()
+    assert result.eligible is True
+    assert result.hold_reason is None
+    assert result.evidence_sources == ("feedback_polarity",)
     assert result.to_dict() == {
-        "schema_version": "fapo-feedback-eligibility-v1",
+        "schema_version": "fafo-feedback-eligibility-v1",
         "record_id": "record-1",
         "group_id": "group-1",
-        "eligible": False,
-        "evidence_sources": [],
-        "hold_reason": "insufficient_correctness_evidence",
+        "eligible": True,
+        "evidence_sources": ["feedback_polarity"],
+        "hold_reason": None,
     }
 
 

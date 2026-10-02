@@ -43,7 +43,7 @@ def _feedback_row(
     user_input: str | None = None,
 ) -> dict[str, Any]:
     return {
-        "schema_version": "fapo-evaluation-input-v1",
+        "schema_version": "fafo-evaluation-input-v1",
         "record_id": record_id,
         "group_id": group_id,
         "task_type": "answer",
@@ -63,7 +63,7 @@ def _feedback_row(
 
 def _unlabeled_row(record_id: str) -> dict[str, Any]:
     return {
-        "schema_version": "fapo-evaluation-input-v1",
+        "schema_version": "fafo-evaluation-input-v1",
         "record_id": record_id,
         "group_id": f"group-{record_id}",
         "task_type": "answer",
@@ -150,14 +150,14 @@ def _install_pre_v3_parent(
     parent._write_authority_json(
         parent.receipt_path(PipelineStage.PREPARED_INPUTS),
         {
-            "schema_version": "fapo-stage-receipt-v2",
+            "schema_version": "fafo-stage-receipt-v2",
             "origin": "native",
         },
     )
     parent._write_authority_json(
         parent.receipt_path(PipelineStage.RUBRIC_EXTRACTION),
         {
-            "schema_version": "fapo-stage-receipt-v2",
+            "schema_version": "fafo-stage-receipt-v2",
             "origin": "native",
             "provider_identity": {
                 "rubric": {
@@ -170,7 +170,7 @@ def _install_pre_v3_parent(
     parent._write_authority_json(
         parent.receipt_path(PipelineStage.INTENT_CLUSTERING),
         {
-            "schema_version": "fapo-stage-receipt-v2",
+            "schema_version": "fafo-stage-receipt-v2",
             "origin": "native",
             "provider_identity": {
                 "embedding": {
@@ -375,7 +375,7 @@ def test_pre_v3_extension_does_not_promote_unreceipted_current_profile_files(
         )
     )
     assert (stage_two_receipt["schema_version"], stage_two_receipt["origin"]) == (
-        "fapo-stage-receipt-v2",
+        "fafo-stage-receipt-v2",
         "native",
     )
     parent_before = _tree_bytes(parent.root)

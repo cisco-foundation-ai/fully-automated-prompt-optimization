@@ -17,7 +17,6 @@ from tau2.data_model.simulation import TextRunConfig
 from tau2.runner.build import build_text_orchestrator
 from tau2.runner.helpers import get_tasks
 
-
 AGENT_MODEL = "gpt-4.1-2025-04-14"
 USER_MODEL = "gpt-4.1-2025-04-14"
 _PROMPT_LICENSE_HEADER = (
@@ -89,7 +88,7 @@ def run(task_id: str, seed: int, prompt_path: Path) -> dict[str, Any]:
     tools_path = runtime_root / "src/tau2/domains/retail/tools.py"
     messages = [_message_payload(message) for message in simulation.messages]
     return {
-        "schema_version": "tau3-fapo-episode-v1",
+        "schema_version": "tau3-fafo-episode-v1",
         "task_id": task_id,
         "seed": seed,
         "agent_model": AGENT_MODEL,

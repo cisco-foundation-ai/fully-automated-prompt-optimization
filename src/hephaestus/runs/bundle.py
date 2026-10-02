@@ -20,7 +20,7 @@ from src.hephaestus.artifact_io import atomic_write_bytes_at, rename_noreplace_a
 from src.hephaestus.runs.identity import validate_run_identity_payload
 
 RUN_MANIFEST_FILENAME = "run_manifest.json"
-RUN_MANIFEST_SCHEMA_VERSION = "fapo-run-bundle-manifest-v1"
+RUN_MANIFEST_SCHEMA_VERSION = "fafo-run-bundle-manifest-v1"
 TERMINAL_ARTIFACT_NAMES = (
     "progress.json",
     "results.jsonl",

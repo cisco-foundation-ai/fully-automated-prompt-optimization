@@ -83,10 +83,10 @@ _SECRET = re.compile(r"(?i)(?:\bsk-[a-z0-9_-]+|bearer\s+|api[_-]?key)")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GENERATION_ID = re.compile(r"^sha256-[0-9a-f]{64}$")
 
-PROVIDER_CALL_SCHEMA_VERSION = "fapo-provider-call-v2"
-STAGE_PROVENANCE_SCHEMA_VERSION = "fapo-stage-provenance-v4"
-BUILD_PROVENANCE_SCHEMA_VERSION = "fapo-evaluation-build-provenance-v4"
-BUILD_IDENTITY_SCHEMA_VERSION = "fapo-evaluation-build-identity-v4"
+PROVIDER_CALL_SCHEMA_VERSION = "fafo-provider-call-v2"
+STAGE_PROVENANCE_SCHEMA_VERSION = "fafo-stage-provenance-v4"
+BUILD_PROVENANCE_SCHEMA_VERSION = "fafo-evaluation-build-provenance-v4"
+BUILD_IDENTITY_SCHEMA_VERSION = "fafo-evaluation-build-identity-v4"
 PROVIDER_STAGE_ROLES = {
     "raw_inputs": (),
     "prepared_inputs": (),
@@ -118,46 +118,46 @@ PROMPT_REVISIONS = {
 # evidence.  Keep these v1 literals independent from the mutable authoring
 # registries above so a later deployment can still authenticate an already
 # completed generation.
-HISTORICAL_PROVENANCE_PROFILE_V1 = "fapo-historical-provenance-profile-v1"
+HISTORICAL_PROVENANCE_PROFILE_V1 = "fafo-historical-provenance-profile-v1"
 HISTORICAL_LEGACY_PROVENANCE_PROFILE_V1 = (
-    "fapo-historical-legacy-provenance-profile-v1"
+    "fafo-historical-legacy-provenance-profile-v1"
 )
-HISTORICAL_PROVENANCE_PROFILE_V2 = "fapo-historical-provenance-profile-v2"
+HISTORICAL_PROVENANCE_PROFILE_V2 = "fafo-historical-provenance-profile-v2"
 HISTORICAL_LEGACY_PROVENANCE_PROFILE_V2 = (
-    "fapo-historical-legacy-provenance-profile-v2"
+    "fafo-historical-legacy-provenance-profile-v2"
 )
-HISTORICAL_PROVENANCE_PROFILE_V3 = "fapo-historical-provenance-profile-v3"
+HISTORICAL_PROVENANCE_PROFILE_V3 = "fafo-historical-provenance-profile-v3"
 HISTORICAL_LEGACY_PROVENANCE_PROFILE_V3 = (
-    "fapo-historical-legacy-provenance-profile-v3"
+    "fafo-historical-legacy-provenance-profile-v3"
 )
-HISTORICAL_PROVENANCE_PROFILE_V4 = "fapo-historical-provenance-profile-v4"
+HISTORICAL_PROVENANCE_PROFILE_V4 = "fafo-historical-provenance-profile-v4"
 HISTORICAL_LEGACY_PROVENANCE_PROFILE_V4 = (
-    "fapo-historical-legacy-provenance-profile-v4"
+    "fafo-historical-legacy-provenance-profile-v4"
 )
-_HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V1 = "fapo-provider-call-v1"
-_HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V1 = "fapo-stage-provenance-v1"
+_HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V1 = "fafo-provider-call-v1"
+_HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V1 = "fafo-stage-provenance-v1"
 _HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V1 = (
-    "fapo-evaluation-build-provenance-v1"
+    "fafo-evaluation-build-provenance-v1"
 )
-_HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V1 = "fapo-evaluation-build-identity-v1"
-_HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V2 = "fapo-provider-call-v2"
-_HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V2 = "fapo-stage-provenance-v2"
+_HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V1 = "fafo-evaluation-build-identity-v1"
+_HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V2 = "fafo-provider-call-v2"
+_HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V2 = "fafo-stage-provenance-v2"
 _HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V2 = (
-    "fapo-evaluation-build-provenance-v2"
+    "fafo-evaluation-build-provenance-v2"
 )
-_HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V2 = "fapo-evaluation-build-identity-v2"
-_HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V3 = "fapo-provider-call-v2"
-_HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V3 = "fapo-stage-provenance-v3"
+_HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V2 = "fafo-evaluation-build-identity-v2"
+_HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V3 = "fafo-provider-call-v2"
+_HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V3 = "fafo-stage-provenance-v3"
 _HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V3 = (
-    "fapo-evaluation-build-provenance-v3"
+    "fafo-evaluation-build-provenance-v3"
 )
-_HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V3 = "fapo-evaluation-build-identity-v3"
-_HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V4 = "fapo-provider-call-v2"
-_HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V4 = "fapo-stage-provenance-v4"
+_HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V3 = "fafo-evaluation-build-identity-v3"
+_HISTORICAL_PROVIDER_CALL_SCHEMA_VERSION_V4 = "fafo-provider-call-v2"
+_HISTORICAL_STAGE_PROVENANCE_SCHEMA_VERSION_V4 = "fafo-stage-provenance-v4"
 _HISTORICAL_BUILD_PROVENANCE_SCHEMA_VERSION_V4 = (
-    "fapo-evaluation-build-provenance-v4"
+    "fafo-evaluation-build-provenance-v4"
 )
-_HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V4 = "fapo-evaluation-build-identity-v4"
+_HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V4 = "fafo-evaluation-build-identity-v4"
 _HISTORICAL_SOURCE_FIXED_MEMBERS_V1 = (
     "pyproject.toml",
     "src/__init__.py",
@@ -536,7 +536,7 @@ def working_source_identity(repository_root: Path) -> dict[str, Any]:
             }
         )
     return {
-        "algorithm": "fapo-working-source-fingerprint-v1",
+        "algorithm": "fafo-working-source-fingerprint-v1",
         "members": members,
         "fingerprint": canonical_sha256(members),
     }
@@ -834,9 +834,9 @@ def _algorithm_inventory_v4(
 ) -> dict[str, Any]:
     """Return the frozen algorithm body introduced by provenance v4."""
     return {
-        "raw_inputs": "fapo-evaluation-input-v1",
+        "raw_inputs": "fafo-evaluation-input-v1",
         "prepared_inputs": {
-            "algorithm": "fapo-evaluation-canonical-preparation-v1",
+            "algorithm": "fafo-evaluation-canonical-preparation-v1",
             "trusted_split_assignment": (
                 "connected-model-context-stable-hash-v1"
             ),
@@ -845,7 +845,7 @@ def _algorithm_inventory_v4(
             ),
         },
         "rubric_extraction": {
-            "algorithm": "fapo-evaluation-guideline-v1",
+            "algorithm": "fafo-evaluation-guideline-v1",
             "reusable_scope": "eligible_train_only",
             "protected_scope": "split_group_group_route_local",
         },
@@ -881,7 +881,7 @@ def _algorithm_inventory_v4(
             ),
         },
         "synthetic_coverage": {
-            "algorithm": "fapo-synthetic-filter-v1",
+            "algorithm": "fafo-synthetic-filter-v1",
             "dependency": "stage-seven-dependency-v1",
             "scoreability": "scoreable-case-or-hold-v1",
             "review_binding": (
@@ -940,7 +940,7 @@ def _algorithm_inventory_v3(
     *,
     extension: bool,
 ) -> dict[str, Any]:
-    """Return the frozen pre-V3-pipeline algorithm body."""
+    """Return the frozen earlier algorithm body."""
     inventory = _algorithm_inventory_v4(config, extension=extension)
     inventory["coverage_decisions"] = {
         "algorithm": "route-constrained-cosine-v1",
@@ -977,9 +977,9 @@ def historical_algorithm_inventory_v1(
 ) -> dict[str, Any]:
     """Return the immutable algorithm profile recorded by provenance v1."""
     return {
-        "raw_inputs": "fapo-evaluation-input-v1",
-        "prepared_inputs": "fapo-evaluation-canonical-preparation-v1",
-        "rubric_extraction": "fapo-evaluation-guideline-v1",
+        "raw_inputs": "fafo-evaluation-input-v1",
+        "prepared_inputs": "fafo-evaluation-canonical-preparation-v1",
+        "rubric_extraction": "fafo-evaluation-guideline-v1",
         "intent_clustering": {
             "algorithm": "deterministic-cosine-fixed-count-v1",
             "embedding": (
@@ -998,7 +998,7 @@ def historical_algorithm_inventory_v1(
             "maximum_per_cluster": 3,
         },
         "label_inference": "trusted-guideline-inference-v1",
-        "synthetic_coverage": "fapo-synthetic-filter-v1",
+        "synthetic_coverage": "fafo-synthetic-filter-v1",
         "dataset_splits": {
             "algorithm": (
                 "group-safe-stable-fraction-extension-v1"
@@ -1903,7 +1903,7 @@ def _validate_source_identity(value: Any) -> None:
         "algorithm",
         "members",
         "fingerprint",
-    } or value.get("algorithm") != "fapo-working-source-fingerprint-v1":
+    } or value.get("algorithm") != "fafo-working-source-fingerprint-v1":
         raise ValueError("build provenance source schema is invalid")
     members = value.get("members")
     if not isinstance(members, list) or not members:
@@ -2537,7 +2537,7 @@ def _historical_native_provider_profile_v1(
         model_lower = str(model).lower()
         reasoning = any(
             model_lower.startswith(prefix)
-            for prefix in ("o1", "o3", "o4", "gpt-5", "gpt5")
+            for prefix in ("o1", "o3", "o4", "gpt-5", "gpt5", "gpt-6")
         )
         settings = {
             "timeout_seconds": 300,
@@ -2774,7 +2774,7 @@ def build_legacy_provenance(
     marker = unavailable("legacy_checkpoint_predates_provenance")
     config_values = dict(resolved_configuration)
     identity = {
-        # Legacy adoption authenticates the frozen pre-v3 pipeline contract;
+        # Legacy adoption authenticates the frozen earlier pipeline contract;
         # it must not masquerade as a current v4-native build.
         "schema_version": _HISTORICAL_BUILD_IDENTITY_SCHEMA_VERSION_V3,
         "hash_algorithm": "sha256",

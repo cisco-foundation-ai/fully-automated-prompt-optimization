@@ -16,7 +16,6 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-
 TAU_COMMIT = "fc0055dc4e0a316c3f83133267fbd6faaa770992"
 AGENT_MODEL = "gpt-4.1-2025-04-14"
 USER_MODEL = "gpt-4.1-2025-04-14"

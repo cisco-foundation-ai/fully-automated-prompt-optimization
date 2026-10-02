@@ -4,11 +4,11 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAFO v3 native Tau held-out comparison
+# FAFO native Tau held-out comparison
 
 ## Outcome
 
-The three frozen FAFO v3 winners were evaluated on the same 22 native Tau Retail held-out tasks and four fixed trial seeds (88 trajectories per prompt). Native outcomes were not used to create or select any prompt.
+The three frozen FAFO winners were evaluated on the same 22 native Tau Retail held-out tasks and four fixed trial seeds (88 trajectories per prompt). Native outcomes were not used to create or select any prompt.
 
 | Native Tau metric | Baseline B0 | Trusted-only T008 | Mixed M004 | Staged T001 |
 |---|---:|---:|---:|---:|

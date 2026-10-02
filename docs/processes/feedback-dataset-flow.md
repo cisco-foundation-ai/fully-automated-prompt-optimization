@@ -4,19 +4,19 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAFO V3 Evaluation-Asset Pipeline
+# FAFO Data Pipeline
 
 ## Purpose
 
-FAFO V3 turns a small collection of trusted, feedback-labeled agent episodes
-and a larger collection of unlabeled episodes into a versioned evaluation
-asset. The resulting cases and rubrics can be used by FAPO to evaluate prompt
+The FAFO data pipeline turns a small collection of trusted, feedback-labeled
+agent episodes and a larger collection of unlabeled episodes into a versioned
+evaluation asset. The resulting cases and rubrics can be used by FAFO to evaluate prompt
 or skill variants without treating an agent's historical behavior as ground
 truth.
 
-This document is the canonical description of the final V3 pipeline. The input
+This document describes the FAFO data pipeline. The input
 schema is defined separately in the
-[`fapo-evaluation-input-v1` contract](evaluation-input-contract.md).
+[`fafo-evaluation-input-v1` contract](evaluation-input-contract.md).
 
 The design separates three kinds of information:
 
@@ -36,7 +36,7 @@ flowchart LR
     S --> G[Extract and consolidate guidelines]
     S --> C[Cluster unlabeled intents]
     G --> R[One rubric-generation call per episode]
-    C -. sampling metadata .-> R
+    C -. optional cluster input .-> X
     R --> Q[Trusted and inferred cases]
     Q --> Y{Synthetic coverage enabled?}
     Y -- no --> V[Build review snapshot]
@@ -44,7 +44,7 @@ flowchart LR
     X --> V
     V --> F[Explicit finalization]
     F --> D[Immutable train, validation, test, regression datasets]
-    D --> O[FAPO optimization and independent evaluation]
+    D --> O[FAFO optimization and independent evaluation]
 ```
 
 In compact form:
@@ -52,8 +52,8 @@ In compact form:
 1. Validate and copy the source episodes into a self-contained asset.
 2. Redact content, derive split-isolation groups, and assign trusted splits.
 3. Extract evidence-backed guidelines from eligible training feedback only.
-4. Cluster unlabeled intent text for later sampling and analysis.
-5. Persist cluster metadata without making policy decisions.
+4. Optionally cluster unlabeled intent text for later sampling and analysis.
+5. Optionally persist cluster metadata without making policy decisions.
 6. Give every episode and the complete permitted guideline catalog to one LLM
    call, which selects applicable guidelines and writes a case-specific rubric.
 7. Optionally propose narrowly constrained synthetic cases, then construct the
@@ -67,7 +67,7 @@ An evaluation asset contains:
 - a reusable training guideline catalog;
 - one case-specific rubric for every scoreable trusted or unlabeled episode;
 - trusted cases, inferred cases, and optionally synthetic cases;
-- cluster membership and representatives for sampling;
+- optional cluster membership and representatives for sampling;
 - complete provenance and dependency fingerprints;
 - held-item and review records;
 - immutable train, validation, test, and trusted-regression datasets.
@@ -75,7 +75,7 @@ An evaluation asset contains:
 The asset defines evaluation requirements. A downstream judge must still
 score a candidate agent's newly produced trajectory against each case rubric.
 The historical assistant response is evidence for authoring; it is not the
-response that FAPO should optimize toward.
+response that FAFO should optimize toward.
 
 ## Inputs
 
@@ -83,14 +83,14 @@ Asset creation requires two nonempty JSONL files:
 
 | Input | Required contents | Role |
 |---|---|---|
-| Trusted feedback | Complete episode, assistant output, feedback polarity, and usable correctness evidence | Extract reusable guidelines and create trusted case rubrics |
+| Trusted feedback | Complete episode, assistant output, and feedback polarity; rationale or checks when available | Extract reusable guidelines and create trusted case rubrics |
 | Unlabeled traffic | Complete episode without feedback | Represent real traffic and create inferred case rubrics |
 
 Every row must conform to
-[`fapo-evaluation-input-v1`](evaluation-input-contract.md). Core fields include
+[`fafo-evaluation-input-v1`](evaluation-input-contract.md). Core fields include
 `record_id`, `group_id`, `task_type`, `user_input`, `conversation_context`,
 `tool_calls`, `runtime`, and `metadata`. Feedback rows additionally require an
-`assistant_output` and feedback with a polarity and rationale. The optional
+`assistant_output` and feedback with a polarity; rationale is optional. The optional
 `episode` field preserves the complete ordered sequence of messages, tool
 calls, and tool results, including call/result linkage.
 
@@ -102,15 +102,12 @@ workspace rather than the original source files.
 
 ### Feedback eligibility
 
-A trusted row can influence guideline creation only when it contains at least
-one usable correctness signal:
-
-- a nonempty feedback rationale;
-- a material correction; or
-- an explicitly declared deterministic or executable check result.
-
-Polarity alone is not sufficient. Ineligible feedback remains auditable but
-does not trigger guideline extraction or activate a trusted case.
+A trusted row with valid feedback polarity can influence guideline creation
+and receive a trusted case rubric. A nonempty rationale, material correction,
+or declared deterministic or executable check gives the authoring model more
+specific evidence. With polarity alone, the model must preserve uncertainty
+about the cause of the rating and ground requirements in the explicit request
+and observable trace.
 
 ### Intent text
 
@@ -167,17 +164,17 @@ for any other record.
 
 | Stage | Behavior | Main outputs |
 |---|---|---|
-| 1. `raw_inputs` | Copy, validate, count, and hash both sources; validate cluster feasibility before provider calls | Copied source JSONL and validation receipt |
+| 1. `raw_inputs` | Copy, validate, count, and hash both sources; validate cluster feasibility when clustering is enabled | Copied source JSONL and validation receipt |
 | 2. `prepared_inputs` | Redact content, normalize defaults, check IDs, build split groups and trusted split plan, assess feedback eligibility, and construct user-message intent text | Normalized records, intent records, eligibility and split plans |
 | 3. `rubric_extraction` | Extract trace-grounded evidence from eligible training feedback and consolidate compatible evidence into reusable guidelines; compile protected guidance separately | Public guideline catalog, protected guideline artifacts, evidence and candidate inventories |
-| 4. `intent_clustering` | Embed unlabeled intent text and perform deterministic route-local clustering | Cluster assignments, representatives, top terms, embedding metadata |
-| 5. `coverage_decisions` | Persist cluster sampling context only; make no matching, support, or correctness decisions | `cluster_sampling_metadata.jsonl` |
+| 4. `intent_clustering` | Optionally embed unlabeled intent text and perform deterministic route-local clustering | Cluster assignments, representatives, top terms, embedding metadata; empty inventory when disabled |
+| 5. `coverage_decisions` | Optionally persist cluster sampling context only; make no matching, support, or correctness decisions | `cluster_sampling_metadata.jsonl`; empty when disabled |
 | 6. `label_inference` | Make exactly one rubric-generation call per episode with the full split-permitted catalog and complete episode evidence | Episode rubrics, trusted/inferred cases, dependencies, held outputs |
 | 7. `synthetic_coverage` | Optionally generate conservative synthetic proposals, apply mechanical filters, form exact-context families, fingerprint eligible items, and auto-approve scoreable derived cases | Synthetic artifacts, review decisions, holds, dependencies |
 | 8. `dataset_splits` | After explicit finalization, publish trusted plus approved derived cases while excluding held or rejected items | Immutable datasets and release manifest |
 
 The persisted Stage 3 enum remains `rubric_extraction` for compatibility. Its
-V3 product is evaluation-guideline creation, and its canonical directory is
+product is evaluation-guideline creation, and its canonical directory is
 `03_evaluation_guidelines`.
 
 ## Stage 3: Guideline Extraction
@@ -186,7 +183,8 @@ V3 product is evaluation-guideline creation, and its canonical directory is
 
 For each eligible training feedback episode, the model receives the feedback
 and the ordered trace, including assistant messages, tool calls, tool results,
-and relevant runtime observations. It must:
+and relevant runtime observations. Where the feedback supports a specific
+behavioral conclusion, it must:
 
 1. identify the behavior praised or criticized;
 2. point to the feedback and observable trace evidence;
@@ -196,8 +194,10 @@ and relevant runtime observations. It must:
 6. retain uncertainty instead of inventing a causal explanation.
 
 The extraction step makes tool activity first-class evidence. For example, a
-tool result can prove that a mutation succeeded or failed, while the feedback
-can establish whether attempting that mutation was appropriate.
+tool result can prove that a mutation succeeded or failed, while detailed
+feedback can establish whether attempting that mutation was appropriate. A
+polarity-only rating records overall satisfaction or dissatisfaction without
+identifying the responsible action or a specific repair.
 
 ### Consolidation
 
@@ -223,7 +223,18 @@ added to the public catalog and cannot influence another episode.
 Clustering answers “which user requests are semantically similar?” It does not
 answer “which guideline applies?”
 
-V3 uses clusters for:
+The default is 50 clusters. Set `--clusters 0` (or API `cluster_count: 0`)
+to skip both stages. Their receipts and empty JSONL artifacts preserve the
+eight-stage workspace shape.
+No embedding provider call or cluster sampling occurs. Stage 6 reads neither
+Stage 4 nor Stage 5 and builds the same episode rubric inputs from Stage 2
+records and Stage 3 guidelines. Synthetic coverage requires clustering and
+therefore rejects `cluster_count: 0` when enabled.
+
+The review provenance format retains a `source_cluster` field for compatibility;
+inferred cases use an episode-local identifier there, independent of Stage 4.
+
+The pipeline uses clusters for:
 
 - representative and diverse batch sampling;
 - coverage analysis;
@@ -233,11 +244,12 @@ V3 uses clusters for:
 Stage 5 records the route, task type, group, cluster membership, and cluster
 representatives. It does not run an LLM, retrieve or attach guidelines, apply a
 similarity threshold, or create a labeling queue. The legacy matching and
-deterministic-applicability gates are not part of V3.
+deterministic-applicability gates are not part of the pipeline.
 
 ## Stage 6: One Case-Specific Rubric Per Episode
 
-V3 uses one LLM call for every feedback or unlabeled episode. The call receives:
+The pipeline uses one LLM call for every feedback or unlabeled episode. The call
+receives:
 
 - all user and assistant messages;
 - tool calls, observations, and results;
@@ -375,7 +387,7 @@ python -m hephaestus.cli assets create \
   --asset-id v1 \
   --feedback <labeled_feedback.jsonl> \
   --unlabeled <unlabeled.jsonl> \
-  --rubric-model gpt-5.5 \
+  --rubric-model gpt-6-luna \
   --embedding-model text-embedding-3-small \
   --clusters 20
 
@@ -387,11 +399,12 @@ python -m hephaestus.cli assets run \
 Use `--embedding-model tfidf` for deterministic local vectorization without an
 embedding API call. Use `--enable-synthetic-coverage` and
 `--synthetic-cases-per-cluster <count>` only when synthetic expansion is
-desired. Provider failures are surfaced; FAPO does not silently switch models
-or providers.
+desired. Provider failures are surfaced; FAFO does not silently switch models
+or enable clustering. `--clusters 0` skips Stages 4 and 5; it is incompatible
+with synthetic coverage.
 
 The CLI still accepts legacy matching/support settings so older asset
-configurations remain readable. V3 does not use `match_threshold`,
+configurations remain readable. The pipeline does not use `match_threshold`,
 `min_trusted_examples`, `min_trusted_groups`, or
 `max_unlabeled_to_trusted_ratio` to create rubrics.
 
@@ -406,7 +419,7 @@ python -m hephaestus.cli assets reviews list \
   --asset-id v1
 ```
 
-Normal V3 scoreable inferred cases and mechanically accepted synthetic cases
+Scoreable inferred cases and mechanically accepted synthetic cases
 are already approved. `assets reviews approve` and `assets reviews reject`
 remain available for pending items in compatible or historical workflows; a
 decision must include the exact case fingerprint and current review-set
@@ -431,7 +444,7 @@ The main model costs are predictable:
 
 - Stage 3: batched evidence extraction and guideline synthesis over eligible
   trusted feedback;
-- Stage 4: batched embeddings for unlabeled user-message intent text;
+- Stage 4: batched embeddings for unlabeled user-message intent text when enabled;
 - Stage 6: exactly one rubric-model call per episode; and
 - Stage 7: calls only for eligible clusters when synthetic coverage is enabled.
 
@@ -439,7 +452,7 @@ There is no pairwise episode-guideline LLM gate. Passing the complete permitted
 catalog makes Stage 6 cost scale with episode count and catalog prompt size,
 rather than the product of episodes and candidate guidelines. If the catalog
 eventually becomes too large for a model context window, add a separately
-validated retrieval layer; do not silently change V3's evidence semantics.
+validated retrieval layer; preserve the pipeline's evidence semantics.
 
 ## Resume, Revision, and Extension
 
@@ -470,7 +483,7 @@ that bridges incompatible parent splits fails closed. Because Stage 6 considers
 the complete permitted catalog, adding feedback can legitimately regenerate
 episode rubric dependencies even when clusters are kept.
 
-## Using the Asset with FAPO
+## Using the Asset with FAFO
 
 A typical experimental loop is:
 
@@ -510,9 +523,10 @@ audits and independent native scoring remain important validation layers.
 Before running:
 
 - validate both inputs against the canonical contract;
-- confirm feedback has meaningful rationales, corrections, or checks;
-- choose and record the rubric model, embedding model, cluster count, and split
-  seed;
+- confirm feedback has valid polarity and include rationales, corrections, or
+  checks when available;
+- choose and record the rubric model, split seed, and whether to enable
+  clustering with a positive cluster count;
 - keep all source episodes under the correct tenant; and
 - reserve an independent native-environment holdout.
 

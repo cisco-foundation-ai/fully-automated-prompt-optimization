@@ -13,15 +13,15 @@ from src.hephaestus.datasets.rubric_providers import (
 )
 
 
-def test_openai_rubric_provider_defaults_to_gpt_5_5_and_json_mode() -> None:
+def test_openai_rubric_provider_defaults_to_gpt_6_luna_and_json_mode() -> None:
     completions = _DummyCompletions()
     provider = OpenAIRubricProvider(client=_DummyClient(completions), sleep_fn=lambda _: None)
 
     result = provider.generate_json("return json", {"task": "extract_feedback_rubric"})
 
     assert result == {"ok": True}
-    assert provider.model == DEFAULT_OPENAI_RUBRIC_MODEL == "gpt-5.5"
-    assert completions.called_with["model"] == "gpt-5.5"
+    assert provider.model == DEFAULT_OPENAI_RUBRIC_MODEL == "gpt-6-luna"
+    assert completions.called_with["model"] == "gpt-6-luna"
     assert completions.called_with["response_format"] == {"type": "json_object"}
     assert completions.called_with["max_completion_tokens"] == 4096
     assert "temperature" not in completions.called_with

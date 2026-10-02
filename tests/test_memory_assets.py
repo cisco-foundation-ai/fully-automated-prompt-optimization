@@ -10,12 +10,12 @@ from pathlib import Path
 import pytest
 
 from src.hephaestus.cli import build_parser
-from src.hephaestus.memory_evidence import build_additive_memory_asset
 from src.hephaestus.memory_assets import (
     MEMORY_ASSET_SCHEMA_VERSION,
     MEMORY_CARD_SCHEMA_VERSION,
     build_memory_asset,
 )
+from src.hephaestus.memory_evidence import build_additive_memory_asset
 
 
 class FakeMemoryProvider:

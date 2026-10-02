@@ -49,8 +49,8 @@ from src.hephaestus.evaluation_assets.dependencies import (
     STAGE_SIX_DEPENDENCY_SCHEMA_VERSION,
 )
 from src.hephaestus.evaluation_assets.durability import (
-    STAGE_SPECIFICATIONS,
     STAGE_RECEIPT_SCHEMA_VERSION,
+    STAGE_SPECIFICATIONS,
     EvaluationAssetBusyError,
     EvaluationAssetImmutableError,
     EvaluationAssetIntegrityError,
@@ -1578,7 +1578,7 @@ class EvaluationAssetLayout:
         )
         current_v3_profile = (
             stage_two_receipt.get("schema_version")
-            == STAGE_RECEIPT_SCHEMA_VERSION
+            in {"fafo-stage-receipt-v4", STAGE_RECEIPT_SCHEMA_VERSION}
             and stage_two_receipt.get("origin") == "native"
         )
         if current_v3_profile:

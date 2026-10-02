@@ -2,13 +2,12 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Integrity checks for exact V3 prompt lineages."""
+"""Integrity checks for exact prompt lineages."""
 
 from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-
 
 PROMPT_ROOT = Path(__file__).resolve().parents[1] / "prompts/v3"
 PROMPT_LICENSE_HEADER = (

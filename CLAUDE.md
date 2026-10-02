@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 # Repository Guidelines
 
 ## Repository Purpose
-FAPO (Fully Autonomous Prompt Optimization) is an LLM chain optimization framework. It provides structured tooling for iteratively improving LLM-powered pipelines through evaluation, failure analysis, and prompt/chain iteration.
+FAFO (Fully Automated Flow Optimization) is an LLM chain optimization framework. It provides structured tooling for iteratively improving LLM-powered pipelines through evaluation, failure analysis, and prompt/chain iteration.
 The repo separates reusable optimization and evaluation core logic from tenant-specific prompts, datasets, and historical artifacts.
 
 ## Project Structure

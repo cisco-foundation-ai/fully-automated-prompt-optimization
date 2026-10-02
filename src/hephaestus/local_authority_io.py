@@ -1252,7 +1252,7 @@ def exclusive_parent_namespace_lock(directory: DirectoryLike) -> Iterator[None]:
     descriptor: int | None = None
     try:
         if os.name == "nt":  # pragma: no cover - exercised by Windows CI
-            name = "Global\\FAPO-" + hashlib.sha256(
+            name = "Global\\FAFO-" + hashlib.sha256(
                 repr(identity).encode()
             ).hexdigest()
             mutex = _CreateMutexW(None, False, name)

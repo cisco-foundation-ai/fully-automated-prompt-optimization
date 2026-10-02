@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Literal, Mapping, Optional, Sequence
 
-from src.hephaestus.datasets.evaluation_assets import validate_fapo_case
+from src.hephaestus.datasets.evaluation_assets import validate_fafo_case
 from src.hephaestus.evaluation_assets.input_contract import (
     canonical_user_intent_text,
     effective_route,
@@ -33,8 +33,8 @@ EVALUATOR_TYPES = frozenset(
 )
 GuidelineIdentityProfile = Literal["current_v2", "historical_v1"]
 TrustedIntentTextProfile = Literal["current", "historical_v1"]
-_CURRENT_GUIDELINE_IDENTITY_REVISION = "fapo-guideline-identity-v2"
-_CURRENT_CRITERION_IDENTITY_REVISION = "fapo-criterion-identity-v2"
+_CURRENT_GUIDELINE_IDENTITY_REVISION = "fafo-guideline-identity-v2"
+_CURRENT_CRITERION_IDENTITY_REVISION = "fafo-criterion-identity-v2"
 
 _EVIDENCE_FIELDS = {
     "record_id",
@@ -408,7 +408,7 @@ def compile_evaluation_guidelines(
             "calibration_status": "uncalibrated",
             "guideline_provider": rubric_provider,
             "guideline_model": rubric_model,
-            "oracle_version": "fapo-evaluation-guideline-v1",
+            "oracle_version": "fafo-evaluation-guideline-v1",
         }
         guideline_id = _guideline_id(
             route=route,
@@ -599,7 +599,7 @@ def replay_legacy_stage_three(
             raise ValueError("legacy rubric has no scoreable expected value")
         if row.get("label_source") != "human_feedback" or row.get(
             "oracle_version"
-        ) != "fapo-evaluation-asset-v1":
+        ) != "fafo-evaluation-asset-v1":
             raise ValueError("legacy rubric provenance is invalid")
         _nonempty_string(row.get("rubric_provider"))
         _nonempty_string(row.get("rubric_model"))
@@ -716,7 +716,7 @@ def rubric_from_guidelines(
         "label_source": "evaluation_guideline_from_trusted_feedback",
         "rubric_provider": rubric_provider,
         "rubric_model": rubric_model,
-        "oracle_version": "fapo-evaluation-guideline-v1",
+        "oracle_version": "fafo-evaluation-guideline-v1",
     }
 
 
@@ -807,7 +807,7 @@ def trusted_case(
             "trust_tier": TRUSTED_FEEDBACK,
         },
     }
-    validate_fapo_case(case)
+    validate_fafo_case(case)
     return case
 
 
@@ -954,7 +954,7 @@ def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "general"
 
 
-APPLICABILITY_CONTRACT_SCHEMA_VERSION = "fapo-applicability-contract-v1"
+APPLICABILITY_CONTRACT_SCHEMA_VERSION = "fafo-applicability-contract-v1"
 _APPLICABILITY_STATUSES = frozenset(
     {"applicable", "not_applicable", "unknown"}
 )

@@ -15,7 +15,6 @@ from src.hephaestus.providers import build_provider_client
 from src.hephaestus.scoring.scorer import Scorer as BaseScorer
 from src.hephaestus.types import EvalCase
 
-
 _JUDGE_SYSTEM_PROMPT = """\
 You are a strict evaluation judge for a customer-service agent episode.
 

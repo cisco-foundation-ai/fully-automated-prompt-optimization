@@ -791,7 +791,7 @@ def test_assets_cli_rejects_symlinked_tenants_ancestor_before_writes(
 
 def _evaluation_input(record_id: str, *, labeled: bool) -> dict:
     row = {
-        "schema_version": "fapo-evaluation-input-v1",
+        "schema_version": "fafo-evaluation-input-v1",
         "record_id": record_id,
         "group_id": f"group-{record_id}",
         "task_type": "generic",

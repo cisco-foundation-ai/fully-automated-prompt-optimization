@@ -175,7 +175,7 @@ class _DuplicateLifecycleRubricProvider:
 
 def _feedback_row(group_id: str) -> dict[str, Any]:
     return {
-        "schema_version": "fapo-evaluation-input-v1",
+        "schema_version": "fafo-evaluation-input-v1",
         "record_id": "trusted-copy",
         "group_id": group_id,
         "request_id": "trusted-request",
@@ -209,7 +209,7 @@ def _unlabeled_row(
     user_input: str,
 ) -> dict[str, Any]:
     return {
-        "schema_version": "fapo-evaluation-input-v1",
+        "schema_version": "fafo-evaluation-input-v1",
         "record_id": record_id,
         "group_id": group_id,
         "request_id": f"request-{record_id}",

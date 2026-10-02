@@ -45,7 +45,7 @@ instruction unchanged.
 
 ## Variant Strategy
 
-The V3 lineages are retained exactly under `prompts/v3/`:
+The prompt lineages are retained exactly under `prompts/v3/`:
 
 | Lineage | Files | Recorded winner |
 |---|---|---|
@@ -70,7 +70,7 @@ rather than the hash of the licensed file as stored in the repository.
 
 - Do not optimize Tau policy text, tool implementations, environment state,
   agent/user model settings, judge prompt, score aggregation, task split, or
-  FAPO chain structure under this tenant's autonomous scope.
+  FAFO chain structure under this tenant's autonomous scope.
 - Do not train on native Tau reward or hidden expected actions.
 - Do not use final-holdout failures to revise a selected prompt.
 - Do not treat the recorded winner as universally optimal; rerun the recipe for

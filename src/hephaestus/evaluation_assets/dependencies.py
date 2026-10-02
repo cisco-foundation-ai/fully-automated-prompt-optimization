@@ -11,8 +11,8 @@ import json
 import re
 from typing import Any, Mapping, Sequence
 
-STAGE_SIX_DEPENDENCY_SCHEMA_VERSION = "fapo-stage-six-dependency-v1"
-STAGE_SEVEN_DEPENDENCY_SCHEMA_VERSION = "fapo-stage-seven-dependency-v1"
+STAGE_SIX_DEPENDENCY_SCHEMA_VERSION = "fafo-stage-six-dependency-v1"
+STAGE_SEVEN_DEPENDENCY_SCHEMA_VERSION = "fafo-stage-seven-dependency-v1"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _STAGE_SIX_FIELDS = frozenset(
     {

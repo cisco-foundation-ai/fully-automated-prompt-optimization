@@ -23,18 +23,18 @@ from src.hephaestus.evaluation_assets.journal_transitions import (
 )
 from src.hephaestus.evaluation_assets.models import PipelineStage
 
-LINEAGE_SCHEMA_VERSION = "fapo-evaluation-asset-lineage-v1"
-_HISTORICAL_REUSE_SCHEMA_VERSION_V1 = "fapo-evaluation-asset-reuse-v1"
+LINEAGE_SCHEMA_VERSION = "fafo-evaluation-asset-lineage-v1"
+_HISTORICAL_REUSE_SCHEMA_VERSION_V1 = "fafo-evaluation-asset-reuse-v1"
 _HISTORICAL_SNAPSHOT_SCHEMA_VERSION_V1 = (
-    "fapo-evaluation-asset-parent-snapshot-v1"
+    "fafo-evaluation-asset-parent-snapshot-v1"
 )
-_HISTORICAL_REUSE_SCHEMA_VERSION_V2 = "fapo-evaluation-asset-reuse-v2"
+_HISTORICAL_REUSE_SCHEMA_VERSION_V2 = "fafo-evaluation-asset-reuse-v2"
 _HISTORICAL_SNAPSHOT_SCHEMA_VERSION_V2 = (
-    "fapo-evaluation-asset-parent-snapshot-v2"
+    "fafo-evaluation-asset-parent-snapshot-v2"
 )
-_HISTORICAL_REUSE_SCHEMA_VERSION_V3 = "fapo-evaluation-asset-reuse-v3"
+_HISTORICAL_REUSE_SCHEMA_VERSION_V3 = "fafo-evaluation-asset-reuse-v3"
 _HISTORICAL_SNAPSHOT_SCHEMA_VERSION_V3 = (
-    "fapo-evaluation-asset-parent-snapshot-v3"
+    "fafo-evaluation-asset-parent-snapshot-v3"
 )
 REUSE_SCHEMA_VERSION = _HISTORICAL_REUSE_SCHEMA_VERSION_V3
 SNAPSHOT_SCHEMA_VERSION = _HISTORICAL_SNAPSHOT_SCHEMA_VERSION_V3

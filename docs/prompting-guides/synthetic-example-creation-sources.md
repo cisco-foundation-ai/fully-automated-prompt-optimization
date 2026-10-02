@@ -28,7 +28,7 @@ Use this when you:
   - Recommends including synthetic eval data as one dataset type.
   - Emphasizes continuous expansion with typical, edge, and adversarial cases.
   - Frames evaluation as an iterative engineering loop, not one-time scoring.
-- How to apply in FAPO:
+- How to apply in FAFO:
   - Maintain synthetic splits as living datasets.
   - Add explicit edge/adversarial coverage for recurring tenant-defined scoring failures.
 
@@ -37,7 +37,7 @@ Use this when you:
 - Why it matters:
   - Treats datasets as a dynamic artifact that grows over time.
   - Encourages adding blind spots and new edge cases as they are found.
-- How to apply in FAPO:
+- How to apply in FAFO:
   - Treat `cases_synthetic.jsonl` as continuously updated, not static.
   - Add synthetic cases immediately after failure-pattern discovery.
 
@@ -47,7 +47,7 @@ Use this when you:
   - Provides concrete prompt patterns for structured synthetic generation.
   - Highlights privacy, sparsity, and class-imbalance motivations for synthetic data.
   - Shows scaling patterns (direct generation vs code-based generation).
-- How to apply in FAPO:
+- How to apply in FAFO:
   - Use structured templates for synthetic artifact fields.
   - Explicitly balance underrepresented scenario types in synthetic sets.
 
@@ -56,7 +56,7 @@ Use this when you:
 - Why it matters:
   - Demonstrates eval-set-first guardrail development.
   - Calls out building a strong eval set and synthetic data workflows.
-- How to apply in FAPO:
+- How to apply in FAFO:
   - For each new synthetic cluster, define measurable check criteria before generation.
   - Validate generated examples against explicit guardrail checks.
 
@@ -65,7 +65,7 @@ Use this when you:
 - Why it matters:
   - Explicitly includes synthetic data generation as a path for evaluation dataset creation.
   - Emphasizes rubric-driven evaluation for actionable debugging.
-- How to apply in FAPO:
+- How to apply in FAFO:
   - Pair each synthetic case family with clear pass/fail expectations.
   - Keep evaluation criteria specific enough to localize failure causes.
 
@@ -74,7 +74,7 @@ Use this when you:
 - Why it matters:
   - Documents simulator-driven dataset generation for non-adversarial and adversarial testing.
   - Shows how to generate scenario-varied interaction data when production data is limited.
-- How to apply in FAPO:
+- How to apply in FAFO:
   - Create scenario matrices (benign, malicious, ambiguous, conflicting signals).
   - Add adversarial-like cases for robustness and regression prevention.
 
@@ -83,7 +83,7 @@ Use this when you:
 - Why it matters:
   - Gives concrete grounding techniques (`I don't know`, quotes, citations, verification).
   - Reinforces auditable outputs in high-stakes workflows.
-- How to apply in FAPO:
+- How to apply in FAFO:
   - Ensure synthetic contexts support evidence-grounded decisions.
   - Add examples that test uncertainty handling and citation-like evidence use.
 
@@ -92,7 +92,7 @@ Use this when you:
 - Why it matters:
   - Provides structured, current phishing tradecraft and sub-techniques.
   - Helps ground synthetic phishing/BEC examples in realistic attacker behavior.
-- How to apply in FAPO:
+- How to apply in FAFO:
   - Map synthetic scenarios to relevant ATT&CK techniques.
   - Avoid unrealistic indicator combinations that do not reflect known TTPs.
 
@@ -101,7 +101,7 @@ Use this when you:
 - Why it matters:
   - Establishes generate-then-filter as a practical synthetic-data pipeline.
   - Shows quality gains from filtering invalid or near-duplicate generations.
-- How to apply in FAPO:
+- How to apply in FAFO:
   - Add deterministic dedupe and quality filtering before adding new synthetic cases.
   - Reject examples that are too similar or internally inconsistent.
 
@@ -110,11 +110,11 @@ Use this when you:
 - Why it matters:
   - Introduces stepwise complexity evolution for synthetic instructions/examples.
   - Supports deliberate construction of harder examples beyond easy baseline cases.
-- How to apply in FAPO:
+- How to apply in FAFO:
   - Escalate synthetic-case difficulty in controlled tiers.
   - Add "hard" variants with conflicting but plausible signals to test robustness.
 
-## FAPO Synthetic Quality Checklist
+## FAFO Synthetic Quality Checklist
 Before committing new synthetic examples:
 - Coverage:
   - Include typical, edge, and adversarial-style cases for the target failure cluster.

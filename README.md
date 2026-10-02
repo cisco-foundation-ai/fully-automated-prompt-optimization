@@ -4,7 +4,7 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Fully Automated Prompt Optimization (FAPO)
+# Fully Automated Flow Optimization (FAFO)
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/actions/workflows/ci.yml/badge.svg)](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/actions/workflows/ci.yml)
@@ -12,27 +12,27 @@ SPDX-License-Identifier: Apache-2.0
 
 Demo video link: https://youtu.be/QG5mFbypNaI
 
-An optimization framework for multi-step LLM pipelines. FAPO uses [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as an autonomous optimizer that iteratively improves prompts, agent skills, parameters, and chain architecture — guided by built-in evaluation, step-level failure analysis, and a structured variant system.
+An optimization framework for multi-step LLM pipelines. FAFO uses [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as an autonomous optimizer that iteratively improves prompts, agent skills, parameters, and chain architecture — guided by built-in evaluation, step-level failure analysis, and a structured variant system.
 
-FAPO provides the full loop: **evaluate** a chain against a dataset, **analyze** what went wrong using step attribution, **create** a better variant, and **measure** whether it improved. The evaluation infrastructure exists to drive and measure optimization — not as an end in itself.
+FAFO provides the full loop: **evaluate** a chain against a dataset, **analyze** what went wrong using step attribution, **create** a better variant, and **measure** whether it improved. The evaluation infrastructure exists to drive and measure optimization — not as an end in itself.
 
 ## Why pipeline-aware optimization
 
-Multi-step LLM pipelines fail through interactions among retrieval, reasoning, and formatting steps, so optimizing the *prompt* alone can miss the real bottleneck. FAPO treats a pipeline as an **inspectable workflow**: instead of scoring only the final answer, it records every intermediate step output, then localizes each failure to a prompt, an upstream evidence source (such as retrieval), or the chain structure itself. It edits prompts when failures are prompt-addressable, and **escalates** to chain parameters or chain structure when attribution shows that prompts alone can no longer help.
+Multi-step LLM pipelines fail through interactions among retrieval, reasoning, and formatting steps, so optimizing the *prompt* alone can miss the real bottleneck. FAFO treats a pipeline as an **inspectable workflow**: instead of scoring only the final answer, it records every intermediate step output, then localizes each failure to a prompt, an upstream evidence source (such as retrieval), or the chain structure itself. It edits prompts when failures are prompt-addressable, and **escalates** to chain parameters or chain structure when attribution shows that prompts alone can no longer help.
 
-Concretely, FAPO is a reusable evaluation engine (`src/hephaestus/`), a set of isolated tenant workspaces (`tenants/<id>/`), [LangGraph](https://langchain-ai.github.io/langgraph/) to represent each pipeline as a stateful graph, and Claude Code as the optimization orchestrator. The orchestrator is a layer **separate from the task model being optimized** — see [The optimizer vs. the task model](#the-optimizer-vs-the-task-model).
+Concretely, FAFO is a reusable evaluation engine (`src/hephaestus/`), a set of isolated tenant workspaces (`tenants/<id>/`), [LangGraph](https://langchain-ai.github.io/langgraph/) to represent each pipeline as a stateful graph, and Claude Code as the optimization orchestrator. The orchestrator is a layer **separate from the task model being optimized** — see [The optimizer vs. the task model](#the-optimizer-vs-the-task-model).
 
-### How FAPO relates to GEPA
+### How FAFO relates to GEPA
 
-FAPO's baseline is **GEPA**, a prompt optimizer. FAPO builds on GEPA's evaluation setup but widens the action space and changes how candidates are chosen:
+FAFO's baseline is **GEPA**, a prompt optimizer. FAFO builds on GEPA's evaluation setup but widens the action space and changes how candidates are chosen:
 
-| | GEPA (baseline) | FAPO |
+| | GEPA (baseline) | FAFO |
 |---|---|---|
 | **Action space** | Instruction string inside a **fixed** chain | Prompt text **+** agent skills **+** chain parameters **+** chain structure |
 | **Search** | Evolutionary search (MIPROv2-Heavy) over prompts | Attribution-driven scoped edits, escalating only when evidence requires it |
 | **Failure signal** | Final-score feedback | Step-level attribution over recorded intermediate outputs |
 
-When the two are compared, both start from the same pipeline and the same baseline prompts; the only difference is the optimizer. FAPO does **not** depend on GEPA or DSPy as libraries — they are points of comparison, and some tenants merely reuse DSPy-style prompt *text* for parity. For benchmark results across six tasks and three task models, see the FAPO paper.
+When the two are compared, both start from the same pipeline and the same baseline prompts; the only difference is the optimizer. FAFO does **not** depend on GEPA or DSPy as libraries — they are points of comparison, and some tenants merely reuse DSPy-style prompt *text* for parity. For benchmark results across six tasks and three task models, see the original paper.
 
 ## Quick start
 
@@ -134,7 +134,7 @@ With Claude Code, run the optimization agent:
   → Success criteria: composite_score >= 90
 ```
 
-With Codex, ask it to run the FAPO optimization workflow:
+With Codex, ask it to run the FAFO optimization workflow:
 
 ```
 Optimize eval quality for tenant "my_project".
@@ -157,7 +157,7 @@ optimization. It can be the first step in creating a tenant: the pipeline does
 not require an existing chain, prompt, config, adapter, or legacy
 `tenants/<tenant_id>/datasets/` directory.
 
-FAFO V3 is the final evaluation-asset workflow:
+The FAFO data pipeline creates evaluation assets as follows:
 
 ```mermaid
 flowchart LR
@@ -166,20 +166,21 @@ flowchart LR
     P --> G[Extract and consolidate evidence-backed guidelines]
     P --> C[Cluster user-message intents]
     G --> R[One full-catalog rubric call per episode]
-    C -. sampling metadata .-> R
+    C -. optional .-> M[Sampling, analysis, and synthetic coverage]
     R --> V[Fingerprint and review derived cases]
     V --> D[Finalize immutable dataset splits]
-    D --> O[FAPO optimization and held-out evaluation]
+    D --> O[FAFO optimization and held-out evaluation]
 ```
 
 Guidelines come only from eligible trusted training feedback correlated with
 the complete trace, including tool activity and outcomes. For every trusted or
 unlabeled episode, one rubric-generation call considers all guidelines allowed
 for that split, selects zero, one, or many, and writes a case-specific rubric.
-When none applies, the rubric is explicitly trace-inferred. Intent clusters are
-retained for sampling and analysis, not correctness or guideline matching.
+When none applies, the rubric is explicitly trace-inferred. Stages 4 and 5
+are optional and never supply input to guideline or rubric building. Intent
+clusters serve sampling, analysis, and optional synthetic coverage.
 See the
-[comprehensive FAFO V3 data-pipeline guide](docs/processes/feedback-dataset-flow.md)
+[FAFO data pipeline guide](docs/processes/feedback-dataset-flow.md)
 for the trust model, stage contracts, artifacts, split isolation, scaling, and
 operational workflow.
 
@@ -188,11 +189,11 @@ remaining research gates, see the
 [Evaluation Asset Studio stress test](docs/processes/evaluation-asset-studio-stress-test.md).
 
 Both input files must already use the vendor-neutral
-[`fapo-evaluation-input-v1`](docs/processes/evaluation-input-contract.md)
+[`fafo-evaluation-input-v1`](docs/processes/evaluation-input-contract.md)
 JSONL contract. Each source must be a regular `.jsonl` file beneath the
 selected tenant's `source_artifacts/` or ordinary `datasets/` directory.
 Generated `datasets/evaluation_assets/` outputs, other tenants, external
-paths, and symlink escapes are rejected. FAPO validates the source contract,
+paths, and symlink escapes are rejected. FAFO validates the source contract,
 then copies the inputs into a self-contained workspace at:
 
 ```text
@@ -233,25 +234,24 @@ the pipeline has no remote persistence backend for this workspace.
 | 1. Validate raw inputs | Validate the canonical contract and record source counts and hashes. |
 | 2. Prepare inputs | Redact sensitive values, apply canonical defaults, assign connected trusted groups to train, validation, test, or regression from the split seed, record minimum correctness-evidence eligibility, and build intent text without renaming fields. |
 | 3. Create evaluation guidelines | Correlate eligible trusted feedback with messages, tool activity, outcomes, and runtime; recognize supported mistake/success patterns; and compile the reusable training-only guideline library. Keep held-out guidance protected and case-local. |
-| 4. Cluster intents | Embed unlabeled intent records and build route-aware clusters used only as batch-sampling and analysis metadata. |
-| 5. Record sampling context | Persist cluster membership, representatives, routes, and task types without making correctness or guideline-applicability decisions. |
+| 4. Cluster intents | Optionally embed unlabeled intent records and build route-aware clusters for sampling, analysis, and synthetic coverage. Set `--clusters 0` to skip. |
+| 5. Record sampling context | Optionally persist cluster membership, representatives, routes, and task types. Skipped with Stage 4. |
 | 6. Build episode rubrics | For every feedback and unlabeled episode, give the model the complete split-permitted guideline catalog and trace analysis in one call. Select zero, one, or many guidelines and create one scoreable case rubric; if none applies, infer the rubric from the trace and available constraints. |
 | 7. Expand coverage and prepare review | Optionally synthesize only from clusters whose episodes share one identical guideline-grounded rubric, apply the documented mechanical filters, fingerprint every eligible derived case and its complete dependencies, build exact-context duplicate/conflict families, and pause at `awaiting_review`. |
 | 8. Build splits after finalization | After explicit review finalization, publish trusted cases plus exact-fingerprint-approved derived cases only. Pending, rejected, and held cases remain auditable but unpublished. |
 
 Stage 2 preserves each source `group_id` and adds a derived `split_group_id`
 that connects supplied groups sharing exact canonical model-visible context.
-It assigns those components before any guideline call. A rating with no
-nonempty rationale, material correction, or declared deterministic/executable
-correctness signal remains auditable with
-`insufficient_correctness_evidence`, but makes no guideline call and activates
-no trusted case. This is a minimum evidence gate, not a general factual,
-safety, privacy, or contradiction validator.
+It assigns those components before any guideline call. A valid rating without
+a rationale, correction, or declared check can still produce guidelines and a
+trusted case rubric. The rating supplies only a coarse episode-level signal;
+the model must ground specific requirements in the user request and observable
+trace without inventing a reason for the rating.
 
 Stage 3 uses one shared producer/verification contract. Its public evidence,
 candidate, and guideline inventories contain eligible training feedback only.
-The extractor must link a claimed mistake or success to both the feedback and
-an observable trace location, state the expected repair, distinguish agent
+When feedback supports a claimed mistake or success, the extractor must link
+it to both the feedback and an observable trace location, distinguish agent
 behavior from environment failure, and preserve uncertainty when causality is
 not supported. Validation, test, and regression evidence is compiled separately
 within its assigned split, `split_group_id`, original `group_id`, and route.
@@ -463,7 +463,7 @@ python -m hephaestus.cli assets create \
   --asset-id v1 \
   --feedback <labeled_feedback.jsonl> \
   --unlabeled <unlabeled.jsonl> \
-  --rubric-model gpt-5.5 \
+  --rubric-model gpt-6-luna \
   --embedding-model text-embedding-3-small \
   --clusters 20
 
@@ -478,9 +478,9 @@ python -m hephaestus.cli assets status \
 
 The first `assets run` returns after Stage 7 with `status: awaiting_review`.
 Scoreable inferred cases and mechanically accepted synthetic cases are
-automatically approved by the V3 pipeline. List the bounded review snapshot to
-inspect approvals and holds, and retain its `review_set_fingerprint` and
-`decision_set_fingerprint`:
+automatically approved by the FAFO data pipeline. List the bounded review
+snapshot to inspect approvals and holds, and retain its
+`review_set_fingerprint` and `decision_set_fingerprint`:
 
 ```bash
 python -m hephaestus.cli assets reviews list \
@@ -509,7 +509,7 @@ python -m hephaestus.cli assets reviews approve \
 ```
 
 Use `assets reviews reject` with the same arguments for a rejection. For normal
-V3 runs, inspect the automatic decisions and holds, then explicitly freeze the
+FAFO runs, inspect the automatic decisions and holds, then explicitly freeze the
 exact item/dependency and resolved-decision snapshot and synchronously
 build/publish Stage 8:
 
@@ -564,8 +564,15 @@ backup or rebuild it as a new asset version; adoption is not a migration path.
 
 Add `--enable-synthetic-coverage --synthetic-cases-per-cluster <count>` to
 enable Stage 7. Use `--embedding-model tfidf` for deterministic local
-vectorization without an embedding API call. FAPO never silently changes
+vectorization without an embedding API call. FAFO never silently changes
 providers after a failure.
+
+The existing default is 50 clusters. Use `--clusters 0` to skip Stages 4 and 5.
+Their receipts and empty artifacts remain in the eight-stage workspace, but no
+embedding or cluster sampling work is performed. Stage 6 still builds every
+episode rubric from its trace and
+split-permitted guidelines. Synthetic coverage requires `--clusters` greater
+than zero.
 
 To change decisions while resuming, pass only the settings that should change:
 
@@ -581,7 +588,7 @@ Split-seed changes restart at Stage 2 because trusted assignment precedes
 authoring. Guideline-model changes restart at Stage 3; embedding or
 cluster-count changes at Stage 4; and synthetic settings at Stage 7. Legacy
 matching/support options remain readable for older configurations but do not
-drive V3 rubric generation. Each revision is prepared in the recovery journal,
+drive rubric generation. Each revision is prepared in the recovery journal,
 then applied to `config.json`, `pipeline_state.json`, `config_history.jsonl`,
 and `events.jsonl`; stale downstream outputs are cleaned only after their state
 and receipt references are nonauthoritative.
@@ -590,7 +597,7 @@ and receipt references are nonauthoritative.
 
 If an OpenAI request fails because TLS/SSL certificate verification is blocked,
 upgrade the OpenAI HTTP and certificate packages in the Python environment that
-runs FAPO:
+runs FAFO:
 
 ```bash
 python3 -m pip install --upgrade openai httpx certifi truststore
@@ -603,7 +610,7 @@ Then uncomment the `try`/`import truststore`/
 - `src/hephaestus/datasets/rubric_providers.py`, lines 85–89.
 - `src/hephaestus/datasets/embedding_providers.py`, lines 61–65.
 
-Restart the FAPO CLI or service process after changing the environment or source,
+Restart the FAFO CLI or service process after changing the environment or source,
 then resume the failed asset run.
 Use this procedure only for an SSL/certificate error; it does not fix
 an invalid API key, unavailable model, rate limit, or malformed response.
@@ -827,7 +834,7 @@ Skills are opt-in per tenant via two `chain.config` fields:
   a factory that never renders/passes the paths also receives no skill message.
 - **`optimization_target`** — `"prompt"`, `"skill"`, or `"both"` (default `"both"`). Selects which textual artifacts the optimizer iterates. When set to `"skill"` or `"both"`, the tenant must be agentic (an `mcp` section configured); the eval runner validates this.
 
-Prompt and skill are **co-equal textual levels**: when both are available the optimizer treats them as one textual surface, routing each failure cluster to whichever artifact owns it (broad scaffold/format → base prompt; reusable task-specific procedure → a skill). See `tenants/skill_example/` for a complete worked example. In the **FAPO Explorer** UI, skills appear under the **Prompts** tab in their own section.
+Prompt and skill are **co-equal textual levels**: when both are available the optimizer treats them as one textual surface, routing each failure cluster to whichever artifact owns it (broad scaffold/format → base prompt; reusable task-specific procedure → a skill). See `tenants/skill_example/` for a complete worked example. In the **FAFO Explorer** UI, skills appear under the **Prompts** tab in their own section.
 
 ### Scorers
 
@@ -865,7 +872,7 @@ The engine calls `validate_case` (to catch bad data early) then `score_case` for
 
 ### Providers
 
-FAPO supports three LLM providers out of the box:
+FAFO supports three LLM providers out of the box:
 
 | Provider | Config value | Auth env variable | Notes |
 |----------|-------------|-------------------|-------|
@@ -893,11 +900,11 @@ Provider settings go in the config file:
 
 ## Optimization loop
 
-Evaluation tells you *how well* your chain performs. Optimization tells you *what to change* to make it better. FAPO includes a structured optimization loop that works at levels of increasing cost — from textual edits (prompt and agent skills) up through chain parameters and chain structure. (For the full architecture, see [docs/processes/prompt-iteration-loop.md](docs/processes/prompt-iteration-loop.md).)
+Evaluation tells you *how well* your chain performs. Optimization tells you *what to change* to make it better. FAFO includes a structured optimization loop that works at levels of increasing cost — from textual edits (prompt and agent skills) up through chain parameters and chain structure. (For the full architecture, see [docs/processes/prompt-iteration-loop.md](docs/processes/prompt-iteration-loop.md).)
 
 ### The optimizer vs. the task model
 
-FAPO has two models, and keeping them straight avoids most confusion:
+FAFO has two models, and keeping them straight avoids most confusion:
 
 - **The optimizer** is Claude Code. It reads the playbook, runs evals, dispatches subagents, writes variants, compares results, and decides when to escalate. It never appears in your config.
 - **The task model** is whatever you set under `provider` / `provider_settings.model` (e.g. `gpt-4o`, `gemma-3-12b`). It is the model *being optimized*, reached through a small `ProviderClient.generate(messages)` interface.
@@ -926,7 +933,7 @@ For Claude Code, use the slash commands from within your project directory:
 For Codex, provide the same tenant, config, and success criteria in the prompt:
 
 ```
-Run the FAPO eval runner.
+Run the FAFO eval runner.
 Tenant: my_project
 Config: tenants/my_project/configs/eval.json
 Follow .codex/commands/eval-runner.md.
@@ -1041,7 +1048,7 @@ Together these prevent rework (you won't re-try something that already failed) a
 
 ### Guardrails
 
-Autonomous optimization can overfit or drift out of scope, so FAPO documents four
+Autonomous optimization can overfit or drift out of scope, so FAFO documents four
 agent procedures. **All four are agent-enforced / bypassable**, not runtime
 barriers:
 
@@ -1121,9 +1128,9 @@ Scopes: `raw` (source artifacts), `derived` (processed datasets), `all`.
 
 ---
 
-## FAPO UI
+## FAFO UI
 
-FAPO includes a local, read-only web UI called **FAPO Explorer** for browsing tenant artifacts after evals and optimization runs. It shows cross-tenant run summaries, per-case eval outputs, score breakdowns, prompt variants (and agent skills, under the Prompts tab), datasets, iteration history, and tenant docs. It refreshes live as runs progress, supports shareable URLs, sortable/filterable case tables, expected-vs-actual trajectory diffs, JSON syntax highlighting, and Markdown-rendered summaries.
+FAFO includes a local, read-only web UI called **FAFO Explorer** for browsing tenant artifacts after evals and optimization runs. It shows cross-tenant run summaries, per-case eval outputs, score breakdowns, prompt variants (and agent skills, under the Prompts tab), datasets, iteration history, and tenant docs. It refreshes live as runs progress, supports shareable URLs, sortable/filterable case tables, expected-vs-actual trajectory diffs, JSON syntax highlighting, and Markdown-rendered summaries.
 
 Start it from the repository root:
 
@@ -1139,7 +1146,7 @@ options such as `--tenants-root`, `--host`, and `--port`.
 
 ## Claude Code skills
 
-FAPO ships as a set of [Claude Code](https://docs.anthropic.com/en/docs/claude-code) agents and commands. The optimization *method* is the three core agents; the rest support evaluation, data augmentation, and repository operations around them.
+FAFO ships as a set of [Claude Code](https://docs.anthropic.com/en/docs/claude-code) agents and commands. The optimization *method* is the three core agents; the rest support evaluation, data augmentation, and repository operations around them.
 
 ### Core optimization agents
 
@@ -1175,7 +1182,7 @@ Not part of the optimization method — general repo tooling that happens to shi
 
 ## Codex workflows
 
-FAPO also ships Codex prompt files for the same core optimization workflows. These are not Claude Code slash commands; use them only when working in Codex.
+FAFO also ships Codex prompt files for the same core optimization workflows. These are not Claude Code slash commands; use them only when working in Codex.
 
 ### User-invocable workflows
 
@@ -1348,7 +1355,7 @@ The companion paper is the canonical reference for the concepts, the GEPA compar
 | [docs/tenant-docs-contract.md](docs/tenant-docs-contract.md) | Required documentation for each tenant |
 | [docs/style-guide.md](docs/style-guide.md) | Coding standards (Python 3.10+, pytest, type hints) |
 | [docs/github-hygiene.md](docs/github-hygiene.md) | Commit, branch, and PR conventions |
-| [docs/processes/feedback-dataset-flow.md](docs/processes/feedback-dataset-flow.md) | Comprehensive FAFO V3 evaluation-asset data pipeline |
+| [docs/processes/feedback-dataset-flow.md](docs/processes/feedback-dataset-flow.md) | FAFO data pipeline guide |
 | [docs/processes/prompt-iteration-loop.md](docs/processes/prompt-iteration-loop.md) | Optimization system architecture reference |
 | [docs/processes/chain-variant-conventions.md](docs/processes/chain-variant-conventions.md) | Standards for creating and naming chain variants |
 | [docs/prompting-guides/](docs/prompting-guides/) | Prompting best practices, agentic chain patterns, and evaluation benchmarks |
@@ -1360,10 +1367,11 @@ The companion paper is the canonical reference for the concepts, the GEPA compar
 **FAPO: Fully Automated Prompt Optimization of Multi-Step LLM Pipelines**<br>
 Paul Kassianik, Baturay Saglam, Huaibo Zhao, Blaine Nelson, Supriti Vijay, Aman Priyanshu, Amin Karbasi · [arXiv:2606.19605](https://arxiv.org/abs/2606.19605)
 
-If you use FAPO in your research, please cite the paper:
+If you use FAFO in your research, cite the original paper under its published
+title:
 
 ```bibtex
-@misc{kassianik2026fapofullyautonomousprompt,
+@misc{kassianik2026fafoflowoptimization,
       title={FAPO: Fully Automated Prompt Optimization of Multi-Step LLM Pipelines},
       author={Paul Kassianik and Baturay Saglam and Huaibo Zhao and Blaine Nelson and Supriti Vijay and Aman Priyanshu and Amin Karbasi},
       year={2026},

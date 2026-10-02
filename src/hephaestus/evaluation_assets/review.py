@@ -20,23 +20,23 @@ from src.hephaestus.evaluation_assets.dependencies import (
     dependency_matches,
 )
 
-DERIVED_REVIEW_ITEM_SCHEMA_VERSION = "fapo-derived-review-item-v1"
+DERIVED_REVIEW_ITEM_SCHEMA_VERSION = "fafo-derived-review-item-v1"
 REVIEW_QUEUE_SCHEMA_VERSION = DERIVED_REVIEW_ITEM_SCHEMA_VERSION
-DERIVED_CASE_CONTENT_SCHEMA_VERSION = "fapo-derived-case-content-v1"
-MODEL_CONTEXT_FINGERPRINT_SCHEMA_VERSION = "fapo-model-context-fingerprint-v1"
-EXPECTED_TRUTH_FINGERPRINT_SCHEMA_VERSION = "fapo-expected-truth-fingerprint-v2"
-REVIEW_DEPENDENCY_FINGERPRINT_SCHEMA_VERSION = "fapo-review-dependency-fingerprint-v1"
-DERIVED_REVIEW_FINGERPRINT_SCHEMA_VERSION = "fapo-derived-review-fingerprint-v1"
-REVIEW_DECISION_SCHEMA_VERSION = "fapo-review-decision-v1"
-REVIEW_DECISION_IDENTITY_SCHEMA_VERSION = "fapo-review-decision-identity-v1"
-REVIEW_SET_FINGERPRINT_SCHEMA_VERSION = "fapo-review-set-fingerprint-v1"
-REVIEW_DECISION_SET_FINGERPRINT_SCHEMA_VERSION = "fapo-review-decision-set-fingerprint-v1"
-REVIEW_AUTHORITY_REVISION_SCHEMA_VERSION = "fapo-review-authority-revision-v1"
-REVIEW_FINALIZATION_SCHEMA_VERSION = "fapo-review-finalization-v1"
-REVIEW_FINALIZATION_IDENTITY_SCHEMA_VERSION = "fapo-review-finalization-identity-v1"
-DUPLICATE_FAMILY_SCHEMA_VERSION = "fapo-duplicate-family-v1"
-DUPLICATE_FAMILY_IDENTITY_SCHEMA_VERSION = "fapo-duplicate-family-identity-v1"
-SPLIT_GROUP_IDENTITY_SCHEMA_VERSION = "fapo-split-group-identity-v1"
+DERIVED_CASE_CONTENT_SCHEMA_VERSION = "fafo-derived-case-content-v1"
+MODEL_CONTEXT_FINGERPRINT_SCHEMA_VERSION = "fafo-model-context-fingerprint-v1"
+EXPECTED_TRUTH_FINGERPRINT_SCHEMA_VERSION = "fafo-expected-truth-fingerprint-v2"
+REVIEW_DEPENDENCY_FINGERPRINT_SCHEMA_VERSION = "fafo-review-dependency-fingerprint-v1"
+DERIVED_REVIEW_FINGERPRINT_SCHEMA_VERSION = "fafo-derived-review-fingerprint-v1"
+REVIEW_DECISION_SCHEMA_VERSION = "fafo-review-decision-v1"
+REVIEW_DECISION_IDENTITY_SCHEMA_VERSION = "fafo-review-decision-identity-v1"
+REVIEW_SET_FINGERPRINT_SCHEMA_VERSION = "fafo-review-set-fingerprint-v1"
+REVIEW_DECISION_SET_FINGERPRINT_SCHEMA_VERSION = "fafo-review-decision-set-fingerprint-v1"
+REVIEW_AUTHORITY_REVISION_SCHEMA_VERSION = "fafo-review-authority-revision-v1"
+REVIEW_FINALIZATION_SCHEMA_VERSION = "fafo-review-finalization-v1"
+REVIEW_FINALIZATION_IDENTITY_SCHEMA_VERSION = "fafo-review-finalization-identity-v1"
+DUPLICATE_FAMILY_SCHEMA_VERSION = "fafo-duplicate-family-v1"
+DUPLICATE_FAMILY_IDENTITY_SCHEMA_VERSION = "fafo-duplicate-family-identity-v1"
+SPLIT_GROUP_IDENTITY_SCHEMA_VERSION = "fafo-split-group-identity-v1"
 
 REVIEW_ITEM_FIELDS = frozenset(
     {
@@ -1327,7 +1327,7 @@ def _validate_dependency(value: Any) -> dict[str, Any]:
         _validate_authentic_dependency_provenance(dependency)
         return dependency
     schema_version = dependency.get("schema_version")
-    if schema_version == "fapo-stage6-dependency-v1":
+    if schema_version == "fafo-stage6-dependency-v1":
         missing = _SCOUT_STAGE_SIX_DEPENDENCY_FIELDS - set(dependency)
         if missing:
             raise ValueError(f"dependency is missing fields {sorted(missing)}")
@@ -1345,7 +1345,7 @@ def _validate_dependency(value: Any) -> dict[str, Any]:
                 "raw_record_sha256",
             ),
         )
-    elif schema_version == "fapo-stage7-dependency-v1":
+    elif schema_version == "fafo-stage7-dependency-v1":
         missing = _SCOUT_STAGE_SEVEN_DEPENDENCY_FIELDS - set(dependency)
         if missing:
             raise ValueError(f"dependency is missing fields {sorted(missing)}")

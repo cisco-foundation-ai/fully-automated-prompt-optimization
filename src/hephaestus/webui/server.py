@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
+from src.hephaestus.datasets.rubric_providers import DEFAULT_OPENAI_RUBRIC_MODEL
 from src.hephaestus.evaluation_assets.durability import EvaluationAssetError
 from src.hephaestus.evaluation_assets.input_contract import input_contract_document
 from src.hephaestus.evaluation_assets.models import EvaluationAssetConfig
@@ -57,9 +58,10 @@ from src.hephaestus.evaluation_assets.service import EvaluationAssetRunManager
 from src.hephaestus.webui.data import TenantStore
 from src.hephaestus.webui.frontend import INDEX_HTML
 
-_LOGO_PATH = Path(__file__).with_name("assets") / "fapo-explorer-logo.webp"
+_LOGO_PATH = Path(__file__).with_name("assets") / "fafo-explorer-logo.webp"
 
 RUBRIC_MODELS = {
+    "gpt-6-luna",
     "gpt-5.5",
     "gpt-5.4",
     "gpt-5.2",
@@ -108,7 +110,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_html(INDEX_HTML)
             return
 
-        if path == "/assets/fapo-explorer-logo.webp":
+        if path == "/assets/fafo-explorer-logo.webp":
             self._send_file(_LOGO_PATH, "image/webp")
             return
 
@@ -470,9 +472,13 @@ class _Handler(BaseHTTPRequestHandler):
         if payload is None:
             return
         try:
-            cluster_count = int(payload.get("cluster_count") or 50)
-            if not 1 <= cluster_count <= 1000:
-                raise ValueError("cluster_count must be between 1 and 1000")
+            raw_cluster_count = payload.get("cluster_count")
+            cluster_count = int(
+                50 if raw_cluster_count is None or raw_cluster_count == ""
+                else raw_cluster_count
+            )
+            if not 0 <= cluster_count <= 1000:
+                raise ValueError("cluster_count must be between 0 and 1000 (0 skips clustering)")
             raw_match_threshold = payload.get("match_threshold")
             match_threshold = (
                 0.6
@@ -491,7 +497,9 @@ class _Handler(BaseHTTPRequestHandler):
                 raise ValueError(
                     "synthetic_cases_per_cluster must be between 1 and 100"
                 )
-            rubric_model = str(payload.get("rubric_model") or "gpt-5.5")
+            rubric_model = str(
+                payload.get("rubric_model") or DEFAULT_OPENAI_RUBRIC_MODEL
+            )
             embedding_model = str(
                 payload.get("embedding_model") or "text-embedding-3-small"
             )
@@ -1020,7 +1028,7 @@ def serve(
 ) -> None:
     """Start the UI server and block until interrupted."""
     if not _is_loopback_name(host):
-        raise ValueError("FAPO web server must bind to a loopback host")
+        raise ValueError("FAFO web server must bind to a loopback host")
     bind_host = host.strip().strip("[]")
     try:
         bind_address = ipaddress.ip_address(bind_host)

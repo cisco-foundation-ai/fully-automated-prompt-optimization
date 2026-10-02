@@ -73,7 +73,7 @@ python tenants/tau3_retail/scripts/run_tau.py \
 ## Output Management
 
 - Tau outputs remain under the sibling checkout's `data/simulations/`.
-- FAPO outputs remain under `tenants/tau3_retail/evals/`.
+- FAFO outputs remain under `tenants/tau3_retail/evals/`.
 - FAFO workspaces remain under `tenants/tau3_retail/evaluation_assets/`.
 - All are ignored and must not be committed.
 - Commit only aggregate reports, prompt text, configs, code, iteration memory,

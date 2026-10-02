@@ -4,10 +4,10 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# V3 Prompt Lineages
+# Prompt Lineages
 
 These files preserve the exact Tau agent instructions evaluated in the recorded
-FAFO V3 experiment. Every variant includes repository license metadata; the Tau
+FAFO experiment. Every variant includes repository license metadata; the Tau
 launchers remove that exact header before sending the instruction to the model.
 
 | Arm | Sequence | Winner |

@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests that every published Tau recipe config follows the FAPO contract."""
+"""Tests that every published Tau recipe config follows the FAFO contract."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 
 from src.hephaestus.runs.eval_runner import load_eval_config
-
 
 TENANT_ROOT = Path(__file__).resolve().parents[1]
 CONFIGS = [TENANT_ROOT / "configs" / name for name in ("train.json", "eval.json", "test.json")]

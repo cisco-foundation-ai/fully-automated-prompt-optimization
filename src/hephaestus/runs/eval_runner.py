@@ -650,7 +650,7 @@ def _snapshot_runtime_inputs(
         _safe_evaluation_provenance(case.metadata) for case in execution_cases
     )
 
-    with tempfile.TemporaryDirectory(prefix="fapo-eval-snapshot-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="fafo-eval-snapshot-") as temporary:
         snapshot_root = Path(temporary)
         repository_root = _lexical_absolute(_repository_root())
         python_cache = _PythonSnapshotCache()
@@ -970,7 +970,7 @@ def _build_identity_and_config(
         resolved_mcp_capabilities=resolved_mcp_capabilities,
     )
     safe_config = {
-        "schema_version": "fapo-run-config-v2",
+        "schema_version": "fafo-run-config-v2",
         "run_id": run_id,
         "tenant_id": config.tenant_id,
         "provider": provider_facts["provider"],

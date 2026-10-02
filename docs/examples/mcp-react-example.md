@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Example: ReAct Agent with MCP Tools
 
-This example demonstrates a complete agentic workflow using FAPO with MCP integration.
+This example demonstrates a complete agentic workflow using FAFO with MCP integration.
 
 ## Scenario
 

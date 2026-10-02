@@ -13,11 +13,11 @@ from typing import Any, Literal, Mapping, Sequence, cast
 
 DatasetSplit = Literal["regression", "train", "validation", "test"]
 AssignmentSource = Literal["seeded", "inherited"]
-MODEL_VISIBLE_CONTEXT_REVISION = "fapo-model-visible-context-v1"
-SPLIT_GROUP_REVISION = "fapo-split-group-v1"
-SPLIT_ASSIGNMENT_REVISION = "fapo-trusted-split-v1"
-SPLIT_PLAN_SCHEMA_VERSION = "fapo-trusted-split-plan-v1"
-ELIGIBILITY_SCHEMA_VERSION = "fapo-feedback-eligibility-v1"
+MODEL_VISIBLE_CONTEXT_REVISION = "fafo-model-visible-context-v1"
+SPLIT_GROUP_REVISION = "fafo-split-group-v1"
+SPLIT_ASSIGNMENT_REVISION = "fafo-trusted-split-v1"
+SPLIT_PLAN_SCHEMA_VERSION = "fafo-trusted-split-plan-v1"
+ELIGIBILITY_SCHEMA_VERSION = "fafo-feedback-eligibility-v1"
 PARENT_SPLIT_ASSIGNMENT_CONFLICT = "parent_split_assignment_conflict"
 INSUFFICIENT_CORRECTNESS_EVIDENCE = "insufficient_correctness_evidence"
 DATASET_SPLITS = frozenset({"regression", "train", "validation", "test"})
@@ -97,7 +97,7 @@ class CorrectnessEligibility:
 
 
 def model_visible_context(row: Mapping[str, Any]) -> dict[str, str]:
-    """Compile the exact serialized context shape used by a FAPO case."""
+    """Compile the exact serialized context shape used by a FAFO case."""
     messages = [
         *row["conversation_context"],
         {"role": "user", "content": row["user_input"]},
@@ -297,7 +297,7 @@ def parent_assignments_by_group_id(
 def assess_correctness_eligibility(
     row: Mapping[str, Any],
 ) -> CorrectnessEligibility:
-    """Require explicit, material correctness evidence for Stage 3 authoring."""
+    """Accept a trusted rating as the minimum Stage 3 evidence signal."""
     feedback = row.get("feedback")
     evidence_sources: list[str] = []
     if isinstance(feedback, Mapping):
@@ -318,6 +318,13 @@ def assess_correctness_eligibility(
                 for kind in CORRECTNESS_SIGNAL_KINDS
                 if kind in valid_kinds
             )
+        polarity = feedback.get("polarity")
+        if not evidence_sources and isinstance(polarity, str) and polarity in {
+            "positive",
+            "negative",
+            "mixed",
+        }:
+            evidence_sources.append("feedback_polarity")
     eligible = bool(evidence_sources)
     return CorrectnessEligibility(
         record_id=str(row["record_id"]),

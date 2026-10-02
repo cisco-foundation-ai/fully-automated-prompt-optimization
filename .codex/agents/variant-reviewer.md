@@ -4,7 +4,7 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAPO Variant Review Phase for Codex
+# FAFO Variant Review Phase for Codex
 
 Use this as a fresh-eyes checklist before evaluating a new prompt, skill, parameter, or chain variant.
 

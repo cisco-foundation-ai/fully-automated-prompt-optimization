@@ -56,7 +56,7 @@ def test_builder_separates_permanent_controls_from_declared_variants() -> None:
     """Declared dimensions are variants while every other dimension is controlled."""
     payload = _build_identity().to_dict()
 
-    assert payload["schema_version"] == "fapo-run-identity-v1"
+    assert payload["schema_version"] == "fafo-run-identity-v1"
     assert payload["declared_variant_dimensions"] == ["prompts", "skills"]
     assert list(payload["variants"]) == ["prompts", "skills"]
     assert set(payload["control_dimensions"]) == set(ALLOWED_VARIANT_DIMENSIONS) - {"prompts", "skills"}

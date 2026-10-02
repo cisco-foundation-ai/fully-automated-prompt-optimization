@@ -4,7 +4,7 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAPO Eval Runner for Codex
+# FAFO Eval Runner for Codex
 
 Use this when the user wants to run an eval, test a prompt variant, check scores, execute an eval config, compare variants, or see evaluation results.
 

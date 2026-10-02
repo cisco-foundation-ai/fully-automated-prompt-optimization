@@ -538,7 +538,8 @@ _ARTIFACT_CATALOG = {
     ),
     "episode_rubrics.jsonl": (
         "Case-specific episode rubrics",
-        "One rubric per feedback or unlabeled episode, with zero or more selected guideline IDs and explicit provenance.",
+        "One rubric per feedback or unlabeled episode, with zero or more selected guideline IDs "
+        "and explicit provenance.",
         "Key outputs",
     ),
     "episode_guideline_applicability.jsonl": (
@@ -568,12 +569,14 @@ _ARTIFACT_CATALOG = {
     ),
     "case_dependencies.jsonl": (
         "Case rubric dependencies",
-        "Protected per-episode dependencies over the full permitted guideline catalog, trace, provider, and prompt.",
+        "Protected per-episode dependencies over the full permitted guideline catalog, trace, "
+        "provider, and prompt.",
         "Diagnostics",
     ),
     "held_rubric_outputs.jsonl": (
         "Held rubric outputs",
-        "Episodes whose generated rubric was not scoreable or whose feedback could not become a trusted case.",
+        "Episodes whose generated rubric was not scoreable or whose feedback could not become "
+        "a trusted case.",
         "Needs attention",
     ),
     "synthetic_candidates.jsonl": (

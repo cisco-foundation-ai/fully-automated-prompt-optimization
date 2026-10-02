@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Organization Profile
 
-This tenant supports the FAPO Software Name Categorization Challenge. The
+This tenant supports the FAFO Software Name Categorization Challenge. The
 workflow optimizes a single-prompt `gpt-4o-mini` classifier that maps real
 software names to domains of security concern.
 
