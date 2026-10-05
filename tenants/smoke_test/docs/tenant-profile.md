@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 # Tenant Profile
 
 ## Organization Profile
-smoke_test is a minimal integration-test tenant used to verify the FAPO eval pipeline end-to-end. It contains trivially easy yes/no questions so pipeline correctness can be validated without domain expertise.
+smoke_test is a minimal integration-test tenant used to verify the FAFO eval pipeline end-to-end. It contains trivially easy yes/no questions so pipeline correctness can be validated without domain expertise.
 
 ## Security Environment Assumptions
 - Input: simple factual yes/no questions with no sensitive content.

@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 # Tenant Profile
 
 ## Organization Profile
-mcp_example is a reference/demonstration tenant for FAPO's Model Context Protocol (MCP) integration. It exercises the agentic evaluation path end-to-end — a ReAct agent that calls tools exposed by an MCP server — using a bundled mock server so no external credentials or services are required. It exists to validate the agentic infrastructure and to serve as a copy-paste template for building real MCP-backed tenants.
+mcp_example is a reference/demonstration tenant for FAFO's Model Context Protocol (MCP) integration. It exercises the agentic evaluation path end-to-end — a ReAct agent that calls tools exposed by an MCP server — using a bundled mock server so no external credentials or services are required. It exists to validate the agentic infrastructure and to serve as a copy-paste template for building real MCP-backed tenants.
 
 ## Security Environment Assumptions
 - Input: short natural-language tasks (echo requests, arithmetic, simple knowledge questions). No sensitive content.

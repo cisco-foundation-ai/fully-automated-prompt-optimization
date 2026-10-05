@@ -5,7 +5,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Mapping, Optional
+
+_EVALUATION_TRUST_TIERS = frozenset(
+    {
+        "trusted_feedback",
+        "inferred_from_trusted_feedback",
+        "synthetic_from_trusted_rubric",
+    }
+)
 
 
 @dataclass
@@ -53,12 +61,32 @@ class EvalCaseResult:
     total_tool_calls: int = 0
     failed_tool_calls: int = 0
 
+    # Persisted execution state contains only privacy-safe, allowlisted facts.
+    execution_status: Literal["succeeded", "failed"] = "succeeded"
+    execution_error: Optional[Dict[str, str]] = None
+    evaluation_provenance: Dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.execution_status not in {"succeeded", "failed"}:
+            raise ValueError("execution_status must be 'succeeded' or 'failed'")
+        if self.execution_status == "succeeded" and self.execution_error is not None:
+            raise ValueError("succeeded EvalCaseResult cannot carry execution_error")
+        if self.execution_status == "failed" and self.execution_error is None:
+            raise ValueError("failed EvalCaseResult requires execution_error")
+        if self.execution_error is not None:
+            from src.hephaestus.runs.errors import validate_execution_error
+
+            self.execution_error = validate_execution_error(self.execution_error)
+        self.evaluation_provenance = _sanitize_evaluation_provenance(
+            self.evaluation_provenance
+        )
+
 
 @dataclass
 class EvalProgress:
     """Snapshot of evaluation progress."""
 
-    status: str  # "running" | "completed" | "failed"
+    status: str  # "running" | "completed" | "degraded" | "failed"
     total_cases: int
     completed_cases: int
     started_at: str  # ISO 8601
@@ -68,6 +96,10 @@ class EvalProgress:
     failed_case_ids: List[str]
     in_flight_case_ids: List[str] = field(default_factory=list)
     run_id: str = ""
+    successful_cases: int = 0
+    attempted_case_ids: List[str] = field(default_factory=list)
+    successful_case_ids: List[str] = field(default_factory=list)
+    trust_tier_summaries: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -82,3 +114,13 @@ class EvalConfig:
     max_workers: Optional[int] = None
     run_id: Optional[str] = None
     mcp: Optional[Any] = None  # MCPConfig from mcp.types, but avoid circular import
+    comparison_variant_dimensions: List[str] = field(default_factory=list)
+
+
+def _sanitize_evaluation_provenance(value: Mapping[str, Any] | None) -> Dict[str, str]:
+    if not isinstance(value, Mapping):
+        return {}
+    trust_tier = value.get("trust_tier")
+    if not isinstance(trust_tier, str) or trust_tier not in _EVALUATION_TRUST_TIERS:
+        return {}
+    return {"trust_tier": trust_tier}

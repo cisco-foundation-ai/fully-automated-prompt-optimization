@@ -4,12 +4,12 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAPO Web UI
+# FAFO Web UI
 
-The FAPO Web UI (the **FAPO Explorer**) is a local, read-only dashboard for
-browsing the artifacts a tenant accumulates during optimization: eval runs,
-per-case outputs, iteration history, prompt variants and agent skills, datasets,
-and tenant docs.
+FAFO Explorer browses the artifacts a tenant accumulates during optimization:
+eval runs, per-case outputs, iteration history, prompt variants and agent
+skills, datasets, and tenant docs. Evaluation-asset creation and review are
+CLI/API workflows and have no web frontend.
 
 It is intentionally zero-dependency — the server is built on Python's standard
 library `http.server`, and the frontend is a single self-contained HTML
@@ -24,15 +24,15 @@ From the repository root, with the project installed (`python -m pip install -e 
 python -m hephaestus.cli ui
 ```
 
-This serves the UI at <http://127.0.0.1:8765/> and reads from the `tenants/`
-directory by default. Press `Ctrl+C` to stop.
+This serves FAFO Explorer at <http://127.0.0.1:8765/> and reads from the
+`tenants/` directory by default. Press `Ctrl+C` to stop.
 
 ### Options
 
 | Flag | Default | Description |
 |---|---|---|
 | `--tenants-root` | `tenants` | Path to the tenants directory to browse |
-| `--host` | `127.0.0.1` | Bind host |
+| `--host` | `127.0.0.1` | Loopback bind host (`localhost`, `127.0.0.0/8`, or `::1`) |
 | `--port` | `8765` | Bind port |
 
 Example — serve a different tenants root on a custom port:
@@ -70,10 +70,21 @@ Inside a tenant, content is organized into tabs:
 | **Docs** | `README.md` + `docs/**/*.md` | The tenant README and tenant-specific markdown docs. |
 
 A run directory is recognized recursively under the probed output roots when it
-contains any of `results.jsonl`, `run_config.json`, `summary.md`, or
-`progress.json`. Per-case ground truth is joined from the run's dataset (via
-`run_config.json`'s `dataset_path`, falling back to the tenant's only dataset)
-by matching on `case_id`.
+contains any of `results.jsonl`, `run_config.json`, `summary.md`, `progress.json`, or
+`run_manifest.json`. The API labels a valid manifest-authenticated bundle
+`authoritative`; a present but invalid manifest `invalid_unverified`; a terminal
+legacy progress record without a manifest `legacy_unverified`; and every other
+in-progress or loose directory `live_unverified`.
+
+For an `authoritative` run, ground truth is authenticated only when the bundle's
+dataset path agrees with its run identity, the validated `run_manifest.json`
+has authenticated the bundle, the resolved dataset remains inside the tenant
+dataset root, and the dataset bytes match the recorded fingerprint. The UI then
+joins the exact recorded dataset by `case_id`. Evaluation-asset dataset ground
+truth is not joined from a fallback path. Legacy and live-unverified directories can
+expose only a best-effort join from `run_config.json`'s `dataset_path` (or the
+tenant's one ordinary dataset when no evaluation-asset catalog exists); that join is not
+authority.
 
 ## Interactive features
 
@@ -112,18 +123,20 @@ These behaviors apply across the views above:
 
 The UI has three small modules under `src/hephaestus/webui/`:
 
-- **`server.py`** — a stdlib `ThreadingHTTPServer` that serves the SPA shell at
-  `/` and a read-only JSON API under `/api/`.
-- **`data.py`** — `TenantStore`, the read-only filesystem layer that walks the
+- **`server.py`** — a stdlib `ThreadingHTTPServer` that serves Explorer at `/`
+  and JSON APIs. Evaluation-asset endpoints remain available to programmatic
+  clients, but no evaluation-asset HTML route is served.
+- **`data.py`** — `TenantStore`, the constrained filesystem layer that walks the
   tenants root and surfaces artifacts. All paths are resolved relative to the
   tenants root and validated to stay inside it (and inside the expected
   subtree), so the HTTP layer cannot read arbitrary files on disk.
 - **`frontend.py`** — the single-page `INDEX_HTML` document that calls the JSON
-  API to render the views above.
+  API to render Explorer.
 
 ### JSON API
 
-The frontend is backed by these read-only endpoints (useful for scripting too):
+The Explorer uses the read endpoints below. Evaluation-asset endpoints are
+retained for CLI/API automation even though there is no corresponding frontend.
 
 | Endpoint | Returns |
 |---|---|
@@ -141,10 +154,61 @@ The frontend is backed by these read-only endpoints (useful for scripting too):
 | `GET /api/tenants/<t>/dataset?path=<rel>&offset=&limit=` | Dataset rows (paged) |
 | `GET /api/tenants/<t>/docs` | Doc files |
 | `GET /api/tenants/<t>/doc?path=<rel>` | Doc content (markdown) |
+| `GET /api/tenants/<t>/evaluation-assets` | Asset configuration, stage status, directory summaries, and safe `review_authority_revision` for polling |
+| `GET /api/evaluation-assets/input-contract` | Versioned canonical field, message, tool-call, and feedback requirements |
+| `GET /api/tenants/<t>/evaluation-assets/<a>/stages/<s>` | One stage's status, metrics, artifact list, and bounded example previews |
+| `GET /api/tenants/<t>/evaluation-assets/<a>/reviews?status=&offset=&limit=` | Current receipt-verified safe page; exposes both fingerprints, revision, and safe current finalization; filters `pending`, `approved`, `rejected`, or `held`, accepts a limit from 1 through 100, and returns at most that many combined eligible-plus-held rows |
+| `POST /api/evaluation-assets/start` | Copy inputs and start a core pipeline run |
+| `POST /api/evaluation-assets/extend` | Create and run an immutable child version with reused or refreshed clustering |
+| `POST /api/tenants/<t>/evaluation-assets/<a>/resume` | Optionally revise pipeline decisions, invalidate dependent stages, and resume an asset |
+| `POST /api/tenants/<t>/evaluation-assets/<a>/adopt` | Synchronously verify an exact legacy completion and return its terminal released `PipelineState`; HTTP `202` is retained compatibility semantics, stable asset/runtime rejections return `409`, and malformed input/filesystem-value errors return `400` |
+| `POST /api/tenants/<t>/evaluation-assets/<a>/reviews/<fingerprint>/approve` | Append one immutable approval for the exact current `case_id`, item fingerprint, and review-set fingerprint |
+| `POST /api/tenants/<t>/evaluation-assets/<a>/reviews/<fingerprint>/reject` | Append one immutable rejection for the exact current `case_id`, item fingerprint, and review-set fingerprint |
+| `POST /api/tenants/<t>/evaluation-assets/<a>/reviews/finalize` | Require `expected_review_set_fingerprint` and `expected_decision_set_fingerprint`, freeze that exact current authority, and start Stage 8; pending/rejected/held derived cases are excluded |
 
 ## Notes
 
-- **Read-only:** the UI never mutates tenant data — it only reads artifacts.
-- **Local by default:** it binds to `127.0.0.1`. Change `--host` only if you
-  understand the exposure, since it serves whatever is under the tenants root.
+- **Narrow writes:** evaluation-asset APIs only create, extend, resume, adopt,
+  decide exact current review items, or finalize evaluation assets. All other
+  tenant views remain read-only. Inputs must be regular `.jsonl` files beneath
+  the selected tenant's `source_artifacts/` or ordinary `datasets/` directory;
+  generated evaluation-asset datasets and symlink escapes are rejected before
+  the input contract is validated and files are copied.
+- **Audited resume edits:** the resume endpoint accepts a JSON object containing
+  any editable pipeline decision, including model and batch settings,
+  embedding and clustering settings, trusted-coverage thresholds, synthetic
+  settings, and the split seed. The failed-stage view shows only the parameters
+  relevant to that stage. Revisions are recorded in `config_history.jsonl` and
+  `events.jsonl`. Because trusted assignment now precedes authoring, a split-seed
+  change rebuilds from Stage 2.
+- **Fingerprint-bound review:** list, approve, reject, and finalize operations
+  verify the current Stage 7 receipt, complete dependency authority, and
+  item/hold fingerprints while holding the same asset lock as pipeline
+  execution. Approve and reject require the optimistic review-set token;
+  finalization additionally requires the decision-set token over every resolved
+  eligible status and decision ID. Decisions and finalizations are append-only,
+  and an exact released-finalization replay is idempotent.
+- **Review polling:** asset summaries contain only the safe
+  `review_authority_revision`, not review bodies. It changes when the resolved
+  decisions or current finalization identity changes, telling API clients to
+  fetch a fresh bounded review page.
+- **Loopback only:** the server rejects non-loopback bind hosts.
+  Evaluation-asset APIs also require a loopback `Host`; mutation requests
+  require an absent `Origin` or an HTTP origin matching `Host`. Their JSON
+  responses use `Cache-Control: no-store`. Explorer's generic dataset list/read
+  endpoints and
+  case details inherit the loopback-Host and no-store policy whenever they can
+  expose a published `datasets/evaluation_assets/` file. Dataset discovery
+  lists ordinary files plus only the four files from each evaluation asset's
+  strictly resolved `release.json`; it never recursively exposes old
+  generations, hidden temporaries, or legacy top-level copies. An explicit
+  immutable historical generation path remains readable only after its complete
+  generation manifest and file hashes validate. Corrupt pointers or generations
+  fail closed without hiding ordinary datasets.
+- **Local evaluation-asset state:** copied inputs, checkpoints, state, events, and stage
+  artifacts under `evaluation_assets/` are local-only. Published Stage 8
+  generations and their sole `release.json` authority under
+  `datasets/evaluation_assets/` are ordinary local derived datasets; only
+  a separate tenant-configured `customer-data --scope derived` operation can
+  sync them.
 - **No external dependencies:** standard-library server, no frontend build step.

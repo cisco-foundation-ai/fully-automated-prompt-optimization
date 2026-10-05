@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Reference experiment results
 
-Reference results for the proposed method **FAPO** and the baseline **GEPA**,
+Reference results for the proposed method **FAFO** and the baseline **GEPA**,
 showing what a complete optimization run produces and how its outputs are
 organized on disk.
 
@@ -26,15 +26,15 @@ that format.
 ## Directory layout
 
 A single scaffold, `<method>/<benchmark>/<model>/trial-N/`, holds both methods
-side by side. Inside each cell, each method keeps its own file layout (FAPO and
+side by side. Inside each cell, each method keeps its own file layout (FAFO and
 GEPA emit different artifacts).
 
 ```
 experiments/
 ├── README.md
 │
-├── fapo/
-│   └── <benchmark>/<model>/trial-N/                    ← FAPO cell:
+├── fafo/
+│   └── <benchmark>/<model>/trial-N/                    ← FAFO cell:
 │       ├── run-metadata.json       ← provenance: model, trial, created_at
 │       ├── configs/*.json          ← eval / optimization configs for this cell
 │       ├── prompts/                ← evolved prompt variants (variant-*.md)
@@ -61,11 +61,11 @@ experiments/
 │
 └── samples/                        ← one raw-output exemplar per method (see samples/README.md)
     ├── README.md
-    ├── fapo/…chain-best-test.results.sample.jsonl
+    ├── fafo/…chain-best-test.results.sample.jsonl
     └── gepa/…test.sample.jsonl
 ```
 
-Concrete cell examples: `experiments/fapo/hotpotqa/gpt-4.1-mini/trial-1/` and
+Concrete cell examples: `experiments/fafo/hotpotqa/gpt-4.1-mini/trial-1/` and
 `experiments/gepa/hotpotqa/gpt-4.1-mini/trial-1/`.
 
 ## Naming
@@ -77,7 +77,7 @@ original names are preserved inside each cell's own files (e.g. GEPA's
 
 **Benchmarks** (canonical = lowercase snake, matching the repo's tenant ids):
 
-| Canonical | FAPO native | GEPA native |
+| Canonical | FAFO native | GEPA native |
 |-----------|-------------|-------------|
 | `aime2025` | `aime2025` | `AIMEBench` |
 | `hotpotqa` | `hotpotqa` | `HotpotQABench` |
@@ -88,7 +88,7 @@ original names are preserved inside each cell's own files (e.g. GEPA's
 
 **Models** (canonical = the dotted API model string):
 
-| Canonical | FAPO native | GEPA native | GEPA `task_model` |
+| Canonical | FAFO native | GEPA native | GEPA `task_model` |
 |-----------|-------------|-------------|-------------------|
 | `gpt-4.1-mini` | `gpt41mini` | `gpt-41-mini` | `openai/gpt-4.1-mini-2025-04-14` |
 | `gpt-5.4-mini` | `gpt54mini` | `gpt-54-mini` | `openai/gpt-5.4-mini` |
@@ -96,7 +96,7 @@ original names are preserved inside each cell's own files (e.g. GEPA's
 
 **Trials** are 1-indexed; GEPA's upstream seeds are 0-indexed:
 
-| Canonical | FAPO native | GEPA native | GEPA `config.json` `seed` |
+| Canonical | FAFO native | GEPA native | GEPA `config.json` `seed` |
 |-----------|-------------|-------------|---------------------------|
 | `trial-1` | `-t1` | `seed_0` | `0` |
 | `trial-2` | `-t2` | `seed_1` | `1` |
@@ -114,12 +114,12 @@ from the task model being evaluated.
   `evaluation_results/optimized_program_state.json` under each module's
   `…predict.signature.instructions`. Per-cell cost and token usage are in
   `token_stats.json`, and timing/budget in `timing.json`.
-- **FAPO** — per run, the headline score is `progress.json` →
+- **FAFO** — per run, the headline score is `progress.json` →
   `avg_composite_score` (with `summary.md` for a readable view, and
   `run_config.json` for what was evaluated); the optimized prompts are the
   highest-numbered `prompts/.../variant-*.md`. Within `evals/`, the
   `baseline-variant001-*` run is the un-optimized baseline and `chain-best-test`
-  / `fapo-final-test*` are the selected optimized program (other run dirs are
+  / `fafo-final-test*` are the selected optimized program (other run dirs are
   intermediate trajectory steps); the trailing token of a run name is its split
   (`train` / `val` / `test`). The number of eval runs per cell varies with how
   much each cell was iterated.

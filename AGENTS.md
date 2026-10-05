@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Repository Purpose
 
-FAPO (Fully Autonomous Prompt Optimization) is an LLM chain optimization framework. It provides structured tooling for iteratively improving LLM-powered pipelines through evaluation, failure analysis, and prompt/chain iteration.
+FAFO (Fully Automated Flow Optimization) is an LLM chain optimization framework. It provides structured tooling for iteratively improving LLM-powered pipelines through evaluation, failure analysis, and prompt/chain iteration.
 
 The repo separates reusable optimization and evaluation core logic from tenant-specific prompts, datasets, and historical artifacts.
 
@@ -30,7 +30,7 @@ The repo separates reusable optimization and evaluation core logic from tenant-s
 
 ## Codex Workflows
 
-Codex does not use Claude Code slash commands directly. When a user asks for a FAPO workflow, follow the local prompt files under `.codex/`:
+Codex does not use Claude Code slash commands directly. When a user asks for a FAFO workflow, follow the local prompt files under `.codex/`:
 
 - Optimization loop: `.codex/agents/optimization.md`
 - Eval runner: `.codex/commands/eval-runner.md`
@@ -39,6 +39,8 @@ Codex does not use Claude Code slash commands directly. When a user asks for a F
 - Reset tenant: `.codex/commands/reset-tenant.md`
 - Internal failure attribution phase: `.codex/agents/step-attribution.md`
 - Internal variant review phase: `.codex/agents/variant-reviewer.md`
+- Evaluation asset creation and monitoring:
+  `.codex/agents/evaluation-asset-creator.md`
 
 For repeated autonomous optimization rounds, use:
 

@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Model Context Protocol (MCP) integration for FAPO.
+"""Model Context Protocol (MCP) integration for FAFO.
 
 This module provides MCP server lifecycle management and tool execution
 for agentic workflows.

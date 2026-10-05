@@ -12,7 +12,7 @@ SPDX-License-Identifier: Apache-2.0
 - `datasets/datasets/eval.jsonl` - 40 cases, 5 per label.
 - `datasets/datasets/test.jsonl` - 80 cases, 10 per label.
 
-Copy these files from `fapo_challenge/software_name_categorization/data/` before
+Copy these files from `fafo_challenge/software_name_categorization/data/` before
 running this tenant locally. The copied tenant dataset files are runtime
 artifacts and should not be tracked by git.
 
@@ -68,7 +68,7 @@ Allowed labels:
 
 ## Dataset Update Procedure
 
-- Treat the challenge JSONLs under `fapo_challenge/` as the source of truth.
+- Treat the challenge JSONLs under `fafo_challenge/` as the source of truth.
 - If the challenge data changes, recopy the JSONLs into this tenant locally.
 - Validate that each split remains balanced across all labels after any dataset
   change.

@@ -5,9 +5,8 @@
 """Single-page UI shell.
 
 The entire frontend is one self-contained HTML document (inline CSS + vanilla
-JS, no build step and no external CDN) served at ``/``. It calls the read-only
-JSON API in :mod:`server` to navigate tenants, eval runs, iterations, prompts,
-and per-case outputs.
+JS, no build step and no external CDN) served at ``/``. It calls the JSON API
+in :mod:`server` to navigate tenant outputs.
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>FAPO Explorer</title>
+<title>FAFO Explorer</title>
 <style>
   :root {
     --bg: #0f1117; --panel: #171a23; --panel-2: #1e222e; --border: #2a2f3d;
@@ -197,6 +196,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
   .dot.completed { background: var(--good); } .dot.running { background: var(--warn); }
   .dot.failed, .dot.error { background: var(--bad); } .dot.unknown { background: var(--muted); }
+  .dot.queued, .dot.not-started { background: var(--muted); }
   .chart-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
     padding: 14px 16px 10px; margin-bottom: 24px; }
   .chart { display: flex; align-items: flex-end; gap: 8px; height: 120px;
@@ -221,9 +221,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <div id="app">
   <div id="sidebar">
     <div id="home-link" class="brand" title="Back to dashboard" role="button" tabindex="0">
-      <img class="brand-logo" src="/assets/fapo-explorer-logo.webp" alt="" aria-hidden="true" />
+      <img class="brand-logo" src="/assets/fafo-explorer-logo.webp" alt="" aria-hidden="true" />
       <div>
-        <h1>FAPO Explorer</h1>
+        <h1>FAFO Explorer</h1>
         <div class="sub">tenant outputs &amp; iterations</div>
       </div>
     </div>
@@ -244,6 +244,19 @@ function scoreClass(v) {
 }
 function fmtScore(v) {
   return (v === null || v === undefined) ? '–' : Number(v).toFixed(1);
+}
+function authorityLabel(authority) {
+  const labels = {
+    authoritative: 'manifest verified',
+    invalid_unverified: 'invalid / unverified',
+    live_unverified: 'live / unverified',
+    legacy_unverified: 'legacy / unverified',
+  };
+  return labels[authority] || 'unverified';
+}
+function authoritativeCompletedScore(run) {
+  return run && run.authority === 'authoritative' && run.status === 'completed'
+    ? run.avg_composite_score : null;
 }
 // Filter text persists by input id so auto-refresh re-renders don't lose it.
 const FILTERS = {};
@@ -313,10 +326,12 @@ function textPre(text, attrs) {
   const raw = String(text == null ? '' : text);
   return copyablePre(esc(raw), raw, attrs);
 }
-async function api(path) {
-  const r = await fetch(path);
-  if (!r.ok) throw new Error('HTTP ' + r.status);
-  return r.json();
+async function api(path, options={}) {
+  const r = await fetch(path, options);
+  let payload = null;
+  try { payload = await r.json(); } catch (e) {}
+  if (!r.ok) throw new Error((payload && payload.error) || ('HTTP ' + r.status));
+  return payload;
 }
 const el = (id) => document.getElementById(id);
 const main = () => el('main');
@@ -331,7 +346,7 @@ async function loadTenants() {
   box.innerHTML = tenants.map(t => `
     <div class="tenant" data-id="${esc(t.tenant_id)}">
       <div class="name">${esc(t.tenant_id)}</div>
-      <div class="meta">${t.run_count} runs · ${t.iteration_count} iters · ${t.prompt_count} prompts · ${t.config_count} configs · ${t.dataset_count} datasets · ${t.doc_count} docs</div>
+      <div class="meta">${t.run_count} runs · ${t.prompt_count} prompts · ${t.dataset_count} datasets</div>
     </div>`).join('');
   box.querySelectorAll('.tenant').forEach(node => {
     node.classList.toggle('active', node.dataset.id === S.tenant);
@@ -393,7 +408,7 @@ async function renderDashboard() {
     <div class="stat"><div class="num ${cls}">${num}</div><div class="lbl">${lbl}</div></div>`;
 
   // Chart: recent scored runs in chronological order (oldest left → newest right).
-  const scored = recent.filter(r => r.avg_composite_score != null).slice().reverse();
+  const scored = recent.filter(r => authoritativeCompletedScore(r) != null).slice().reverse();
   const gridlines = [0, 25, 50, 75, 100].map(g => `
     <div class="gridline" style="bottom:${g}%"><span>${g}</span></div>`).join('');
   const chartHtml = scored.length ? `
@@ -449,11 +464,11 @@ async function renderDashboard() {
           ${lr ? `<div class="ring" style="--p:${Math.max(0,Math.min(100,sc||0))};--ring-c:${scoreColorVar(sc)}">
             <span>${fmtScore(sc)}</span></div>` : ''}
         </div>
-        <div class="counts">${tc.run_count} runs · ${tc.variant_count} variants · ${tc.prompt_count} prompts · ${tc.config_count} configs · ${tc.dataset_count} datasets</div>
+        <div class="counts">${tc.run_count} runs · ${tc.prompt_count} prompts</div>
         <div class="latest">${lr
-          ? `<span class="dot ${esc(lr.status||'unknown')}"></span> latest: <b>${esc(lr.name)}</b>
+          ? `<span class="dot ${esc(lr.status||'unknown')}"></span> latest verified: <b>${esc(lr.name)}</b>
              <span class="muted">· ${esc(lr.model||'—')} · ${esc((lr.updated_at||'').replace('T',' ').slice(0,16))}</span>`
-          : `<span class="none">no eval runs yet</span>`}</div>
+          : `<span class="none">no verified completed eval runs yet</span>`}</div>
       </div>`;
     }).join('')}</div>
 
@@ -462,8 +477,9 @@ async function renderDashboard() {
       <div class="recent-row" data-id="${esc(r.tenant_id)}" data-run="${esc(r.run_dir)}">
         <span class="dot ${esc(r.status||'unknown')}"></span>
         <span class="rt">${esc(r.tenant_id)}</span>
-        <span class="rn">${esc(r.name)} · ${esc(r.model||'—')} · ${esc((r.updated_at||'').replace('T',' ').slice(0,16))}</span>
-        <span class="rscore" style="color:${scoreColorVar(r.avg_composite_score)}">${fmtScore(r.avg_composite_score)}</span>
+        <span class="rn">${esc(r.name)} · ${esc(r.model||'—')} · ${esc((r.updated_at||'').replace('T',' ').slice(0,16))}
+          · <span class="pill">${esc(authorityLabel(r.authority))}</span></span>
+        <span class="rscore" style="color:${scoreColorVar(authoritativeCompletedScore(r))}">${fmtScore(authoritativeCompletedScore(r))}</span>
       </div>`).join('')}</div>` : ''}
 
     ${chartHtml}`;
@@ -530,14 +546,15 @@ async function renderRuns() {
   if (!runs.length) { view.innerHTML = '<div class="empty">No eval runs for this tenant.</div>'; return; }
   view.innerHTML = `${filterBox('runs-filter', 'Filter runs by name, model, status…')}
     <table id="runs-table"><thead><tr>
-      <th>Run</th><th>Status</th><th>Model</th><th>Cases</th><th>Avg score</th><th>Updated</th>
+      <th>Run</th><th>Status</th><th>Authority</th><th>Model</th><th>Cases</th><th>Avg score</th><th>Updated</th>
     </tr></thead><tbody>${runs.map(r => `
       <tr class="clickable" data-run="${esc(r.run_dir)}">
         <td><b>${esc(r.name)}</b><div class="muted" style="font-size:11px">${esc(r.run_id)}</div></td>
         <td><span class="pill">${esc(r.status || '—')}</span></td>
+        <td><span class="pill">${esc(authorityLabel(r.authority))}</span></td>
         <td>${esc(r.model || '—')}</td>
         <td>${r.completed_cases ?? '—'}/${r.total_cases ?? '—'}</td>
-        <td class="score ${scoreClass(r.avg_composite_score)}">${fmtScore(r.avg_composite_score)}</td>
+        <td class="score ${scoreClass(authoritativeCompletedScore(r))}">${fmtScore(authoritativeCompletedScore(r))}</td>
         <td class="muted">${esc((r.updated_at||'').replace('T',' ').slice(0,19))}</td>
       </tr>`).join('')}</tbody></table>`;
   view.querySelectorAll('tr.clickable').forEach(node =>
@@ -555,6 +572,9 @@ async function renderRunDetail() {
   const cases = d.cases || [];
   view.innerHTML = `
     <div class="crumb"><a id="back">← runs</a> / ${esc(d.run_dir)}</div>
+    <div class="card"><b>Run authority:</b> ${esc(authorityLabel(d.authority))}
+      ${d.authority === 'authoritative' ? '' : '<div class="muted">Unverified artifacts are diagnostic only and are not score evidence.</div>'}
+    </div>
     <div class="grid2">
       <div class="card"><h3>Configuration</h3>
         <div class="kv"><b>provider:</b> ${esc(cfg.provider||'—')} · ${esc(ps.model||'—')}</div>

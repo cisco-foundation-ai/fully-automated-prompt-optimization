@@ -2,11 +2,12 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Zero-dependency HTTP server for the local web UI.
+"""Zero-dependency HTTP server for the local Explorer and JSON API.
 
-Serves a single-page app at ``/`` and a small read-only JSON API under
-``/api/``. Built on :mod:`http.server` so the UI requires no extra packages
-beyond the standard library.
+Serves the Explorer at ``/`` and a small JSON API under ``/api/``. Built on
+:mod:`http.server` so the UI requires no extra packages beyond the standard
+library. Evaluation-asset creation and review have no web frontend; the API is
+retained for programmatic clients.
 
 Routes:
     GET /                                          -> SPA shell (HTML)
@@ -24,24 +25,70 @@ Routes:
     GET /api/tenants/<t>/dataset?path=<rel>&offset=&limit=  -> dataset rows
     GET /api/tenants/<t>/docs                       -> [doc files]
     GET /api/tenants/<t>/doc?path=<rel>            -> doc content (markdown)
+    GET /api/tenants/<t>/evaluation-assets         -> asset pipeline summaries
+    GET /api/tenants/<t>/evaluation-assets/<a>/stages/<s> -> stage details
+    GET /api/tenants/<t>/evaluation-assets/<a>/reviews -> safe review queue
+    POST /api/evaluation-assets/start              -> create and run an asset
+    POST /api/evaluation-assets/extend             -> create an incremental version
+    POST /api/tenants/<t>/evaluation-assets/<a>/resume -> revise and resume an asset
+    POST /api/tenants/<t>/evaluation-assets/<a>/adopt -> adopt legacy completion
+    POST /api/tenants/<t>/evaluation-assets/<a>/reviews/... -> decide/finalize
 """
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import re
+import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
+from src.hephaestus.datasets.rubric_providers import DEFAULT_OPENAI_RUBRIC_MODEL
+from src.hephaestus.evaluation_assets.durability import EvaluationAssetError
+from src.hephaestus.evaluation_assets.input_contract import input_contract_document
+from src.hephaestus.evaluation_assets.models import EvaluationAssetConfig
+from src.hephaestus.evaluation_assets.review import (
+    ReviewDecisionConflictError,
+    ReviewIntegrityError,
+)
+from src.hephaestus.evaluation_assets.service import EvaluationAssetRunManager
 from src.hephaestus.webui.data import TenantStore
 from src.hephaestus.webui.frontend import INDEX_HTML
 
-_LOGO_PATH = Path(__file__).with_name("assets") / "fapo-explorer-logo.webp"
+_LOGO_PATH = Path(__file__).with_name("assets") / "fafo-explorer-logo.webp"
+
+RUBRIC_MODELS = {
+    "gpt-6-luna",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.2",
+    "gpt-5.1",
+    "gpt-5",
+    "gpt-4.1",
+    "gpt-4.1-mini",
+    "gpt-4o",
+    "gpt-4o-mini",
+    "o3",
+    "o4-mini",
+}
+OPENAI_EMBEDDING_MODELS = {
+    "text-embedding-3-small",
+    "text-embedding-3-large",
+    "text-embedding-ada-002",
+}
+_CANONICAL_REVIEW_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+class _ThreadingHTTPServerV6(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
 
 
 class _Handler(BaseHTTPRequestHandler):
     store: TenantStore  # injected via factory below
+    asset_manager: EvaluationAssetRunManager
 
     server_version = "HephaestusUI/0.1"
 
@@ -53,17 +100,26 @@ class _Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         query = _parse_query(parsed.query)
+        if (
+            _is_evaluation_asset_api_path(path)
+            and not self._authorize_evaluation_asset_request()
+        ):
+            return
 
         if path in ("/", "/index.html"):
             self._send_html(INDEX_HTML)
             return
 
-        if path == "/assets/fapo-explorer-logo.webp":
+        if path == "/assets/fafo-explorer-logo.webp":
             self._send_file(_LOGO_PATH, "image/webp")
             return
 
         if path == "/api/overview":
             self._send_json(self.store.overview(_overview_tenant_ids(query)))
+            return
+
+        if path == "/api/evaluation-assets/input-contract":
+            self._send_json(input_contract_document())
             return
 
         if path == "/api/tenants":
@@ -77,6 +133,51 @@ class _Handler(BaseHTTPRequestHandler):
                 return
 
         self._send_json({"error": "not found", "path": path}, status=404)
+
+    def do_POST(self) -> None:  # noqa: N802 (http.server API)
+        parsed = urlparse(self.path)
+        if (
+            _is_evaluation_asset_api_path(parsed.path)
+            and not self._authorize_evaluation_asset_request(mutation=True)
+        ):
+            return
+        if parsed.path == "/api/evaluation-assets/start":
+            self._route_start_evaluation_asset()
+            return
+        if parsed.path == "/api/evaluation-assets/extend":
+            self._route_extend_evaluation_asset()
+            return
+        params = _match(
+            "/api/tenants/{tenant}/evaluation-assets/{asset}/resume",
+            parsed.path,
+        )
+        if params is not None:
+            self._route_resume_evaluation_asset(params)
+            return
+        params = _match(
+            "/api/tenants/{tenant}/evaluation-assets/{asset}/adopt",
+            parsed.path,
+        )
+        if params is not None:
+            self._route_adopt_evaluation_asset(params)
+            return
+        params = _match(
+            "/api/tenants/{tenant}/evaluation-assets/{asset}/reviews/finalize",
+            parsed.path,
+        )
+        if params is not None:
+            self._route_finalize_evaluation_asset_reviews(params)
+            return
+        for action in ("approve", "reject"):
+            params = _match(
+                "/api/tenants/{tenant}/evaluation-assets/{asset}/reviews/"
+                f"{{fingerprint}}/{action}",
+                parsed.path,
+            )
+            if params is not None:
+                self._route_decide_evaluation_asset_review(params, action)
+                return
+        self._send_json({"error": "not found", "path": parsed.path}, status=404)
 
     # -- route table -----------------------------------------------------
 
@@ -96,6 +197,18 @@ class _Handler(BaseHTTPRequestHandler):
             ("/api/tenants/{tenant}/dataset", _Handler._route_dataset),
             ("/api/tenants/{tenant}/docs", _Handler._route_docs),
             ("/api/tenants/{tenant}/doc", _Handler._route_doc),
+            (
+                "/api/tenants/{tenant}/evaluation-assets",
+                _Handler._route_evaluation_assets,
+            ),
+            (
+                "/api/tenants/{tenant}/evaluation-assets/{asset}/stages/{stage}",
+                _Handler._route_evaluation_asset_stage,
+            ),
+            (
+                "/api/tenants/{tenant}/evaluation-assets/{asset}/reviews",
+                _Handler._route_evaluation_asset_reviews,
+            ),
         ]
 
     def _route_runs(self, params: Dict[str, str], query: Dict[str, List[str]]) -> None:
@@ -113,8 +226,17 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "bad index"}, status=400)
             return
         run_rel = unquote(params["run"])
-        data = self.store.get_case(params["tenant"], run_rel, index)
-        self._send_json_or_404(data)
+        snapshot, studio_data = self.store.prepare_case(
+            params["tenant"],
+            run_rel,
+            index,
+        )
+        if studio_data and not self._authorize_evaluation_asset_request(
+            no_store=True
+        ):
+            return
+        data = self.store.materialize_case(snapshot)
+        self._send_json_or_404(data, no_store=studio_data)
 
     def _route_iterations(self, params: Dict[str, str], query: Dict[str, List[str]]) -> None:
         self._send_json(self.store.list_iterations(params["tenant"]))
@@ -142,17 +264,41 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json_or_404(data)
 
     def _route_datasets(self, params: Dict[str, str], query: Dict[str, List[str]]) -> None:
-        self._send_json(self.store.list_datasets(params["tenant"]))
+        snapshots, studio_data = self.store.prepare_dataset_listing(
+            params["tenant"]
+        )
+        if studio_data and not self._authorize_evaluation_asset_request(
+            no_store=True
+        ):
+            return
+        datasets = self.store.materialize_dataset_listing(snapshots)
+        self._send_json(
+            datasets,
+            no_store=studio_data,
+        )
 
     def _route_dataset(self, params: Dict[str, str], query: Dict[str, List[str]]) -> None:
         rel = (query.get("path") or [""])[0]
         if not rel:
             self._send_json({"error": "missing path"}, status=400)
             return
+        dataset_rel = unquote(rel)
         offset = _int_param(query, "offset", 0)
         limit = _int_param(query, "limit", 100)
-        data = self.store.get_dataset(params["tenant"], unquote(rel), offset=offset, limit=limit)
-        self._send_json_or_404(data)
+        snapshot, studio_data = self.store.prepare_dataset(
+            params["tenant"],
+            dataset_rel,
+        )
+        if studio_data and not self._authorize_evaluation_asset_request(
+            no_store=True
+        ):
+            return
+        data = self.store.materialize_dataset(
+            snapshot,
+            offset=offset,
+            limit=limit,
+        )
+        self._send_json_or_404(data, no_store=studio_data)
 
     def _route_docs(self, params: Dict[str, str], query: Dict[str, List[str]]) -> None:
         self._send_json(self.store.list_docs(params["tenant"]))
@@ -165,21 +311,367 @@ class _Handler(BaseHTTPRequestHandler):
         data = self.store.get_doc(params["tenant"], unquote(rel))
         self._send_json_or_404(data)
 
+    def _route_evaluation_assets(
+        self,
+        params: Dict[str, str],
+        query: Dict[str, List[str]],
+    ) -> None:
+        assets = self.store.list_evaluation_assets(params["tenant"])
+        for asset in assets:
+            asset["runner_active"] = self.asset_manager.is_running(
+                params["tenant"],
+                str(asset["asset_id"]),
+            )
+        self._send_json(assets)
+
+    def _route_evaluation_asset_stage(
+        self,
+        params: Dict[str, str],
+        query: Dict[str, List[str]],
+    ) -> None:
+        data = self.store.get_evaluation_asset_stage(
+            params["tenant"],
+            params["asset"],
+            params["stage"],
+        )
+        self._send_json_or_404(data)
+
+    def _route_evaluation_asset_reviews(
+        self,
+        params: Dict[str, str],
+        query: Dict[str, List[str]],
+    ) -> None:
+        try:
+            options = _validated_review_list_query(query)
+        except (TypeError, ValueError):
+            self._send_json({"error": "invalid review request"}, status=400)
+            return
+        try:
+            page = self.asset_manager.list_reviews(
+                params["tenant"],
+                params["asset"],
+                **options,
+            )
+        except (FileNotFoundError, KeyError):
+            self._send_json(
+                {"error": "evaluation asset review not found"},
+                status=404,
+            )
+            return
+        except (
+            EvaluationAssetError,
+            ReviewDecisionConflictError,
+            ReviewIntegrityError,
+            RuntimeError,
+            ValueError,
+            OSError,
+        ):
+            self._send_json(
+                {"error": "review request conflicts with current asset state"},
+                status=409,
+            )
+            return
+        self._send_json(page)
+
+    def _route_decide_evaluation_asset_review(
+        self,
+        params: Dict[str, str],
+        action: str,
+    ) -> None:
+        payload = self._read_json_body()
+        if payload is None:
+            return
+        try:
+            request = _validated_review_decision_payload(payload)
+            fingerprint = _canonical_review_fingerprint(params["fingerprint"])
+        except (KeyError, TypeError, ValueError):
+            self._send_json({"error": "invalid review request"}, status=400)
+            return
+        try:
+            decision = self.asset_manager.decide_review(
+                params["tenant"],
+                params["asset"],
+                request["case_id"],
+                fingerprint,
+                "approved" if action == "approve" else "rejected",
+                reviewer=request["reviewer"],
+                note=request.get("note"),
+                expected_review_set_fingerprint=(
+                    request["expected_review_set_fingerprint"]
+                ),
+            )
+        except (FileNotFoundError, KeyError):
+            self._send_json(
+                {"error": "evaluation asset review not found"},
+                status=404,
+            )
+            return
+        except (
+            EvaluationAssetError,
+            ReviewDecisionConflictError,
+            ReviewIntegrityError,
+            RuntimeError,
+            ValueError,
+            OSError,
+        ):
+            self._send_json(
+                {"error": "review request conflicts with current asset state"},
+                status=409,
+            )
+            return
+        self._send_json(decision)
+
+    def _route_finalize_evaluation_asset_reviews(
+        self,
+        params: Dict[str, str],
+    ) -> None:
+        payload = self._read_json_body()
+        if payload is None:
+            return
+        try:
+            request = _validated_review_finalization_payload(payload)
+        except (KeyError, TypeError, ValueError):
+            self._send_json({"error": "invalid review request"}, status=400)
+            return
+        try:
+            state = self.asset_manager.finalize_review(
+                params["tenant"],
+                params["asset"],
+                reviewer=request["reviewer"],
+                note=request.get("note"),
+                expected_review_set_fingerprint=(
+                    request["expected_review_set_fingerprint"]
+                ),
+                expected_decision_set_fingerprint=(
+                    request["expected_decision_set_fingerprint"]
+                ),
+            )
+        except (FileNotFoundError, KeyError):
+            self._send_json(
+                {"error": "evaluation asset review not found"},
+                status=404,
+            )
+            return
+        except (
+            EvaluationAssetError,
+            ReviewDecisionConflictError,
+            ReviewIntegrityError,
+            RuntimeError,
+            ValueError,
+            OSError,
+        ):
+            self._send_json(
+                {"error": "review request conflicts with current asset state"},
+                status=409,
+            )
+            return
+        self._send_json(state, status=202)
+
+    def _route_start_evaluation_asset(self) -> None:
+        payload = self._read_json_body()
+        if payload is None:
+            return
+        try:
+            raw_cluster_count = payload.get("cluster_count")
+            cluster_count = int(
+                50 if raw_cluster_count is None or raw_cluster_count == ""
+                else raw_cluster_count
+            )
+            if not 0 <= cluster_count <= 1000:
+                raise ValueError("cluster_count must be between 0 and 1000 (0 skips clustering)")
+            raw_match_threshold = payload.get("match_threshold")
+            match_threshold = (
+                0.6
+                if raw_match_threshold is None or raw_match_threshold == ""
+                else float(raw_match_threshold)
+            )
+            if not 0.0 <= match_threshold <= 1.0:
+                raise ValueError("match_threshold must be between 0 and 1")
+            synthetic_coverage_enabled = str(
+                payload.get("synthetic_coverage_enabled", "false")
+            ).lower() in {"1", "true", "yes", "on"}
+            synthetic_cases_per_cluster = int(
+                payload.get("synthetic_cases_per_cluster") or 1
+            )
+            if not 1 <= synthetic_cases_per_cluster <= 100:
+                raise ValueError(
+                    "synthetic_cases_per_cluster must be between 1 and 100"
+                )
+            rubric_model = str(
+                payload.get("rubric_model") or DEFAULT_OPENAI_RUBRIC_MODEL
+            )
+            embedding_model = str(
+                payload.get("embedding_model") or "text-embedding-3-small"
+            )
+            if rubric_model not in RUBRIC_MODELS:
+                raise ValueError("unsupported rubric_model")
+            if (
+                embedding_model not in OPENAI_EMBEDDING_MODELS
+                and embedding_model != "tfidf"
+            ):
+                raise ValueError("unsupported embedding_model")
+            embedding_provider = (
+                "tfidf" if embedding_model == "tfidf" else "openai"
+            )
+            config = EvaluationAssetConfig(
+                tenant_id=str(payload["tenant_id"]),
+                asset_id=str(payload.get("asset_id") or "v1"),
+                rubric_model=rubric_model,
+                embedding_provider=embedding_provider,
+                embedding_model=embedding_model,
+                cluster_count=cluster_count,
+                match_threshold=match_threshold,
+                synthetic_coverage_enabled=synthetic_coverage_enabled,
+                synthetic_cases_per_cluster=synthetic_cases_per_cluster,
+            )
+            state = self.asset_manager.start(
+                config,
+                Path(str(payload["feedback_path"])),
+                Path(str(payload["unlabeled_path"])),
+            )
+        except FileExistsError as exc:
+            self._send_json({"error": str(exc)}, status=409)
+            return
+        except RuntimeError as exc:
+            self._send_json({"error": str(exc)}, status=409)
+            return
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        self._send_json(state, status=202)
+
+    def _route_resume_evaluation_asset(self, params: Dict[str, str]) -> None:
+        payload = self._read_json_body()
+        if payload is None:
+            return
+        try:
+            updates = _validated_resume_updates(payload)
+            state = self.asset_manager.resume(
+                params["tenant"],
+                params["asset"],
+                updates,
+            )
+        except RuntimeError as exc:
+            self._send_json({"error": str(exc)}, status=409)
+            return
+        except (ValueError, OSError, KeyError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        self._send_json(state, status=202)
+
+    def _route_extend_evaluation_asset(self) -> None:
+        payload = self._read_json_body()
+        if payload is None:
+            return
+        try:
+            mode = str(payload.get("clustering_mode") or "keep")
+            if mode not in {"keep", "refresh"}:
+                raise ValueError("clustering_mode must be 'keep' or 'refresh'")
+            updates: Dict[str, Any] = {}
+            if payload.get("embedding_model"):
+                embedding_model = str(payload["embedding_model"])
+                if (
+                    embedding_model not in OPENAI_EMBEDDING_MODELS
+                    and embedding_model != "tfidf"
+                ):
+                    raise ValueError("unsupported embedding_model")
+                updates["embedding_model"] = embedding_model
+            if payload.get("cluster_count") not in {None, ""}:
+                cluster_count = int(payload["cluster_count"])
+                if not 1 <= cluster_count <= 1000:
+                    raise ValueError("cluster_count must be between 1 and 1000")
+                updates["cluster_count"] = cluster_count
+            feedback_value = str(payload.get("additional_feedback_path") or "").strip()
+            unlabeled_value = str(payload.get("additional_unlabeled_path") or "").strip()
+            state = self.asset_manager.extend(
+                str(payload["tenant_id"]),
+                str(payload["parent_asset_id"]),
+                str(payload["asset_id"]),
+                additional_feedback=(
+                    Path(feedback_value) if feedback_value else None
+                ),
+                additional_unlabeled=(
+                    Path(unlabeled_value) if unlabeled_value else None
+                ),
+                clustering_mode=mode,
+                config_updates=updates,
+            )
+        except FileExistsError as exc:
+            self._send_json({"error": str(exc)}, status=409)
+            return
+        except RuntimeError as exc:
+            self._send_json({"error": str(exc)}, status=409)
+            return
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        self._send_json(state, status=202)
+
+    def _route_adopt_evaluation_asset(self, params: Dict[str, str]) -> None:
+        try:
+            state = self.asset_manager.adopt(
+                params["tenant"],
+                params["asset"],
+            )
+        except RuntimeError as exc:
+            self._send_json({"error": str(exc)}, status=409)
+            return
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        self._send_json(state, status=202)
+
     # -- response helpers ------------------------------------------------
 
-    def _send_json_or_404(self, data: Any) -> None:
+    def _send_json_or_404(self, data: Any, *, no_store: bool = False) -> None:
         if data is None:
-            self._send_json({"error": "not found"}, status=404)
+            self._send_json({"error": "not found"}, status=404, no_store=no_store)
         else:
-            self._send_json(data)
+            self._send_json(data, no_store=no_store)
 
-    def _send_json(self, payload: Any, status: int = 200) -> None:
+    def _send_json(
+        self,
+        payload: Any,
+        status: int = 200,
+        *,
+        no_store: bool = False,
+    ) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if no_store or _is_evaluation_asset_api_path(
+            urlparse(getattr(self, "path", "")).path
+        ):
+            self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _read_json_body(self, max_bytes: int = 1024 * 1024) -> Dict[str, Any] | None:
+        content_type = self.headers.get("Content-Type", "")
+        if not content_type.lower().startswith("application/json"):
+            self._send_json({"error": "Content-Type must be application/json"}, status=415)
+            return None
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._send_json({"error": "invalid Content-Length"}, status=400)
+            return None
+        if content_length < 1:
+            self._send_json({"error": "request body is empty"}, status=400)
+            return None
+        if content_length > max_bytes:
+            self._send_json({"error": "request body is too large"}, status=413)
+            return None
+        try:
+            payload = json.loads(self.rfile.read(content_length))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._send_json({"error": "request body must be valid JSON"}, status=400)
+            return None
+        if not isinstance(payload, dict):
+            self._send_json({"error": "request body must be a JSON object"}, status=400)
+            return None
+        return payload
 
     def _send_html(self, html: str, status: int = 200) -> None:
         body = html.encode("utf-8")
@@ -188,6 +680,30 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _authorize_evaluation_asset_request(
+        self,
+        *,
+        mutation: bool = False,
+        no_store: bool = False,
+    ) -> bool:
+        authority = self.headers.get("Host", "")
+        if not _is_loopback_authority(authority):
+            self._send_json(
+                {"error": "Evaluation-asset APIs require a loopback Host"},
+                status=403,
+                no_store=no_store,
+            )
+            return False
+        origin = self.headers.get("Origin")
+        if mutation and origin and not _is_same_http_origin(origin, authority):
+            self._send_json(
+                {"error": "Evaluation-asset API mutation Origin must match Host"},
+                status=403,
+                no_store=no_store,
+            )
+            return False
+        return True
 
     def _send_file(self, path: Path, content_type: str) -> None:
         try:
@@ -211,6 +727,194 @@ def _int_param(query: Dict[str, List[str]], name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def _validated_resume_updates(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate the user-editable pipeline decisions accepted on resume."""
+    allowed = {
+        "rubric_model",
+        "embedding_model",
+        "cluster_count",
+        "batch_size",
+        "match_threshold",
+        "min_trusted_examples",
+        "min_trusted_groups",
+        "max_unlabeled_to_trusted_ratio",
+        "synthetic_coverage_enabled",
+        "synthetic_cases_per_cluster",
+        "split_seed",
+    }
+    unknown = set(payload) - allowed
+    if unknown:
+        raise ValueError(
+            "unsupported resume fields: " + ", ".join(sorted(unknown))
+        )
+    updates: Dict[str, Any] = {}
+    if "rubric_model" in payload:
+        rubric_model = str(payload["rubric_model"])
+        if rubric_model not in RUBRIC_MODELS:
+            raise ValueError("unsupported rubric_model")
+        updates["rubric_model"] = rubric_model
+    if "embedding_model" in payload:
+        embedding_model = str(payload["embedding_model"])
+        if (
+            embedding_model not in OPENAI_EMBEDDING_MODELS
+            and embedding_model != "tfidf"
+        ):
+            raise ValueError("unsupported embedding_model")
+        updates["embedding_model"] = embedding_model
+    if "cluster_count" in payload:
+        cluster_count = int(payload["cluster_count"])
+        if not 1 <= cluster_count <= 1000:
+            raise ValueError("cluster_count must be between 1 and 1000")
+        updates["cluster_count"] = cluster_count
+    if "batch_size" in payload:
+        batch_size = int(payload["batch_size"])
+        if not 1 <= batch_size <= 100:
+            raise ValueError("batch_size must be between 1 and 100")
+        updates["batch_size"] = batch_size
+    if "match_threshold" in payload:
+        match_threshold = float(payload["match_threshold"])
+        if not 0.0 <= match_threshold <= 1.0:
+            raise ValueError("match_threshold must be between 0 and 1")
+        updates["match_threshold"] = match_threshold
+    if "min_trusted_examples" in payload:
+        min_trusted_examples = int(payload["min_trusted_examples"])
+        if min_trusted_examples < 1:
+            raise ValueError("min_trusted_examples must be at least 1")
+        updates["min_trusted_examples"] = min_trusted_examples
+    if "min_trusted_groups" in payload:
+        min_trusted_groups = int(payload["min_trusted_groups"])
+        if min_trusted_groups < 0:
+            raise ValueError("min_trusted_groups must be at least 0")
+        updates["min_trusted_groups"] = min_trusted_groups
+    if "max_unlabeled_to_trusted_ratio" in payload:
+        raw_ratio = payload["max_unlabeled_to_trusted_ratio"]
+        ratio = None if raw_ratio is None or raw_ratio == "" else float(raw_ratio)
+        if ratio is not None and ratio <= 0:
+            raise ValueError(
+                "max_unlabeled_to_trusted_ratio must be positive"
+            )
+        updates["max_unlabeled_to_trusted_ratio"] = ratio
+    if "synthetic_coverage_enabled" in payload:
+        raw_enabled = payload["synthetic_coverage_enabled"]
+        updates["synthetic_coverage_enabled"] = (
+            raw_enabled
+            if isinstance(raw_enabled, bool)
+            else str(raw_enabled).lower() in {"1", "true", "yes", "on"}
+        )
+    if "synthetic_cases_per_cluster" in payload:
+        cases_per_cluster = int(payload["synthetic_cases_per_cluster"])
+        if not 1 <= cases_per_cluster <= 100:
+            raise ValueError(
+                "synthetic_cases_per_cluster must be between 1 and 100"
+            )
+        updates["synthetic_cases_per_cluster"] = cases_per_cluster
+    if "split_seed" in payload:
+        updates["split_seed"] = int(payload["split_seed"])
+    return updates
+
+
+def _validated_review_list_query(
+    query: Dict[str, List[str]],
+) -> Dict[str, Any]:
+    unknown = set(query) - {"status", "offset", "limit"}
+    if unknown or any(len(values) != 1 for values in query.values()):
+        raise ValueError("review query is invalid")
+    status = (query.get("status") or [""])[0] or None
+    if status not in {None, "pending", "approved", "rejected", "held"}:
+        raise ValueError("review status is invalid")
+    offset = _strict_review_integer(query, "offset", default=0, minimum=0)
+    limit = _strict_review_integer(query, "limit", default=100, minimum=1)
+    if limit > 100:
+        raise ValueError("review limit is invalid")
+    return {"status": status, "offset": offset, "limit": limit}
+
+
+def _strict_review_integer(
+    query: Dict[str, List[str]],
+    name: str,
+    *,
+    default: int,
+    minimum: int,
+) -> int:
+    values = query.get(name)
+    if values is None:
+        return default
+    try:
+        value = int(values[0])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"review {name} is invalid") from exc
+    if value < minimum:
+        raise ValueError(f"review {name} is invalid")
+    return value
+
+
+def _validated_review_decision_payload(
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    allowed = {
+        "case_id",
+        "reviewer",
+        "note",
+        "expected_review_set_fingerprint",
+    }
+    if set(payload) - allowed:
+        raise ValueError("review decision payload has unsupported fields")
+    return {
+        "case_id": _nonempty_review_string(payload["case_id"]),
+        "reviewer": _nonempty_review_string(payload["reviewer"]),
+        "note": _optional_review_note(payload.get("note")),
+        "expected_review_set_fingerprint": _canonical_review_fingerprint(
+            payload["expected_review_set_fingerprint"]
+        ),
+    }
+
+
+def _validated_review_finalization_payload(
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    allowed = {
+        "reviewer",
+        "note",
+        "expected_review_set_fingerprint",
+        "expected_decision_set_fingerprint",
+    }
+    if set(payload) - allowed:
+        raise ValueError("review finalization payload has unsupported fields")
+    return {
+        "reviewer": _nonempty_review_string(payload["reviewer"]),
+        "note": _optional_review_note(payload.get("note")),
+        "expected_review_set_fingerprint": _canonical_review_fingerprint(
+            payload["expected_review_set_fingerprint"]
+        ),
+        "expected_decision_set_fingerprint": _canonical_review_fingerprint(
+            payload["expected_decision_set_fingerprint"]
+        ),
+    }
+
+
+def _nonempty_review_string(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("review identity must be non-empty")
+    return value
+
+
+def _optional_review_note(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("review note must be a string")
+    return value
+
+
+def _canonical_review_fingerprint(value: Any) -> str:
+    if (
+        not isinstance(value, str)
+        or _CANONICAL_REVIEW_SHA256.fullmatch(value) is None
+    ):
+        raise ValueError("review fingerprint is invalid")
+    return value
 
 
 def _parse_query(raw_query: str) -> Dict[str, List[str]]:
@@ -239,14 +943,118 @@ def _match(pattern: str, path: str) -> Dict[str, str] | None:
     return params
 
 
-def serve(tenants_root: Path, host: str = "127.0.0.1", port: int = 8765) -> None:
+def _is_evaluation_asset_api_path(path: str) -> bool:
+    if path in {"/api/overview", "/api/tenants"}:
+        return True
+    if path == "/api/evaluation-assets" or path.startswith(
+        "/api/evaluation-assets/"
+    ):
+        return True
+    parts = path.strip("/").split("/")
+    return (
+        len(parts) >= 4
+        and parts[0] == "api"
+        and parts[1] == "tenants"
+        and parts[3] == "evaluation-assets"
+    )
+
+
+def _is_loopback_name(hostname: str) -> bool:
+    candidate = hostname.strip().strip("[]")
+    try:
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        return candidate.rstrip(".").lower() == "localhost"
+
+
+def _parsed_authority(authority: str) -> Tuple[str, int] | None:
+    if not authority or any(character.isspace() for character in authority):
+        return None
+    parsed = urlparse(f"//{authority}")
+    if parsed.username is not None or parsed.password is not None:
+        return None
+    try:
+        port = parsed.port or 80
+    except ValueError:
+        return None
+    if parsed.hostname is None or parsed.path:
+        return None
+    return _normalized_host(parsed.hostname), port
+
+
+def _normalized_host(hostname: str) -> str:
+    candidate = hostname.rstrip(".").lower()
+    try:
+        return ipaddress.ip_address(candidate).compressed
+    except ValueError:
+        return candidate
+
+
+def _is_loopback_authority(authority: str) -> bool:
+    parsed = _parsed_authority(authority)
+    return parsed is not None and _is_loopback_name(parsed[0])
+
+
+def _is_same_http_origin(origin: str, authority: str) -> bool:
+    request_authority = _parsed_authority(authority)
+    parsed = urlparse(origin)
+    if (
+        request_authority is None
+        or parsed.scheme.lower() != "http"
+        or not parsed.netloc
+        or parsed.path
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return False
+    try:
+        origin_port = parsed.port or 80
+    except ValueError:
+        return False
+    if parsed.hostname is None:
+        return False
+    return request_authority == (_normalized_host(parsed.hostname), origin_port)
+
+
+def serve(
+    tenants_root: Path,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    *,
+    repository_base: Path | None = None,
+) -> None:
     """Start the UI server and block until interrupted."""
-    store = TenantStore(tenants_root)
+    if not _is_loopback_name(host):
+        raise ValueError("FAFO web server must bind to a loopback host")
+    bind_host = host.strip().strip("[]")
+    try:
+        bind_address = ipaddress.ip_address(bind_host)
+    except ValueError:
+        bind_address = None
+    server_type = (
+        _ThreadingHTTPServerV6
+        if isinstance(bind_address, ipaddress.IPv6Address)
+        else ThreadingHTTPServer
+    )
+    effective_base = repository_base if repository_base is not None else Path.cwd()
+    store = TenantStore(tenants_root, repository_base=effective_base)
+    asset_manager = EvaluationAssetRunManager(
+        tenants_root,
+        repository_base=effective_base,
+    )
 
-    handler = type("_BoundHandler", (_Handler,), {"store": store})
-    httpd = ThreadingHTTPServer((host, port), handler)
+    handler = type(
+        "_BoundHandler",
+        (_Handler,),
+        {"store": store, "asset_manager": asset_manager},
+    )
+    httpd = server_type((bind_host, port), handler)
 
-    url = f"http://{host}:{port}/"
+    url_host = f"[{bind_host}]" if isinstance(bind_address, ipaddress.IPv6Address) else bind_host
+    url = f"http://{url_host}:{httpd.server_address[1]}/"
     print(f"Hephaestus UI serving {tenants_root} at {url}")
     print("Press Ctrl+C to stop.")
     try:

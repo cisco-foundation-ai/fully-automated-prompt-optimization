@@ -5,7 +5,54 @@
 from __future__ import annotations
 
 import argparse
+import os
+import re
 from pathlib import Path
+
+from src.hephaestus.datasets.rubric_providers import DEFAULT_OPENAI_RUBRIC_MODEL
+
+_CANONICAL_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _nonempty_cli_value(value: str) -> str:
+    if not value.strip():
+        raise argparse.ArgumentTypeError("value must be non-empty")
+    return value
+
+
+def _review_fingerprint(value: str) -> str:
+    if _CANONICAL_SHA256.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError(
+            "value must be sha256: followed by 64 lowercase hexadecimal characters"
+        )
+    return value
+
+
+def _nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be non-negative")
+    return parsed
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("value must be positive")
+    return parsed
+
+
+def _review_page_limit(value: str) -> int:
+    parsed = _positive_int(value)
+    if parsed > 100:
+        raise argparse.ArgumentTypeError("value must be at most 100")
+    return parsed
+
+
+def _repository_base_for_cli(tenants_root: Path) -> Path:
+    """Return the explicit invocation base for repository-relative contracts."""
+    del tenants_root
+    return Path(os.path.abspath(os.fspath(Path.cwd())))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -61,6 +108,248 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes",
         action="store_true",
         help="Required confirmation for local data removal.",
+    )
+
+    memory_parser = subparsers.add_parser(
+        "memory",
+        help="Build runtime memory assets from released FAFO evaluation assets",
+    )
+    memory_subparsers = memory_parser.add_subparsers(
+        dest="memory_command",
+        required=True,
+    )
+    build_memory_parser = memory_subparsers.add_parser(
+        "build",
+        help="Compile trusted-only runtime memory cards (the default)",
+    )
+    build_memory_parser.add_argument("--tenant", required=True)
+    build_memory_parser.add_argument(
+        "--asset-id",
+        required=True,
+        help="Released FAFO evaluation asset to use as the source",
+    )
+    build_memory_parser.add_argument("--memory-id", required=True)
+    build_memory_parser.add_argument("--tenants-root", default="tenants")
+    build_memory_parser.add_argument(
+        "--model",
+        help="Generation model; defaults to the source evaluation asset's rubric model",
+    )
+    build_memory_parser.add_argument(
+        "--max-source-traces",
+        type=_positive_int,
+        default=5,
+        help="Maximum supporting trusted traces supplied for each guideline",
+    )
+    additive_memory_parser = memory_subparsers.add_parser(
+        "build-additive",
+        help="Explicitly extend trusted cards with approved inferred evidence",
+    )
+    additive_memory_parser.add_argument("--tenant", required=True)
+    additive_memory_parser.add_argument("--asset-id", required=True)
+    additive_memory_parser.add_argument("--base-memory-id", required=True)
+    additive_memory_parser.add_argument("--memory-id", required=True)
+    additive_memory_parser.add_argument("--tenants-root", default="tenants")
+    additive_memory_parser.add_argument("--model")
+    additive_memory_parser.add_argument(
+        "--include-approved-inferred",
+        action="store_true",
+        required=True,
+        help="Explicit consent to use the released inferred training split",
+    )
+    additive_memory_parser.add_argument("--batch-size", type=_positive_int, default=8)
+    additive_memory_parser.add_argument(
+        "--max-additions-per-card",
+        type=_positive_int,
+        default=3,
+    )
+
+    assets_parser = subparsers.add_parser(
+        "assets",
+        help="Create generic evaluation assets from prepared tenant-local data",
+    )
+    assets_subparsers = assets_parser.add_subparsers(dest="assets_command", required=True)
+
+    create_asset_parser = assets_subparsers.add_parser(
+        "create",
+        help="Create a self-contained evaluation asset workspace",
+    )
+    create_asset_parser.add_argument("--tenant", required=True)
+    create_asset_parser.add_argument(
+        "--feedback",
+        required=True,
+        help="Labeled JSONL using fafo-evaluation-input-v1",
+    )
+    create_asset_parser.add_argument(
+        "--unlabeled",
+        required=True,
+        help="Unlabeled JSONL using fafo-evaluation-input-v1",
+    )
+    create_asset_parser.add_argument("--asset-id", default="v1")
+    create_asset_parser.add_argument("--tenants-root", default="tenants")
+    create_asset_parser.add_argument(
+        "--rubric-model", default=DEFAULT_OPENAI_RUBRIC_MODEL
+    )
+    create_asset_parser.add_argument(
+        "--embedding-model",
+        default="text-embedding-3-small",
+    )
+    create_asset_parser.add_argument(
+        "--clusters", type=int, default=50,
+        help="Number of intent clusters; 0 skips optional Stages 4 and 5",
+    )
+    create_asset_parser.add_argument(
+        "--match-threshold",
+        type=float,
+        default=0.6,
+        help="Legacy matching setting; Stage 5 does not score or select rubrics",
+    )
+    create_asset_parser.add_argument(
+        "--enable-synthetic-coverage",
+        action="store_true",
+        help="Enable optional Stage 7 synthetic case generation",
+    )
+    create_asset_parser.add_argument(
+        "--synthetic-cases-per-cluster",
+        type=int,
+        default=1,
+        help="Synthetic cases to request for each supported cluster",
+    )
+
+    run_asset_parser = assets_subparsers.add_parser(
+        "run",
+        help="Run or resume a core evaluation asset pipeline",
+    )
+    run_asset_parser.add_argument("--tenant", required=True)
+    run_asset_parser.add_argument("--asset-id", default="v1")
+    run_asset_parser.add_argument("--tenants-root", default="tenants")
+    run_asset_parser.add_argument("--rubric-model")
+    run_asset_parser.add_argument("--embedding-model")
+    run_asset_parser.add_argument("--clusters", type=int)
+    run_asset_parser.add_argument("--batch-size", type=int)
+    run_asset_parser.add_argument("--match-threshold", type=float)
+    run_asset_parser.add_argument("--min-trusted-examples", type=int)
+    run_asset_parser.add_argument("--min-trusted-groups", type=int)
+    run_asset_parser.add_argument(
+        "--max-unlabeled-to-trusted-ratio",
+        type=float,
+    )
+    run_asset_parser.add_argument(
+        "--synthetic-coverage",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable Stage 7 when resuming",
+    )
+    run_asset_parser.add_argument("--synthetic-cases-per-cluster", type=int)
+    run_asset_parser.add_argument("--split-seed", type=int)
+
+    extend_asset_parser = assets_subparsers.add_parser(
+        "extend",
+        help="Create a new asset version from additional labeled or unlabeled data",
+    )
+    extend_asset_parser.add_argument("--tenant", required=True)
+    extend_asset_parser.add_argument("--parent-asset-id", required=True)
+    extend_asset_parser.add_argument("--asset-id", required=True)
+    extend_asset_parser.add_argument("--additional-feedback")
+    extend_asset_parser.add_argument("--additional-unlabeled")
+    extend_asset_parser.add_argument(
+        "--clustering-mode",
+        choices=("keep", "refresh"),
+        default="keep",
+    )
+    extend_asset_parser.add_argument("--embedding-model")
+    extend_asset_parser.add_argument("--clusters", type=int)
+    extend_asset_parser.add_argument("--tenants-root", default="tenants")
+
+    adopt_asset_parser = assets_subparsers.add_parser(
+        "adopt",
+        help="Verify and adopt a pre-v2 completed evaluation asset",
+    )
+    adopt_asset_parser.add_argument("--tenant", required=True)
+    adopt_asset_parser.add_argument("--asset-id", default="v1")
+    adopt_asset_parser.add_argument("--tenants-root", default="tenants")
+
+    status_asset_parser = assets_subparsers.add_parser(
+        "status",
+        help="Read persisted evaluation asset pipeline progress",
+    )
+    status_asset_parser.add_argument("--tenant", required=True)
+    status_asset_parser.add_argument("--asset-id", default="v1")
+    status_asset_parser.add_argument("--tenants-root", default="tenants")
+
+    reviews_asset_parser = assets_subparsers.add_parser(
+        "reviews",
+        help="List and decide fingerprint-bound derived-case reviews",
+    )
+    reviews_subparsers = reviews_asset_parser.add_subparsers(
+        dest="reviews_command",
+        required=True,
+    )
+    list_reviews_parser = reviews_subparsers.add_parser("list")
+    list_reviews_parser.add_argument("--tenant", required=True)
+    list_reviews_parser.add_argument("--asset-id", default="v1")
+    list_reviews_parser.add_argument("--tenants-root", default="tenants")
+    list_reviews_parser.add_argument(
+        "--status",
+        choices=("pending", "approved", "rejected", "held"),
+    )
+    list_reviews_parser.add_argument("--offset", type=_nonnegative_int, default=0)
+    list_reviews_parser.add_argument("--limit", type=_review_page_limit, default=100)
+
+    for command in ("approve", "reject"):
+        decision_parser = reviews_subparsers.add_parser(command)
+        decision_parser.add_argument("--tenant", required=True)
+        decision_parser.add_argument("--asset-id", default="v1")
+        decision_parser.add_argument("--tenants-root", default="tenants")
+        decision_parser.add_argument(
+            "--case-id",
+            required=True,
+            type=_nonempty_cli_value,
+        )
+        decision_parser.add_argument(
+            "--fingerprint",
+            required=True,
+            type=_review_fingerprint,
+        )
+        decision_parser.add_argument(
+            "--reviewer",
+            required=True,
+            type=_nonempty_cli_value,
+        )
+        decision_parser.add_argument("--note")
+        decision_parser.add_argument(
+            "--review-set",
+            required=True,
+            dest="expected_review_set_fingerprint",
+            type=_review_fingerprint,
+        )
+
+    finalize_reviews_parser = reviews_subparsers.add_parser(
+        "finalize",
+        help=(
+            "Freeze this review set and build immutable datasets; "
+            "pending, rejected, and held derived cases are excluded"
+        ),
+    )
+    finalize_reviews_parser.add_argument("--tenant", required=True)
+    finalize_reviews_parser.add_argument("--asset-id", default="v1")
+    finalize_reviews_parser.add_argument("--tenants-root", default="tenants")
+    finalize_reviews_parser.add_argument(
+        "--reviewer",
+        required=True,
+        type=_nonempty_cli_value,
+    )
+    finalize_reviews_parser.add_argument("--note")
+    finalize_reviews_parser.add_argument(
+        "--review-set",
+        required=True,
+        dest="expected_review_set_fingerprint",
+        type=_review_fingerprint,
+    )
+    finalize_reviews_parser.add_argument(
+        "--decision-set",
+        required=True,
+        dest="expected_decision_set_fingerprint",
+        type=_review_fingerprint,
     )
 
     return parser
@@ -119,7 +408,12 @@ def main() -> None:
     if args.command == "ui":
         from src.hephaestus.webui import serve
 
-        serve(Path(args.tenants_root), host=args.host, port=args.port)
+        serve(
+            Path(args.tenants_root),
+            host=args.host,
+            port=args.port,
+            repository_base=_repository_base_for_cli(Path(args.tenants_root)),
+        )
         return
 
     if args.command == "customer-data":
@@ -160,6 +454,258 @@ def main() -> None:
             return
 
         raise ValueError(f"Unsupported customer-data command: {args.customer_data_command}")
+
+    if args.command == "memory":
+        if args.memory_command == "build":
+            import json as json_mod
+
+            from src.hephaestus.memory_assets import build_memory_asset
+
+            manifest = build_memory_asset(
+                tenants_root=Path(args.tenants_root),
+                tenant_id=args.tenant,
+                source_asset_id=args.asset_id,
+                memory_asset_id=args.memory_id,
+                model=args.model,
+                max_source_traces=args.max_source_traces,
+            )
+            print(json_mod.dumps(manifest, indent=2, sort_keys=True))
+            return
+        if args.memory_command == "build-additive":
+            import json as json_mod
+
+            from src.hephaestus.memory_evidence import build_additive_memory_asset
+
+            manifest = build_additive_memory_asset(
+                tenants_root=Path(args.tenants_root),
+                tenant_id=args.tenant,
+                source_asset_id=args.asset_id,
+                base_memory_asset_id=args.base_memory_id,
+                memory_asset_id=args.memory_id,
+                model=args.model,
+                batch_size=args.batch_size,
+                max_additions_per_card=args.max_additions_per_card,
+            )
+            print(json_mod.dumps(manifest, indent=2, sort_keys=True))
+            return
+        raise ValueError(f"Unsupported memory command: {args.memory_command}")
+
+    if args.command == "assets":
+        if args.assets_command == "reviews":
+            import json as json_mod
+
+            from src.hephaestus.evaluation_assets.pipeline import (
+                EvaluationAssetPipeline,
+            )
+            from src.hephaestus.evaluation_assets.service import (
+                public_review_decision,
+                public_review_page,
+                public_review_state,
+            )
+            from src.hephaestus.evaluation_assets.workspace import (
+                EvaluationAssetLayout,
+            )
+
+            layout = EvaluationAssetLayout(
+                Path(args.tenants_root),
+                args.tenant,
+                args.asset_id,
+                repository_base=_repository_base_for_cli(Path(args.tenants_root)),
+            )
+            if args.reviews_command == "list":
+                payload = public_review_page(
+                    layout.list_review_items(
+                        status=args.status,
+                        offset=args.offset,
+                        limit=args.limit,
+                    )
+                )
+            elif args.reviews_command in {"approve", "reject"}:
+                payload = public_review_decision(
+                    layout.decide_review(
+                        args.case_id,
+                        args.fingerprint,
+                        (
+                            "approved"
+                            if args.reviews_command == "approve"
+                            else "rejected"
+                        ),
+                        reviewer=args.reviewer,
+                        note=args.note,
+                        expected_review_set_fingerprint=(
+                            args.expected_review_set_fingerprint
+                        ),
+                    )
+                )
+            elif args.reviews_command == "finalize":
+                state = EvaluationAssetPipeline(layout).finalize_review(
+                    reviewer=args.reviewer,
+                    note=args.note,
+                    expected_review_set_fingerprint=(
+                        args.expected_review_set_fingerprint
+                    ),
+                    expected_decision_set_fingerprint=(
+                        args.expected_decision_set_fingerprint
+                    ),
+                )
+                payload = public_review_state(state.to_dict())
+            else:
+                raise ValueError(
+                    f"Unsupported assets reviews command: {args.reviews_command}"
+                )
+            print(json_mod.dumps(payload, indent=2, sort_keys=True))
+            return
+
+        if args.assets_command == "extend":
+            import json as json_mod
+
+            from src.hephaestus.evaluation_assets.pipeline import (
+                EvaluationAssetPipeline,
+            )
+            from src.hephaestus.evaluation_assets.workspace import (
+                EvaluationAssetLayout,
+            )
+
+            parent = EvaluationAssetLayout(
+                Path(args.tenants_root),
+                args.tenant,
+                args.parent_asset_id,
+                repository_base=_repository_base_for_cli(Path(args.tenants_root)),
+            )
+            layout = EvaluationAssetLayout(
+                Path(args.tenants_root),
+                args.tenant,
+                args.asset_id,
+                repository_base=_repository_base_for_cli(Path(args.tenants_root)),
+            )
+            updates = {
+                key: value
+                for key, value in {
+                    "embedding_model": args.embedding_model,
+                    "cluster_count": args.clusters,
+                }.items()
+                if value is not None
+            }
+            layout.initialize_extension(
+                parent,
+                additional_feedback=(
+                    Path(args.additional_feedback)
+                    if args.additional_feedback
+                    else None
+                ),
+                additional_unlabeled=(
+                    Path(args.additional_unlabeled)
+                    if args.additional_unlabeled
+                    else None
+                ),
+                clustering_mode=args.clustering_mode,
+                config_updates=updates,
+            )
+            state = EvaluationAssetPipeline(layout).run()
+            print(json_mod.dumps(state.to_dict(), indent=2, sort_keys=True))
+            return
+
+        if args.assets_command == "create":
+            import json as json_mod
+
+            from src.hephaestus.evaluation_assets.models import EvaluationAssetConfig
+            from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
+
+            config = EvaluationAssetConfig(
+                tenant_id=args.tenant,
+                asset_id=args.asset_id,
+                rubric_model=args.rubric_model,
+                embedding_provider=(
+                    "tfidf" if args.embedding_model == "tfidf" else "openai"
+                ),
+                embedding_model=args.embedding_model,
+                cluster_count=args.clusters,
+                match_threshold=args.match_threshold,
+                synthetic_coverage_enabled=args.enable_synthetic_coverage,
+                synthetic_cases_per_cluster=args.synthetic_cases_per_cluster,
+            )
+            layout = EvaluationAssetLayout(
+                Path(args.tenants_root),
+                args.tenant,
+                args.asset_id,
+                repository_base=_repository_base_for_cli(Path(args.tenants_root)),
+            )
+            state = layout.initialize(
+                config,
+                Path(args.feedback),
+                Path(args.unlabeled),
+            )
+            print(json_mod.dumps(state.to_dict(), indent=2, sort_keys=True))
+            print(f"Evaluation asset workspace created at {layout.root}")
+            return
+
+        if args.assets_command == "run":
+            import json as json_mod
+
+            from src.hephaestus.evaluation_assets.pipeline import EvaluationAssetPipeline
+            from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
+
+            layout = EvaluationAssetLayout(
+                Path(args.tenants_root),
+                args.tenant,
+                args.asset_id,
+                repository_base=_repository_base_for_cli(Path(args.tenants_root)),
+            )
+            updates = {
+                key: value
+                for key, value in {
+                    "rubric_model": args.rubric_model,
+                    "embedding_model": args.embedding_model,
+                    "cluster_count": args.clusters,
+                    "batch_size": args.batch_size,
+                    "match_threshold": args.match_threshold,
+                    "min_trusted_examples": args.min_trusted_examples,
+                    "min_trusted_groups": args.min_trusted_groups,
+                    "max_unlabeled_to_trusted_ratio": (
+                        args.max_unlabeled_to_trusted_ratio
+                    ),
+                    "synthetic_coverage_enabled": args.synthetic_coverage,
+                    "synthetic_cases_per_cluster": args.synthetic_cases_per_cluster,
+                    "split_seed": args.split_seed,
+                }.items()
+                if value is not None
+            }
+            state = EvaluationAssetPipeline(layout).run(config_updates=updates)
+            print(json_mod.dumps(state.to_dict(), indent=2, sort_keys=True))
+            return
+
+        if args.assets_command == "adopt":
+            import json as json_mod
+
+            from src.hephaestus.evaluation_assets.workspace import (
+                EvaluationAssetLayout,
+            )
+
+            layout = EvaluationAssetLayout(
+                Path(args.tenants_root),
+                args.tenant,
+                args.asset_id,
+                repository_base=_repository_base_for_cli(Path(args.tenants_root)),
+            )
+            state = layout.adopt_legacy()
+            print(json_mod.dumps(state.to_dict(), indent=2, sort_keys=True))
+            return
+
+        if args.assets_command == "status":
+            import json as json_mod
+
+            from src.hephaestus.evaluation_assets.workspace import EvaluationAssetLayout
+
+            layout = EvaluationAssetLayout(
+                Path(args.tenants_root),
+                args.tenant,
+                args.asset_id,
+                repository_base=_repository_base_for_cli(Path(args.tenants_root)),
+            )
+            print(json_mod.dumps(layout.load_state().to_dict(), indent=2, sort_keys=True))
+            return
+
+        raise ValueError(f"Unsupported assets command: {args.assets_command}")
 
     raise ValueError(f"Unsupported command: {args.command}")
 

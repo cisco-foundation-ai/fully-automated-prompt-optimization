@@ -4,11 +4,18 @@
 
 from __future__ import annotations
 
-import json
 import math
 import statistics
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, List
+
+from src.hephaestus.artifact_io import (
+    atomic_write_json,
+    atomic_write_jsonl,
+    atomic_write_text,
+)
+from src.hephaestus.evaluation_assets.trust_tiers import CURRENT_TRUST_TIERS
 
 
 def _normalize_timings(timings: Any) -> List[List]:
@@ -18,29 +25,37 @@ def _normalize_timings(timings: Any) -> List[List]:
     return timings or []
 
 
-def write_outputs(output_dir: Path, run_config: Dict, results: Iterable[Dict]) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
+def _is_successful(item: Mapping[str, Any]) -> bool:
+    return item.get("execution_status", "succeeded") == "succeeded"
 
-    run_config_path = output_dir / "run_config.json"
-    results_path = output_dir / "results.jsonl"
-    summary_path = output_dir / "summary.md"
 
-    run_config_path.write_text(json.dumps(run_config, indent=2), encoding="utf-8")
+def render_summary(
+    results: Sequence[Mapping[str, Any]],
+    *,
+    cases: Sequence[Any] | None = None,
+) -> str:
+    """Render successful-only metrics plus separate infrastructure diagnostics."""
 
-    results_list: List[Dict] = list(results)
-    with results_path.open("w", encoding="utf-8") as handle:
-        for item in results_list:
-            handle.write(json.dumps(item) + "\n")
-
+    results_list = list(results)
+    successful_results = [item for item in results_list if _is_successful(item)]
     total = len(results_list)
+    successful_count = len(successful_results)
+    infrastructure_failures = total - successful_count
     scores: List[float] = []
     breakdown_totals: Dict[str, float] = {}
-    for item in results_list:
+    for item in successful_results:
         scores.append(float(item.get("composite_score", 0.0)))
         for key, value in item.get("score_breakdown", {}).items():
             breakdown_totals[key] = breakdown_totals.get(key, 0.0) + float(value)
 
-    lines = ["# Evaluation Summary", "", f"Total cases: {total}", ""]
+    lines = [
+        "# Evaluation Summary",
+        "",
+        f"Total cases: {total}",
+        f"Successful cases: {successful_count}",
+        f"Infrastructure failures: {infrastructure_failures}",
+        "",
+    ]
     if scores:
         lines.append("## Composite Score")
         lines.append(f"- average: {sum(scores)/len(scores):.2f}")
@@ -48,7 +63,7 @@ def write_outputs(output_dir: Path, run_config: Dict, results: Iterable[Dict]) -
     if breakdown_totals:
         lines.append("## Score Breakdown")
         for key in sorted(breakdown_totals):
-            average = breakdown_totals[key] / total if total else 0.0
+            average = breakdown_totals[key] / successful_count
             lines.append(f"- {key}: {average:.2f}")
 
     # Point-weighted score (for scoring schemes with earned/possible points)
@@ -65,7 +80,7 @@ def write_outputs(output_dir: Path, run_config: Dict, results: Iterable[Dict]) -
     # Step timings section
     step_timings_by_name: Dict[str, List[float]] = {}
     case_totals: List[float] = []
-    for item in results_list:
+    for item in successful_results:
         trace = _normalize_timings(item.get("step_timings"))
         if trace:
             case_totals.append(sum(d for _, d in trace))
@@ -94,32 +109,98 @@ def write_outputs(output_dir: Path, run_config: Dict, results: Iterable[Dict]) -
             )
             lines.append(f"| **Total** | **{avg_total:.3f}** | **{p50_total:.3f}** | **{p95_total:.3f}** |")
 
-    # Step attribution section — only when there are failures with step_outputs
+    tier_stats: Dict[str, Dict[str, float | int]] = {}
+    for item in results_list:
+        provenance = item.get("evaluation_provenance", {})
+        trust_tier = (
+            provenance.get("trust_tier")
+            if isinstance(provenance, Mapping)
+            else None
+        )
+        if trust_tier not in CURRENT_TRUST_TIERS:
+            continue
+        stats = tier_stats.setdefault(
+            str(trust_tier),
+            {"total": 0, "successful": 0, "failed": 0, "score_sum": 0.0},
+        )
+        stats["total"] += 1
+        if _is_successful(item):
+            stats["successful"] += 1
+            stats["score_sum"] += float(item.get("composite_score", 0.0))
+        else:
+            stats["failed"] += 1
+
+    if tier_stats:
+        lines.extend(
+            [
+                "",
+                "## Trust-Tier Diagnostics",
+                "",
+                "| Trust tier | Total | Successful | Failed | Mean composite score |",
+                "|---|---:|---:|---:|---:|",
+            ]
+        )
+        for trust_tier in sorted(tier_stats):
+            stats = tier_stats[trust_tier]
+            tier_successes = int(stats["successful"])
+            mean = (
+                f"{float(stats['score_sum']) / tier_successes:.2f}"
+                if tier_successes
+                else "N/A"
+            )
+            lines.append(
+                f"| {trust_tier} | {int(stats['total'])} | {tier_successes} "
+                f"| {int(stats['failed'])} | {mean} |"
+            )
+
+    # Step attribution uses protected evidence only through the caller-supplied
+    # in-memory cases; neither those cases nor an intermediate join is written.
     has_step_outputs = any(item.get("step_outputs") for item in results_list)
-    has_failures = any(float(item.get("composite_score", 0)) < 100.0 for item in results_list)
+    has_failures = infrastructure_failures > 0 or any(
+        float(item.get("composite_score", 0)) < 100.0
+        for item in successful_results
+    )
     if has_step_outputs and has_failures:
-        import tempfile
+        from src.hephaestus.analysis.step_attribution import (
+            INFRASTRUCTURE_FAILURE_KEY,
+            attribute_results,
+        )
 
-        from src.hephaestus.analysis.step_attribution import attribute_failures
+        attribution = attribute_results(results_list, cases)
+        infrastructure = attribution.pop(INFRASTRUCTURE_FAILURE_KEY, None)
+        if infrastructure:
+            lines.extend(
+                [
+                    "",
+                    "## Infrastructure Failures",
+                    "",
+                    f"- failed cases: {int(infrastructure['count'])}",
+                ]
+            )
+        if attribution:
+            lines.extend(
+                [
+                    "",
+                    "## Step Attribution",
+                    "",
+                    "| Step | Failure Count |",
+                    "|------|--------------|",
+                ]
+            )
+            for step_name in sorted(
+                attribution,
+                key=lambda name: attribution[name]["count"],
+                reverse=True,
+            ):
+                lines.append(f"| {step_name} | {attribution[step_name]['count']} |")
 
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
-        ) as tf:
-            for item in results_list:
-                tf.write(json.dumps(item) + "\n")
-            tf_path = Path(tf.name)
+    return "\n".join(lines) + "\n"
 
-        try:
-            attribution = attribute_failures(tf_path)
-            if attribution:
-                lines.append("")
-                lines.append("## Step Attribution")
-                lines.append("")
-                lines.append("| Step | Failure Count |")
-                lines.append("|------|--------------|")
-                for step_name in sorted(attribution, key=lambda s: attribution[s]["count"], reverse=True):
-                    lines.append(f"| {step_name} | {attribution[step_name]['count']} |")
-        finally:
-            tf_path.unlink(missing_ok=True)
 
-    summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+def write_outputs(output_dir: Path, run_config: Dict, results: Iterable[Dict]) -> None:
+    """Compatibility writer for callers outside the authoritative bundle path."""
+
+    results_list: List[Dict] = list(results)
+    atomic_write_json(output_dir / "run_config.json", run_config)
+    atomic_write_jsonl(output_dir / "results.jsonl", results_list)
+    atomic_write_text(output_dir / "summary.md", render_summary(results_list))

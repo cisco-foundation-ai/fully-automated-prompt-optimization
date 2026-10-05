@@ -47,6 +47,12 @@ class OpenAIClient(ProviderClient):
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is not set.")
+        # Optional local truststore workaround; intentionally disabled.
+        # try:
+        #     import truststore
+        #     truststore.inject_into_ssl()
+        # except ImportError:
+        #     pass
         return OpenAI(
             api_key=api_key,
             timeout=self.timeout_seconds,
@@ -217,6 +223,10 @@ def build_openai_client(settings: Dict[str, object]) -> OpenAIClient:
             settings.get("retry_backoff_seconds", DEFAULT_RETRY_BACKOFF_SECONDS)
         ),
         temperature=float(settings.get("temperature", 0.0)),
-        top_p=float(settings["top_p"]) if "top_p" in settings else None,
+        top_p=(
+            float(settings["top_p"])
+            if settings.get("top_p") is not None
+            else None
+        ),
         max_tokens=int(settings.get("max_tokens", 16000)),
     )

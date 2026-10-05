@@ -1,0 +1,12 @@
+{
+  "tenant_id": "tau3_retail",
+  "gcs": {
+    "bucket": "your-gcs-bucket-name",
+    "prefix": "tenants/tau3_retail"
+  },
+  "paths": {
+    "raw_local": "tenants/tau3_retail/source_artifacts",
+    "derived_local": "tenants/tau3_retail/datasets",
+    "code_local": "tenants/tau3_retail/code"
+  }
+}

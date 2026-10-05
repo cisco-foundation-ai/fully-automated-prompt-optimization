@@ -4,7 +4,7 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAPO Synthetic Pruner for Codex
+# FAFO Synthetic Pruner for Codex
 
 Use this when the user wants to clean synthetic examples, remove bad samples, normalize placeholder hashes, validate synthetic data quality, or align review CSVs.
 

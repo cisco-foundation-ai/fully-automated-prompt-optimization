@@ -4,7 +4,7 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAPO Step Attribution Phase for Codex
+# FAFO Step Attribution Phase for Codex
 
 Use this as an internal phase of the optimization workflow after each eval run.
 

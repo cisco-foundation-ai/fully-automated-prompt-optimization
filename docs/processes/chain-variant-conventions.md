@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Purpose
 
-Standards for creating, naming, and evaluating chain variants in FAPO. Chain variants represent structural or parameter changes to a tenant's chain — as opposed to prompt variants, which only change prompt text.
+Standards for creating, naming, and evaluating chain variants in FAFO. Chain variants represent structural or parameter changes to a tenant's chain — as opposed to prompt variants, which only change prompt text.
 
 ## Directory Layout
 

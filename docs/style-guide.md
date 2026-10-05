@@ -4,9 +4,9 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAPO Style Guide
+# FAFO Style Guide
 
-Coding standards for the FAPO evaluation engine. These conventions are derived from existing patterns in the codebase and should be followed for all new code.
+Coding standards for the FAFO evaluation engine. These conventions are derived from existing patterns in the codebase and should be followed for all new code.
 
 ## Python & Tooling
 

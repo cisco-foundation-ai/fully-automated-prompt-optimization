@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Prompting Guides
 
-This folder contains distilled prompting, optimization, and evaluation guidance used by FAPO operators during prompt iteration.
+This folder contains distilled prompting, optimization, and evaluation guidance used by FAFO operators during prompt iteration.
 
 ## Documents
 

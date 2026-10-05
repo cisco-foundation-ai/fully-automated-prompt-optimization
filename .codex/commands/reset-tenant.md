@@ -4,7 +4,7 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAPO Reset Tenant for Codex
+# FAFO Reset Tenant for Codex
 
 Use this when the user explicitly wants to reset a tenant to baseline, clear optimization history, remove non-baseline variants, or start fresh.
 

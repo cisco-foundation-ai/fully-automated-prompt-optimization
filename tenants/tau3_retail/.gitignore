@@ -1,0 +1,16 @@
+# External benchmark runtime is a sibling checkout, never a tenant payload.
+runtime/
+
+# Generated source, review, asset, and evaluation data remain local.
+source_artifacts/*
+!source_artifacts/.gitkeep
+datasets/*
+!datasets/.gitkeep
+evaluation_assets/
+evals/
+reviews/
+
+# Local credentials and interpreter artifacts.
+.env
+__pycache__/
+*.pyc

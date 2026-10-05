@@ -81,7 +81,7 @@ Use this as the default template regardless of task domain:
 
 2. **Build datasets**: Start with ~50 failure traces for manual coding and taxonomy building. Formalize as graders, then split into train/validation/test + adversarial sets.
 
-3. **Implement eval harness**: Define scoring checks that cover task performance, format compliance, and safety. In FAPO, this means a scoring profile with check functions.
+3. **Implement eval harness**: Define scoring checks that cover task performance, format compliance, and safety. In FAFO, this means a scoring profile with check functions.
 
 4. **Select optimization algorithm**: Start with cheap black-box search (APE-style candidate generation + selection). Graduate to evolutionary or Bayesian methods if the search space is large and noisy. Consider DSPy when the workflow is multi-module.
 
@@ -126,9 +126,9 @@ These belong in the optimization framework, not as ad-hoc fixes:
 
 5. **Version pinning and regression testing**: Store prompts/chains as versioned artifacts. Re-run eval suites on every change. Integrate into CI/CD when possible.
 
-## FAPO Mapping
+## FAFO Mapping
 
-| Concept | FAPO equivalent | How to apply |
+| Concept | FAFO equivalent | How to apply |
 |---|---|---|
 | Scoring profile | `scoring_profile` in eval config | Each eval config specifies which checks to run. Map metric categories to check functions. |
 | Multi-metric evaluation | `score_breakdown` in `results.jsonl` | Per-check scores already provide vector-valued evaluation. Use composite score for ranking but inspect individual checks for regression. |

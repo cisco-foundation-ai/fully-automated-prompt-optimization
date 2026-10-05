@@ -1,0 +1,52 @@
+{
+  "tenant_id": "tau3_retail",
+  "provider": "openai",
+  "provider_settings": {
+    "model": "gpt-4.1-2025-04-14",
+    "temperature": 0,
+    "max_tokens": 4096,
+    "timeout_seconds": 300,
+    "max_retries": 2,
+    "retry_backoff_seconds": 2
+  },
+  "dataset": {
+    "path": "tenants/tau3_retail/evaluation_assets/fafo-v3-luna-v1/stages/08_dataset_splits/test.jsonl"
+  },
+  "chain": {
+    "path": "tenants/tau3_retail/chains/tau_episode.py",
+    "fn": "build_chain",
+    "config": {
+      "optimization_target": "prompt",
+      "prompt_paths": {
+        "agent": "tenants/tau3_retail/prompts/v3/mixed/m004.txt"
+      },
+      "tau_runtime_path": "../tau2-bench",
+      "episode_runner_path": "tenants/tau3_retail/code/run_tau_episode.py",
+      "episode_timeout_seconds": 660
+    }
+  },
+  "scoring_profile": {
+    "scorer": {
+      "module_path": "tenants/tau3_retail/code/scorers/guideline_judge.py",
+      "class_name": "GuidelineJudgeScorer"
+    },
+    "pass_threshold": 90,
+    "judge": {
+      "provider": "openai",
+      "provider_settings": {
+        "model": "gpt-5.5",
+        "max_tokens": 8192,
+        "timeout_seconds": 300,
+        "max_retries": 2,
+        "retry_backoff_seconds": 2
+      }
+    }
+  },
+  "comparison": {
+    "variant_dimensions": [
+      "prompts"
+    ]
+  },
+  "output_dir": "tenants/tau3_retail/evals/recipe/mixed-test-m004",
+  "max_workers": 3
+}
