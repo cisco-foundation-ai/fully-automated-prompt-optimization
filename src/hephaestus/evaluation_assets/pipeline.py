@@ -246,6 +246,17 @@ Separate the agent's behavior from environment failures and from the final
 outcome. If the trace cannot establish what caused the feedback, record the
 candidate pattern in uncertainties instead of asserting it.
 
+The overall feedback polarity constrains pattern evidence types:
+- feedback_trace_mistake_pattern requires overall feedback negative or mixed and
+  observation polarity negative or mixed.
+- feedback_trace_success_pattern requires overall feedback positive or mixed and
+  observation polarity positive or mixed.
+A positive overall rating can still request an improvement. Preserve that
+criticism as explicit_feedback and a requested_correction instead of assigning
+feedback_trace_mistake_pattern. Likewise, preserve praise inside a negative
+rating as explicit_feedback rather than a feedback_trace_success_pattern.
+Do not change the supplied overall rating or discard the reviewer's comments.
+
 Each item must contain record_id, intent_label, confidence (0..1), observations,
 requested_corrections, and uncertainties. Each observation must contain claim,
 evidence_type, evidence_pointer, and polarity. Record only claims directly
