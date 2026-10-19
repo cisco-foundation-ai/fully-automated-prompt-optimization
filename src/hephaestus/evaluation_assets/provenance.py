@@ -2270,7 +2270,10 @@ def _validate_native_build_profile(
     configuration = identity["resolved_configuration"]
     config = configuration["values"]
     if historical:
-        _validate_historical_native_configuration_v1(config)
+        _validate_historical_native_configuration_v1(
+            config,
+            allow_disabled_clustering=profile == HISTORICAL_PROVENANCE_PROFILE_V4,
+        )
     else:
         _validate_native_configuration(config)
     _validate_native_runtime_profile(identity.get("runtime_dependencies"), config)
@@ -2368,7 +2371,11 @@ def _validate_native_configuration(value: Any) -> None:
         raise ValueError("native build provenance configuration is incomplete")
 
 
-def _validate_historical_native_configuration_v1(value: Any) -> None:
+def _validate_historical_native_configuration_v1(
+    value: Any,
+    *,
+    allow_disabled_clustering: bool = False,
+) -> None:
     """Validate the closed config shape recorded by provenance v1."""
     expected_fields = {
         *_HISTORICAL_CONFIG_STRING_FIELDS_V1,
@@ -2390,7 +2397,8 @@ def _validate_historical_native_configuration_v1(value: Any) -> None:
     ):
         raise ValueError("native build provenance configuration is invalid")
     if (
-        value["cluster_count"] < 1
+        value["cluster_count"] < (0 if allow_disabled_clustering else 1)
+        or (value["cluster_count"] == 0 and value["synthetic_coverage_enabled"])
         or value["batch_size"] < 1
         or value["min_trusted_examples"] < 1
         or value["min_trusted_groups"] < 0
