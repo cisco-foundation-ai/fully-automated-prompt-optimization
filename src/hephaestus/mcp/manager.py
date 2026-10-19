@@ -335,10 +335,15 @@ class MCPServerManager:
         try:
             tools_result = await session.list_tools()
             for tool_info in tools_result.tools:
+                input_schema = getattr(tool_info, "inputSchema", None)
+                if input_schema is None:
+                    input_schema = getattr(tool_info, "input_schema", None)
+                if not isinstance(input_schema, dict):
+                    raise ValueError("Discovered MCP tool has no valid input schema")
                 self.tools[tool_info.name] = MCPTool(
                     name=tool_info.name,
                     description=tool_info.description or "",
-                    input_schema=tool_info.inputSchema,
+                    input_schema=input_schema,
                     server_name=server_name,
                 )
                 logger.debug(f"Discovered tool '{tool_info.name}' from server '{server_name}'")
