@@ -79,6 +79,7 @@ Use the prompt set that matches the tool running the workflow:
 1. **Claude Code**: follow the existing `.claude/` agents and commands. Do not redirect Claude Code runs to `.codex/`; those prompts are written for Codex sessions.
 2. **Codex**: follow the matching `.codex/` agents and commands. For eval execution, use `.codex/commands/eval-runner.md` or run `python scripts/eval/run_eval_and_summarize.py --config tenants/<tenant_id>/configs/<config>.json`.
 3. **Automation wrappers**: `scripts/optimize-loop.sh` invokes Claude Code and should remain Claude Code-specific. Codex automation should use a separate wrapper or an explicit Codex session.
+4. **No meta agent**: `python -m hephaestus.cli optimize --policy <policy>.json` runs prompt- and parameter-level optimization with only API credentials. See [`headless-optimization.md`](headless-optimization.md) for scope, the policy format, and which controls that mode enforces in code.
 4. **Shared behavior**: both tools must follow the tenant playbook, protect tenant source artifacts, write iteration memory under the tenant docs directory, and avoid committing unless the user asks.
 
 ## Iteration Memory

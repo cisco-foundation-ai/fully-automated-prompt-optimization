@@ -12,7 +12,7 @@ SPDX-License-Identifier: Apache-2.0
 
 Demo video link: https://youtu.be/QG5mFbypNaI
 
-An optimization framework for multi-step LLM pipelines. FAFO uses [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as an autonomous optimizer that iteratively improves prompts, agent skills, parameters, and chain architecture — guided by built-in evaluation, step-level failure analysis, and a structured variant system.
+An optimization framework for multi-step LLM pipelines. FAFO uses [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (or Codex) as an autonomous optimizer that iteratively improves prompts, agent skills, parameters, and chain architecture — guided by built-in evaluation, step-level failure analysis, and a structured variant system. Where no coding agent is available, such as in production, a built-in **headless optimizer** runs the prompt- and parameter-level loop with only API credentials (see [Running it without a coding agent](#running-it-without-a-coding-agent-headless)).
 
 FAFO provides the full loop: **evaluate** a chain against a dataset, **analyze** what went wrong using step attribution, **create** a better variant, and **measure** whether it improved. The evaluation infrastructure exists to drive and measure optimization — not as an end in itself.
 
@@ -20,7 +20,7 @@ FAFO provides the full loop: **evaluate** a chain against a dataset, **analyze**
 
 Multi-step LLM pipelines fail through interactions among retrieval, reasoning, and formatting steps, so optimizing the *prompt* alone can miss the real bottleneck. FAFO treats a pipeline as an **inspectable workflow**: instead of scoring only the final answer, it records every intermediate step output, then localizes each failure to a prompt, an upstream evidence source (such as retrieval), or the chain structure itself. It edits prompts when failures are prompt-addressable, and **escalates** to chain parameters or chain structure when attribution shows that prompts alone can no longer help.
 
-Concretely, FAFO is a reusable evaluation engine (`src/hephaestus/`), a set of isolated tenant workspaces (`tenants/<id>/`), [LangGraph](https://langchain-ai.github.io/langgraph/) to represent each pipeline as a stateful graph, and Claude Code as the optimization orchestrator. The orchestrator is a layer **separate from the task model being optimized** — see [The optimizer vs. the task model](#the-optimizer-vs-the-task-model).
+Concretely, FAFO is a reusable evaluation engine (`src/hephaestus/`), a set of isolated tenant workspaces (`tenants/<id>/`), [LangGraph](https://langchain-ai.github.io/langgraph/) to represent each pipeline as a stateful graph, and an optimization orchestrator: Claude Code or Codex, or the headless coordinator. The orchestrator is a layer **separate from the task model being optimized** — see [The optimizer vs. the task model](#the-optimizer-vs-the-task-model).
 
 ### How FAFO relates to GEPA
 
@@ -146,6 +146,24 @@ Follow .codex/agents/optimization.md.
 The agent autonomously analyzes failures, creates improved prompt variants, evaluates them, and iterates until your target score is reached. See [Optimization loop](#optimization-loop) for the full details.
 
 > **Note:** `/optimization` runs inside Claude Code, which acts as the optimizer. The model it optimizes is whatever you set under `provider` / `provider_settings.model` (here, GPT-4o) — the two are independent.
+
+**Without a coding agent**, run the headless optimizer instead. It needs only an `OPENAI_API_KEY` (here it serves both the optimizer roles and the task model), train/val/test splits of your dataset, and a policy file that states what may change (`optimize-policy.json`):
+
+```json
+{
+  "base_config": "eval.json",
+  "datasets": { "train": "train.jsonl", "val": "val.jsonl", "test": "test.jsonl" },
+  "levels": ["prompt"],
+  "budget": { "max_iterations": 10 },
+  "roles": { "model": "<openai-model>" }
+}
+```
+
+```bash
+python -m hephaestus.cli optimize --policy optimize-policy.json --workspace optimize_output/ --final-test
+```
+
+The optimizer writes each new prompt variant next to `prompt.md`, records every decision in `optimize_output/ledger.jsonl`, and prints a JSON summary with baseline and best scores. `optimize_output/best-config.json` is a runnable eval config for the best variant. See [Running it without a coding agent](#running-it-without-a-coding-agent-headless).
 
 ---
 
@@ -695,7 +713,7 @@ The core workflow is an **optimization loop**. Each pass runs the same six stage
                       └──────────► back to step 1 (next cycle)
 ```
 
-You wire the dataset, chain, and scorer together with a **config file** and run `python -m hephaestus.cli eval --config <config>.json` to perform a single **Evaluate** stage. The remaining stages are driven by the Claude Code optimizer (see [Optimization loop](#optimization-loop)). A separate reviewer checks every proposed change before it is re-evaluated, and accepted variants are compared on aggregate validation scores only.
+You wire the dataset, chain, and scorer together with a **config file** and run `python -m hephaestus.cli eval --config <config>.json` to perform a single **Evaluate** stage. The remaining stages are driven by the optimizer, either the Claude Code / Codex agent or the headless coordinator (see [Optimization loop](#optimization-loop)). A separate reviewer checks every proposed change before it is re-evaluated, and accepted variants are compared on aggregate validation scores only.
 
 ## Runtime and Agent Responsibilities
 
@@ -906,7 +924,7 @@ Evaluation tells you *how well* your chain performs. Optimization tells you *wha
 
 FAFO has two models, and keeping them straight avoids most confusion:
 
-- **The optimizer** is Claude Code. It reads the playbook, runs evals, dispatches subagents, writes variants, compares results, and decides when to escalate. It never appears in your config.
+- **The optimizer** is Claude Code (or Codex). It reads the playbook, runs evals, dispatches subagents, writes variants, compares results, and decides when to escalate. It never appears in your eval config. In headless mode, the optimizer is instead a plain-code coordinator plus LLM roles whose model is set by `roles.model` in the optimization policy.
 - **The task model** is whatever you set under `provider` / `provider_settings.model` (e.g. `gpt-4o`, `gemma-3-12b`). It is the model *being optimized*, reached through a small `ProviderClient.generate(messages)` interface.
 
 The two are independent — you can optimize a Gemma pipeline using Claude as the optimizer. Only the task model changes when you swap providers; the optimization machinery stays the same.
@@ -957,6 +975,70 @@ The `/optimization` agent is the orchestrator; it manages two internal subagents
 - **variant-reviewer** — checks proposed variants for leakage, placeholder drift, and scope violations before eval
 
 You can also run evals and optimization steps manually via the CLI (see [CLI reference](#cli-reference) below), but the agent handles the full loop autonomously.
+
+### Running it without a coding agent (headless)
+
+`python -m hephaestus.cli optimize` runs the optimization loop with nothing but API credentials; no Claude Code or Codex session is involved. It covers the **prompt** and **parameter** levels. Skills and structural (chain-code) changes stay with the agent loop.
+
+A plain-code coordinator owns the loop and its invariants, and each judgment step is one JSON call to an LLM role (an OpenAI model by default):
+
+| Role | Sees | Produces |
+|------|------|----------|
+| **Analyst** | Current prompts; the **training overview** (every train case with its input, expected output, metadata, and pass/fail, when the train split is small); detailed failing train cases; step attribution; run history with the train cases each attempt fixed and broke | Failure clusters and one plan: level, module, scope (`rewrite` the whole prompt or `edit` one thing), technique |
+| **Prompt proposer** | The plan, the clusters, the current prompt, the training overview | A complete new prompt |
+| **Reviewer** | Previous and proposed prompt, the plan | Verdict on case-specific hints and leakage |
+
+Each iteration plans one change, proposes it, and reviews it with code checks plus the reviewer role, allowing one revision. It then evaluates on train, then on val, and accepts the candidate if val improves by at least `min_val_delta`. With `train_tiebreak` on, a candidate is also accepted if val holds and train strictly improves. Every decision is recorded. The coordinator enforces in code what the agent loop leaves to agent protocol:
+
+- Roles only ever see per-case data from the **train** split; val and test contribute aggregate scores only.
+- Test runs once, after optimization stops (`--final-test`), and a workspace with a test result cannot be resumed.
+- Only the levels, prompt modules, and parameter bounds declared in the policy can change.
+- Every variant is a new file.
+- Before any eval, a static review blocks changed `${placeholders}`, dropped `System:`/`User:` markers, references to train case IDs, copied train text or inputs, and prompts that name val or test inputs. A strong role model can otherwise list well-known held-out examples from its own knowledge.
+
+The policy is the machine-readable counterpart of the playbook's scope section; translate the playbook into a policy once:
+
+```json
+{
+  "base_config": "tenants/my_project/configs/eval.json",
+  "datasets": {
+    "train": "tenants/my_project/datasets/train.jsonl",
+    "val": "tenants/my_project/datasets/val.jsonl",
+    "test": "tenants/my_project/datasets/test.jsonl"
+  },
+  "levels": ["prompt", "parameter"],
+  "parameter_space": {
+    "provider_settings.temperature": { "type": "float", "min": 0.0, "max": 1.0 },
+    "chain.config.retrieval_k": { "type": "int", "min": 3, "max": 20 }
+  },
+  "acceptance": { "min_val_delta": 1.0, "train_tiebreak": true },
+  "budget": { "max_iterations": 10, "plateau_patience": 3 },
+  "roles": { "model": "<openai-model>" },
+  "guidance_paths": ["tenants/my_project/docs/iteration-playbook.md"]
+}
+```
+
+```bash
+python -m hephaestus.cli optimize --policy tenants/my_project/configs/optimize-policy.json --final-test
+# Continue after an interruption (same policy, same workspace)
+python -m hephaestus.cli optimize --policy tenants/my_project/configs/optimize-policy.json --resume
+```
+
+Outputs go to `tenants/<tenant_id>/evals/optimize/<policy-name>/`, which is git-ignored:
+- `ledger.jsonl`: every plan, review, score, decision, and per-role token count.
+- The exact eval config and run bundle for every eval.
+- `best-config.json`: a runnable config for the best candidate.
+
+Optimization quality depends on `roles.model`, so use the strongest model available. The full policy reference is in [docs/processes/headless-optimization.md](docs/processes/headless-optimization.md).
+
+| | Coding-agent loop | Headless optimizer |
+|---|---|---|
+| **Driver** | Claude Code or Codex session | `python -m hephaestus.cli optimize` |
+| **Requires** | A coding-agent CLI | API credentials only |
+| **Levels** | Prompt, skill, parameter, structural | Prompt, parameter |
+| **Scope source** | Tenant playbook (prose) | Optimization policy (JSON) |
+| **Guardrails** | Agent-enforced (optimizer + reviewer subagent) | Coordinator-enforced (code checks) + reviewer role |
+| **State** | `docs/iteration-memory.jsonl` | `ledger.jsonl` (resumable) |
 
 ### The optimization levels
 
@@ -1062,6 +1144,10 @@ runtime-enforced isolation boundary. This workspace boundary is not an
 operating-system sandbox; the four procedures above depend on the optimizer and
 reviewer following the tenant protocol.
 
+In headless mode, the coordinator enforces the training/held-out workflow,
+policy scope, and variant immutability in code, and keeps its own ledger. See
+[Running it without a coding agent](#running-it-without-a-coding-agent-headless).
+
 ### Example: optimizing a multi-hop QA chain
 
 Starting from a baseline with 39% exact match on the validation set:
@@ -1111,6 +1197,25 @@ python -m hephaestus.cli eval-progress --output-dir path/to/output/ --json
 
 Shows run status, progress (completed/total), and current average score.
 
+### `optimize` — Run the headless optimizer
+
+```bash
+python -m hephaestus.cli optimize --policy path/to/optimize-policy.json
+python -m hephaestus.cli optimize --policy path/to/optimize-policy.json --final-test
+python -m hephaestus.cli optimize --policy path/to/optimize-policy.json --resume
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--policy` | Optimization policy JSON (required) |
+| `--workspace` | Ledger and eval output directory; defaults to `tenants/<tenant_id>/evals/optimize/<policy-name>/` |
+| `--resume` | Continue the workspace's existing ledger |
+| `--final-test` | After optimization stops, evaluate baseline and best once on the test split |
+| `--max-iterations` | Override `budget.max_iterations` |
+| `--role-model` | Override `roles.model` |
+
+Runs the prompt- and parameter-level loop described in [Running it without a coding agent](#running-it-without-a-coding-agent-headless) and prints a JSON summary: stop reason, baseline and best scores, test scores when `--final-test` is set, and the ledger and best-config paths.
+
 ### `customer-data` — Sync datasets with GCS
 
 ```bash
@@ -1146,7 +1251,7 @@ options such as `--tenants-root`, `--host`, and `--port`.
 
 ## Claude Code skills
 
-FAFO ships as a set of [Claude Code](https://docs.anthropic.com/en/docs/claude-code) agents and commands. The optimization *method* is the three core agents; the rest support evaluation, data augmentation, and repository operations around them.
+FAFO ships as a set of [Claude Code](https://docs.anthropic.com/en/docs/claude-code) agents and commands. The optimization *method* is the three core agents; the rest support evaluation, data augmentation, and repository operations around them. To run the prompt- and parameter-level loop without Claude Code or Codex, use the [headless optimizer](#running-it-without-a-coding-agent-headless) instead.
 
 ### Core optimization agents
 
