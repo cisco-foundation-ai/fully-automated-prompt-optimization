@@ -8,8 +8,13 @@ import argparse
 import os
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from src.hephaestus.datasets.rubric_providers import DEFAULT_OPENAI_RUBRIC_MODEL
+
+if TYPE_CHECKING:
+    from src.hephaestus.optimization.coordinator import CandidateState
+    from src.hephaestus.optimization.policy import OptimizationPolicy
 
 _CANONICAL_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -55,6 +60,18 @@ def _repository_base_for_cli(tenants_root: Path) -> Path:
     return Path(os.path.abspath(os.fspath(Path.cwd())))
 
 
+def _default_optimize_workspace(policy: OptimizationPolicy, policy_path: Path) -> Path:
+    """Place optimization outputs under the tenant's git-ignored evals directory."""
+    import json as json_mod
+
+    base = json_mod.loads(Path(policy.base_config).read_text(encoding="utf-8"))
+    return Path("tenants") / str(base["tenant_id"]) / "evals" / "optimize" / policy_path.stem
+
+
+def _val_score(candidate: CandidateState) -> float | None:
+    return candidate.val.score if candidate.val is not None else None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Hephaestus prompt evaluation CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -65,6 +82,27 @@ def build_parser() -> argparse.ArgumentParser:
     progress_parser = subparsers.add_parser("eval-progress", help="Check eval run progress")
     progress_parser.add_argument("--output-dir", required=True, help="Output directory of the eval run")
     progress_parser.add_argument("--json", action="store_true", dest="json_output", help="Output raw JSON")
+
+    optimize_parser = subparsers.add_parser(
+        "optimize",
+        help="Run the headless prompt/parameter optimization loop (no meta agent)",
+    )
+    optimize_parser.add_argument("--policy", required=True, help="Path to optimization policy JSON")
+    optimize_parser.add_argument(
+        "--workspace",
+        help="Directory for the ledger and eval outputs; defaults to "
+        "tenants/<tenant_id>/evals/optimize/<policy-name>",
+    )
+    optimize_parser.add_argument("--resume", action="store_true", help="Continue the workspace's ledger")
+    optimize_parser.add_argument(
+        "--final-test",
+        action="store_true",
+        help="Evaluate baseline and best once on the test split after optimization stops",
+    )
+    optimize_parser.add_argument(
+        "--max-iterations", type=_nonnegative_int, help="Override budget.max_iterations"
+    )
+    optimize_parser.add_argument("--role-model", help="Override roles.model")
 
     ui_parser = subparsers.add_parser("ui", help="Launch the local web UI to browse tenant outputs")
     ui_parser.add_argument(
@@ -403,6 +441,45 @@ def main() -> None:
                 f"Progress: {progress.completed_cases}/{progress.total_cases}  "
                 f"Avg score: {score_str}"
             )
+        return
+
+    if args.command == "optimize":
+        import json as json_mod
+        import logging
+
+        from src.hephaestus.optimization import load_policy, run_optimization
+
+        policy = load_policy(Path(args.policy))
+        if args.max_iterations is not None:
+            policy.budget.max_iterations = args.max_iterations
+        if args.role_model:
+            policy.role_model = args.role_model
+        workspace = (
+            Path(args.workspace) if args.workspace else _default_optimize_workspace(policy, Path(args.policy))
+        )
+        optimization_logger = logging.getLogger("src.hephaestus.optimization")
+        optimization_logger.setLevel(logging.INFO)
+        optimization_logger.addHandler(logging.StreamHandler())
+
+        result = run_optimization(policy, workspace, resume=args.resume, final_test=args.final_test)
+        print(
+            json_mod.dumps(
+                {
+                    "stop_reason": result.stop_reason,
+                    "iterations": result.iterations,
+                    "baseline": {"train": result.baseline.train.score, "val": _val_score(result.baseline)},
+                    "best": {
+                        "candidate_id": result.best.candidate_id,
+                        "train": result.best.train.score,
+                        "val": _val_score(result.best),
+                    },
+                    "test": {name: split["score"] for name, split in (result.test or {}).items()} or None,
+                    "best_config": str(result.best_config_path),
+                    "ledger": str(result.ledger_path),
+                },
+                indent=2,
+            )
+        )
         return
 
     if args.command == "ui":

@@ -10,29 +10,83 @@ SPDX-License-Identifier: Apache-2.0
 [![CI](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/actions/workflows/ci.yml/badge.svg)](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/actions/workflows/ci.yml)
 [![arXiv](https://img.shields.io/badge/arXiv-2606.19605-b31b1b.svg)](https://arxiv.org/abs/2606.19605)
 
-Demo video link: https://youtu.be/QG5mFbypNaI
+FAFO optimizes multi-step LLM pipelines. It evaluates a pipeline on a dataset,
+finds the step that caused each failure, proposes one scoped change (prompt,
+agent skill, parameter, or chain structure), and keeps the change only if it
+improves the held-out score.
 
-An optimization framework for multi-step LLM pipelines. FAFO uses [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as an autonomous optimizer that iteratively improves prompts, agent skills, parameters, and chain architecture — guided by built-in evaluation, step-level failure analysis, and a structured variant system.
+The optimizer is either:
 
-FAFO provides the full loop: **evaluate** a chain against a dataset, **analyze** what went wrong using step attribution, **create** a better variant, and **measure** whether it improved. The evaluation infrastructure exists to drive and measure optimization — not as an end in itself.
+- **A coding agent.** Claude Code or Codex drives the loop using the agent
+  prompts in `.claude/` or `.codex/`. All optimization levels are available.
+- **The headless optimizer.** `python -m hephaestus.cli optimize` runs the loop
+  with API credentials only, for prompt and parameter changes. Use it where no
+  coding agent is available, such as in production.
 
-## Why pipeline-aware optimization
+On top of the optimization loop, the FAFO data pipeline turns agent traces and
+sparse user feedback into evaluation datasets with case-specific rubrics.
+Together they form an end-to-end recursive self-improvement (RSI) loop: collect
+traces, build datasets, optimize the agent, deploy it, and repeat. A local UI
+shows the results.
 
-Multi-step LLM pipelines fail through interactions among retrieval, reasoning, and formatting steps, so optimizing the *prompt* alone can miss the real bottleneck. FAFO treats a pipeline as an **inspectable workflow**: instead of scoring only the final answer, it records every intermediate step output, then localizes each failure to a prompt, an upstream evidence source (such as retrieval), or the chain structure itself. It edits prompts when failures are prompt-addressable, and **escalates** to chain parameters or chain structure when attribution shows that prompts alone can no longer help.
+Demo: <https://youtu.be/QG5mFbypNaI> · Paper: [arXiv:2606.19605](https://arxiv.org/abs/2606.19605)
 
-Concretely, FAFO is a reusable evaluation engine (`src/hephaestus/`), a set of isolated tenant workspaces (`tenants/<id>/`), [LangGraph](https://langchain-ai.github.io/langgraph/) to represent each pipeline as a stateful graph, and Claude Code as the optimization orchestrator. The orchestrator is a layer **separate from the task model being optimized** — see [The optimizer vs. the task model](#the-optimizer-vs-the-task-model).
+Blog posts:
 
-### How FAFO relates to GEPA
+- [Fully Automated Prompt Optimization](https://cisco-foundation-ai.github.io/blogs/fully-automated-prompt-optimization/):
+  the Claude Code-driven optimization loop and its benchmark results.
+- [Optimize your agents with FAPO and the Explorer UI](https://cisco-foundation-ai.github.io/blogs/optimize-and-visualize-with-fapo/):
+  running optimization and tracking its progress in the Explorer UI.
+- [From Prompt Optimization to a Recursive Self-Improvement Framework](https://cisco-foundation-ai.github.io/blogs/fafo-recursive-self-improvement/):
+  turning sparse user feedback into evaluation rubrics for continuous agent improvement.
 
-FAFO's baseline is **GEPA**, a prompt optimizer. FAFO builds on GEPA's evaluation setup but widens the action space and changes how candidates are chosen:
+## Contents
 
-| | GEPA (baseline) | FAFO |
+- [How it works](#how-it-works)
+- [Quick start](#quick-start)
+- [Core concepts](#core-concepts)
+- [Optimization](#optimization)
+- [Building evaluation datasets from traces](#building-evaluation-datasets-from-traces)
+- [Guarantees and limits](#guarantees-and-limits)
+- [CLI reference](#cli-reference)
+- [Agent prompt sets](#agent-prompt-sets)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+- [Documentation](#documentation)
+- [Citation](#citation)
+
+## How it works
+
+```text
+1. Evaluate   run the chain on a dataset; record every step's output; score each case
+2. Attribute  localize each failure to a step and to the kind of change that can fix it
+3. Propose    write one scoped variant: prompt, skill, parameter, or chain structure
+4. Review     check the variant for leakage, placeholder drift, and scope violations
+5. Compare    evaluate the variant and keep it only if it beats the current best
+6. Iterate    continue at this level, or escalate when text changes stop helping
+```
+
+Pipelines are [LangGraph](https://langchain-ai.github.io/langgraph/) graphs whose
+nodes each write a named output, so a failure can be traced to retrieval,
+reasoning, or formatting instead of only to the final answer. FAFO starts with
+the cheapest change (prompt text) and escalates to parameters or chain structure
+only when attribution shows that text cannot fix the remaining failures.
+
+The loop needs a dataset to evaluate against. You can write one by hand, or let
+the [FAFO data pipeline](#building-evaluation-datasets-from-traces) build it from
+production agent traces and feedback, which turns optimization into a
+self-improvement cycle.
+
+FAFO's baseline is the GEPA prompt optimizer:
+
+| | GEPA | FAFO |
 |---|---|---|
-| **Action space** | Instruction string inside a **fixed** chain | Prompt text **+** agent skills **+** chain parameters **+** chain structure |
-| **Search** | Evolutionary search (MIPROv2-Heavy) over prompts | Attribution-driven scoped edits, escalating only when evidence requires it |
+| **Action space** | Instruction text inside a fixed chain | Prompt text, agent skills, chain parameters, and chain structure |
+| **Search** | Evolutionary search over prompts | Attribution-driven scoped edits, escalating only when needed |
 | **Failure signal** | Final-score feedback | Step-level attribution over recorded intermediate outputs |
 
-When the two are compared, both start from the same pipeline and the same baseline prompts; the only difference is the optimizer. FAFO does **not** depend on GEPA or DSPy as libraries — they are points of comparison, and some tenants merely reuse DSPy-style prompt *text* for parity. For benchmark results across six tasks and three task models, see the original paper.
+Both start from the same pipeline and baseline prompts. FAFO does not depend on
+GEPA or DSPy; see the paper for benchmark results.
 
 ## Quick start
 
@@ -41,22 +95,23 @@ When the two are compared, both start from the same pipeline and the same baseli
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
-
-# MCP support is included in the core dependency set; this extra is currently empty.
-pip install -e ".[mcp]"
 ```
 
-### 2. Set up a tenant
+### 2. Define a tenant
 
-A tenant is a self-contained optimization project. You need four entities: a dataset, a chain, a scorer, and a config that wires them together.
+A **tenant** is one optimization project: a dataset, a chain, a scorer, a prompt,
+and a config that ties them together. Real tenants live in `tenants/<tenant_id>/`;
+this example keeps the files in one directory.
 
-**Dataset** — a JSONL file with test cases (`my_dataset.jsonl`):
+**Dataset** (`my_dataset.jsonl`), one case per line:
+
 ```json
 {"case_id": "1", "task_type": "qa", "context": {"question": "What is the capital of France?"}, "expected": {"answer": "Paris"}, "metadata": {}}
 {"case_id": "2", "task_type": "qa", "context": {"question": "What is 2 + 2?"}, "expected": {"answer": "4"}, "metadata": {}}
 ```
 
-**Chain** — a LangGraph pipeline that processes each case (`my_chain.py`):
+**Chain** (`my_chain.py`), a LangGraph pipeline:
+
 ```python
 from langgraph.graph import StateGraph, END
 from src.hephaestus.chains.types import ChainState
@@ -74,7 +129,8 @@ def build_chain(provider, config):
     return graph.compile()
 ```
 
-**Scorer** — compares chain output to expected answers (`my_scorer.py`):
+**Scorer** (`my_scorer.py`):
+
 ```python
 from src.hephaestus.scoring.scorer import Scorer as BaseScorer
 
@@ -83,20 +139,20 @@ class Scorer(BaseScorer):
         assert "answer" in case.expected, "Missing 'answer' in expected"
 
     def score_case(self, case, output_text, scoring_profile):
-        expected = case.expected["answer"].strip().lower()
-        predicted = output_text.strip().lower()
-        em = 100.0 if predicted == expected else 0.0
+        em = 100.0 if output_text.strip().lower() == case.expected["answer"].strip().lower() else 0.0
         return {"composite_score": em, "score_breakdown": {"exact_match": em}}
 ```
 
-**Prompt template** — the LLM instructions with placeholders (`prompt.md`):
-```
+**Prompt** (`prompt.md`):
+
+```text
 System: You are a helpful assistant. Answer concisely in as few words as possible.
 
 User: ${question}
 ```
 
-**Config** — ties everything together (`eval.json`):
+**Config** (`eval.json`):
+
 ```json
 {
   "tenant_id": "my_project",
@@ -123,1252 +179,379 @@ cat eval_output/summary.md
 
 ### 4. Optimize
 
-Run the optimization loop with [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or Codex from your project directory.
+**With Claude Code**, from the repository root:
 
-With Claude Code, run the optimization agent:
-
-```
+```text
 > /optimization
   → Tenant: my_project
   → Config: eval.json
   → Success criteria: composite_score >= 90
 ```
 
-With Codex, ask it to run the FAFO optimization workflow:
+**With Codex**, give the same tenant, config, and success criteria and ask it to
+follow `.codex/agents/optimization.md`.
 
+**Without a coding agent**, split the dataset into `train.jsonl`, `val.jsonl`,
+and `test.jsonl`, and write a policy that states what may change
+(`optimize-policy.json`):
+
+```json
+{
+  "base_config": "eval.json",
+  "datasets": { "train": "train.jsonl", "val": "val.jsonl", "test": "test.jsonl" },
+  "levels": ["prompt"],
+  "budget": { "max_iterations": 10 },
+  "roles": { "model": "<openai-model>" }
+}
 ```
-Optimize eval quality for tenant "my_project".
-Config: eval.json
-Success criteria: composite_score >= 90
-Follow .codex/agents/optimization.md.
+
+```bash
+python -m hephaestus.cli optimize --policy optimize-policy.json --workspace optimize_output/ --final-test
 ```
 
-The agent autonomously analyzes failures, creates improved prompt variants, evaluates them, and iterates until your target score is reached. See [Optimization loop](#optimization-loop) for the full details.
+New prompt variants are written next to `prompt.md`. The run prints baseline and
+best scores and writes `optimize_output/best-config.json`, a runnable eval config
+for the best variant.
 
-> **Note:** `/optimization` runs inside Claude Code, which acts as the optimizer. The model it optimizes is whatever you set under `provider` / `provider_settings.model` (here, GPT-4o) — the two are independent.
+The agent or headless optimizer is separate from the **task model** it
+optimizes, which is whatever you set in `provider_settings.model` (here `gpt-4o`).
 
----
+## Core concepts
 
-## Create an evaluation asset
+### Project layout
 
-An evaluation asset turns a small set of trusted, feedback-labeled traces and a
-larger set of unlabeled traces into versioned datasets for evaluation and
-optimization. It can be the first step in creating a tenant: the pipeline does
-not require an existing chain, prompt, config, adapter, or legacy
-`tenants/<tenant_id>/datasets/` directory.
+```text
+src/hephaestus/       # generic engine: chains, providers, scoring, runs, analysis, optimization
+tenants/<tenant_id>/  # one project: chains/, prompts/, skills/, datasets/, code/, configs/, docs/, evals/
+docs/                 # architecture, processes, and references
+tests/                # automated tests
+```
 
-The FAFO data pipeline creates evaluation assets as follows:
+Everything in `src/hephaestus/` is generic; everything tenant-specific lives in
+`tenants/<tenant_id>/`. Each tenant also keeps docs, including an
+`iteration-playbook.md` that sets its optimization scope and success criteria.
+See the [tenant docs contract](docs/tenant-docs-contract.md) and the
+[templates](docs/templates/tenant-docs/).
+
+### Datasets
+
+JSONL, one case per line, with five required fields: `case_id`, `task_type`,
+`context` (inputs passed to the chain), `expected` (ground truth, read only by
+your scorer), and `metadata` (free-form; may be `{}`).
+
+### Chains and chain state
+
+A chain is a LangGraph `StateGraph` returned by `build_chain(provider, config)`.
+Nodes share a state with four protocol fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `context` | `Dict[str, str]` | Inputs from the dataset case |
+| `output_text` | `str` | Final output, read by the scorer |
+| `step_outputs` | `Dict[str, str]` | Intermediate outputs, keyed by node name |
+| `diagnostics` | `List[str]` | Warnings, such as missing placeholders |
+
+`make_llm_node` renders a prompt from `context` and earlier step outputs, calls
+the provider, and writes the response to `output_text` and
+`step_outputs[output_key]`.
+
+### Prompt templates
+
+```text
+System: You are a helpful assistant.
+
+User: Question: ${question}
+Context: ${steps.retrieve.output}
+```
+
+`${name}` is filled from `context`; `${steps.<node>.output}` is filled from an
+earlier node. Missing variables are logged as diagnostics, not errors. Every
+change is a new file, `prompts/modules/<module>/variant-NNN.md`; variants are
+never edited in place.
+
+### Scorers
+
+Subclass `Scorer` and implement `validate_case` and `score_case`. `score_case`
+returns a finite `composite_score` in `[0, 100]`, the objective the optimizer
+drives, and a numeric `score_breakdown` for any extra metrics. A multi-step scorer
+can override `score_pipeline_case(case, step_outputs, scoring_profile, output_text)`
+to score intermediate outputs.
+
+### Providers
+
+| Provider | `provider` value | Credential |
+|---|---|---|
+| OpenAI | `"openai"` | `OPENAI_API_KEY` |
+| Baseten | `"baseten"` | `BASETEN_API_KEY` |
+| SageMaker | `"sagemaker"` | Environment variable named by `api_key_env` |
+
+Model, sampling, timeout, and retry settings go in `provider_settings`; see the
+[config schema](docs/config-schema.md).
+
+### Skills
+
+Tool-using (MCP) tenants can also optimize **skills**: reusable procedures stored
+at `tenants/<tenant_id>/skills/<name>/variant-NNN.md`, listed in
+`chain.config.skill_paths`, and iterated like prompts. The chain factory must
+render and pass them to its agentic node; see the
+[architecture](docs/architecture.md) and the [MCP quick start](docs/mcp-quick-start.md).
+
+## Optimization
+
+### Levels
+
+| Level | What changes | Example | Headless |
+|---|---|---|---|
+| **Prompt** | Prompt template text | Add "answer in one word" | Yes |
+| **Skill** | Agent skill text (agentic tenants) | Refine a tool-sequencing procedure | No |
+| **Parameter** | Config values | `retrieval_k` 7 → 10, `temperature` 1.0 → 0.5 | Yes |
+| **Structural** | Chain topology and nodes | Add a verification node | No |
+
+### Step attribution
+
+After each eval, the runtime performs deterministic, rule-based runtime
+attribution over recorded step outputs, tool history, execution status, and
+caller-supplied in-memory case context and expected-answer evidence; it does not
+persist that joined protected evidence. It flags retrieval misses, cascading
+empty steps, tool errors, and format failures. A failed case that no rule
+explains gets a low-confidence final-step fallback, which does not prove that
+the inputs were good or that reasoning was the cause. Format failures and
+low-confidence final-step fallbacks are tagged textual (prompt- or
+skill-addressable); retrieval and cascade failures are tagged structural. The
+attribution table appears in `summary.md` only when the run has step outputs and
+at least one failure. Any later agent semantic analysis is a separate,
+tenant-governed step.
+
+### With a coding agent
+
+`/optimization` in Claude Code, or `.codex/agents/optimization.md` in Codex:
+
+1. Reads the tenant playbook and states a scope contract (allowed and forbidden levels).
+2. Analyzes failures after each eval, using the step-attribution subagent.
+3. Writes one variant per change and has the variant-reviewer subagent check it.
+4. Evaluates the variant, comparing on validation scores only, and keeps improvements.
+5. Repeats until the success criteria are met or every allowed level is exhausted.
+
+Each cycle is recorded in `tenants/<tenant_id>/docs/iteration-memory.jsonl` and
+`change-log.md`, so later sessions do not repeat failed attempts. See the
+[optimization loop reference](docs/processes/prompt-iteration-loop.md).
+
+### Without a coding agent (headless)
+
+`python -m hephaestus.cli optimize` runs the loop with a plain-code coordinator
+and three LLM roles (analyst, prompt proposer, and reviewer) called through the
+OpenAI API by default. The coordinator, not a prompt, enforces the rules:
+
+- Roles see only training cases.
+- Candidates are accepted on validation.
+- Test runs once, at the end.
+- Only the levels and parameter bounds declared in the policy can change.
+- A static review blocks leaked training examples, placeholder drift, and prompts
+  that name held-out inputs.
+
+Every decision is appended to a resumable `ledger.jsonl`.
+
+| | Coding agent | Headless optimizer |
+|---|---|---|
+| **Runs with** | Claude Code or Codex | `python -m hephaestus.cli optimize` and API credentials |
+| **Levels** | Prompt, skill, parameter, structural | Prompt, parameter |
+| **Scope from** | Tenant playbook (prose) | Optimization policy (JSON) |
+| **Guardrails** | Agent protocol and reviewer subagent | Code checks plus a reviewer role |
+| **State** | `docs/iteration-memory.jsonl` | `ledger.jsonl` (resumable) |
+
+Results depend on the role model (`roles.model`), so use the strongest model
+available. See [headless optimization](docs/processes/headless-optimization.md)
+for the policy format, the roles, and the outputs.
+
+## Building evaluation datasets from traces
+
+Everything above assumes you already have a labeled dataset. A deployed agent
+usually has traces instead: many unlabeled conversations, a few with user
+feedback, and no ground-truth answers. The FAFO data pipeline is an add-on to
+the optimization loop that fills this gap. It turns those traces into evaluation
+datasets, so the loop can learn from the agent's real behavior:
+
+```text
+ ┌─► agent traces + user feedback
+ │          │
+ │          ▼   FAFO data pipeline
+ │   evaluation datasets with case-specific rubrics
+ │          │
+ │          ▼   optimization loop (coding agent or headless)
+ │   improved agent
+ │          │
+ └──────────┘   deploy, then collect new traces
+```
+
+The released train, validation, and test splits are the datasets the
+optimization loop trains on, selects with, and tests on, under the same held-out
+rules as any other dataset. A trusted regression split checks that previously
+correct behavior still holds. Each deployment produces new traces and feedback,
+so repeating the cycle gives recursive self-improvement. The
+[recursive self-improvement post](https://cisco-foundation-ai.github.io/blogs/fafo-recursive-self-improvement/)
+explains the approach and its results.
+
+### Inside the pipeline
+
+The pipeline needs only a small set of feedback-labeled traces and a larger set
+of unlabeled traces. No chain or prompt is needed, so it can also be the first
+step of a new tenant.
 
 ```mermaid
 flowchart LR
     A[Trusted feedback episodes] --> P[Validate, redact, and preassign splits]
     U[Unlabeled episodes] --> P
-    P --> G[Extract and consolidate evidence-backed guidelines]
-    P --> C[Cluster user-message intents]
-    G --> R[One full-catalog rubric call per episode]
-    C -. optional .-> M[Sampling, analysis, and synthetic coverage]
-    R --> V[Fingerprint and review derived cases]
-    V --> D[Finalize immutable dataset splits]
+    P --> G[Extract evidence-backed guidelines]
+    P --> C[Cluster user intents]
+    G --> R[One case-specific rubric per episode]
+    C -. optional .-> M[Sampling and synthetic coverage]
+    R --> V[Review derived cases]
+    V --> D[Publish immutable dataset splits]
     D --> O[FAFO optimization and held-out evaluation]
 ```
 
-Guidelines come only from eligible trusted training feedback correlated with
-the complete trace, including tool activity and outcomes. For every trusted or
-unlabeled episode, one rubric-generation call considers all guidelines allowed
-for that split, selects zero, one, or many, and writes a case-specific rubric.
-When none applies, the rubric is explicitly trace-inferred. Stages 4 and 5
-are optional and never supply input to guideline or rubric building. Intent
-clusters serve sampling, analysis, and optional synthetic coverage.
-See the
-[FAFO data pipeline guide](docs/processes/feedback-dataset-flow.md)
-for the trust model, stage contracts, artifacts, split isolation, scaling, and
-operational workflow.
-
-For the historical `ce7f832f` audit, successor remediation checklist, and
-remaining research gates, see the
-[Evaluation Asset Studio stress test](docs/processes/evaluation-asset-studio-stress-test.md).
-
-Both input files must already use the vendor-neutral
-[`fafo-evaluation-input-v1`](docs/processes/evaluation-input-contract.md)
-JSONL contract. Each source must be a regular `.jsonl` file beneath the
-selected tenant's `source_artifacts/` or ordinary `datasets/` directory.
-Generated `datasets/evaluation_assets/` outputs, other tenants, external
-paths, and symlink escapes are rejected. FAFO validates the source contract,
-then copies the inputs into a self-contained workspace at:
-
-```text
-tenants/<tenant_id>/evaluation_assets/<asset_id>/
-├── config.json
-├── config_history.jsonl
-├── pipeline_state.json
-├── events.jsonl
-├── recovery_journal.jsonl
-├── receipts/
-├── reviews/
-│   ├── decisions.jsonl
-│   └── finalizations.jsonl
-├── lineage.json                 # extended versions only
-├── reuse_manifest.json          # extended versions only
-├── asset_manifest.json
-└── stages/
-    ├── 01_raw_inputs/
-    ├── 02_prepared_inputs/
-    ├── 03_evaluation_guidelines/
-    ├── 04_intent_clustering/
-    ├── 05_coverage_decisions/
-    ├── 06_label_inference/
-    ├── 07_synthetic_coverage/
-    └── 08_dataset_splits/
-```
-
-After creation, every stage reads from this workspace rather than the original
-files or other tenant resources. Each stage owns only its outputs and reads
-inputs from earlier stage folders. The evaluation-asset runtime, copied inputs,
-checkpoints, events, and stage artifacts in `evaluation_assets/` are local-only;
-the pipeline has no remote persistence backend for this workspace.
-
-### Eight-stage workflow
-
-| Stage | Purpose |
-|---|---|
-| 1. Validate raw inputs | Validate the canonical contract and record source counts and hashes. |
-| 2. Prepare inputs | Redact sensitive values, apply canonical defaults, assign connected trusted groups to train, validation, test, or regression from the split seed, record minimum correctness-evidence eligibility, and build intent text without renaming fields. |
-| 3. Create evaluation guidelines | Correlate eligible trusted feedback with messages, tool activity, outcomes, and runtime; recognize supported mistake/success patterns; and compile the reusable training-only guideline library. Keep held-out guidance protected and case-local. |
-| 4. Cluster intents | Optionally embed unlabeled intent records and build route-aware clusters for sampling, analysis, and synthetic coverage. Set `--clusters 0` to skip. |
-| 5. Record sampling context | Optionally persist cluster membership, representatives, routes, and task types. Skipped with Stage 4. |
-| 6. Build episode rubrics | For every feedback and unlabeled episode, give the model the complete split-permitted guideline catalog and trace analysis in one call. Select zero, one, or many guidelines and create one scoreable case rubric; if none applies, infer the rubric from the trace and available constraints. |
-| 7. Expand coverage and prepare review | Optionally synthesize only from clusters whose episodes share one identical guideline-grounded rubric, apply the documented mechanical filters, fingerprint every eligible derived case and its complete dependencies, build exact-context duplicate/conflict families, and pause at `awaiting_review`. |
-| 8. Build splits after finalization | After explicit review finalization, publish trusted cases plus exact-fingerprint-approved derived cases only. Pending, rejected, and held cases remain auditable but unpublished. |
-
-Stage 2 preserves each source `group_id` and adds a derived `split_group_id`
-that connects supplied groups sharing exact canonical model-visible context.
-It assigns those components before any guideline call. A valid rating without
-a rationale, correction, or declared check can still produce guidelines and a
-trusted case rubric. The rating supplies only a coarse episode-level signal;
-the model must ground specific requirements in the user request and observable
-trace without inventing a reason for the rating.
-
-Stage 3 uses one shared producer/verification contract. Its public evidence,
-candidate, and guideline inventories contain eligible training feedback only.
-When feedback supports a claimed mistake or success, the extractor must link
-it to both the feedback and an observable trace location, distinguish agent
-behavior from environment failure, and preserve uncertainty when causality is
-not supported. Validation, test, and regression evidence is compiled separately
-within its assigned split, `split_group_id`, original `group_id`, and route.
-Those protected guidelines are visible only while generating the corresponding
-held-out episode rubric; they never enter reusable training guidance or other
-episodes' provider payloads.
-
-Stage 6 persists one rubric and one self-authenticating dependency descriptor
-per episode. The dependency covers the full permitted guideline catalog, the
-episode evidence, selected guideline IDs (possibly empty), provider/model/
-settings, prompt identity, and algorithm revision. Cluster identity is excluded
-from rubric correctness and remains available only for sampling and optional
-synthesis. Extension reuse requires exact dependency equality, and any changed
-dependency produces a new pending review fingerprint.
-
-The top-level lifecycle is exactly `draft`, `queued`, `running`,
-`awaiting_review`, `released`, or `failed`. Each completed stage has an atomic
-receipt commit marker under `receipts/`; `pipeline_state.json` references its
-hash, and `events.jsonl` retains the append-only history. Resume verifies the
-completed receipt prefix and rebuilds from its first invalid boundary. Missing
-or corrupt immutable raw snapshots require repair or a new asset. Presence-only
-raw validation is limited to a coherent Stage 1 lifecycle that has never
-claimed receipt or completion authority, including safe retry after a failure
-or process death before the first receipt. Once a completed-stage status, state
-receipt hash, receipt file, or completion event claims Stage 1 authority,
-revision and resume require a completed stage, the exact state-bound receipt
-hash, and receipt records that authenticate both copied raw files. A released
-asset is read-only: verification binds the exact v2 control state, persisted
-configuration history, receipt chain, and required artifact hashes while
-treating historical code identity as audit evidence. The final stage receipt
-also binds the exact configuration-history bytes, whose versioned row schemas,
-UTC timestamps, revision operations, and changed-field boundaries are verified.
-Any mismatch fails closed, and changes require a child version.
-
-After the Stage 7 receipt commits, an ordinary run stops at
-`awaiting_review`; Stage 8 has no authorization yet. Review decisions are
-append-only `approved` or `rejected` terminal rows bound to the complete current
-case, its scoring and generation dependencies, and source provenance. A
-missing, stale, or mismatched decision resolves to pending. Malformed decision
-authority blocks further decisions, finalization, and publication until it is
-repaired. Finalization requires both the exact review-set fingerprint, which
-binds the current items, dependencies, and holds, and the exact decision-set
-fingerprint, which binds every resolved eligible status and decision ID. Both
-tokens are revalidated under the asset lock before the snapshot is frozen.
-Finalization may leave items pending; Stage 8 then publishes trusted cases and
-approved derived cases only. Exact canonical
-model-visible-context duplicates are transitively united with supplied groups
-for splitting. An exact context with conflicting expected/scoring truth is held
-in full rather than resolved by source, confidence, or order. This mechanism
-does not claim paraphrase or semantic-duplicate detection.
-
-Configuration revisions and checkpoint rebuilds first append a durable
-prepared record to `recovery_journal.jsonl`, then make stale stage state
-nonauthoritative, and only afterward remove stale files. A later run rolls any
-prepared operation forward idempotently before it evaluates the receipt chain.
-Recovery authenticates the journal schema, operation and tenant/asset identity,
-the complete pre-operation config/state snapshot, exact nested target semantics,
-byte-exact before/target prefixes for configuration history and events,
-prepare-before-commit order, before/target hashes, and only operation-reachable
-intermediate control pairs before writing. Version 2 operations form strict
-contiguous prepare/commit pairs with at most one trailing prepare. Consecutive
-operations also authenticate writer chronology through mutation identity,
-configuration history, and monotonic event prefixes while allowing ordinary
-stage events between mutations. A committed legacy adoption is terminal and
-must retain its exact target config, state, receipts, and audit prefixes.
-When no operation remains outstanding, a final committed configuration revision
-or checkpoint rebuild must retain its exact target configuration and complete
-target configuration history. Its state and event log may continue through
-ordinary pipeline lifecycle and stage progress after the commit.
-Standalone candidate and released verification use this same complete journal
-validator. Pre-WAL history compatibility comes only from the final validated
-adoption transaction whose target hashes match the semantically replayed
-receipts, not from receipt origin labels. Version 1 or mixed-version journals
-require explicit repair because they lack the complete before-state evidence
-needed for safe roll-forward.
-One cross-process per-asset hard lock protects create, run/resume, revision,
-adoption, and extension mutations across library, CLI, and service callers.
-`filelock` supplies bounded acquisition and reentrancy over the already
-identity-bound handle: POSIX uses `flock`, while Windows uses `LockFileEx`.
-Process-global exact-identity ownership distinguishes same-thread recursion
-from other threads that share one native handle. Bound handles record their
-opening process and fail closed if inherited across `fork`; child work must
-reopen the literal path and revalidate its identity.
-Missing native hard-lock or atomic-CAS support fails explicitly instead of
-selecting a soft lock or check-then-replace fallback.
-Every evaluation-asset authority-root, authority-ancestor, stage,
-receipt, publication-catalog, generation, and generation-staging directory
-creator also locks the already-open parent and uses the same platform adapter
-with private names, no-follow POSIX descriptors or reparse-rejecting Windows
-handles, exact identity rechecks, and native no-replace installation. Windows
-retains the complete no-share-delete, reparse-checked ancestor handle chain
-until the bound directory closes. Darwin and Windows reject
-Unicode-normalized case-fold aliases in authority names. A movable Windows
-private directory is closed immediately before its exact-identity rename and
-the installed name is reopened with stable no-share-delete guards. The
-reentrant parent
-lock also spans each complete single-file observe/create/CAS/sync/reclaim and
-generation collision/stage/install/sync/reclaim transaction. The finite
-production guard
-rejects other `Path.mkdir`, `os.mkdir`, and `os.makedirs` spellings, including
-literal persistence attributes constructed through `operator.attrgetter` or
-`operator.methodcaller`; unresolved dynamic attribute names are outside this
-finite claim. Its authority adapter audits only named native create, write,
-CAS, and exact-owned reclamation functions. The remaining directory-creation
-compatibility seams are the generic parent bootstraps in
-`_atomic_write_text` and `_atomic_write_binary`, and the deprecated non-pipeline
-`assemble_dataset_bundle`; a live release check verifies that the latter three
-never bootstrap the authority or generation directories listed above.
-This boundary fails closed on preexisting or detectably substituted nodes.
-POSIX provides neither an atomic `mkdirat`-and-return-descriptor operation nor
-handle-conditional `unlink`/`rmdir`; Windows uses an identity-keyed parent mutex
-around create/open/install. Exact-owned POSIX reclamation is therefore safe
-against cooperating evaluation-asset writers that honor the same parent lock, not an
-arbitrary noncooperating same-identity namespace swap. The
-workspace must not be concurrently mutated by an unaudited process running as
-the same OS identity during authority mutation; use an exclusive trusted OS
-identity and filesystem permissions for the evaluation-asset workspace.
-Default providers are constructed only after that lock, recovery, lifecycle
-and immutable raw-snapshot checks, revision, and configuration reload. Injected
-providers must pass the strict provider/model/settings allowlists and
-secret-shaped-value rejection used by persisted provenance. Complete
-prospective call rows, stage provenance, and receipts validate in memory before
-calls or mutable writes; receipts identify the provider instance and model
-actually used instead of substituting configured defaults. Service jobs persist `queued`, then return
-acceptance only after separate lock and preflight decisions from the live
-worker, without abandoning a lock-owning worker on a fixed timeout. A verified
-recovery that itself reaches `released` is accepted as a completed terminal
-resume before the worker exits.
-
-After Stage 8 succeeds, the authoritative split artifacts remain inside the
-asset workspace and a content-addressed consumer generation is installed at:
-
-```text
-tenants/<tenant_id>/datasets/evaluation_assets/<asset_id>/
-├── release.json
-└── generations/
-    └── sha256-<generation-descriptor-hash>/
-        ├── generation_manifest.json
-        ├── train.jsonl
-        ├── validation.jsonl
-        ├── test.jsonl
-        └── regression_trusted.jsonl
-```
-
-The generation descriptor hashes all four files and the deterministic build
-fingerprint. A same-filesystem hidden temporary directory is validated and
-synced before one native no-replace operation installs the immutable
-generation; exact content is reused, while an address collision fails without
-overwrite. Exact operation-owned staging, displaced, and quarantine nodes are
-reclaimed after success, ordinary Python exceptions, and recoverable retry
-paths. Raced foreign nodes and ambiguous durability failures are retained and
-fail closed. Hard process termination can therefore leave an unproven hidden
-node for explicit inspection; the next process does not scavenge by name.
-Immutable final generations are never garbage-collected. `release.json` is
-the sole mutable catalog authority and is replaced atomically only after the
-generation, Stage 8 receipt, build provenance, manifests, and hashes agree.
-Released state and its event follow the pointer under the recovery journal, so
-recovery accepts only the reachable pointer/state/event phases and rolls an
-interrupted publication forward without rerunning providers. Old generations
-are retained; invalidation does not delete them or the release pointer.
-
-`asset_manifest.json` and the Stage 8 manifest expose the current generation
-ID, release pointer, hashes, and literal immutable paths. Evaluation configs do
-not interpret `release.json`; set `dataset.path` to the exact generation file
-path recorded in a manifest. These paths are relative to the explicit
-repository/invocation base; CLI and service entry points reject a tenants root
-outside that base or traversing an intermediate symlink before writing. These local derived files are not uploaded by the
-pipeline. A separate `customer-data --scope derived` operation can sync them only
-when the tenant storage configuration includes `datasets/` in its configured
-`derived_local` tree.
-
-Both manifests also contain an authenticated `review` block. It binds the
-review-set fingerprint, finalization ID, Stage 7 receipt, exact
-trusted/approved/pending/rejected/held counts, and canonical per-case
-fingerprint inventory. Trusted entries use complete case-content fingerprints;
-derived entries use their complete review fingerprints; held entries retain
-their exact fingerprint and reason. Released verification recomputes this
-inventory from the persisted finalization snapshot and fails closed on any
-count, identity, or fingerprint mismatch.
-
-Stages 3–7 persist receipt-backed `provider_calls.jsonl` ledgers, including an
-empty ledger when a stage makes no call. `build_provenance.json` aggregates
-their body-free request/response hashes and separates deterministic identity
-from audit-only timestamps, Git commit/tree and dirt, request IDs, token usage,
-and retries. The identity covers the complete declared source inventory,
-resolved configuration/defaults, runtime dependencies, copied input hashes,
-lineage, provider/model/settings, prompt revisions and hashes, seeds, and
-algorithms. Optional transport metadata is strictly allowlisted; custom
-providers without the metadata protocol record an explicit unavailable marker.
-Full prompts, requests, responses, headers, exceptions, and credentials are
-never serialized for provenance.
-
-Stages 6 and 7 additionally persist full-content dependency authority. The
-Stage 7 review fingerprint binds the complete pre-publication case, its
-dependency descriptor, and source provenance. A child may inherit a parent
-approval or rejection only when both that fingerprint and the canonical case
-bytes are identical; changed content or dependencies return the child item to
-pending.
-
-### Use the CLI
-
-Set the relevant provider credential, then create and run the asset:
+Guidelines come only from trusted training feedback, and each episode's rubric
+uses only the guidelines its split may see. Intent clustering is optional and
+used only for sampling and synthetic coverage. Derived cases are published only
+after explicit review finalization.
 
 ```bash
-export OPENAI_API_KEY="<your-openai-api-key>"
-
-python -m hephaestus.cli assets create \
-  --tenant <tenant_id> \
-  --asset-id v1 \
-  --feedback <labeled_feedback.jsonl> \
-  --unlabeled <unlabeled.jsonl> \
-  --rubric-model gpt-6-luna \
-  --embedding-model text-embedding-3-small \
-  --clusters 20
-
-python -m hephaestus.cli assets run \
-  --tenant <tenant_id> \
-  --asset-id v1
-
-python -m hephaestus.cli assets status \
-  --tenant <tenant_id> \
-  --asset-id v1
+python -m hephaestus.cli assets create --tenant <tenant_id> --asset-id v1 \
+  --feedback <labeled.jsonl> --unlabeled <unlabeled.jsonl>
+python -m hephaestus.cli assets run --tenant <tenant_id> --asset-id v1   # stops at awaiting_review
+python -m hephaestus.cli assets reviews list --tenant <tenant_id> --asset-id v1
+python -m hephaestus.cli assets reviews finalize --tenant <tenant_id> --asset-id v1 \
+  --reviewer <name> --review-set <sha256:...> --decision-set <sha256:...>
 ```
 
-The first `assets run` returns after Stage 7 with `status: awaiting_review`.
-Scoreable inferred cases and mechanically accepted synthetic cases are
-automatically approved by the FAFO data pipeline. List the bounded review
-snapshot to inspect approvals and holds, and retain its
-`review_set_fingerprint` and `decision_set_fingerprint`:
-
-```bash
-python -m hephaestus.cli assets reviews list \
-  --tenant <tenant_id> \
-  --asset-id v1
-```
-
-The page applies `--offset` and `--limit` to one combined, deterministic
-projection of eligible and held rows; the sum of returned `items` and `held`
-never exceeds `--limit`. The limit must be from 1 through 100. The `--status`
-option accepts `pending`, `approved`, `rejected`, or `held` and filters that
-projection before pagination.
-
-The `approve` and `reject` commands remain available for pending items in
-compatible or historical workflows. Each decision must use both the item's
-exact case fingerprint and the current review-set fingerprint:
-
-```bash
-python -m hephaestus.cli assets reviews approve \
-  --tenant <tenant_id> \
-  --asset-id v1 \
-  --case-id <case_id> \
-  --fingerprint <sha256:fingerprint> \
-  --reviewer <reviewer_name> \
-  --review-set <sha256:review_set_fingerprint>
-```
-
-Use `assets reviews reject` with the same arguments for a rejection. For normal
-FAFO runs, inspect the automatic decisions and holds, then explicitly freeze the
-exact item/dependency and resolved-decision snapshot and synchronously
-build/publish Stage 8:
-
-```bash
-python -m hephaestus.cli assets reviews finalize \
-  --tenant <tenant_id> \
-  --asset-id v1 \
-  --reviewer <reviewer_name> \
-  --review-set <sha256:review_set_fingerprint> \
-  --decision-set <sha256:decision_set_fingerprint>
-```
-
-Finalization does not implicitly approve pending items. A pending-only
-finalization is valid and publishes zero derived cases. Replaying finalization
-for a released asset is idempotent only with both exact current fingerprints.
-
-Extend a verified released version from the CLI:
-
-```bash
-python -m hephaestus.cli assets extend \
-  --tenant <tenant_id> \
-  --parent-asset-id v1 \
-  --asset-id v2 \
-  --additional-feedback <additional_feedback.jsonl> \
-  --clustering-mode keep
-```
-
-Use `--additional-unlabeled <additional_unlabeled.jsonl>
---clustering-mode refresh` when the intent landscape must be rebuilt.
-
-Assets created by an older build may retain the pre-v2 top-level status
-`completed`. It is a legacy sentinel, not an alias for `released`. Verify and
-adopt it explicitly before extension:
-
-```bash
-python -m hephaestus.cli assets adopt \
-  --tenant <tenant_id> \
-  --asset-id <legacy_asset_id>
-```
-
-Adoption accepts only pre-v2 `completed`, validates all eight stages, raw source
-hashes, strict finite artifact schemas, deterministic Stage 7 filter outputs,
-both manifests, and the current four catalog copies, records unavailable
-historical prompt/provider/code facts honestly, materializes an immutable
-generation, and publishes it with receipts, pointer, released state, event, and
-commit as one terminal `legacy_adoption` operation. The old top-level catalog
-copies become nonauthoritative. Failure leaves legacy authority unchanged or
-rolls the prepared adoption forward and requires repair or a new asset only
-when authenticated evidence is inconsistent. A v2 released checkpoint without
-`release.json` is an unpublished interim build: repair it from a verified
-backup or rebuild it as a new asset version; adoption is not a migration path.
-
-Add `--enable-synthetic-coverage --synthetic-cases-per-cluster <count>` to
-enable Stage 7. Use `--embedding-model tfidf` for deterministic local
-vectorization without an embedding API call. FAFO never silently changes
-providers after a failure.
-
-The existing default is 50 clusters. Use `--clusters 0` to skip Stages 4 and 5.
-Their receipts and empty artifacts remain in the eight-stage workspace, but no
-embedding or cluster sampling work is performed. Stage 6 still builds every
-episode rubric from its trace and
-split-permitted guidelines. Synthetic coverage requires `--clusters` greater
-than zero.
-
-To change decisions while resuming, pass only the settings that should change:
-
-```bash
-python -m hephaestus.cli assets run \
-  --tenant <tenant_id> \
-  --asset-id v1 \
-  --clusters 12 \
-  --embedding-model tfidf
-```
-
-Split-seed changes restart at Stage 2 because trusted assignment precedes
-authoring. Guideline-model changes restart at Stage 3; embedding or
-cluster-count changes at Stage 4; and synthetic settings at Stage 7. Legacy
-matching/support options remain readable for older configurations but do not
-drive rubric generation. Each revision is prepared in the recovery journal,
-then applied to `config.json`, `pipeline_state.json`, `config_history.jsonl`,
-and `events.jsonl`; stale downstream outputs are cleaned only after their state
-and receipt references are nonauthoritative.
-
-### Troubleshoot OpenAI SSL connections
-
-If an OpenAI request fails because TLS/SSL certificate verification is blocked,
-upgrade the OpenAI HTTP and certificate packages in the Python environment that
-runs FAFO:
-
-```bash
-python3 -m pip install --upgrade openai httpx certifi truststore
-```
-
-Then uncomment the `try`/`import truststore`/
-`truststore.inject_into_ssl()`/`except ImportError` block at:
-
-- `src/hephaestus/providers/openai.py`, lines 50–54.
-- `src/hephaestus/datasets/rubric_providers.py`, lines 85–89.
-- `src/hephaestus/datasets/embedding_providers.py`, lines 61–65.
-
-Restart the FAFO CLI or service process after changing the environment or source,
-then resume the failed asset run.
-Use this procedure only for an SSL/certificate error; it does not fix
-an invalid API key, unavailable model, rate limit, or malformed response.
-
-The CLI, service API, and evaluation-asset assistants all trigger and monitor the same
-core implementation under `src/hephaestus/evaluation_assets/`; agents do not
-implement the data transformations themselves. See the full
-[feedback and unlabeled trace flow](docs/processes/feedback-dataset-flow.md)
-for artifact details, trust boundaries, and split semantics.
-
-### Build runtime memory cards
-
-After an evaluation asset is released, FAFO can compile each reusable trusted
-guideline and a bounded sample of its supporting traces into a compact
-procedural memory card for direct runtime injection:
-
-```bash
-python -m hephaestus.cli memory build \
-  --tenant <tenant_id> \
-  --asset-id <released_evaluation_asset_id> \
-  --memory-id <memory_asset_id>
-```
-
-Trusted-only construction is the default and recommended runtime-memory mode.
-The command writes a separate
-`tenants/<tenant_id>/memory_assets/<memory_asset_id>/` artifact. It does not
-modify the released evaluation asset or the agent's base prompt. The first
-version produces one card per trusted guideline, excludes protected and
-inferred cases, and requires every procedural instruction to cite a source
-criterion. See [Runtime memory card construction](docs/processes/runtime-memory-cards.md)
-for the schema, trust boundary, outputs, and intended guideline-versus-memory
-experiment.
-
-To deliberately incorporate approved inferred training episodes, first build
-the trusted-only asset above, then run the additive extension with the explicit
-opt-in flag:
-
-```bash
-python -m hephaestus.cli memory build-additive \
-  --tenant <tenant_id> \
-  --asset-id <released_evaluation_asset_id> \
-  --base-memory-id <trusted_only_memory_asset_id> \
-  --memory-id <additive_memory_asset_id> \
-  --include-approved-inferred
-```
-
-The extension preserves the trusted card as a frozen spine and appends only
-bounded, criterion-grounded additions. Inferred evidence is never read by the
-default `memory build` command.
-
----
-
-## How it works
-
-The core workflow is an **optimization loop**. Each pass runs the same six stages — the labels below are reused throughout this README:
-
-```
-      ┌────────────────────────────────────────────────┐
-      │                 OPTIMIZATION LOOP              │
-      └────────────────────────────────────────────────┘
-
-  1. Evaluate    Dataset ─> Chain ─> Scorer ─> Results
-                 (JSONL)    (LangGraph)        (summary.md, results.jsonl)
-                      │
-                      ▼
-  2. Attribute   classify failures by pipeline step and fix type
-                      │
-                      ▼
-  3. Propose     generate one scoped variant (prompt / skill / parameter / chain)
-                      │
-                      ▼
-  4. Review      independent guardrail check (scope, leakage, placeholders)
-                      │
-                      ▼
-  5. Compare     re-run the variant; compare to the previous best
-                      │
-                      ▼
-  6. Iterate or escalate
-                 keep improved variants; iterate at this level, or
-                 escalate to the next level when attribution requires it
-                      │
-                      └──────────► back to step 1 (next cycle)
-```
-
-You wire the dataset, chain, and scorer together with a **config file** and run `python -m hephaestus.cli eval --config <config>.json` to perform a single **Evaluate** stage. The remaining stages are driven by the Claude Code optimizer (see [Optimization loop](#optimization-loop)). A separate reviewer checks every proposed change before it is re-evaluated, and accepted variants are compared on aggregate validation scores only.
-
-## Runtime and Agent Responsibilities
-
-The [canonical enforcement boundary](docs/processes/prompt-iteration-loop.md#enforcement-boundary)
-distinguishes runtime-enforced controls from bypassable agent protocol and
-recommended conventions. Tenant directories organize tenant-specific code and
-data, but they are not an operating-system sandbox. The runtime’s file and
-bundle checks do not confine an arbitrary process that already has filesystem
-access to the checkout.
-
----
-
-## Concepts
-
-### Datasets
-
-A dataset is a JSONL file. Each line is one test case:
-
-```json
-{
-  "case_id": "unique-id",
-  "task_type": "qa",
-  "context": {
-    "question": "Your input field(s) here"
-  },
-  "expected": {
-    "answer": "The correct output"
-  },
-  "metadata": {
-    "difficulty": "hard",
-    "source": "manual"
-  }
-}
-```
-
-- **`case_id`** — unique identifier for the case (required)
-- **`task_type`** — label for the kind of task, e.g. `"qa"`, `"summarization"` (required)
-- **`context`** — key-value pairs passed into your chain as input variables (required)
-- **`expected`** — ground truth used by your scorer (required; the schema inside `expected` is up to your scorer -- the engine does not inspect it)
-- **`metadata`** — arbitrary key-value pairs for filtering and analysis (required, may be `{}`)
-
-### Chains
-
-A chain is a [LangGraph](https://langchain-ai.github.io/langgraph/) state graph that processes each test case. You define it as a Python module with a `build_chain` function (see the [Quick start](#quick-start) for a minimal single-node example).
-
-**`make_llm_node`** reads a prompt template, substitutes `${variables}` from the chain state, calls the LLM, and writes the response back to state.
-
-For multi-step chains, add more nodes and edges:
-
-```python
-def build_chain(provider, config):
-    graph = StateGraph(ChainState)
-
-    graph.add_node("retrieve", my_retrieval_node)
-    graph.add_node("summarize", make_llm_node(
-        provider=provider,
-        prompt_template_path=config["prompt_paths"]["summarize"],
-        output_key="summary",
-    ))
-    graph.add_node("answer", make_llm_node(
-        provider=provider,
-        prompt_template_path=config["prompt_paths"]["answer"],
-        output_key="answer",
-    ))
-
-    graph.set_entry_point("retrieve")
-    graph.add_edge("retrieve", "summarize")
-    graph.add_edge("summarize", "answer")
-    graph.add_edge("answer", END)
-
-    return graph.compile()
-```
-
-Later nodes can reference earlier outputs in their prompts using `${steps.summarize.output}`.
-
-### Chain state
-
-Every chain operates on a shared **state** with four protocol fields:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `context` | `Dict[str, str]` | Input from the dataset case (`case.context`) |
-| `output_text` | `str` | The final output, read by the scorer |
-| `step_outputs` | `Dict[str, str]` | Intermediate outputs, **keyed by node name** |
-| `diagnostics` | `List[str]` | Debug traces and warnings (e.g. missing placeholders) |
-
-`make_llm_node` ties this together: it merges `context` with prior `step_outputs` (exposed under keys like `steps.<name>.output`), renders the `${...}` placeholders, splits the `System:` / `User:` sections into chat messages, calls `provider.generate`, and writes its result into both `output_text` and `step_outputs[output_key]`. Because every node writes a **named** output, the pipeline is inspectable as a sequence of intermediate artifacts rather than a single opaque final string — this is what makes step attribution possible.
-
-### Prompt templates
-
-Prompts are Markdown files with a simple format:
-
-```
-System: You are a helpful assistant.
-
-User: Answer the following question concisely.
-
-Question: ${question}
-Context: ${steps.retrieve.output}
-```
-
-- `${question}` is replaced by `context.question` from the dataset case
-- `${steps.<node_name>.output}` is replaced by the output of a previous chain node
-- Missing variables are logged as diagnostics (not hard errors)
-
-### Skills
-
-**Skills** are reusable units of procedural knowledge for **agentic** (tool-using) tenants — e.g. "how to handle a ranking question" or "how to sequence these tools". They live as markdown files at `tenants/<tenant_id>/skills/<skill-name>/variant-NNN.md`, each with YAML frontmatter (`name`, `description`) and a body of instructions, and are optimized exactly like prompts (clone-to-new-variant, eval, attribution, review).
-
-A skill is **loaded at the agentic layer** only when the tenant chain does the
-work: `skill_paths` does not itself inject a skill into a tenant chain. The
-factory must call `render_skills_block(config["skill_paths"])` and pass the
-result as `skills_text` to `make_agentic_node` (or `make_llm_node`). That node
-then injects one ordered `<available_skills>` context message right after the
-system prompt, rather than inlining skills into the authored template.
-
-Skills are opt-in per tenant via two `chain.config` fields:
-
-```json
-{
-  "chain": {
-    "config": {
-      "prompt_paths": { "agent": "tenants/my_project/prompts/modules/agent/variant-001.md" },
-      "skill_paths": [
-        "tenants/my_project/skills/ranking-questions/variant-001.md",
-        "tenants/my_project/skills/answer-formatting/variant-001.md"
-      ],
-      "optimization_target": "both"
-    }
-  }
-}
-```
-
-- **`skill_paths`** — the ordered skill files available for an explicit
-  tenant-chain render/pass. Omit it and the tenant behaves exactly as before;
-  a factory that never renders/passes the paths also receives no skill message.
-- **`optimization_target`** — `"prompt"`, `"skill"`, or `"both"` (default `"both"`). Selects which textual artifacts the optimizer iterates. When set to `"skill"` or `"both"`, the tenant must be agentic (an `mcp` section configured); the eval runner validates this.
-
-Prompt and skill are **co-equal textual levels**: when both are available the optimizer treats them as one textual surface, routing each failure cluster to whichever artifact owns it (broad scaffold/format → base prompt; reusable task-specific procedure → a skill). See `tenants/skill_example/` for a complete worked example. In the **FAFO Explorer** UI, skills appear under the **Prompts** tab in their own section.
-
-### Scorers
-
-A scorer compares the chain output to the expected answer. Implement the `Scorer` base class:
-
-```python
-# my_scorer.py
-from src.hephaestus.scoring.scorer import Scorer as BaseScorer
-
-class Scorer(BaseScorer):
-    def validate_case(self, case, scoring_profile):
-        """Check that each case has the fields this scorer needs."""
-        assert "answer" in case.expected, f"Case {case.case_id}: missing 'answer'"
-
-    def score_case(self, case, output_text, scoring_profile):
-        expected = case.expected["answer"].strip().lower()
-        predicted = output_text.strip().lower()
-
-        exact_match = 100.0 if predicted == expected else 0.0
-        contains = 100.0 if expected in predicted else 0.0
-        composite = 0.6 * exact_match + 0.4 * contains
-
-        return {
-            "composite_score": composite,     # 0-100, required
-            "score_breakdown": {              # required dict — track individual metrics
-                "exact_match": exact_match,
-                "contains_answer": contains,
-            },
-        }
-```
-
-The engine calls `validate_case` (to catch bad data early) then `score_case` for each test case, and aggregates the results. Every scorer must return a finite `composite_score` in `[0, 100]` plus a numeric `score_breakdown` — the breakdown can expose as many task-specific metrics as you like (exact match, F1, format validity, …) while `composite_score` stays the single objective the optimizer drives.
-
-**Pipeline-aware scoring.** Because each node writes a named output into `step_outputs` (see [Chain state](#chain-state)), a scorer for a multi-step chain can override `score_pipeline_case(case, step_outputs, scoring_profile, output_text)` and score against intermediate outputs, not just the final string. The default implementation simply scores `output_text`; the HotpotQA scorer, for example, scores the `answer` step explicitly. This is what lets optimization reason about *where* in the pipeline a case went wrong.
-
-### Providers
-
-FAFO supports three LLM providers out of the box:
-
-| Provider | Config value | Auth env variable | Notes |
-|----------|-------------|-------------------|-------|
-| **OpenAI** | `"openai"` | `OPENAI_API_KEY` | GPT models |
-| **Baseten** | `"baseten"` | `BASETEN_API_KEY` | Custom model deployments |
-| **SageMaker** | `"sagemaker"` | Configurable via `api_key_env` | AWS-hosted endpoints |
-
-Provider settings go in the config file:
-
-```json
-{
-  "provider": "openai",
-  "provider_settings": {
-    "model": "gpt-4o",
-    "temperature": 0.0,
-    "max_tokens": 4096,
-    "timeout_seconds": 300,
-    "max_retries": 3,
-    "retry_backoff_seconds": 5
-  }
-}
-```
-
----
-
-## Optimization loop
-
-Evaluation tells you *how well* your chain performs. Optimization tells you *what to change* to make it better. FAFO includes a structured optimization loop that works at levels of increasing cost — from textual edits (prompt and agent skills) up through chain parameters and chain structure. (For the full architecture, see [docs/processes/prompt-iteration-loop.md](docs/processes/prompt-iteration-loop.md).)
-
-### The optimizer vs. the task model
-
-FAFO has two models, and keeping them straight avoids most confusion:
-
-- **The optimizer** is Claude Code. It reads the playbook, runs evals, dispatches subagents, writes variants, compares results, and decides when to escalate. It never appears in your config.
-- **The task model** is whatever you set under `provider` / `provider_settings.model` (e.g. `gpt-4o`, `gemma-3-12b`). It is the model *being optimized*, reached through a small `ProviderClient.generate(messages)` interface.
-
-The two are independent — you can optimize a Gemma pipeline using Claude as the optimizer. Only the task model changes when you swap providers; the optimization machinery stays the same.
-
-### Running it
-
-The optimization loop can be driven by [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or Codex. Use the prompt set that matches the tool you are running: `.claude/` for Claude Code and `.codex/` for Codex.
-
-For Claude Code, use the slash commands from within your project directory:
-
-```
-# 1. Run a baseline eval first
-> /eval-runner
-  → Tenant: my_project
-  → Config: tenants/my_project/configs/eval.json
-
-# 2. Start the autonomous optimization loop
-> /optimization
-  → Tenant: my_project
-  → Config: tenants/my_project/configs/eval.json
-  → Success criteria: composite_score >= 80
-```
-
-For Codex, provide the same tenant, config, and success criteria in the prompt:
-
-```
-Run the FAFO eval runner.
-Tenant: my_project
-Config: tenants/my_project/configs/eval.json
-Follow .codex/commands/eval-runner.md.
-
-Then optimize eval quality for tenant "my_project".
-Config: tenants/my_project/configs/eval.json
-Success criteria: composite_score >= 80
-Follow .codex/agents/optimization.md.
-```
-
-The `/optimization` agent takes over from there. It will:
-1. Read the tenant's `docs/iteration-playbook.md` to understand what it's allowed to change (the **scope contract**)
-2. Run failure analysis on the eval results
-3. Create new prompt/skill/parameter/chain variants targeting the top failure patterns
-4. Validate each variant through an independent guardrail review
-5. Run eval on the new variant and compare to the previous best
-6. Repeat until success criteria are met or all allowed optimization levels are exhausted
-
-The `/optimization` agent is the orchestrator; it manages two internal subagents automatically — you don't invoke these directly:
-- **step-attribution** — classifies failures by root cause after each eval
-- **variant-reviewer** — checks proposed variants for leakage, placeholder drift, and scope violations before eval
-
-You can also run evals and optimization steps manually via the CLI (see [CLI reference](#cli-reference) below), but the agent handles the full loop autonomously.
-
-### The optimization levels
-
-| Level | What changes | Example |
-|-------|-------------|---------|
-| **Prompt** (lowest cost) | Prompt template text only | Add "answer in one word" to reduce verbosity |
-| **Skill** (lowest cost) | Agent skill file text only (agentic tenants) | Refine a reusable "how to handle ranking questions" procedure |
-| **Parameter** (medium cost) | Config values only | Change `retrieval_k` from 7 to 10, or `temperature` from 1.0 to 0.5 |
-| **Structural** (highest cost) | Chain topology / new nodes | Add a self-reflection node, switch from linear to ReAct pattern |
-
-Prompt and **skill** are co-equal *textual* levels — both edit instruction text and carry the same cost. Skills apply only to agentic (tool-using) tenants; see [Skills](#skills) below.
-
-The **prompt-first convention is recommended, not runtime-enforced**: prefer textual changes (prompt and/or skill) when the evidence is ambiguous, and escalate to parameters or structure only after textual search has exposed a bottleneck that text cannot fix. This is the "prefer the smallest useful change" principle — cheaper levels first, and a higher level only when attribution justifies it.
-
-### Step attribution (failure analysis)
-
-After an eval run, the runtime can perform deterministic, rule-based runtime
-attribution over recorded step outputs, tool history, execution status, and
-caller-supplied in-memory case context and expected-answer evidence. It does not
-persist that joined protected evidence or make a semantic LLM judgment. A later
-agent semantic analysis may use the authenticated run evidence under the tenant
-protocol; that analysis is separate from the deterministic runtime result. The
-heuristics cover categories such as:
-
-- **Retrieval failures** — a retrieval step returned empty content, or its output overlaps the query too little (scored as hit / partial / miss)
-- **Cascading failures** — an early step produced empty output, causing everything downstream to fail
-- **Format failures** — the correct answer is in the output but surrounded by extra text the scorer can't parse
-- **Final-step fallback** — no earlier rule explained a low-scoring case, so the runtime assigns a low-confidence final-step fallback; this does not prove that the inputs were good or that reasoning was the cause
-
-Each failure is also tagged by which optimization level can address it:
-- Format failures and low-confidence final-step fallbacks → **textual** (prompt-addressable, and skill-addressable on agentic tenants)
-- Retrieval and cascade failures → **structural-addressable**
-
-This partition is a bounded diagnostic hint, not proof that an optimization
-level is exhausted. The deterministic table appears in `summary.md` only when
-the run has step outputs and at least one failure, and only when attribution
-produces a non-infrastructure step entry. A later tenant-governed semantic
-analysis decides whether the evidence justifies a prompt, skill, parameter, or
-structural change.
-
-### Prompt variants
-
-Prompts live at `tenants/<tenant_id>/prompts/modules/<module>/variant-NNN.md`. Each variant is a new file — you never edit in place:
-
-```
-prompts/modules/generate_answer/
-├── variant-001.md    # Baseline (minimal instructions)
-├── variant-002.md    # Added answer brevity rules
-└── variant-003.md    # Added must-always-answer constraint
-```
-
-To test a new variant, create a config that points to it:
-
-```json
-{
-  "chain": {
-    "config": {
-      "prompt_paths": {
-        "generate_answer": "tenants/my_project/prompts/modules/generate_answer/variant-002.md"
-      }
-    }
-  }
-}
-```
-
-Then run eval with that config. Each variant gets its own eval output — no collisions.
-
-### Tracking what you tried
-
-Each tenant tracks optimization history in two places:
-
-**`docs/iteration-memory.jsonl`** — structured, one record per cycle:
-```json
-{
-  "iteration": 1,
-  "variant": "variant-002",
-  "modules_changed": ["generate_answer", "summarize1"],
-  "hypothesis": "Answer brevity rules will improve exact match",
-  "train_em": 74.67,
-  "val_em": 65.67,
-  "delta_val": 26.34,
-  "accepted": true
-}
-```
-
-**`docs/change-log.md`** — human-readable narrative of what changed and why.
-
-Together these prevent rework (you won't re-try something that already failed) and provide an audit trail of how scores improved over time.
-
-### Guardrails
-
-Autonomous optimization can overfit or drift out of scope, so FAFO documents four
-agent procedures. **All four are agent-enforced / bypassable**, not runtime
-barriers:
-
-1. **Training/held-out workflow** — the optimizer sees individual *training* cases; validation and test expose **aggregate scores only**. Candidates are accepted on validation, never by inspecting test cases.
-2. **Scope constraints** — the tenant's `iteration-playbook.md` defines which optimization levels are allowed and which are forbidden. The optimizer and the variant-reviewer enforce this **independently**.
-3. **Iteration memory** — a structured log of variants, scores, and exhaustion reasons (see [Tracking what you tried](#tracking-what-you-tried) above).
-4. **Variant immutability** — every attempt, accepted or rejected, becomes a new numbered file; structural variants are cloned, never edited in place.
-
-Tenant directory layout and config-local paths are organizational only, not a
-runtime-enforced isolation boundary. This workspace boundary is not an
-operating-system sandbox; the four procedures above depend on the optimizer and
-reviewer following the tenant protocol.
-
-### Example: optimizing a multi-hop QA chain
-
-Starting from a baseline with 39% exact match on the validation set:
-
-| Iteration | Change | Val EM | Delta |
-|-----------|--------|--------|-------|
-| Baseline (variant-001) | Minimal DSPy-format prompts | 39.3% | — |
-| Iteration 1 (variant-002) | Added task-specific rules: answer brevity, no explanations | 65.7% | +26.4pp |
-| Iteration 2 (variant-003) | Added must-always-answer, singular form guidance | 70.3% | +4.6pp |
-
-After iteration 2, failure analysis showed remaining failures were mostly retrieval-limited (the right documents weren't being retrieved) — a structural problem that prompt changes alone can't fix. This is the kind of signal that tells you when to stop iterating at one level and move to the next.
-
----
+Inputs must follow the
+[`fafo-evaluation-input-v1`](docs/processes/evaluation-input-contract.md) contract.
+Released splits are published under
+`tenants/<tenant_id>/datasets/evaluation_assets/<asset_id>/`; point an eval
+config's `dataset.path` at the exact generation file listed in the asset
+manifest.
+
+### Runtime memory cards
+
+Released assets can also feed the agent directly. `python -m hephaestus.cli memory build`
+compiles each trusted guideline and a few supporting traces into a compact
+procedural card that the agent reads at runtime. This is a second way to bring
+what the traces taught back into the agent; see
+[runtime memory cards](docs/processes/runtime-memory-cards.md).
+
+Further reading: the [data pipeline guide](docs/processes/feedback-dataset-flow.md)
+covers concepts and the trust model; the
+[evaluation asset reference](docs/references/evaluation-assets.md) covers the
+workspace, stages, lifecycle, and full CLI.
+
+## Guarantees and limits
+
+- **Runtime-enforced controls:** config validation, unique case IDs, exclusive
+  output directories, per-case execution status, successful-only score averages,
+  and authenticated run bundles. The
+  [canonical enforcement boundary](docs/processes/prompt-iteration-loop.md#enforcement-boundary)
+  lists exactly which controls the runtime enforces.
+- **Agent-loop guardrails:** train-only failure analysis, playbook scope,
+  iteration memory, and variant immutability. **All four are agent-enforced / bypassable**:
+  they rely on the agent following the tenant protocol. The headless optimizer
+  enforces the train/held-out split, policy scope, and variant immutability in
+  code.
+- **Conventions:** the **prompt-first convention is recommended, not runtime-enforced**,
+  as are focused edits and repeated trials for noisy metrics.
+- **Isolation:** tenant directories are organizational only, not a
+  runtime-enforced isolation boundary, and not an operating-system sandbox. Any
+  process with filesystem access to the checkout can read or change them.
 
 ## CLI reference
 
-### `eval` — Run an evaluation
-
-```bash
-python -m hephaestus.cli eval --config path/to/config.json
-```
-
-Runs the chain on every case in the dataset, scores each output, and writes results to `output_dir`.
-
-**Outputs:**
-| File | Contents |
-|------|----------|
-| `summary.md` | Human-readable score summary with breakdowns and step timings |
-| `results.jsonl` | Per-case results, including output, scores, diagnostics, and agentic tool history when present. The schema does not persist raw dataset `context` or `expected` fields by default, but outputs, step outputs, diagnostics, tool arguments, and tool results can repeat tenant data; it is not a privacy boundary. |
-| `run_config.json` | Safe, resolved projection of the configuration used for this run |
-| `run_identity.json` | Privacy-safe comparison identity and permanent-control fingerprints |
-| `progress.json` | Real-time progress (useful for long-running evals) |
-| `run_manifest.json` | Final authority for the terminal bundle, including hashes for every terminal artifact |
-
-For the exact lifecycle and authority rule, see [Eval output paths](docs/references/eval_paths.md).
-An authenticated terminal bundle has status `completed`, `degraded`, or
-`failed`; each result row has its own execution status, and score aggregates use
-successful rows only. Do not treat a loose `results.jsonl` directory as an
-authenticated run.
-
-### `eval-progress` — Check a running evaluation
-
-```bash
-python -m hephaestus.cli eval-progress --output-dir path/to/output/
-python -m hephaestus.cli eval-progress --output-dir path/to/output/ --json
-```
-
-Shows run status, progress (completed/total), and current average score.
-
-### `customer-data` — Sync datasets with GCS
-
-```bash
-# Pull datasets from GCS
-python -m hephaestus.cli customer-data pull --tenant my_project --scope derived
-
-# Push local datasets to GCS
-python -m hephaestus.cli customer-data push --tenant my_project --scope derived
-
-# Remove local copies
-python -m hephaestus.cli customer-data remove-local --tenant my_project --scope raw --yes
-```
-
-Scopes: `raw` (source artifacts), `derived` (processed datasets), `all`.
-
----
-
-## FAFO UI
-
-FAFO includes a local, read-only web UI called **FAFO Explorer** for browsing tenant artifacts after evals and optimization runs. It shows cross-tenant run summaries, per-case eval outputs, score breakdowns, prompt variants (and agent skills, under the Prompts tab), datasets, iteration history, and tenant docs. It refreshes live as runs progress, supports shareable URLs, sortable/filterable case tables, expected-vs-actual trajectory diffs, JSON syntax highlighting, and Markdown-rendered summaries.
-
-Start it from the repository root:
-
-```bash
-python -m hephaestus.cli ui
-```
-
-By default, the UI serves `tenants/` at <http://127.0.0.1:8765/>. The server
-accepts loopback bind hosts only. See [docs/web-ui.md](docs/web-ui.md) for
-options such as `--tenants-root`, `--host`, and `--port`.
-
----
-
-## Claude Code skills
-
-FAFO ships as a set of [Claude Code](https://docs.anthropic.com/en/docs/claude-code) agents and commands. The optimization *method* is the three core agents; the rest support evaluation, data augmentation, and repository operations around them.
-
-### Core optimization agents
-
-These three agents are the optimization loop. You invoke `/optimization`; it dispatches the other two automatically.
-
-| Agent | Command | Role |
-|-------|---------|------|
-| **Optimization** | `/optimization` | Orchestrator. Reads the playbook, emits the scope contract, creates variants, runs evals, records outcomes, and manages level transitions. See [Optimization loop](#optimization-loop). |
-| **Step Attribution** | *(dispatched)* | Post-eval failure analysis — classifies failures by root cause and recommends the next optimization level. |
-| **Variant Reviewer** | *(dispatched)* | Independent guardrail check on proposed variants (catches leakage, placeholder drift, scope violations). |
-
-### Supporting commands
-
-| Command | What it does |
-|---------|-------------|
-| `/eval-runner` | Runs a tenant evaluation and returns a score summary plus the output directory. |
-| `/synthetic-samples` | Creates realistic synthetic test cases to augment eval datasets with edge cases. |
-| `/synthetic-pruner` | Prunes noncompliant synthetic examples and normalizes placeholder data. |
-| `/reset-tenant` | Resets a tenant to baseline (variant-001), removing optimization artifacts from the working tree (history is preserved). |
-
-`CLAUDE.md` at the repo root provides repository-wide guidance (project purpose, eval workflow, code style, tenant data-safety rules) that all of the above respect.
-
-### Repository operations
-
-Not part of the optimization method — general repo tooling that happens to ship as Claude Code agents:
-
-| Command | What it does |
-|---------|-------------|
-| `/pr-lifecycle` | Creates, self-reviews, simplifies, and addresses review comments on a PR until it's merge-ready. |
-| `/k8s-manager` | Inspects K8s resources, tracks usage, cleans up stale pods, and launches eval workloads. |
-
----
-
-## Codex workflows
-
-FAFO also ships Codex prompt files for the same core optimization workflows. These are not Claude Code slash commands; use them only when working in Codex.
-
-### User-invocable workflows
-
-| Workflow | Codex prompt file | How to invoke |
-|----------|-------------------|---------------|
-| **Optimization** | `.codex/agents/optimization.md` | Ask Codex to optimize eval quality for a tenant and provide the eval config plus success criteria. |
-| **Eval Runner** | `.codex/commands/eval-runner.md` | Ask Codex to run an eval for a tenant config and summarize the output directory, score, and failures. |
-| **Synthetic Samples** | `.codex/commands/synthetic-samples.md` | Ask Codex to create synthetic examples for a tenant dataset. |
-| **Synthetic Pruner** | `.codex/commands/synthetic-pruner.md` | Ask Codex to validate and clean synthetic examples. |
-| **Reset Tenant** | `.codex/commands/reset-tenant.md` | Ask Codex to reset generated tenant optimization and eval artifacts. |
-
-### Internal Codex phases
-
-These are used by the Codex optimization workflow — you don't run them directly:
-
-| Phase | Codex prompt file | Purpose |
-|-------|-------------------|---------|
-| **Step Attribution** | `.codex/agents/step-attribution.md` | Post-eval failure analysis. Classifies failures by root cause and optimization level. |
-| **Variant Reviewer** | `.codex/agents/variant-reviewer.md` | Independent guardrail check on proposed variants before eval. |
-
----
-
-## Project structure
-
-```
-hephaestus/
-├── src/hephaestus/        # Core engine (provider-agnostic)
-│   ├── chains/            #   LangGraph chain infrastructure
-│   ├── providers/         #   LLM provider clients (OpenAI, Baseten, SageMaker)
-│   ├── scoring/           #   Scorer base class and runtime
-│   ├── datasets/          #   JSONL dataset loader
-│   ├── engine/            #   Prompt template renderer
-│   ├── runs/              #   Eval runner, progress tracker, output writer
-│   ├── storage/           #   GCS data sync
-│   ├── analysis/          #   Step attribution and failure analysis
-│   └── types.py           #   Core dataclasses (EvalCase, EvalConfig, etc.)
-├── tenants/               # Tenant-specific implementations
-│   └── <tenant_id>/
-│       ├── chains/        #   Chain definitions
-│       ├── prompts/       #   Prompt templates (with variants)
-│       ├── skills/        #   Agent skill files (agentic tenants; optional)
-│       ├── datasets/      #   Local dataset cache
-│       ├── code/          #   Scorers, data processors, utilities
-│       ├── configs/       #   Eval config files
-│       └── evals/         #   Eval output directory
-├── tests/                 # Automated tests
-├── docs/                  # Architecture and usage documentation
-└── deploy/                # K8s deployment scripts
-```
-
-The key design principle: **everything in `src/hephaestus/` is generic**. Everything tenant-specific lives under `tenants/<tenant_id>/`.
-
----
-
-## Creating a new tenant
-
-A tenant is a self-contained optimization project. Create the directory structure, then add the same four components shown in [Quick start](#quick-start) (dataset, chain, scorer, config):
-
-```bash
-mkdir -p tenants/my_project/{chains,prompts/modules,datasets,code/scorers,configs,evals,docs}
-```
-
-Additionally, create an **iteration playbook** at `tenants/my_project/docs/iteration-playbook.md` that defines which optimization levels are allowed (prompt, parameter, structural) and success criteria. The optimization agent reads this to determine its scope. See [docs/tenant-docs-contract.md](docs/tenant-docs-contract.md) for the full list of required tenant docs, and [docs/templates/tenant-docs/](docs/templates/tenant-docs/) for templates.
-
-See `tenants/hotpotqa/` for a complete working example (multi-hop question answering with BM25 retrieval and a multi-node chain).
-
----
-
-## Eval config reference
-
-Full config schema with all fields (see [docs/config-schema.md](docs/config-schema.md) for the complete specification):
-
-```json
-{
-  "tenant_id": "my_project",
-
-  "provider": "openai",
-  "provider_settings": {
-    "model": "gpt-4o",
-    "temperature": 0.0,
-    "top_p": 0.95,
-    "max_tokens": 4096,
-    "timeout_seconds": 300,
-    "max_retries": 3,
-    "retry_backoff_seconds": 5
-  },
-
-  "dataset": {
-    "path": "tenants/my_project/datasets/eval.jsonl"
-  },
-
-  "chain": {
-    "path": "tenants/my_project/chains/my_chain.py",
-    "fn": "build_chain",
-    "config": {
-      "prompt_paths": {
-        "answer": "tenants/my_project/prompts/answer/variant-001.md"
-      }
-    }
-  },
-
-  "scoring_profile": {
-    "scorer": {
-      "module_path": "tenants/my_project/code/scorers/my_scorer.py",
-      "class_name": "Scorer"
-    }
-  },
-
-  "output_dir": "tenants/my_project/evals/run-001",
-  "max_workers": 4,
-  "run_id": "run-001"
-}
-```
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `tenant_id` | yes | Tenant identifier |
-| `provider` | yes | `"openai"`, `"baseten"` (alias `"base10"`), or `"sagemaker"` |
-| `provider_settings` | no | Model name, temperature, timeouts, retries |
-| `dataset.path` | yes | Path to JSONL dataset |
-| `chain.path` | yes | Path to chain module |
-| `chain.fn` | no | Factory function name (default: `"build_chain"`) |
-| `chain.config` | no | Arbitrary config passed to the chain factory |
-| `scoring_profile.scorer.module_path` | yes | Path to scorer module |
-| `scoring_profile.scorer.class_name` | yes | Scorer class name |
-| `output_dir` | yes | Where to write results |
-| `max_workers` | no | Parallel threads for concurrent case evaluation (default: sequential). Progress is tracked thread-safely in `progress.json`. |
-| `run_id` | no | Custom run ID (auto-generated if omitted) |
-
----
-
-## Requirements
-
-- Python 3.10+
-- Core: `openai`, `langgraph`, `requests`, `datasets`, `pytest`
-- Optional extras:
-  - `pip install -e ".[hotpotqa]"` — BM25 retrieval dependencies
-  - `pip install -e ".[cti_rcm]"` — [FAITH](https://github.com/cisco-foundation-ai/faith) test harness for CTI benchmarks
-  - `pip install -e ".[local-models]"` — Local model support (llama-cpp)
-
----
-
-## Running tests
-
-```bash
-# Unit tests (no API keys needed)
-python -m pytest
-
-# Integration tests (requires API keys and GCS access)
-python -m pytest -m integration
-```
-
----
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code style, commit conventions, and PR guidelines.
-
----
-
-## Further reading
-
-The companion paper is the canonical reference for the concepts, the GEPA comparison, and benchmark results — see [Citation](#citation) for the full reference and BibTeX entry. The repository docs below cover implementation and contribution details.
-
-| Document | Description |
-|----------|-------------|
-| [docs/architecture.md](docs/architecture.md) | System architecture and evaluation pipeline overview |
-| [docs/config-schema.md](docs/config-schema.md) | Full eval config JSON schema reference |
-| [docs/tenant-model.md](docs/tenant-model.md) | Tenant directory structure and lifecycle |
-| [docs/tenant-docs-contract.md](docs/tenant-docs-contract.md) | Required documentation for each tenant |
-| [docs/style-guide.md](docs/style-guide.md) | Coding standards (Python 3.10+, pytest, type hints) |
-| [docs/github-hygiene.md](docs/github-hygiene.md) | Commit, branch, and PR conventions |
-| [docs/processes/feedback-dataset-flow.md](docs/processes/feedback-dataset-flow.md) | FAFO data pipeline guide |
-| [docs/processes/prompt-iteration-loop.md](docs/processes/prompt-iteration-loop.md) | Optimization system architecture reference |
-| [docs/processes/chain-variant-conventions.md](docs/processes/chain-variant-conventions.md) | Standards for creating and naming chain variants |
-| [docs/prompting-guides/](docs/prompting-guides/) | Prompting best practices, agentic chain patterns, and evaluation benchmarks |
-
----
+| Command | Purpose |
+|---|---|
+| `eval --config <config>` | Run one eval and write a run bundle to `output_dir` |
+| `eval-progress --output-dir <dir> [--json]` | Show a run's status, progress, and average score |
+| `optimize --policy <policy> [--final-test] [--resume]` | Run the headless optimizer |
+| `assets create \| run \| status \| reviews \| extend \| adopt` | Build evaluation assets from traces |
+| `memory build \| build-additive` | Build runtime memory cards from a released asset |
+| `customer-data pull \| push \| remove-local --tenant <id> --scope raw\|derived\|all` | Sync tenant data with GCS |
+| `ui` | Start the FAFO Explorer UI |
+
+All commands run as `python -m hephaestus.cli <command>`; add `--help` for every
+option.
+
+An eval run bundle contains `summary.md`, `results.jsonl`, `run_config.json`,
+`run_identity.json`, `progress.json`, and `run_manifest.json`, which is written
+last and authenticates the bundle. Score averages use successful cases only.
+`results.jsonl` can repeat tenant data, so treat it as tenant data. See
+[eval output paths](docs/references/eval_paths.md).
+
+**FAFO Explorer** (`python -m hephaestus.cli ui`) is a local, read-only web UI at
+<http://127.0.0.1:8765/>. It shows runs, per-case outputs, score breakdowns,
+prompt and skill variants, datasets, iteration history, and tenant docs; see
+[web UI](docs/web-ui.md) and the
+[Explorer UI post](https://cisco-foundation-ai.github.io/blogs/optimize-and-visualize-with-fapo/).
+
+## Agent prompt sets
+
+Claude Code and Codex use parallel prompt sets for the same workflows:
+
+| Workflow | Claude Code | Codex | Purpose |
+|---|---|---|---|
+| Optimization | `/optimization` | `.codex/agents/optimization.md` | Run the optimization loop |
+| Step attribution | Dispatched by `/optimization` | `.codex/agents/step-attribution.md` | Post-eval failure analysis |
+| Variant review | Dispatched by `/optimization` | `.codex/agents/variant-reviewer.md` | Guardrail check before each eval |
+| Eval runner | `/eval-runner` | `.codex/commands/eval-runner.md` | Run and summarize an eval |
+| Evaluation assets | `evaluation-asset-creator` agent | `.codex/agents/evaluation-asset-creator.md` | Run and monitor the data pipeline |
+| Synthetic data | `/synthetic-samples`, `/synthetic-pruner` | `.codex/commands/synthetic-*.md` | Create and clean synthetic cases |
+| Reset tenant | `/reset-tenant` | `.codex/commands/reset-tenant.md` | Reset a tenant to its baseline |
+
+Repository tooling for Claude Code only: `/pr-lifecycle` and `/k8s-manager`.
+`CLAUDE.md` holds repository-wide rules, including tenant data safety.
+
+## Troubleshooting
+
+**OpenAI SSL or certificate errors**, for example behind a corporate proxy:
+
+1. Run `pip install --upgrade openai httpx certifi truststore`.
+2. Uncomment the `truststore.inject_into_ssl()` block in
+   `src/hephaestus/providers/openai.py`, `src/hephaestus/datasets/rubric_providers.py`,
+   and `src/hephaestus/datasets/embedding_providers.py`.
+3. Restart the process.
+
+This only fixes certificate errors, not invalid keys, unavailable models, or rate
+limits.
+
+## Development
+
+- Python 3.10+. Optional extras in `pyproject.toml` add local-model and
+  tenant-specific dependencies.
+- `python -m pytest` runs the unit tests without API keys;
+  `python -m pytest -m integration` needs live API keys and GCS access.
+- `make ci` runs lint, license-header and tenant-docs checks, and the tests.
+- See [CONTRIBUTING.md](CONTRIBUTING.md), the [style guide](docs/style-guide.md),
+  and [GitHub hygiene](docs/github-hygiene.md).
+
+## Documentation
+
+| Document | Covers |
+|---|---|
+| [Architecture](docs/architecture.md) | Eval runtime, chain execution, run artifacts |
+| [Config schema](docs/config-schema.md) | Every eval config field |
+| [Eval output paths](docs/references/eval_paths.md) | Run bundle lifecycle and authority |
+| [Tenant model](docs/tenant-model.md) and [docs contract](docs/tenant-docs-contract.md) | Tenant layout and required tenant docs |
+| [Optimization loop](docs/processes/prompt-iteration-loop.md) | Agent loop, enforcement boundary, iteration memory |
+| [Headless optimization](docs/processes/headless-optimization.md) | API-only optimizer: policy, roles, outputs |
+| [Chain variant conventions](docs/processes/chain-variant-conventions.md) | Structural variant naming and metadata |
+| [Data pipeline guide](docs/processes/feedback-dataset-flow.md) | Traces and feedback to evaluation datasets |
+| [Evaluation input contract](docs/processes/evaluation-input-contract.md) | Input JSONL format for the data pipeline |
+| [Evaluation asset reference](docs/references/evaluation-assets.md) | Workspace, stages, lifecycle, full CLI |
+| [Runtime memory cards](docs/processes/runtime-memory-cards.md) | Memory cards from released assets |
+| [MCP quick start](docs/mcp-quick-start.md) | Agentic (tool-using) tenants |
+| [Web UI](docs/web-ui.md) | FAFO Explorer |
+| [Prompting guides](docs/prompting-guides/) | Prompting practices and agentic chain patterns |
 
 ## Citation
 
 **FAPO: Fully Automated Prompt Optimization of Multi-Step LLM Pipelines**<br>
 Paul Kassianik, Baturay Saglam, Huaibo Zhao, Blaine Nelson, Supriti Vijay, Aman Priyanshu, Amin Karbasi · [arXiv:2606.19605](https://arxiv.org/abs/2606.19605)
-
-If you use FAFO in your research, cite the original paper under its published
-title:
 
 ```bibtex
 @misc{kassianik2026fafoflowoptimization,
@@ -1382,10 +565,6 @@ title:
 }
 ```
 
----
-
 ## License
 
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
-
-Copyright 2026 Cisco Systems, Inc. and/or its affiliates.
+Apache License 2.0; see [LICENSE](LICENSE). Copyright 2026 Cisco Systems, Inc. and/or its affiliates.
