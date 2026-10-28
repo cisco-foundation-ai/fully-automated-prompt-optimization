@@ -6,38 +6,41 @@ SPDX-License-Identifier: Apache-2.0
 
 # Chain Variant Conventions
 
-## Purpose
+Rules for creating, naming, and evaluating chain variants. A chain variant
+changes a tenant chain's structure or parameters; a prompt variant changes only
+prompt text.
 
-Standards for creating, naming, and evaluating chain variants in FAFO. Chain variants represent structural or parameter changes to a tenant's chain — as opposed to prompt variants, which only change prompt text.
+## Directory layout
 
-## Directory Layout
-
-```
+```text
 tenants/<tenant_id>/
   chains/
-    <baseline>.py              # Baseline chain (read-only during optimization)
+    <baseline>.py                       # Baseline chain (read-only during optimization)
     variants/
-      <name>-<NNN>.py          # Structural variants
+      <base_chain>-<pattern>-<NNN>.py   # Structural variants
   configs/
-    config-<variant-name>.json # Eval config per variant
+    config-<variant-name>.json          # Eval config per variant
 ```
 
-## Naming Convention
+## Naming
 
-Chain variant files follow the pattern: `<base_chain>-<pattern>-<NNN>.py`
+Chain variant files follow the pattern `<base_chain>-<pattern>-<NNN>.py`:
 
-- `<base_chain>`: Name of the parent chain file (without `.py`)
-- `<pattern>`: The optimization pattern applied (from `agentic-chain-patterns.md`)
-- `<NNN>`: Zero-padded sequence number
+| Part | Meaning |
+|---|---|
+| `<base_chain>` | Name of the parent chain file, without `.py` |
+| `<pattern>` | The optimization pattern applied, from [`agentic-chain-patterns.md`](../prompting-guides/agentic-chain-patterns.md) |
+| `<NNN>` | Zero-padded sequence number |
 
 Examples:
-- `answer-self-refine-001.py` — first self-refine variant of the answer chain
-- `multi_hop-reflexion-001.py` — first reflexion variant of multi_hop
-- `multi_hop-reflexion-002.py` — second iteration on the reflexion approach
 
-## Metadata Docstring
+- `answer-self-refine-001.py`: first self-refine variant of the answer chain
+- `multi_hop-reflexion-001.py`: first reflexion variant of multi_hop
+- `multi_hop-reflexion-002.py`: second iteration on the reflexion approach
 
-Every chain variant must include a metadata docstring at the module level:
+## Metadata docstring
+
+Every chain variant must include a module-level metadata docstring:
 
 ```python
 """Chain variant: answer-self-refine-001
@@ -51,27 +54,36 @@ Created at: 2026-03-16
 """
 ```
 
-## Eval Config Convention
+## Eval configs
 
 Each chain variant gets its own eval config in `tenants/<tenant_id>/configs/`:
 
-- Config filename: `config-<variant-name>.json`
-- The config's `chain.path` points to the variant file
-- All other config fields (dataset, scoring, provider) stay the same as baseline unless the variant specifically requires different parameters
+- The filename is `config-<variant-name>.json`.
+- `chain.path` points to the variant file.
+- All other fields (dataset, scoring, provider) stay the same as the baseline
+  unless the variant requires different parameters.
 
-For parameter-only variants (no new `.py` file), the config is the variant — it overrides `chain.config` values like `retrieval_k` or `temperature`.
+A parameter-only variant has no new `.py` file: the config is the variant. It
+overrides config values such as `chain.config.retrieval_k` or
+`provider_settings.temperature`.
 
-## Relationship to Prompt Variants
+## Prompts for new nodes
 
-Chain variants may reference prompt variants. When a chain variant introduces new nodes, each new node's prompt goes in `prompts/modules/<node_name>/variant-001.md` following normal prompt variant conventions.
+Chain variants may reference prompt variants. When a chain variant adds a node,
+that node's prompt goes in `prompts/modules/<node_name>/variant-001.md`,
+following the normal prompt variant conventions.
 
 ## Rules
 
-1. **Never modify the baseline chain** — always create a new variant file
-2. **Never edit existing variants in-place** — create a new sequence number
-3. **Use `make_llm_node`** from `src.hephaestus.chains.nodes` for new LLM nodes
-4. **Preserve `ChainState` protocol** — all variants must set `context`, `output_text`, `step_outputs`, and `diagnostics` correctly
-5. **Preserve scorer compatibility** — the variant's output format must match what the active scorer expects
-6. **No dataset leakage** — no case-specific conditionals in chain code
-7. **All prompt paths from config** — use `config["prompt_paths"]` for template paths, never hardcode
-8. **Pattern allowlist** — structural patterns must come from `agentic-chain-patterns.md`; novel patterns require user approval
+1. **Never modify the baseline chain.** Always create a new variant file.
+2. **Never edit an existing variant in place.** Create a new sequence number.
+3. **Use `make_llm_node`** from `src.hephaestus.chains.nodes` for new LLM nodes.
+4. **Preserve the `ChainState` protocol.** Every variant must set `context`,
+   `output_text`, `step_outputs`, and `diagnostics` correctly.
+5. **Preserve scorer compatibility.** The variant's output format must match
+   what the active scorer expects.
+6. **No dataset leakage.** Chain code has no case-specific conditionals.
+7. **Take all prompt paths from config.** Use `config["prompt_paths"]` for
+   template paths; never hardcode them.
+8. **Pattern allowlist.** Structural patterns must come from
+   `agentic-chain-patterns.md`; novel patterns require user approval.

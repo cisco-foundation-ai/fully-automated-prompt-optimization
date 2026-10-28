@@ -6,21 +6,19 @@ SPDX-License-Identifier: Apache-2.0
 
 # Headless Optimization
 
-## Purpose
-
 `python -m hephaestus.cli optimize` runs the prompt- and parameter-level
-optimization loop with nothing but provider credentials. No Claude Code or
-Codex session is involved: a plain-code coordinator runs the loop, and each
-judgment step is one JSON call to an LLM role.
+optimization loop with nothing but provider credentials. A plain-code
+coordinator runs the loop, and each judgment step is one JSON call to an LLM
+role. No Claude Code or Codex session is involved.
 
-Scope is deliberately narrower than the agent loop in
-[`prompt-iteration-loop.md`](prompt-iteration-loop.md): only **prompt text**
-and **declared parameters** change. Chain-structure variants, skills, web
-research, and synthetic-data generation remain agent-only.
+The scope is deliberately narrower than the
+[agent loop](prompt-iteration-loop.md): only **prompt text** and **declared
+parameters** change. Chain-structure variants, skills, web research, and
+synthetic-data generation remain agent-only.
 
 ## Loop
 
-```
+```text
 baseline: eval train (+ val)
 repeat until a stop condition:
   1. attribute   rule-based step attribution over the current best's train results
@@ -35,36 +33,44 @@ repeat until a stop condition:
 optional: eval baseline and best once on test
 ```
 
-Stop conditions: `budget.max_iterations` reached, `budget.target_score`
-reached on the selection split, every allowed level has
-`budget.plateau_patience` consecutive rejections since the last acceptance, or
-no failing training cases remain.
+The loop stops when any of these holds:
+
+- `budget.max_iterations` is reached.
+- `budget.target_score` is reached on the selection split.
+- Every allowed level has `budget.plateau_patience` consecutive rejections
+  since the last acceptance.
+- No failing training cases remain.
+
+## Roles
 
 | Role | Input | Output |
 |------|-------|--------|
 | Analyst | current best prompts, the training overview, sampled failing **train** cases with metadata, attribution summary, run history with per-case flips, techniques tried since the last improvement, tenant guidance, scorer source | failure clusters and one plan |
-| Prompt proposer | one module's prompt body, its placeholders, the plan, the analyst's clusters, the targeted train cases, the training overview | full new prompt body |
+| Prompt proposer | one module's prompt body, its placeholders, the plan, the analyst's clusters, the targeted train cases, the training overview, tenant guidance, scorer source | full new prompt body |
 | Reviewer | previous and proposed prompt, plan scope and hypothesis, the targeted train cases | verdict and issues |
 
 The **training overview** lists every training case (inputs, expected output,
 metadata, and whether the current best passes it) when the train split has at
-most `train_overview_limit` cases. It lets the roles induce the structure of the
-task, for example which kinds of inputs map to each output, instead of patching
-individual failures. A **rewrite** plan restructures the whole prompt from that
-overview; an **edit** plan makes one focused change. Each history entry records
-which training cases the attempt fixed and broke, so stateless role calls can
-learn from rejected attempts.
+most `train_overview_limit` cases. It lets the roles induce the structure of
+the task, such as which kinds of inputs map to each output, instead of
+patching individual failures.
 
-Every role response is validated in code. An invalid response is retried once
-with the validation errors attached; a second failure records the iteration as
+A **rewrite** plan restructures the whole prompt from that overview; an
+**edit** plan makes one focused change.
+
+Each history entry records which training cases the attempt fixed and broke,
+so stateless role calls can learn from rejected attempts.
+
+Code validates every role response. An invalid response is retried once with
+the validation errors attached; a second failure records the iteration as
 `role_error`. Parameter plans are validated against the policy's parameter
 space before they can be evaluated.
 
 ## Policy
 
 The policy is the machine-readable counterpart of the tenant playbook's scope
-section. Translating the playbook into a policy is a human step; the
-coordinator enforces only what the policy says.
+section. A human translates the playbook into a policy; the coordinator
+enforces only what the policy says.
 
 ```json
 {
@@ -90,24 +96,15 @@ coordinator enforces only what the policy says.
 }
 ```
 
-- `levels`: any of `prompt` and `parameter`. `parameter` requires a
-  `parameter_space`.
-- `prompt_modules`: optional allowlist of `chain.config.prompt_paths` keys;
-  defaults to every module.
-- `parameter_space`: dotted paths into the eval config with `int`, `float`,
-  `choice`, or `bool` specs. Allowed paths are `provider_settings.model`,
-  `temperature`, `top_p`, `max_tokens`, and top-level `chain.config.<key>` keys
-  other than `prompt_paths`, `skill_paths`, and `optimization_target`.
-- `datasets.val`: strongly recommended. Without it, selection falls back to the
-  train split and `train_tiebreak` does not apply.
-- `acceptance.train_tiebreak`: accept a candidate whose val gain is below
-  `min_val_delta` but not negative when its train score strictly improves.
-  Small val splits tie often; without this, real train gains are discarded.
-- `train_overview_limit`: show the full training overview when the train split
-  has at most this many cases (`0` disables it). Larger splits get only the
-  `max_failures_shown` sampled failing cases.
-- `roles.model`: defaults to the same OpenAI model the evaluation-asset
-  pipeline uses.
+| Field | Notes |
+|---|---|
+| `levels` | Any of `prompt` and `parameter`. `parameter` requires a `parameter_space`. |
+| `prompt_modules` | Optional allowlist of `chain.config.prompt_paths` keys. Defaults to every module. |
+| `parameter_space` | Dotted paths into the eval config, each with an `int`, `float`, `choice`, or `bool` spec. Allowed paths are `provider_settings.<key>` for `model`, `temperature`, `top_p`, and `max_tokens`, and top-level `chain.config.<key>` keys other than `prompt_paths`, `skill_paths`, and `optimization_target`. |
+| `datasets.val` | Strongly recommended. Without it, selection falls back to the train split and `train_tiebreak` does not apply. |
+| `acceptance.train_tiebreak` | Accept a candidate whose val gain is below `min_val_delta` but not negative when its train score strictly improves. Small val splits tie often; without this, real train gains are discarded. |
+| `train_overview_limit` | Show the full training overview when the train split has at most this many cases (`0` disables it). Larger splits get only the `max_failures_shown` sampled failing cases. |
+| `roles.model` | Defaults to the same OpenAI model the evaluation-asset pipeline uses. |
 
 ## Running
 
@@ -132,34 +129,35 @@ policy. The command prints a JSON summary when the loop stops.
 | `prompts/.../variant-NNN.md` | New prompt variants, written next to their parent with the next free number and the parent's license header |
 
 Selection scores count failed executions as 0, so a candidate cannot gain by
-causing infrastructure failures. Run summaries keep reporting successful-only
+causing infrastructure failures. Run summaries still report successful-only
 averages.
 
-## Enforcement in this mode
+## Enforcement
 
-These controls are agent-enforced in the agent loop. Here the coordinator
+In the agent loop these controls are agent-enforced. Here the coordinator
 enforces them in code, within the limits of the policy:
 
-- **Training-only authoring**: role payloads contain per-case data from the
+- **Training-only authoring:** role payloads contain per-case data from the
   train split only. Val and test contribute aggregate scores only.
-- **Validation-only selection**: candidates are accepted on the val split.
-- **Single test evaluation**: test runs only with `--final-test`, after
+- **Validation-only selection:** candidates are accepted on the val split.
+- **Single test evaluation:** test runs only with `--final-test`, after
   optimization stops. A workspace with a test result cannot be resumed.
-- **Scope**: only declared levels, modules, and parameter bounds can change.
-- **Clone-new-variant**: prompts are written to new files with exclusive
-  creation, and existing variants are never edited.
-- **Held-out naming check**: a strong role model can name val or test inputs
-  from its own knowledge, for example the best-known product of a kind, which
+- **Scope:** only declared levels, modules, and parameter bounds can change.
+- **Clone-new-variant:** prompts are written to new files with exclusive
+  creation; existing variants are never edited.
+- **Held-out naming check:** a strong role model can name val or test inputs
+  from its own knowledge (for example, the best-known product of a kind), which
   inflates held-out scores without any data access. The static review blocks
   prompts that name a val or test input, with a message that does not reveal
   which input matched.
-- **Mechanical review checks**: placeholder integrity, `System:`/`User:`
+- **Mechanical review checks:** placeholder integrity, `System:`/`User:`
   section markers, training case-ID references, short training inputs (such as
   a product or entity name) named verbatim, and 8-word spans copied from
   training cases block a variant before any eval.
 
-These are not enforced:
+Not enforced:
+
 - The reviewer role's semantic checks (example-specific hints, paraphrased
   leakage) are model judgment.
-- Policy files and the checkout itself can be edited by anyone with access.
-  This is not an operating-system sandbox.
+- Anyone with access can edit policy files and the checkout itself. This is
+  not an operating-system sandbox.

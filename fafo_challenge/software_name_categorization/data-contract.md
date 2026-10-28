@@ -6,11 +6,17 @@ SPDX-License-Identifier: Apache-2.0
 
 # Data Contract
 
+Dataset inventory, case schema, labels, and scoring expectations for the
+Software Name Categorization Challenge.
+
 ## Dataset Inventory
 
-- `data/train.jsonl` - 80 cases, 10 per label.
-- `data/eval.jsonl` - 40 cases, 5 per label.
-- `data/test.jsonl` - 80 cases, 10 per label.
+| File | Cases | Per label |
+|---|---|---|
+| `data/train.jsonl` | 80 | 10 |
+| `data/eval.jsonl` | 40 | 5 |
+| `data/test.jsonl` | 80 | 10 |
+
 - Source: static checked-in JSONL files with real public software names.
 - Label snapshot date: July 13, 2026.
 
@@ -40,7 +46,7 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Label Taxonomy
 
-The allowed labels are:
+The allowed labels (also listed in [`labels.md`](labels.md)):
 
 - `network_and_remote_access`
 - `exposure_testing`
@@ -50,8 +56,6 @@ The allowed labels are:
 - `sensitive_key_material`
 - `security_posture_changes`
 - `general_utility_other`
-
-See `labels.md` for the label list.
 
 ## Check Expectations
 
@@ -68,8 +72,9 @@ See `labels.md` for the label list.
 ## Dataset Handling
 
 - Treat the checked-in JSONL files as the challenge source of truth.
-- Validate that each split remains balanced across all labels after any dataset
-  change.
-- Verify real software names and category labels against public product pages
-  or project documentation after any dataset change.
-- Do not move these challenge JSONLs into `tenants/*/datasets/` as tracked files.
+- After any dataset change:
+  - Validate that each split remains balanced across all labels.
+  - Verify real software names and category labels against public product
+    pages or project documentation.
+- Do not move these challenge JSONLs into `tenants/*/datasets/` as tracked
+  files.

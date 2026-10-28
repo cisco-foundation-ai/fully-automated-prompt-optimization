@@ -4,25 +4,25 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAFO Challenge Assets
+# FAFO challenge assets
 
-This directory contains reusable public challenge assets that are intentionally
-kept outside `tenants/`.
+Reusable public challenge datasets and instructions, kept outside `tenants/` on
+purpose.
 
-Tenant directories are runtime workspaces. Their `datasets/` and
-`source_artifacts/` payloads are local artifacts and are not tracked by git.
-Challenge packages in this directory are different: they are generic public
-datasets and instructions that can be copied into an example tenant or into a
-participant-created tenant.
+Tenant directories are runtime workspaces: their `datasets/` and
+`source_artifacts/` payloads are local and not tracked by git. Challenge
+packages are generic public datasets and instructions that you copy into an
+example tenant or a tenant you create.
 
-## Available Challenges
+## Available challenges
 
-- `software_name_categorization/` - classify real software names into broad
-  defender-oriented software-nature categories.
+| Challenge | Task |
+|---|---|
+| [`software_name_categorization/`](software_name_categorization/) | Classify real software names into broad, defender-oriented software-nature categories. |
 
-## Using a Challenge Dataset
+## Using a challenge dataset
 
-Copy the selected challenge JSONL files into a tenant dataset directory:
+Copy the challenge JSONL files into a tenant dataset directory:
 
 ```bash
 mkdir -p tenants/<tenant_id>/datasets/datasets

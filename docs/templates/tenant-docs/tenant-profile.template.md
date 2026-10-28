@@ -20,4 +20,3 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Tenant Terminology
 - Tenant-specific terms and aliases used in prompts/data.
-

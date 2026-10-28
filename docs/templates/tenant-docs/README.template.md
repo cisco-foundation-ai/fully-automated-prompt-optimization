@@ -22,7 +22,7 @@ SPDX-License-Identifier: Apache-2.0
 - Iteration playbook: `docs/iteration-playbook.md`
 - Change log: `docs/change-log.md`
 
-Reference canonical global process guidance from tenant docs instead of duplicating it.
+Link to the canonical global process docs instead of duplicating them in tenant docs.
 
 ## Quick Run
 - `python scripts/eval/run_eval_and_summarize.py --config tenants/<tenant_id>/configs/local-<run-name>.json`

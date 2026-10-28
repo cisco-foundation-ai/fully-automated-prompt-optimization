@@ -6,24 +6,25 @@ SPDX-License-Identifier: Apache-2.0
 
 # Tenant Model
 
-Each tenant lives in `tenants/<tenant_id>/`:
-- `source_artifacts/` local raw customer artifact cache hydrated from GCS
-- `datasets/` local derived artifact cache hydrated from GCS (including synthetic example payloads and generated synthetic JSONL datasets)
-- `code/` tenant-specific conversion logic that produces unified JSONL datasets
-- `tests/` tenant-specific tests that validate tenant conversion/data assumptions
-- `prompts/variants/` tenant prompt variants
-- `skills/<skill-name>/` agent skill files for agentic tenants (optional; optimized as a textual level co-equal with prompts)
-- `evals/tmp` and `evals/archive` local eval outputs (not committed)
-- `configs/` local ephemeral eval configs (ignored, not committed)
-- `storage/config.json` tracked storage config for `customer-data` operations
-- `docs/` tenant-specific operating docs (see `docs/tenant-docs-contract.md`)
-- `reports/` local-only point-in-time analysis notes (ignored, non-authoritative, drift allowed)
-- `examples/` tenant-scoped helper scripts and one-off runnable examples
-- `README.md` tenant landing page and quick links
+A tenant is one optimization project. Each tenant lives in `tenants/<tenant_id>/`
+with this layout:
 
-Core eval remains unified-JSONL only. Tenant-specific adapters should be implemented as offline
-conversion scripts under `code/`, not runtime eval plugins.
+| Path | Contents |
+|---|---|
+| `README.md` | Tenant landing page and quick links |
+| `docs/` | Tenant-specific operating docs; checked in. See the [tenant docs contract](tenant-docs-contract.md). |
+| `chains/` | Tenant chains; structural variants go in `chains/variants/` (see [chain variant conventions](processes/chain-variant-conventions.md)) |
+| `prompts/` | Tenant prompt variants, in `prompts/variants/` or per module in `prompts/modules/<module>/` |
+| `skills/<skill-name>/` | Agent skill files for agentic tenants. Optional; optimized as a textual level co-equal with prompts. |
+| `code/` | Tenant-specific conversion logic that produces unified JSONL datasets |
+| `tests/` | Tenant-specific tests that validate conversion and data assumptions |
+| `examples/` | Tenant-scoped helper scripts and one-off runnable examples |
+| `storage/config.json` | Tracked storage config for `customer-data` operations |
+| `source_artifacts/` | Local cache of raw customer artifacts, hydrated from GCS |
+| `datasets/` | Local cache of derived artifacts, hydrated from GCS, including synthetic example payloads and generated synthetic JSONL datasets. Not checked in. |
+| `configs/` | Local, ephemeral eval configs. Git-ignored except a few tracked files, such as `eval.json`, `train.json`, and `test.json`. |
+| `evals/tmp`, `evals/archive` | Local eval outputs; not committed |
+| `reports/` | Local-only, point-in-time analysis notes. Git-ignored and non-authoritative; drift is allowed, and they must not be treated as a source of truth. |
 
-Tenant-specific documentation belongs under `tenants/<tenant_id>/docs/` and should be checked in.
-Point-in-time analysis in `tenants/<tenant_id>/reports/` is local-only and must not be treated as source of truth.
-Synthetic examples and dataset payloads under `tenants/<tenant_id>/datasets/` are local cache and should not be checked in.
+Core eval accepts unified JSONL only. Implement tenant-specific adapters as
+offline conversion scripts under `code/`, not as runtime eval plugins.

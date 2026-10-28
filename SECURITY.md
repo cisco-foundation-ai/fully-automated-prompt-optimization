@@ -4,28 +4,22 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Security Policies and Procedures
+# Security policies and procedures
 
-This document outlines security procedures and general policies for the
-`Fully Automated Flow Optimization` project.
-
-- [Disclosing a security issue](#disclosing-a-security-issue)
-- [Vulnerability management](#vulnerability-management)
-- [Suggesting changes](#suggesting-changes)
+How to report a security issue in `Fully Automated Flow Optimization`, and how
+the maintainers handle it.
 
 ## Disclosing a security issue
 
-The `Fully Automated Flow Optimization` maintainers take all security issues in the project
-seriously. Thank you for improving the security of `Fully Automated Flow Optimization`. We
-appreciate your dedication to responsible disclosure and will make every effort
-to acknowledge your contributions.
+The maintainers take all security issues in the project seriously. Thank you
+for disclosing responsibly; we will make every effort to acknowledge your
+contribution.
 
-`Fully Automated Flow Optimization` leverages GitHub's private vulnerability reporting.
+Report vulnerabilities through GitHub's private vulnerability reporting. See
+[GitHub's documentation on private reporting](https://docs.github.com/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability)
+for how to submit a report.
 
-To learn more about this feature and how to submit a vulnerability report,
-review [GitHub's documentation on private reporting](https://docs.github.com/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability).
-
-Here are some helpful details to include in your report:
+Include in your report:
 
 - a detailed description of the issue
 - the steps required to reproduce the issue
@@ -36,21 +30,18 @@ A maintainer will acknowledge the report within three (3) business days, and
 will send a more detailed response within an additional three (3) business days
 indicating the next steps in handling your report.
 
-If you've been unable to successfully draft a vulnerability report via GitHub
-or have not received a response during the alloted response window, please
-reach out via the [Cisco Open security contact email](mailto:paulkass@cisco.com).
+If you cannot submit a report through GitHub, or have not received a response
+within the allotted window, contact the
+[Cisco Open security contact email](mailto:paulkass@cisco.com).
 
-After the initial reply to your report, the maintainers will endeavor to keep
-you informed of the progress towards a fix and full announcement, and may ask
-for additional information or guidance.
+After the first reply, the maintainers will endeavor to keep you informed of
+progress toward a fix and full announcement, and may ask for more information
+or guidance.
 
 ## Vulnerability management
 
-When the maintainers receive a disclosure report, they will assign it to a
-primary handler.
-
-This person will coordinate the fix and release process, which involves the
-following steps:
+The maintainers assign each disclosure report to a primary handler, who
+coordinates the fix and release:
 
 - confirming the issue
 - determining affected versions of the project
@@ -59,5 +50,4 @@ following steps:
 
 ## Suggesting changes
 
-If you have suggestions on how this process could be improved please submit an
-issue or pull request.
+To suggest improvements to this process, submit an issue or pull request.
