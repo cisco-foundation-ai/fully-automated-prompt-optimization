@@ -6,30 +6,31 @@ SPDX-License-Identifier: Apache-2.0
 
 # Reference experiment results
 
-Reference results for the proposed method **FAFO** and the baseline **GEPA**,
-showing what a complete optimization run produces and how its outputs are
-organized on disk.
+Reference results for FAFO (the proposed method) and GEPA (the baseline). They
+show what a complete optimization run produces and how its outputs are laid out
+on disk.
 
-Both methods were run on the same matrix:
+Both methods ran on the same matrix, giving **54 result cells per method**
+(6 × 3 × 3):
 
-- **6 benchmarks** — `aime2025`, `hotpotqa`, `hover`, `ifbench`, `livebench_math`, `papillon`
-- **3 task models** — `gpt-4.1-mini`, `gpt-5.4-mini`, `gemma-3-12b-it`
-- **3 trials** — `trial-1`, `trial-2`, `trial-3`
+| Dimension | Values |
+|---|---|
+| 6 benchmarks | `aime2025`, `hotpotqa`, `hover`, `ifbench`, `livebench_math`, `papillon` |
+| 3 task models | `gpt-4.1-mini`, `gpt-5.4-mini`, `gemma-3-12b-it` |
+| 3 trials | `trial-1`, `trial-2`, `trial-3` |
 
-giving **54 result cells per method** (6 × 3 × 3).
-
-These cells hold the curated optimization artifacts — prompts, configs, scores,
-optimized programs, and logs. The raw per-case model outputs are not included;
-[`samples/`](samples/) carries one representative output file per method to show
+Each cell holds the curated optimization artifacts: prompts, configs, scores,
+optimized programs, and logs. Raw per-case model outputs are not included;
+[`samples/`](samples/) has one representative output file per method to show
 that format.
 
 ## Directory layout
 
-A single scaffold, `<method>/<benchmark>/<model>/trial-N/`, holds both methods
-side by side. Inside each cell, each method keeps its own file layout (FAFO and
-GEPA emit different artifacts).
+Both methods share one scaffold, `<method>/<benchmark>/<model>/trial-N/`.
+Inside a cell, each method keeps its own file layout, because FAFO and GEPA
+emit different artifacts.
 
-```
+```text
 experiments/
 ├── README.md
 │
@@ -45,13 +46,13 @@ experiments/
 │       │   ├── progress.json       ←   avg_composite_score + score breakdown + case counts
 │       │   └── run_config.json     ←   what was evaluated
 │       └── optimize-loop/
-│           └── progress.log[.<ts>] ← optimization-loop status (rounds, budget)
+│           └── progress[.<ts>].log ← optimization-loop status (rounds, budget)
 │
 ├── gepa/
 │   └── <benchmark>/<model>/trial-N/                    ← GEPA cell:
 │       ├── config.json             ← optimizer config (retains original "seed": 0|1|2)
 │       ├── run_status.json         ← status + duration_s + final score
-│       ├── timing.json             ← epochs, iterations, metric calls
+│       ├── timing.json             ← start/end epochs, iterations, metric calls
 │       ├── token_stats.json        ← task-LM and reflector-LM tokens + cost
 │       ├── evaluation_results/
 │       │   ├── results.json        ← final test score + optimizer cost/tokens
@@ -65,17 +66,18 @@ experiments/
     └── gepa/…test.sample.jsonl
 ```
 
-Concrete cell examples: `experiments/fafo/hotpotqa/gpt-4.1-mini/trial-1/` and
+Example cells: `experiments/fafo/hotpotqa/gpt-4.1-mini/trial-1/` and
 `experiments/gepa/hotpotqa/gpt-4.1-mini/trial-1/`.
 
 ## Naming
 
-The two methods used different naming conventions upstream; directory names are
-normalized to a single canonical vocabulary across all three dimensions. The
-original names are preserved inside each cell's own files (e.g. GEPA's
-`config.json` keeps `model_name` and `seed`).
+The two methods used different names upstream. Directory names use one
+canonical vocabulary for all three dimensions. The original names survive
+inside each cell's own files; for example, GEPA's `config.json` keeps
+`model_name` and `seed`.
 
-**Benchmarks** (canonical = lowercase snake, matching the repo's tenant ids):
+**Benchmarks.** Canonical names are lowercase snake case, matching the repo's
+tenant IDs.
 
 | Canonical | FAFO native | GEPA native |
 |-----------|-------------|-------------|
@@ -86,7 +88,7 @@ original names are preserved inside each cell's own files (e.g. GEPA's
 | `livebench_math` | `livebench_math` | `LiveBenchMathBench` |
 | `papillon` | `papillon` | `Papillon` |
 
-**Models** (canonical = the dotted API model string):
+**Models.** Canonical names are the dotted API model strings.
 
 | Canonical | FAFO native | GEPA native | GEPA `task_model` |
 |-----------|-------------|-------------|-------------------|
@@ -94,7 +96,7 @@ original names are preserved inside each cell's own files (e.g. GEPA's
 | `gpt-5.4-mini` | `gpt54mini` | `gpt-54-mini` | `openai/gpt-5.4-mini` |
 | `gemma-3-12b-it` | `gemma12b` | `gemma3-12b-it` | (AWS Bedrock) |
 
-**Trials** are 1-indexed; GEPA's upstream seeds are 0-indexed:
+**Trials.** Canonical trials are 1-indexed; GEPA's upstream seeds are 0-indexed.
 
 | Canonical | FAFO native | GEPA native | GEPA `config.json` `seed` |
 |-----------|-------------|-------------|---------------------------|
@@ -103,23 +105,31 @@ original names are preserved inside each cell's own files (e.g. GEPA's
 | `trial-3` | `-t3` | `seed_2` | `2` |
 
 **Reflector model.** Every GEPA `config.json` records
-`reflector_model: bedrock/us.anthropic.claude-opus-4-6-v1` (Claude Opus 4.6) —
-the model GEPA uses to propose new instructions during optimization, distinct
-from the task model being evaluated.
+`reflector_model: bedrock/us.anthropic.claude-opus-4-6-v1` (Claude Opus 4.6).
+GEPA uses this model to propose new instructions during optimization; it is
+separate from the task model being evaluated.
 
 ## Reading the results
 
-- **GEPA** — per cell, the final score is in `run_status.json` and
-  `evaluation_results/results.json`; the optimized prompt text is in
-  `evaluation_results/optimized_program_state.json` under each module's
-  `…predict.signature.instructions`. Per-cell cost and token usage are in
-  `token_stats.json`, and timing/budget in `timing.json`.
-- **FAFO** — per run, the headline score is `progress.json` →
-  `avg_composite_score` (with `summary.md` for a readable view, and
-  `run_config.json` for what was evaluated); the optimized prompts are the
-  highest-numbered `prompts/.../variant-*.md`. Within `evals/`, the
-  `baseline-variant001-*` run is the un-optimized baseline and `chain-best-test`
-  / `fafo-final-test*` are the selected optimized program (other run dirs are
-  intermediate trajectory steps); the trailing token of a run name is its split
-  (`train` / `val` / `test`). The number of eval runs per cell varies with how
-  much each cell was iterated.
+**GEPA**, per cell:
+
+- Final score: `run_status.json` and `evaluation_results/results.json`.
+- Optimized prompt text: `evaluation_results/optimized_program_state.json`,
+  under each module's `…predict.signature.instructions`.
+- Cost and token usage: `token_stats.json`. Timing and budget: `timing.json`.
+
+**FAFO**, per eval run:
+
+- Headline score: `progress.json` → `avg_composite_score`. `summary.md` gives a
+  readable view, and `run_config.json` records what was evaluated.
+- Optimized prompts: the highest-numbered `prompts/.../variant-*.md`.
+- Run directories under `evals/`:
+
+  | Run name | Meaning |
+  |---|---|
+  | `baseline-variant001-*` | Un-optimized baseline |
+  | `chain-best-test`, `fafo-final-test*` | Selected optimized program |
+  | Any other | Intermediate trajectory step |
+
+- The trailing token of a run name is its split (`train`, `val`, or `test`).
+- The number of eval runs per cell varies with how much each cell was iterated.

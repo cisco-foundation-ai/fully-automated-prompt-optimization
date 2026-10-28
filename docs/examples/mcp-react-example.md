@@ -6,16 +6,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # Example: ReAct Agent with MCP Tools
 
-This example demonstrates a complete agentic workflow using FAFO with MCP integration.
+A complete agentic tenant, end to end: a ReAct agent that searches the web,
+reads and writes files, and answers questions that need tools. For the concepts
+and limits behind each step, see the [MCP quick start](../mcp-quick-start.md).
 
-## Scenario
-
-Build an agent that can:
-- Search the web for information
-- Read/write files
-- Answer complex questions requiring tool use
-
-## Directory Structure
+## Directory structure
 
 ```
 tenants/web_agent/
@@ -36,9 +31,7 @@ tenants/web_agent/
     └── iteration-playbook.md
 ```
 
----
-
-## 1. Dataset: Web Research Tasks
+## 1. Dataset: web research tasks
 
 **`tenants/web_agent/datasets/web_research_tasks.jsonl`**
 
@@ -48,13 +41,11 @@ tenants/web_agent/
 {"case_id": "3", "task_type": "research", "context": {"task": "Compare the GDP of USA vs China in 2024 and create a summary file"}, "expected": {"answer_contains": "summary", "tools_used": ["brave_web_search", "write_file"]}, "metadata": {"difficulty": "hard"}}
 ```
 
----
+## 2. MCP server configuration
 
-## 2. MCP Server Configuration
-
-The current config loader reads servers and tool execution settings directly
-from the eval config; it does not load an MCP `config_path` indirection.
-The following `mcp` object is embedded in `eval.json` below:
+The config loader reads servers and tool-execution settings directly from the
+eval config; it does not load an MCP `config_path` indirection. This `mcp`
+object is embedded in `eval.json` in step 3:
 
 ```json
 {
@@ -86,13 +77,11 @@ The following `mcp` object is embedded in `eval.json` below:
 }
 ```
 
-This uses Brave's current official stdio package and tool naming:
+The search server uses Brave's current official stdio package and tool naming:
 [`@brave/brave-search-mcp-server` exposes `brave_web_search`](https://github.com/brave/brave-search-mcp-server/blob/main/README.md).
 Install a current Node.js/npm runtime so `npx` is available.
 
----
-
-## 3. Eval Configuration
+## 3. Eval configuration
 
 **`tenants/web_agent/configs/eval.json`**
 
@@ -157,13 +146,13 @@ Install a current Node.js/npm runtime so `npx` is available.
 }
 ```
 
-`mcp.tool_execution` is parsed and recorded, but is not automatically wired
-into this tenant chain. `agent_limits` below is the explicit node configuration
-that controls this example's ReAct limit.
+`mcp.tool_execution` is parsed and recorded but not automatically wired into
+this tenant chain. `agent_limits` is the explicit node configuration that
+controls this example's ReAct limit; the chain in step 4 passes it to
+`make_agentic_node`. See
+[Limits and timeouts](../mcp-quick-start.md#limits-and-timeouts).
 
----
-
-## 4. ReAct Chain
+## 4. ReAct chain
 
 **`tenants/web_agent/chains/react_agent.py`**
 
@@ -220,9 +209,7 @@ def build_chain(provider, config, mcp_manager=None):
     return graph.compile()
 ```
 
----
-
-## 5. Agent Prompt
+## 5. Agent prompt
 
 **`tenants/web_agent/prompts/modules/agent/variant-001.md`**
 
@@ -253,9 +240,10 @@ User: ${task}
 Think step-by-step and use tools as needed to complete this task.
 ```
 
----
-
 ## 6. Scorer
+
+`score_pipeline_case` scores the recorded `tool_call_history`; `score_case` is
+the fallback for non-agentic use, with no trajectory.
 
 **`tenants/web_agent/code/scorers/task_scorer.py`**
 
@@ -318,9 +306,7 @@ class TaskScorer(BaseScorer):
         }
 ```
 
----
-
-## 7. Running the Evaluation
+## 7. Run the evaluation
 
 ```bash
 # Set up environment
@@ -337,9 +323,7 @@ python -m hephaestus.cli eval --config tenants/web_agent/configs/eval.json
 cat tenants/web_agent/evals/run-001/summary.md
 ```
 
----
-
-## 8. Expected Output Structure
+## 8. Expected output
 
 **`tenants/web_agent/evals/run-001/results.jsonl`** (excerpt):
 
@@ -381,11 +365,9 @@ The standard agentic node stores the final model response in both
 remain available in `tool_call_history`; the node does not concatenate them
 into the final response.
 
----
+## 9. Optimization loop
 
-## 9. Optimization Loop
-
-Once you have baseline results, run the optimization agent:
+With baseline results, run the optimization agent:
 
 ```bash
 # In Claude Code
@@ -395,22 +377,22 @@ Once you have baseline results, run the optimization agent:
   → Success criteria: composite_score >= 90
 ```
 
-The agent will:
-1. Analyze failures (missing tool calls, inefficient searches, poor answers)
-2. Create variant-002 with improved ReAct prompting
-3. Run eval and compare
-4. Iterate until target score reached
+The agent:
+
+1. Analyzes failures (missing tool calls, inefficient searches, poor answers).
+2. Creates variant-002 with improved ReAct prompting.
+3. Runs the eval and compares.
+4. Iterates until it reaches the target score.
 
 Example iterations:
-- **variant-001** (baseline): Generic ReAct prompt → 72% composite
-- **variant-002**: Add tool selection guidance → 85% composite
-- **variant-003**: Add answer formatting rules → 92% composite ✓
 
----
+- **variant-001** (baseline): generic ReAct prompt → 72% composite
+- **variant-002**: add tool-selection guidance → 85% composite
+- **variant-003**: add answer-formatting rules → 92% composite (target met)
 
-## 10. Advanced Patterns
+## 10. Advanced patterns
 
-### Multi-Step with Verification
+### Multi-step with verification
 
 ```python
 def build_chain(provider, config, mcp_manager):
@@ -436,12 +418,12 @@ def build_chain(provider, config, mcp_manager):
     return graph.compile()
 ```
 
-### Tool-Specific Nodes
+### Tool-specific nodes
 
 `make_agentic_node` currently exposes all tools discovered through its supplied
-MCP manager. It does not accept an `allowed_tools` argument. Use separate MCP
-manager/configuration instances or implement a chain-level policy before
-constructing a node when a tenant needs tool restriction.
+MCP manager; it does not accept an `allowed_tools` argument. To restrict tools,
+use separate MCP manager/configuration instances or implement a chain-level
+policy before constructing a node.
 
 ```python
 def build_chain(provider, config, mcp_manager):
@@ -467,16 +449,5 @@ def build_chain(provider, config, mcp_manager):
     return graph.compile()
 ```
 
----
-
-## Summary
-
-This example demonstrates:
-- ✅ MCP server configuration and lifecycle management
-- ✅ ReAct-style agentic node with tool calling loop
-- ✅ Tool call tracking in evaluation results
-- ✅ Scoring that considers tool usage and efficiency
-- ✅ Optimization loop for improving agentic prompts
-- ✅ Conditional routing for advanced patterns
-
-The same patterns apply to any MCP-enabled workflow: code execution, database queries, API calls, etc.
+The same patterns apply to any MCP-enabled workflow, such as code execution,
+database queries, or API calls.

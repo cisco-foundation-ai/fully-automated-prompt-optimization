@@ -6,26 +6,24 @@ SPDX-License-Identifier: Apache-2.0
 
 # Software Name Mini Challenge
 
-This is a standalone manual prompt-tuning add-on for the software name
-categorization challenge. It does not import FAFO code or tenant assets.
+A standalone manual prompt-tuning add-on for the software name categorization
+challenge. It does not import FAFO code or tenant assets.
 
-The mini challenge contains:
+## Contents
 
-- `data/train_reference.jsonl` - the training dataset as ground truth reference.
-- `data/mini_test_easy.jsonl` - a fixed 10-case subset using 2 labels.
-- `data/mini_test_medium.jsonl` - a fixed 10-case subset using 4 labels.
-- `data/mini_test.jsonl` - a fixed 10-case difficult subset using all 8 labels.
-- `data/fafo_v006_results_easy.json` - bundled FAFO v006 comparison for easy.
-- `data/fafo_v006_results_medium.json` - bundled FAFO v006 comparison for medium.
-- `data/fafo_v006_results.json` - bundled FAFO v006 comparison for difficult.
-- `mini_eval.py` - a small evaluator that calls OpenAI directly.
-- `server.py` and `web/` - a local UI for prompt editing, scoring, and comparison.
+| Level | Labels | Test subset (10 cases) | Starter prompt | Bundled FAFO v006 comparison |
+|---|---|---|---|---|
+| `easy` | 2 | `data/mini_test_easy.jsonl` | `prompts/starter_prompt_easy.txt` | `data/fafo_v006_results_easy.json` |
+| `medium` | 4 | `data/mini_test_medium.jsonl` | `prompts/starter_prompt_medium.txt` | `data/fafo_v006_results_medium.json` |
+| `difficult` | All 8 | `data/mini_test.jsonl` | `prompts/starter_prompt_difficult.txt` | `data/fafo_v006_results.json` |
 
-## Levels
+Each test subset is fixed. Other files:
 
-- Easy: 2 labels.
-- Medium: 4 labels.
-- Difficult: 8 labels.
+- `data/train_reference.jsonl`: the training dataset, as a ground-truth
+  reference.
+- `mini_eval.py`: a small evaluator that calls OpenAI directly.
+- `server.py` and `web/`: a local UI for prompt editing, scoring, and
+  comparison.
 
 ## Prerequisites
 
@@ -33,7 +31,7 @@ The mini challenge contains:
 - An OpenAI API key in `OPENAI_API_KEY`.
 - Access to `gpt-4o-mini`.
 
-## Run From The Command Line
+## Run from the command line
 
 ```bash
 cd fafo_challenge/software_name_categorization/mini_challenge
@@ -45,10 +43,10 @@ The evaluator sends each software name to the selected model, normalizes the
 returned label, and reports micro-F1. For this single-label exact-match task,
 micro-F1 is the same as accuracy.
 
-Use `--level medium` with `prompts/starter_prompt_medium.txt`, or
-`--level difficult` with `prompts/starter_prompt_difficult.txt`.
+For other levels, pass `--level medium` or `--level difficult` with the
+matching starter prompt from the table above.
 
-To write a JSON result file:
+Write a JSON result file:
 
 ```bash
 python3 mini_eval.py \
@@ -57,13 +55,13 @@ python3 mini_eval.py \
   --output results/manual_results.json
 ```
 
-To validate the bundled FAFO v006 comparison without calling OpenAI:
+Validate the bundled FAFO v006 comparison without calling OpenAI:
 
 ```bash
 python3 mini_eval.py --level difficult --prompt prompts/starter_prompt_difficult.txt --fafo-reference
 ```
 
-## Run The UI
+## Run the UI
 
 ```bash
 cd fafo_challenge/software_name_categorization/mini_challenge
@@ -74,6 +72,6 @@ python3 server.py --host 127.0.0.1 --port 8766
 Open `http://127.0.0.1:8766`.
 
 The UI reads `OPENAI_API_KEY` from the server process environment. It shows the
-training dataset as ground truth reference, lets participants edit a prompt,
-runs the selected 10-case mini evaluation, and compares the manual result to the
-bundled FAFO v006 reference for that level.
+training dataset as a ground-truth reference, lets participants edit a prompt,
+runs the selected 10-case mini evaluation, and compares the manual result with
+the bundled FAFO v006 reference for that level.

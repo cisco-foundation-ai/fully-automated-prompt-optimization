@@ -4,21 +4,24 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAFO K8s Deployment
+# FAFO K8s deployment
 
-Run FAFO evals on a Kubernetes cluster.
+Run FAFO evals on a Kubernetes cluster. Each run gets its own pod, and results
+persist on a shared PVC.
 
 ## Prerequisites
 
 - `kubectl` configured with cluster access
 - `python3` available locally (used for config rewriting)
-- PVC `csi-pvc-mounted` available in your target namespace (see [Namespace Setup](#namespace-setup))
-- `.env` file at the project root with API keys (copy your `.envrc` or fill in `deploy/.env.example`)
+- PVC `csi-pvc-mounted` available in your target namespace (see
+  [Namespace setup](#namespace-setup))
+- `.env` file at the project root with API keys (copy your `.envrc` or fill in
+  `deploy/.env.example`)
 
-## Quick Start
+## Quick start
 
 ```bash
-# From the project root (projects/hephaestus/):
+# From the repository root:
 
 # 0. Set your target namespace (required)
 export NAMESPACE=my-namespace
@@ -45,28 +48,39 @@ deploy/scripts/run_eval.sh --stop hephaestus-<tenant_id>-<hash>
 deploy/scripts/run_eval.sh --cleanup
 ```
 
-## How It Works
+## How it works
 
-1. **Pod creation** — Each run creates a dedicated pod named `hephaestus-<tenant_id>-<hash>` with the PVC mounted at `/shared-storage`. One pod per job ensures full isolation.
+1. **Pod creation.** Each run creates a dedicated pod named
+   `hephaestus-<tenant_id>-<hash>`, with the PVC mounted at `/shared-storage`.
+   One pod per job gives full isolation.
+2. **Code sync.** `run_eval.sh` copies `src/`, `hephaestus/`, `pyproject.toml`,
+   the relevant `tenants/<tid>/` directory, and `.env` to `/tmp/<run-name>/` on
+   the pod in a single tar pipe. This workspace is ephemeral and per-run, so
+   tenant data is re-synced on every run.
+3. **Dependency install.** `pip install -e .` runs inside the pod. A marker file
+   (`.deps_installed`) stores a hash of `pyproject.toml`; the install is skipped
+   while the hash matches and repeated when `pyproject.toml` changes.
+4. **Config rewriting.** Only `output_dir` is rewritten, to point at the PVC
+   (`/shared-storage/heph-results/<run-name>/`), and `run_id` is set to the run
+   name. All other paths stay relative and work unchanged.
+5. **Results persistence.** Results are written to the PVC and survive pod
+   restarts. `--collect` copies them to `local-results/<run-name>/` under the
+   local repository root.
+6. **Pod completion.** For detached runs, the eval-runner container's
+   entrypoint watches the eval process by PID. When the eval exits, the
+   container exits with the eval's exit code (0 = success, non-zero = failure),
+   so the pod moves to `Succeeded` or `Failed`. Native K8s sidecars terminate
+   automatically when the eval-runner container exits. Results stay on the PVC.
 
-2. **Code sync** — `run_eval.sh` copies `src/`, `hephaestus/`, `pyproject.toml`, the relevant `tenants/<tid>/` directory, and `.env` to `/tmp/<run-name>/` on the pod.
-
-3. **Dependency install** — On first sync, `pip install -e .` is run inside the pod. Subsequent runs skip this step (a marker file tracks installation).
-
-4. **Config rewriting** — Only `output_dir` is rewritten to point to the PVC (`/shared-storage/heph-results/<run-name>/`). All other paths remain relative and work unchanged.
-
-5. **Results persistence** — Results are written to the PVC and survive pod restarts. Use `--collect` to copy them back to your local machine.
-
-6. **Pod completion** — Detached runs exit their pod on completion (Succeeded if eval passed, Failed if it errored). Use `--cleanup` to delete terminal pods. Results remain on the PVC.
-
-7. **Pod lifecycle** — The eval-runner container's entrypoint monitors the eval process via its PID. When the eval exits, the container exits with the eval's exit code (0 = success, non-zero = failure), transitioning the pod to `Succeeded` or `Failed`. Native K8s sidecars auto-terminate when the eval-runner container exits.
+Secrets (`.env`) are copied to the pod's `/tmp/` and sourced at runtime. They
+are not persisted to the PVC.
 
 ## Architecture
 
 ```
 Local machine                              K8s Pod
 +---------------------+                   +-------------------------------+
-| hephaestus/         |  kubectl cp       | /tmp/<run-name>/              |
+| hephaestus/         |  tar pipe         | /tmp/<run-name>/              |
 |   src/              | ───────────────>  |   src/  (code)                |
 |   tenants/<tid>/    |                   |   tenants/<tid>/  (data)      |
 |   pyproject.toml    |                   |   pyproject.toml              |
@@ -79,34 +93,36 @@ Local machine                              K8s Pod
                                           PVC: csi-pvc-mounted @ /shared-storage
 ```
 
-## Naming Convention
+## Run names
 
-Each eval run uses a unified name: `hephaestus-<tenant_id>-<hash>`
+Each eval run has one name, `hephaestus-<tenant_id>-<hash>`, used for:
 
-This name is used for:
-- **Pod name** — one dedicated pod per job
-- **Results directory** — `/shared-storage/heph-results/<run-name>/`
-- **Run metadata** — `.run_meta`, `.pid`, `.completed` markers in the results dir
+- **Pod name:** one dedicated pod per job.
+- **Results directory:** `/shared-storage/heph-results/<run-name>/`.
+- **Run metadata:** `.run_meta`, `.pid`, and `.completed` markers in the
+  results directory.
 
-Concurrent runs for the same tenant get different hashes (base36 of epoch seconds) and separate pods — no collisions. The same `run_id` is recorded in `run_config.json` and `progress.json`.
+The hash is base36 of the epoch seconds, so concurrent runs for the same tenant
+get different hashes and separate pods, with no collisions. The same `run_id` is
+recorded in `run_config.json` and `progress.json`.
 
-## Cleanup
+## Cleanup and shutdown
 
-### Auto-cleanup (detached runs)
+Deleting a pod is safe: results persist on the PVC and survive pod deletion.
 
-Detached runs transition to a terminal pod phase (Succeeded/Failed) after the eval completes. The `.completed` marker and all results remain on the PVC. Use `--cleanup` to delete terminal pods.
+**Detached runs** move to a terminal pod phase (`Succeeded` or `Failed`) when
+the eval completes. The `.completed` marker and all results remain on the PVC.
 
-### Interactive runs
-
-Interactive runs leave the pod running so you can inspect results. Delete manually when done:
+**Interactive runs** leave the pod running so you can inspect results. Delete it
+manually when done:
 
 ```bash
 kubectl -n $NAMESPACE delete pod hephaestus-<tenant_id>-<hash>
 ```
 
-### Batch cleanup
-
-Clean up stale eval pods (completed, crashed, or idle > 24h):
+**Batch cleanup.** `--cleanup` deletes completed and crashed eval pods (phase
+`Succeeded` or `Failed`). Pods older than the age threshold that have not
+finished are listed as stale, with the command to delete them manually.
 
 ```bash
 deploy/scripts/run_eval.sh --cleanup              # default: 24h age threshold
@@ -123,25 +139,28 @@ deploy/scripts/run_eval.sh --cleanup --age 12h    # custom threshold
 | `MEM_REQ` / `MEM_LIM` | 4Gi / 8Gi | Memory request / limit |
 | `NAMESPACE` | **(required)** | Kubernetes namespace for all commands |
 
-## Namespace Setup
+## Namespace setup
 
-All scripts require the `NAMESPACE` environment variable. Every `kubectl` command targets this namespace:
+All scripts require `NAMESPACE`, and every `kubectl` command targets it. The
+scripts exit with an error if it is not set.
 
 ```bash
 export NAMESPACE=my-namespace
 ```
 
-The scripts will exit with an error if `NAMESPACE` is not set.
-
 ### PVC requirement
 
-The scripts expect a PVC named `csi-pvc-mounted` in the target namespace. PVCs are namespace-scoped — the cluster has an existing PVC in the `default` namespace, but it is not visible from other namespaces.
+The scripts expect a PVC named `csi-pvc-mounted` in the target namespace. PVCs
+are namespace-scoped: the cluster has an existing PVC in the `default`
+namespace, but other namespaces cannot see it.
 
-If your namespace already has a PVC named `csi-pvc-mounted`, no extra setup is needed. Otherwise, you must create a new PV + PVC pair that points to the same underlying CSI storage.
+If your namespace already has a PVC named `csi-pvc-mounted`, no setup is needed.
+Otherwise, create a new PV + PVC pair that points to the same underlying CSI
+storage.
 
 ### Creating a PV + PVC for your namespace
 
-Replace `<your-namespace>` below with your actual namespace name:
+Replace `<your-namespace>` with your namespace name:
 
 ```bash
 kubectl apply -f - <<'EOF'
@@ -181,32 +200,28 @@ spec:
 EOF
 ```
 
-Verify the PVC binds:
+Verify that the PVC binds:
 
 ```bash
 kubectl -n <your-namespace> get pvc csi-pvc-mounted
 # STATUS should be "Bound"
 ```
 
-> **Critical**: The `volumeHandle` in the PV **must** match the actual volume handle used by your CSI driver to locate the backing directory on each node. Using an incorrect handle will cause `FailedMount` errors because the corresponding directory will not exist on the node filesystem.
+> **Critical:** the `volumeHandle` in the PV **must** match the volume handle
+> your CSI driver uses to locate the backing directory on each node. An
+> incorrect handle causes `FailedMount` errors, because the matching directory
+> does not exist on the node filesystem.
 
 ### Shared storage
 
-All namespaces that follow this setup share the same underlying storage at `/shared-storage`. This means eval results written by one namespace are visible to pods in other namespaces. Run names include a timestamp to avoid collisions.
-
-## Shutting Down the Eval Pod
-
-Detached eval pods auto-terminate on completion. For interactive runs, delete manually:
-
-```bash
-kubectl -n $NAMESPACE delete pod hephaestus-<tenant_id>-<hash>
-```
-
-This is safe — results are persisted on the PVC and survive pod deletion.
+All namespaces set up this way share the same underlying storage at
+`/shared-storage`, so eval results written from one namespace are visible to
+pods in other namespaces. Run names include a timestamp to avoid collisions.
 
 ## Notes
 
-- This uses a generic Python image with runtime dep installation (~2-3 min on first run). A pre-built Docker image can replace this later for faster startup.
-- Code is synced to `/tmp/<run-name>/` (ephemeral, per-run) via a single tar pipe for speed. Tenant data is re-synced each run.
-- Secrets (`.env`) are copied to the pod's `/tmp/` and sourced at runtime. They are not persisted to the PVC.
-- Dependencies are automatically reinstalled when `pyproject.toml` changes (tracked via hash). To force reinstall, delete the marker: `kubectl -n $NAMESPACE exec <pod-name> -- rm /tmp/<run-name>/.deps_installed`
+- The pods use a generic Python image and install dependencies at runtime
+  (~2-3 min on first run). A pre-built Docker image can replace this later for
+  faster startup.
+- To force a dependency reinstall, delete the marker:
+  `kubectl -n $NAMESPACE exec <pod-name> -- rm /tmp/<run-name>/.deps_installed`

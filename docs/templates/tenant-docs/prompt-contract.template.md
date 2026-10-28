@@ -20,4 +20,3 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Non-Goals
 - What prompt logic should not include.
-

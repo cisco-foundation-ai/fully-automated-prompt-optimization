@@ -6,9 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 
 # Runtime memory card construction
 
-The runtime-memory pipeline is an optional downstream step after a FAFO
-evaluation asset is released. It does not modify the evaluation asset and is
-separate from FAFO prompt optimization.
+Runtime memory cards turn the trusted guidelines of a released FAFO evaluation
+asset into compact procedural cards that an agent reads at runtime. This
+optional downstream step does not modify the evaluation asset and is separate
+from FAFO prompt optimization.
 
 The initial contract is intentionally small:
 
@@ -25,7 +26,7 @@ The initial contract is intentionally small:
 There is no episode pairing, reward-model training, learned re-ranking, or
 online memory promotion. Trusted-only construction is the final default. An
 explicit additive mode can use approved inferred training traces to broaden
-procedural coverage while keeping the trusted guideline and trusted card as the
+procedural coverage, while the trusted guideline and trusted card stay the
 only normative sources.
 
 ## Build a memory asset
@@ -42,11 +43,13 @@ python -m hephaestus.cli memory build \
   --memory-id <memory_asset_id>
 ```
 
-This command always uses trusted guidelines and trusted feedback traces. It
-does not read the inferred split. The generation model defaults to the source
-asset's rubric model. Override it
-with `--model <model>`. At most five trusted traces are supplied to each call by
-default; use `--max-source-traces <count>` to change that bound.
+This command always uses trusted guidelines and trusted feedback traces; it
+does not read the inferred split.
+
+| Option | Default |
+|---|---|
+| `--model <model>` | The source asset's rubric model |
+| `--max-source-traces <count>` | At most five trusted traces per call |
 
 The command writes:
 
@@ -57,12 +60,12 @@ tenants/<tenant_id>/memory_assets/<memory_asset_id>/
 └── provider_calls.jsonl
 ```
 
-The command refuses to replace an existing memory asset. Use a new memory ID for
-a new generation.
+It refuses to replace an existing memory asset. Use a new memory ID for a new
+generation.
 
 ### Explicitly add approved inferred training evidence
 
-The additive builder is the scalable alternative to placing a larger raw-trace
+The additive builder is the scalable alternative to putting a larger raw-trace
 sample into one card-generation call:
 
 ```bash
@@ -76,21 +79,24 @@ python -m hephaestus.cli memory build-additive \
   --max-additions-per-card 3
 ```
 
-The required `--include-approved-inferred` flag makes this a deliberate opt-in.
-Without it, the command does not run. The builder processes every row in the
-released inferred training split exactly
-once. It interleaves source clusters across bounded batches and asks the model
-to mine only procedures, avoidances, tool guidance, and examples that are both
-new relative to the trusted card and grounded in trusted guideline criteria.
-Exact duplicate patterns are merged with their supporting trace and cluster
-counts. A second model pass per guideline selects at most the configured number
-of additions.
+The `--include-approved-inferred` flag is required, which makes this a
+deliberate opt-in; without it, the command does not run. The builder then:
+
+- processes every row in the released inferred training split exactly once;
+- interleaves source clusters across bounded batches;
+- asks the model to mine only procedures, avoidances, tool guidance, and
+  examples that are both new relative to the trusted card and grounded in
+  trusted guideline criteria;
+- merges exact duplicate patterns, with their supporting trace and cluster
+  counts; and
+- runs a second model pass per guideline that selects at most the configured
+  number of additions.
 
 The trusted card is a frozen spine: its title, summary, applicability,
 instructions, avoidances, tool guidance, and examples are copied unchanged.
 Selected inferred additions are appended, never substituted. The output also
 contains `evidence_patterns.jsonl`, `card_additions.jsonl`, and
-`trace_index.jsonl` so every addition can be traced through a mined pattern to
+`trace_index.jsonl`, so every addition can be traced through a mined pattern to
 approved training records without republishing raw trace content.
 
 ## Card contract
@@ -103,13 +109,17 @@ One card is produced for each reusable trusted guideline. A card contains:
 - optional tool guidance;
 - optional abstract example steps;
 - an agent-ready `injection_text` rendering;
-- source guideline, criterion, and record provenance;
+- source guideline, criterion, and record provenance; and
 - model and prompt revision metadata.
 
-Every instruction, avoidance, and tool-guidance item must cite at least one
-criterion ID from its source guideline. Example steps must cite one of the
-trusted traces actually supplied to the model. These citations remain in the
-JSON artifact for auditability and are omitted from `injection_text`.
+Citation rules:
+
+- Every instruction, avoidance, and tool-guidance item must cite at least one
+  criterion ID from its source guideline.
+- Example steps must cite one of the trusted traces actually supplied to the
+  model.
+- Citations stay in the JSON artifact for auditability and are omitted from
+  `injection_text`.
 
 ## Trust and split isolation
 
@@ -119,7 +129,7 @@ Their supporting records must be both `evidence_eligible: true` and assigned to
 the trusted `train` split. The builder fails closed if a guideline refers to a
 validation, test, regression, ineligible, or missing feedback record.
 
-This keeps runtime memory and evaluation ground truth separated. The optional
+This keeps runtime memory and evaluation ground truth separate. The optional
 additive mode expands evidence from the released inferred training split only;
 validation, test, regression, held, rejected, and pending cases remain
 unavailable to the builder.
@@ -134,5 +144,5 @@ task split fixed. Compare two runtime conditions:
 
 Evaluate both with the same native benchmark scorer. Log the retrieved artifact
 ID, retrieval score, injected text hash, token count, latency, and native task
-result so the effect of proceduralization can be measured independently from
+result, so the effect of proceduralization can be measured independently from
 retrieval changes.

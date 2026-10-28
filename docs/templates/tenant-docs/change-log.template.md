@@ -12,4 +12,3 @@ SPDX-License-Identifier: Apache-2.0
 - Files/configs:
 - Eval impact:
 - Rollback notes:
-

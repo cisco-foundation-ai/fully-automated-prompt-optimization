@@ -4,29 +4,22 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Prompting Guides
+# Prompting guides
 
-This folder contains distilled prompting, optimization, and evaluation guidance used by FAFO operators during prompt iteration.
+Distilled prompting, chain-design, and evaluation guidance for FAFO operators
+during prompt iteration.
 
-## Documents
-
-| Document | What it covers | When to read |
+| Document | Covers | Read when |
 |---|---|---|
-| `external-prompting-guides.md` | What makes a good prompt — 9 unified principles, failure-cluster-to-fix mapping | Optional reference for prompting principles |
-| `agentic-chain-patterns.md` | What chain structures to use — ReAct, Reflexion, Tree of Thoughts, Self-Refine, Plan-and-Solve | When failure analysis suggests a chain structure change, not just a prompt edit |
-| `evaluation-and-benchmarks.md` | How to measure quality — metrics taxonomy, benchmarks, LLM-as-judge, failure modes, mitigations | When designing scoring profiles, diagnosing convergence issues, or understanding optimization pitfalls |
-| `synthetic-example-creation-sources.md` | How to create test data — synthetic data sources, quality checklist | When adding or revising synthetic eval cases |
-
-## How to Use
-
-1. Consult `external-prompting-guides.md` when you want a quick reference for prompting principles.
-2. If failures suggest the chain structure is wrong (not just the prompt text), consult `agentic-chain-patterns.md`.
-3. When designing or debugging evaluation, read `evaluation-and-benchmarks.md`.
-4. When creating synthetic test data, follow `synthetic-example-creation-sources.md`.
+| [`external-prompting-guides.md`](external-prompting-guides.md) | Nine prompting principles; failure-cluster-to-fix map | You want a quick reference for prompting principles (optional) |
+| [`agentic-chain-patterns.md`](agentic-chain-patterns.md) | Chain structures: ReAct, Reflexion, Tree of Thoughts, Self-Refine, Least-to-Most, Plan-and-Solve, Tool-Augmented Generation | Failure analysis points to the chain structure, not just the prompt text |
+| [`evaluation-and-benchmarks.md`](evaluation-and-benchmarks.md) | Metrics, benchmarks, LLM-as-judge, optimization failure modes and mitigations | You design scoring profiles, diagnose convergence problems, or check for optimization pitfalls |
+| [`synthetic-example-creation-sources.md`](synthetic-example-creation-sources.md) | Sources for synthetic eval data; quality checklist | You add or revise synthetic eval cases |
 
 ## Maintenance
 
-- Revisit this folder when major provider prompting docs are updated.
-- Refresh the top-5 prompt optimization source set in `external-prompting-guides.md` at least quarterly or when one of the canonical provider docs materially changes.
-- Check retrieval dates in each document and refresh source links when stale.
-- Keep summaries actionable and paraphrased; keep links to source docs current.
+- Revisit these guides when major provider prompting docs are updated.
+- Refresh the top-5 source set in `external-prompting-guides.md` at least
+  quarterly, or sooner if a canonical provider doc changes materially.
+- Check the retrieval date in each document and refresh stale source links.
+- Keep summaries actionable and paraphrased, and keep source links current.

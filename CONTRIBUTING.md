@@ -4,61 +4,57 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# How to Contribute
+# How to contribute
 
-Thanks for your interest in contributing to `Fully Automated Flow Optimization`! Here are a few
-general guidelines on contributing and reporting bugs that we ask you to review.
-Following these guidelines helps to communicate that you respect the time of the
-contributors managing and developing this open source project. In return, they
-should reciprocate that respect in addressing your issue, assessing changes, and
-helping you finalize your pull requests. In that spirit of mutual respect, we
-endeavor to review incoming issues and pull requests within 10 days, and will
-close any lingering issues or pull requests after 60 days of inactivity.
+Thanks for your interest in contributing to `Fully Automated Flow Optimization`!
+This page covers how to report bugs and send changes.
 
-Please note that all of your interactions in the project are subject to our
-[Code of Conduct](/CODE_OF_CONDUCT.md). This includes creation of issues or pull
-requests, commenting on issues or pull requests, and extends to all interactions
-in any real-time space e.g., Slack, Discord, etc.
+We aim to review new issues and pull requests within 10 days. Issues and pull
+requests with no activity for 60 days are closed.
 
-## Reporting Issues
+All interactions in the project are subject to our
+[Code of Conduct](/CODE_OF_CONDUCT.md). This covers creating and commenting on
+issues and pull requests, and any real-time space such as Slack or Discord.
 
-Before reporting a new issue, please ensure that the issue was not already
-reported or fixed by searching through our [issues
-list](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/issues).
+## Reporting issues
 
-When creating a new issue, please be sure to include a **title and clear
-description**, as much relevant information as possible, and, if possible, a
-test case.
+Before you open an issue, search the
+[issues list](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/issues)
+to check that it has not already been reported or fixed.
 
-**If you discover a security bug, please do not report it through GitHub.
-Instead, please see security procedures in [SECURITY.md](/SECURITY.md).**
+A new issue should include:
 
-## Sending Pull Requests
+- a **title and clear description**
+- as much relevant information as possible
+- a test case, if possible
 
-Before sending a new pull request, take a look at existing pull requests and
-issues to see if the proposed change or fix has been discussed in the past, or
-if the change was already implemented but not yet released.
+**Do not report security bugs through GitHub. Follow the procedure in
+[SECURITY.md](/SECURITY.md) instead.**
 
-We expect new pull requests to include tests for any affected behavior, and, as
-we follow semantic versioning, we may reserve breaking changes until the next
-major version release.
+## Sending pull requests
 
-## Other Ways to Contribute
+Before you open a pull request, check existing pull requests and issues. The
+change may already have been discussed, or implemented but not yet released.
 
-We welcome anyone that wants to contribute to `Fully Automated Flow Optimization` to triage and
-reply to open issues to help troubleshoot and fix existing bugs. Here is what
-you can do:
+- Include tests for any affected behavior.
+- We follow semantic versioning, so we may hold breaking changes until the next
+  major version.
+- Follow the [style guide](docs/style-guide.md) and the
+  [GitHub hygiene guide](docs/github-hygiene.md).
 
-- Help ensure that existing issues follows the recommendations from the
-  _[Reporting Issues](#reporting-issues)_ section, providing feedback to the
-  issue's author on what might be missing.
-- Review and update the existing content of our
-  [Wiki](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/wiki) with up-to-date
-  instructions and code samples.
-- Review existing pull requests, and testing patches against real existing
-  applications that use `Fully Automated Flow Optimization`.
+## Other ways to contribute
+
+You can also help by triaging and replying to open issues:
+
+- Check that existing issues follow [Reporting issues](#reporting-issues), and
+  tell the author what is missing.
+- Review and update the
+  [Wiki](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/wiki)
+  with up-to-date instructions and code samples.
+- Review existing pull requests, and test patches against real applications that
+  use `Fully Automated Flow Optimization`.
 - Write a test, or add a missing test case to an existing test.
 
-Thanks again for your interest on contributing to `Fully Automated Flow Optimization`!
+Thanks again for contributing to `Fully Automated Flow Optimization`!
 
 :heart:

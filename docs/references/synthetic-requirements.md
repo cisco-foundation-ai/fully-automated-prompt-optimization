@@ -6,24 +6,31 @@ SPDX-License-Identifier: Apache-2.0
 
 # Synthetic Example Requirements
 
-Use these requirements when pruning noncompliant synthetic examples under a tenant synthetic examples root (for example, `tenants/<tenant_id>/datasets/synthetic_artifacts/`).
+Requirements for pruning noncompliant synthetic examples under a tenant's
+synthetic examples root, such as `tenants/<tenant_id>/datasets/synthetic_artifacts/`.
 
-## Structure and Realism
-- Each synthetic message should mirror realistic email structure: subject, greeting, signature.
-- Use credible phishing TTPs and believable tenant/partner references when appropriate.
+## Structure and realism
+
+- Each synthetic message should mirror a realistic email structure: subject,
+  greeting, and signature.
+- Use credible phishing TTPs and believable tenant or partner references when
+  appropriate.
 - Avoid implausible or random strings that break realism.
 - Missing-body examples are allowed when intentionally used as hard cases.
 
-## File Structure
+## File structure
+
 Each example directory should include:
+
 - `Prompt.pdf.txt`
 - `Context - Tools.pdf.txt`
 - `Context - Stealth Watch.pdf.txt`
 - `Context - Email Body.pdf.txt` or `Context - No Email Body.pdf.txt`
 - `Summary.pdf.txt`
 
-## Labeling
-- Keep `labels_review.csv` and `hard_labels_review.csv` aligned to `Summary.pdf.txt` and existing example directories.
+## Labels and hashes
 
-## Hashes
-- `attachments_sha256` must be realistic 64-hex values, not placeholders (e.g., all A/B/0 strings).
+- Keep `labels_review.csv` and `hard_labels_review.csv` aligned with
+  `Summary.pdf.txt` and the existing example directories.
+- `attachments_sha256` values must be realistic 64-hex values, not
+  placeholders such as strings of all `A`, all `B`, or all `0`.

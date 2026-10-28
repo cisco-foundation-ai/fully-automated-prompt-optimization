@@ -6,14 +6,12 @@ SPDX-License-Identifier: Apache-2.0
 
 # Software Name Categorization Challenge
 
-## Task
+You get training, eval, and test datasets that categorize software names into
+domains of security concern. Use FAFO to build an LLM prompt for `gpt-4o-mini`
+that achieves `F1 > 90` on both the test dataset.
 
-You will be provided training, eval, and test datasets that categorize software
-names into domains of security concern. Use FAFO to build an LLM prompt for
-`gpt-4o-mini` that achieves `F1 > 90` on both the test dataset.
-
-Each dataset case contains only a software name as model-visible input. The
-model should output exactly one label from `labels.md`.
+Each case's only model-visible input is a software name. The model should
+output exactly one label from [`labels.md`](labels.md).
 
 ## Prerequisites
 
@@ -21,21 +19,22 @@ model should output exactly one label from `labels.md`.
 - Access to `gpt-4o-mini`.
 - A working FAFO setup.
 
-## Dataset Files
+## Dataset files
 
-- `data/train.jsonl` - training cases for prompt iteration and error attribution.
-- `data/eval.jsonl` - evaluation cases for variant evaluation.
-- `data/test.jsonl` - test cases for variant evaluation and leaderboard results.
+| File | Use |
+|---|---|
+| `data/train.jsonl` | Training cases for prompt iteration and error attribution |
+| `data/eval.jsonl` | Evaluation cases for variant evaluation |
+| `data/test.jsonl` | Test cases for variant evaluation and leaderboard results |
 
 Each line is a FAFO-compatible JSON object with `context.software_name` and
-`expected.category`.
+`expected.category`. See [`data-contract.md`](data-contract.md) for the full
+schema.
 
-## Quick Start With Example Tenant
+## Quick start with the example tenant
 
-An example tenant is available at
-`tenants/software_name_categorization/`.
-
-Copy the challenge datasets into that tenant's local dataset directory:
+An example tenant is available at `tenants/software_name_categorization/`. Copy
+the challenge datasets into its local dataset directory:
 
 ```bash
 mkdir -p tenants/software_name_categorization/datasets/datasets
@@ -49,32 +48,25 @@ Then prompt FAFO to optimize the example tenant. For example:
 Optimize the software_name_categorization tenant until composite score on test set reaches 90.
 ```
 
-## Mini Challenge
+## Mini challenge
 
-A standalone manual prompt-tuning mini challenge is available at
-`mini_challenge/`.
-
-It includes a 10-case test subset, a command-line evaluator, a training dataset
-viewer, easy/medium/difficult level selection, and a local UI that compares a
-manually tuned prompt against bundled FAFO v006 results. The mini challenge is
-decoupled from FAFO and can be run directly from that folder.
+[`mini_challenge/`](mini_challenge/) is a standalone manual prompt-tuning mini
+challenge. It includes a 10-case test subset, a command-line evaluator, a
+training dataset viewer, easy/medium/difficult level selection, and a local UI
+that compares a manually tuned prompt against bundled FAFO v006 results. It is
+decoupled from FAFO and runs directly from that folder.
 
 ## Rules
 
-- You can use the provided example tenant, or prompt FAFO to create a tenant
-  with your own optimization strategies.
-- Only conduct error attribution over the training dataset.
+- Use the provided example tenant, or prompt FAFO to create a tenant with your
+  own optimization strategies.
+- Only conduct error attribution over the training dataset. Eval and test
+  datasets are for scoring variants, not for failure attribution or manual
+  label-specific prompt tuning.
 - Evaluate each variant using the eval and test datasets.
 - Do not use vendor, description, URL, or other external fields as model input.
 
-## Data Hygiene
+## Challenge period
 
-Only conduct error attribution over the training dataset. Eval and test datasets
-are for scoring variants, not for failure attribution or manual label-specific
-prompt tuning.
-
-## Challenge Period
-
-The challenge runs from August 4, 2026 through August 6, 2026 EOD.
-
-Leaderboard results will be displayed at the Black Hat 2026 booth.
+The challenge runs from August 4, 2026 through August 6, 2026 EOD. Leaderboard
+results will be displayed at the Black Hat 2026 booth.
