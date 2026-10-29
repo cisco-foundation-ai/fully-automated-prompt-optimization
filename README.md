@@ -385,64 +385,53 @@ datasets, so the loop can learn from the agent's real behavior:
 
 The released train, validation, and test splits are the datasets the
 optimization loop trains on, selects with, and tests on, under the same held-out
-rules as any other dataset. A trusted regression split checks that previously
-correct behavior still holds. Each deployment produces new traces and feedback,
+rules as any other dataset. An optional trusted regression split checks that
+previously correct behavior still holds. Each deployment produces new traces and feedback,
 so repeating the cycle gives recursive self-improvement. The
 [recursive self-improvement post](https://cisco-foundation-ai.github.io/blogs/fafo-recursive-self-improvement/)
 explains the approach and its results.
 
 ### Inside the pipeline
 
-The pipeline needs only a small set of feedback-labeled traces and a larger set
-of unlabeled traces. No chain or prompt is needed, so it can also be the first
-step of a new tenant.
+The pipeline needs a set of feedback-labeled traces and, optionally, a larger
+set of unlabeled traces. No chain or prompt is needed, so it can also be the
+first step of a new tenant.
 
-```mermaid
-flowchart LR
-    A[Trusted feedback episodes] --> P[Validate, redact, and preassign splits]
-    U[Unlabeled episodes] --> P
-    P --> G[Extract evidence-backed guidelines]
-    P --> C[Cluster user intents]
-    G --> R[One case-specific rubric per episode]
-    C -. optional .-> M[Sampling and synthetic coverage]
-    R --> V[Review derived cases]
-    V --> D[Publish immutable dataset splits]
-    D --> O[FAFO optimization and held-out evaluation]
+```text
+prepare     validate, redact, and assign connected groups to splits
+observe     extract lessons with verbatim evidence from train episodes
+synthesize  group lessons by cause into a guideline catalog, one route at a time
+rubric      write a rubric for every episode: chosen guidelines plus case criteria
+publish     write the dataset splits, the review report, and the manifest
 ```
 
-Guidelines come only from trusted training feedback, and each episode's rubric
-uses only the guidelines its split may see. Intent clustering is optional and
-used only for sampling and synthetic coverage. Derived cases are published only
-after explicit review finalization.
+Guidelines come only from train episodes; held-out feedback is used only for
+its own case's rubric. Code checks every evidence quote, assigns IDs, and
+copies guideline criteria into cases verbatim. Each build writes a review
+report, `review.md`, to read before optimizing.
 
 ```bash
-python -m hephaestus.cli assets create --tenant <tenant_id> --asset-id v1 \
-  --feedback <labeled.jsonl> --unlabeled <unlabeled.jsonl>
-python -m hephaestus.cli assets run --tenant <tenant_id> --asset-id v1   # stops at awaiting_review
-python -m hephaestus.cli assets reviews list --tenant <tenant_id> --asset-id v1
-python -m hephaestus.cli assets reviews finalize --tenant <tenant_id> --asset-id v1 \
-  --reviewer <name> --review-set <sha256:...> --decision-set <sha256:...>
+python -m hephaestus.cli assets build --config tenants/<tenant_id>/configs/<asset>.json
 ```
 
 Inputs must follow the
 [`fafo-evaluation-input-v1`](docs/processes/evaluation-input-contract.md) contract.
-Released splits are published under
-`tenants/<tenant_id>/datasets/evaluation_assets/<asset_id>/`; point an eval
-config's `dataset.path` at the exact generation file listed in the asset
-manifest.
+Datasets are written to
+`tenants/<tenant_id>/evaluation_assets/<asset_id>/datasets/<split>.jsonl`. See
+the [data pipeline reference](docs/references/data-pipeline.md) for the config,
+outputs, and case format.
+
+The previous eight-stage pipeline (`assets create`, `run`, `reviews`, `extend`,
+and `adopt`) still works and will be removed; see the
+[evaluation asset reference](docs/references/evaluation-assets.md).
 
 ### Runtime memory cards
 
-Released assets can also feed the agent directly. `python -m hephaestus.cli memory build`
-compiles each trusted guideline and a few supporting traces into a compact
-procedural card that the agent reads at runtime. This is a second way to bring
-what the traces taught back into the agent; see
-[runtime memory cards](docs/processes/runtime-memory-cards.md).
-
-Further reading: the [data pipeline guide](docs/processes/feedback-dataset-flow.md)
-covers concepts and the trust model; the
-[evaluation asset reference](docs/references/evaluation-assets.md) covers the
-workspace, stages, lifecycle, and full CLI.
+Assets from the eight-stage pipeline can also feed the agent directly.
+`python -m hephaestus.cli memory build` compiles each trusted guideline and a
+few supporting traces into a compact procedural card that the agent reads at
+runtime. This is a second way to bring what the traces taught back into the
+agent; see [runtime memory cards](docs/processes/runtime-memory-cards.md).
 
 ## Guarantees and limits
 
@@ -469,7 +458,8 @@ workspace, stages, lifecycle, and full CLI.
 | `eval --config <config>` | Run one eval and write a run bundle to `output_dir` |
 | `eval-progress --output-dir <dir> [--json]` | Show a run's status, progress, and average score |
 | `optimize --policy <policy> [--final-test] [--resume]` | Run the headless optimizer |
-| `assets create \| run \| status \| reviews \| extend \| adopt` | Build evaluation assets from traces |
+| `assets build --config <asset>` | Build evaluation datasets from traces and feedback |
+| `assets create \| run \| status \| reviews \| extend \| adopt` | The previous eight-stage pipeline, to be removed |
 | `memory build \| build-additive` | Build runtime memory cards from a released asset |
 | `customer-data pull \| push \| remove-local --tenant <id> --scope raw\|derived\|all` | Sync tenant data with GCS |
 | `ui` | Start the FAFO Explorer UI |
@@ -540,9 +530,10 @@ limits.
 | [Optimization loop](docs/processes/prompt-iteration-loop.md) | Agent loop, enforcement boundary, iteration memory |
 | [Headless optimization](docs/processes/headless-optimization.md) | API-only optimizer: policy, roles, outputs |
 | [Chain variant conventions](docs/processes/chain-variant-conventions.md) | Structural variant naming and metadata |
-| [Data pipeline guide](docs/processes/feedback-dataset-flow.md) | Traces and feedback to evaluation datasets |
+| [Data pipeline reference](docs/references/data-pipeline.md) | `assets build`: steps, config, outputs, case format |
+| [Data pipeline guide](docs/processes/feedback-dataset-flow.md) | The eight-stage pipeline: concepts and trust model |
 | [Evaluation input contract](docs/processes/evaluation-input-contract.md) | Input JSONL format for the data pipeline |
-| [Evaluation asset reference](docs/references/evaluation-assets.md) | Workspace, stages, lifecycle, full CLI |
+| [Evaluation asset reference](docs/references/evaluation-assets.md) | The eight-stage pipeline: workspace, stages, CLI |
 | [Runtime memory cards](docs/processes/runtime-memory-cards.md) | Memory cards from released assets |
 | [MCP quick start](docs/mcp-quick-start.md) | Agentic (tool-using) tenants |
 | [Web UI](docs/web-ui.md) | FAFO Explorer |

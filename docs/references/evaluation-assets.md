@@ -6,6 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # Evaluation Asset Reference
 
+> This page describes the eight-stage pipeline, which will be removed. New
+> assets use `assets build`; see the [data pipeline reference](data-pipeline.md).
+
 Reference for operating and reviewing evaluation assets: the workspace layout,
 the eight stages, lifecycle and durability guarantees, publication,
 provenance, and the full CLI. For the concepts, trust model, split semantics,

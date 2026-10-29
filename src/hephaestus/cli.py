@@ -207,6 +207,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     assets_subparsers = assets_parser.add_subparsers(dest="assets_command", required=True)
 
+    build_asset_parser = assets_subparsers.add_parser(
+        "build",
+        help="Build or resume an evaluation asset: observe, synthesize guidelines, write rubrics",
+    )
+    build_asset_parser.add_argument("--config", required=True, help="Path to the asset build config JSON")
+    build_asset_parser.add_argument(
+        "--workers", type=_positive_int, help="Override the number of concurrent model calls"
+    )
+
     create_asset_parser = assets_subparsers.add_parser(
         "create",
         help="Create a self-contained evaluation asset workspace",
@@ -568,6 +577,22 @@ def main() -> None:
         raise ValueError(f"Unsupported memory command: {args.memory_command}")
 
     if args.command == "assets":
+        if args.assets_command == "build":
+            import json as json_mod
+
+            from src.hephaestus.data_pipeline.build import build_asset
+            from src.hephaestus.data_pipeline.config import AssetConfig
+
+            config = AssetConfig.from_dict(json_mod.loads(Path(args.config).read_text(encoding="utf-8")))
+            if args.workers is not None:
+                config.workers = args.workers
+            repository_root = Path.cwd()
+            manifest = build_asset(config, repository_root=repository_root)
+            asset_root = config.asset_root(repository_root)
+            print(json_mod.dumps({"datasets": manifest["datasets"]}, indent=2, sort_keys=True))
+            print(f"Review report: {asset_root / 'review.md'}")
+            return
+
         if args.assets_command == "reviews":
             import json as json_mod
 
