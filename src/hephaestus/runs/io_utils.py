@@ -15,7 +15,7 @@ from src.hephaestus.artifact_io import (
     atomic_write_jsonl,
     atomic_write_text,
 )
-from src.hephaestus.evaluation_assets.trust_tiers import CURRENT_TRUST_TIERS
+from src.hephaestus.datasets.trust_tiers import CURRENT_TRUST_TIERS
 
 
 def _normalize_timings(timings: Any) -> List[List]:
