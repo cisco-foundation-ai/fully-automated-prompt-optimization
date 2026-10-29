@@ -101,7 +101,7 @@ class OpenAIEmbeddingProvider:
         for attempt in range(self.max_retries + 1):
             try:
                 response = client.embeddings.create(model=self.model, input=list(batch))
-                from src.hephaestus.evaluation_assets.provenance import (
+                from src.hephaestus.providers.call_metadata import (
                     provider_response_metadata,
                 )
 

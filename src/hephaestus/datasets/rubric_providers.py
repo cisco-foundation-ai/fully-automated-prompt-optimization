@@ -68,7 +68,7 @@ class OpenAIRubricProvider:
         for attempt in range(self.max_retries + 1):
             try:
                 response = client.chat.completions.create(**self._completion_kwargs(messages))
-                from src.hephaestus.evaluation_assets.provenance import (
+                from src.hephaestus.providers.call_metadata import (
                     provider_response_metadata,
                 )
 

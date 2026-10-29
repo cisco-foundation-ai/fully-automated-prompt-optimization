@@ -29,8 +29,7 @@ from src.hephaestus.datasets.jsonl_loader import (
     LoadedCasesWithIdentity,
     load_cases_with_identity,
 )
-from src.hephaestus.evaluation_assets.provenance import collect_git_evidence
-from src.hephaestus.evaluation_assets.trust_tiers import CURRENT_TRUST_TIERS
+from src.hephaestus.datasets.trust_tiers import CURRENT_TRUST_TIERS
 from src.hephaestus.mcp.manager import MCPServerManager
 from src.hephaestus.mcp.types import MCPConfig, MCPServerConfig
 from src.hephaestus.providers import (
@@ -41,6 +40,7 @@ from src.hephaestus.providers import (
 from src.hephaestus.providers.base import ProviderClient
 from src.hephaestus.runs.bundle import RunBundleWriter
 from src.hephaestus.runs.errors import sanitize_execution_error
+from src.hephaestus.runs.git_evidence import collect_git_evidence
 from src.hephaestus.runs.identity import (
     ALLOWED_VARIANT_DIMENSIONS,
     RunIdentity,
@@ -76,8 +76,7 @@ _RUNTIME_SOURCE_FILES = (
     "src/hephaestus/analysis/step_attribution.py",
     "src/hephaestus/artifact_io.py",
     "src/hephaestus/datasets/jsonl_loader.py",
-    "src/hephaestus/evaluation_assets/provenance.py",
-    "src/hephaestus/evaluation_assets/trust_tiers.py",
+    "src/hephaestus/datasets/trust_tiers.py",
     "src/hephaestus/loader.py",
     "src/hephaestus/local_authority_io.py",
     "src/hephaestus/types.py",
@@ -597,7 +596,7 @@ def _runtime_facts() -> dict[str, Any]:
     return {
         "source_members": members,
         "source_fingerprint": fingerprint_value(members),
-        "git": collect_git_evidence(repository_root),
+        "git": collect_git_evidence(repository_root, [member["path"] for member in members]),
         "python": {
             "implementation": platform.python_implementation(),
             "version": platform.python_version(),
