@@ -6,6 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # FAFO Data Pipeline
 
+> This page describes the eight-stage pipeline, which will be removed. New
+> assets use `assets build`; see the [data pipeline reference](../references/data-pipeline.md).
+
 The FAFO data pipeline turns a small set of trusted, feedback-labeled agent
 episodes and a larger set of unlabeled episodes into a versioned evaluation
 asset. FAFO uses the asset's cases and rubrics to evaluate prompt or skill
