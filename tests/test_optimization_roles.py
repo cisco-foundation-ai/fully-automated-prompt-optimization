@@ -97,6 +97,41 @@ class TestParseAnalysis:
             _analysis(plan, **kwargs)
 
 
+class TestParseMultiplePlans:
+    PLAN_A = {"level": "prompt", "module": "answer", "technique": "decomposition", "hypothesis": "h"}
+    PLAN_B = {"level": "parameter", "parameter_changes": {"provider_settings.temperature": 0.2}}
+
+    def _parse(self, plans: List[Any], max_plans: int) -> Any:
+        return parse_analysis(
+            {"clusters": [], "plans": plans},
+            allowed_levels=["prompt", "parameter"],
+            modules=["answer"],
+            current_values={"provider_settings.temperature": 1.0},
+            policy=POLICY,
+            max_plans=max_plans,
+        )
+
+    def test_keeps_distinct_plans_in_order(self) -> None:
+        """Distinct plans are kept in the analyst's order, up to max_plans."""
+        plan_b = dict(self.PLAN_B, technique="t", hypothesis="h")
+
+        analysis = self._parse([self.PLAN_A, plan_b, dict(self.PLAN_A, technique="other")], max_plans=2)
+
+        assert [plan.level for plan in analysis.plans] == ["prompt", "parameter"]
+        assert analysis.plan is analysis.plans[0]
+
+    def test_drops_duplicate_plans(self) -> None:
+        """An exact duplicate plan is evaluated once."""
+        analysis = self._parse([self.PLAN_A, dict(self.PLAN_A)], max_plans=3)
+
+        assert len(analysis.plans) == 1
+
+    def test_invalid_plan_names_its_index(self) -> None:
+        """A malformed plan in the list fails with its position."""
+        with pytest.raises(ValueError, match=r"plans\[1\]\.module"):
+            self._parse([self.PLAN_A, dict(self.PLAN_A, module="other")], max_plans=3)
+
+
 class TestParseOutputs:
     def test_prompt_proposal(self) -> None:
         """A proposal needs a non-empty prompt; the summary is optional."""

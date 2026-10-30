@@ -343,13 +343,17 @@ and three LLM roles (analyst, prompt proposer, and reviewer) called through the
 OpenAI API by default. The coordinator, not a prompt, enforces the rules:
 
 - Roles see only training cases.
-- Candidates are accepted on validation.
+- Candidates are accepted on validation, by a paired test against their parent.
 - Test runs once, at the end.
 - Only the levels and parameter bounds declared in the policy can change.
 - A static review blocks leaked training examples, placeholder drift, and prompts
   that name held-out inputs.
 
-Every decision is appended to a resumable `ledger.jsonl`.
+Each iteration screens several candidate changes on train and validates the best
+one. Accepted candidates form a pool to branch from, pool members that changed
+different modules are also tried in combination, and the top members are
+re-evaluated before the final pick. Every decision is appended to a resumable
+`ledger.jsonl`.
 
 | | Coding agent | Headless optimizer |
 |---|---|---|

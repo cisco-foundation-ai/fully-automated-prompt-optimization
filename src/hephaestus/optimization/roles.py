@@ -24,12 +24,15 @@ PLAN_SCOPES = ("edit", "rewrite")
 ANALYST_SYSTEM_PROMPT = """\
 You are the failure analyst and planner in an automated optimization loop for an LLM chain.
 
-You receive the current best chain's prompt modules, `training_overview` (every training case with
-its input, expected output, metadata, and whether the current best passes it, when the training
-split is small enough), detailed views of failing TRAINING cases, a rule-based failure
-attribution, tenant guidance, the scorer source, and the history of attempts in this run. History
-entries list which training cases each attempt fixed (`improved_case_ids`) and broke
-(`regressed_case_ids`), so you can learn from rejected attempts too.
+You receive the parent candidate's prompt modules (the pool member this iteration branches from,
+not necessarily the best one), `training_overview` (every training case with its input, expected
+output, metadata, and whether the parent passes it, when the training split is small enough),
+detailed views of the parent's failing TRAINING cases, a rule-based failure attribution, tenant
+guidance, the scorer source, and the history of attempts in this run. History covers every
+candidate tried, including ones that were not selected. Each entry lists which training cases it
+fixed (`improved_case_ids`) and broke (`regressed_case_ids`) relative to its `parent_id`, and
+`p_improve` (the probability that its validation gain was real) when it was validated. Entries
+with `merge_of` combined the changes of two earlier candidates. Learn from rejected attempts too.
 
 Do the following:
 1. Study the whole training overview, including passing cases and metadata, to understand the
@@ -41,8 +44,10 @@ Do the following:
 3. Assign each cluster the optimization level from `allowed_levels` that would fix it:
    "prompt" for reasoning, format, or instruction-following failures that better prompt text can
    fix; "parameter" for failures that a change to a parameter in `parameter_space` can fix.
-4. Choose exactly ONE change to try next (the plan). A prompt plan changes exactly one module and
-   has a `scope`:
+4. Choose up to `max_plans` changes to try next (the plans). Each one is evaluated separately
+   and the best is kept, so make them as different as possible: different modules, or different
+   techniques for the same module. Order them from most to least promising. A prompt plan
+   changes exactly one module and has a `scope`:
    - "rewrite": restructure the whole prompt. Choose this when the prompt lacks explicit
      definitions or a decision procedure for the output space, or when several clusters share
      that root cause. A good rewrite generalizes from the whole training overview, for example
@@ -62,9 +67,9 @@ Do the following:
 Return one JSON object:
 {"clusters": [{"label": str, "count": int, "case_ids": [str], "level": "prompt" | "parameter",
                "module": str | null, "suggested_fix": str}],
- "plan": {"level": "prompt" | "parameter", "module": str | null, "scope": "edit" | "rewrite",
-          "parameter_changes": {"<path>": <value>} | null, "technique": str,
-          "hypothesis": str, "target_case_ids": [str]}}
+ "plans": [{"level": "prompt" | "parameter", "module": str | null, "scope": "edit" | "rewrite",
+            "parameter_changes": {"<path>": <value>} | null, "technique": str,
+            "hypothesis": str, "target_case_ids": [str]}]}
 """
 
 PROMPT_PROPOSER_SYSTEM_PROMPT = """\
@@ -156,10 +161,14 @@ class Plan:
 
 @dataclass
 class Analysis:
-    """Analyst output: failure clusters plus the chosen plan."""
+    """Analyst output: failure clusters plus the plans to try, most promising first."""
 
     clusters: List[Dict[str, Any]]
-    plan: Plan
+    plans: List[Plan]
+
+    @property
+    def plan(self) -> Plan:
+        return self.plans[0]
 
 
 @dataclass
@@ -232,47 +241,74 @@ def parse_analysis(
     modules: Sequence[str],
     current_values: Mapping[str, Any],
     policy: OptimizationPolicy,
+    max_plans: int = 1,
 ) -> Analysis:
-    """Validate analyst output against the levels, modules, and parameters in scope."""
-    plan_raw = raw.get("plan")
+    """Validate analyst output against the levels, modules, and parameters in scope.
+
+    Accepts ``plans`` (a list) or a single ``plan``. Duplicate plans are dropped
+    and at most ``max_plans`` are kept.
+    """
+    plans_raw = raw.get("plans")
+    single = plans_raw is None and "plan" in raw
+    if single:
+        plans_raw = [raw.get("plan")]
+    if not isinstance(plans_raw, list) or not plans_raw:
+        raise ValueError("plans must be a non-empty list")
+    plans: List[Plan] = []
+    for index, plan_raw in enumerate(plans_raw):
+        name = "plan" if single else f"plans[{index}]"
+        plan = _parse_plan(plan_raw, name, allowed_levels, modules, current_values, policy)
+        if all(plan.to_dict() != kept.to_dict() for kept in plans):
+            plans.append(plan)
+    clusters = raw.get("clusters") if isinstance(raw.get("clusters"), list) else []
+    return Analysis(
+        clusters=[cluster for cluster in clusters if isinstance(cluster, dict)],
+        plans=plans[:max_plans],
+    )
+
+
+def _parse_plan(
+    plan_raw: Any,
+    scope_name: str,
+    allowed_levels: Sequence[str],
+    modules: Sequence[str],
+    current_values: Mapping[str, Any],
+    policy: OptimizationPolicy,
+) -> Plan:
     if not isinstance(plan_raw, dict):
-        raise ValueError("plan must be an object")
+        raise ValueError(f"{scope_name} must be an object")
     level = plan_raw.get("level")
     if level not in allowed_levels:
-        raise ValueError(f"plan.level must be one of {list(allowed_levels)}, got {level!r}")
-    technique = _required_text(plan_raw, "technique", "plan")
-    hypothesis = _required_text(plan_raw, "hypothesis", "plan")
+        raise ValueError(f"{scope_name}.level must be one of {list(allowed_levels)}, got {level!r}")
+    technique = _required_text(plan_raw, "technique", scope_name)
+    hypothesis = _required_text(plan_raw, "hypothesis", scope_name)
     module = plan_raw.get("module")
     scope = plan_raw.get("scope") or "edit"
     parameter_changes: Dict[str, Any] = {}
     if level == "prompt":
         if module not in modules:
-            raise ValueError(f"plan.module must be one of {list(modules)}, got {module!r}")
+            raise ValueError(f"{scope_name}.module must be one of {list(modules)}, got {module!r}")
         if scope not in PLAN_SCOPES:
-            raise ValueError(f"plan.scope must be one of {list(PLAN_SCOPES)}, got {scope!r}")
+            raise ValueError(f"{scope_name}.scope must be one of {list(PLAN_SCOPES)}, got {scope!r}")
     else:
         module = None
         scope = "edit"
         changes = plan_raw.get("parameter_changes")
         if not isinstance(changes, dict):
-            raise ValueError("plan.parameter_changes must be an object for a parameter plan")
+            raise ValueError(f"{scope_name}.parameter_changes must be an object for a parameter plan")
         issues = review_parameter_changes(changes, current_values, policy)
         if has_blocking(issues):
             raise ValueError("; ".join(issue.description for issue in issues))
         parameter_changes = dict(changes)
     target_case_ids = plan_raw.get("target_case_ids") or []
-    clusters = raw.get("clusters") if isinstance(raw.get("clusters"), list) else []
-    return Analysis(
-        clusters=[cluster for cluster in clusters if isinstance(cluster, dict)],
-        plan=Plan(
-            level=level,
-            module=module,
-            parameter_changes=parameter_changes,
-            technique=technique,
-            hypothesis=hypothesis,
-            target_case_ids=[str(case_id) for case_id in target_case_ids if isinstance(case_id, str)],
-            scope=scope,
-        ),
+    return Plan(
+        level=level,
+        module=module,
+        parameter_changes=parameter_changes,
+        technique=technique,
+        hypothesis=hypothesis,
+        target_case_ids=[str(case_id) for case_id in target_case_ids if isinstance(case_id, str)],
+        scope=scope,
     )
 
 

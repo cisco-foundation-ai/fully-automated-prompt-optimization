@@ -32,7 +32,13 @@ class TestLoadPolicy:
         assert policy.levels == ["prompt"]
         assert policy.val_dataset == "val.jsonl"
         assert policy.test_dataset is None
-        assert policy.acceptance.min_val_delta == 1.0
+        assert (policy.acceptance.min_val_delta, policy.acceptance.confidence) == (0.0, 0.8)
+        assert (policy.search.candidates, policy.search.parent_selection, policy.search.merge) == (
+            3,
+            "pareto",
+            True,
+        )
+        assert (policy.selection.finalists, policy.selection.repeats) == (3, 1)
         assert policy.budget.max_iterations == 10
         assert policy.llm_review is True
         assert policy.acceptance.train_tiebreak is True
@@ -91,6 +97,11 @@ class TestLoadPolicy:
             ({"datasets": {"train": "a.jsonl", "val": "a.jsonl"}}, "must be distinct"),
             ({"datasets": {"val": "a.jsonl"}}, "missing required string 'train'"),
             ({"acceptance": {"val_repeats": 0}}, "val_repeats"),
+            ({"acceptance": {"confidence": 1.5}}, "confidence must be between 0 and 1"),
+            ({"search": {"candidates": 0}}, "candidates must be between 1 and 26"),
+            ({"search": {"parent_selection": "random"}}, "parent_selection must be one of"),
+            ({"selection": {"finalists": 0}}, "finalists must be >= 1"),
+            ({"selection": {"repeats": 0}}, "selection.repeats must be >= 1"),
             ({"budget": {"plateau_patience": 0}}, "plateau_patience"),
             ({"train_overview_limit": -1}, "train_overview_limit"),
         ],

@@ -48,6 +48,14 @@ WORSE_PROMPT = """\
 System: Explain your reasoning in full sentences.
 
 User: ${question}"""
+DESSERT_PROMPT = """\
+System: Mind the dessert.
+
+User: ${question}"""
+FLAME_PROMPT = """\
+System: Mind the flame.
+
+User: ${question}"""
 
 TRAIN = {"Is fire hot?": "yes", "Is ice hot?": "no", "Is the sun bright?": "yes", "Is coal white?": "no"}
 VAL = {"Is snow cold?": "yes", "Is lava cold?": "no", "Is honey sweet?": "yes"}
@@ -58,7 +66,9 @@ ALL_ANSWERS = {**TRAIN, **VAL, **TEST}
 class StubModel:
     """Answers correctly, but verbosely unless told to use one word; truncates to max_tokens chars.
 
-    A prompt that mentions heat also gets one-word answers, but only for questions about heat.
+    A prompt that mentions heat also gets one-word answers, but only for questions about heat; one
+    that mentions dessert does the same for questions about sweetness (one val case, no train case),
+    and one that mentions flame does it for the question about fire (one train case, no val case).
     """
 
     def __init__(self, settings: Dict[str, Any]) -> None:
@@ -67,7 +77,12 @@ class StubModel:
     def generate(self, messages: List[Dict[str, str]]) -> str:
         text = "\n".join(message["content"] for message in messages)
         answer = next(value for question, value in ALL_ANSWERS.items() if question in text)
-        concise = "exactly one word" in text or ("heat" in text and " hot?" in text)
+        concise = (
+            "exactly one word" in text
+            or ("heat" in text and " hot?" in text)
+            or ("dessert" in text and " sweet?" in text)
+            or ("flame" in text and "fire" in text)
+        )
         reply = answer if concise else f"Well, I think the answer is {answer}."
         return reply[: self.max_tokens]
 
@@ -208,6 +223,9 @@ class Scorer(BaseScorer):
             "levels": ["prompt"],
             "acceptance": {"min_val_delta": 1.0},
             "budget": {"max_iterations": 5, "plateau_patience": 3},
+            # Single-path search, so these tests exercise one candidate per iteration.
+            "search": {"candidates": 1, "merge": False},
+            "selection": {"finalists": 1},
         }
         policy.update(policy_overrides)
         policy_path = root / "policy.json"
@@ -649,3 +667,322 @@ class TestCli:
         assert summary["stop_reason"] == "no_train_failures"
         assert summary["best"] == {"candidate_id": "c001", "train": 100.0, "val": 100.0}
         assert summary["ledger"] == str(workspace / "ledger.jsonl")
+
+
+def _plans(*techniques: str) -> Dict[str, Any]:
+    return {"clusters": [], "plans": [_prompt_plan(technique)["plan"] for technique in techniques]}
+
+
+def _member(candidate_id: str, train: Dict[str, float], config: Dict[str, Any], **kwargs: Any) -> Any:
+    results = [
+        {"case_id": case_id, "composite_score": score, "execution_status": "success"}
+        for case_id, score in train.items()
+    ]
+    score = sum(train.values()) / len(train)
+    return coordinator.CandidateState(
+        candidate_id, config, coordinator.SplitScore(score, len(train), 0), None, results, **kwargs
+    )
+
+
+class TestPoolSearch:
+    def test_every_plan_is_screened_and_the_best_is_validated(self, tenant: Callable[..., Path]) -> None:
+        """Each plan becomes a candidate screened on train; only the best goes to val."""
+        policy_path = tenant(budget={"max_iterations": 1}, search={"candidates": 2, "merge": False})
+        generator = ScriptedGenerator(
+            {
+                "analyst": [_plans("heat hint", "output-format constraint")],
+                "prompt_proposer": [{"prompt": HEAT_PROMPT}, {"prompt": STRICT_PROMPT}],
+                "reviewer": [PASS_REVIEW],
+            }
+        )
+
+        result = _run(policy_path, generator)
+
+        record = _ledger(result)[1]
+        assert (record["candidate_id"], record["reason"], record["train_delta"]) == (
+            "c001b",
+            "accepted",
+            100.0,
+        )
+        [alternative] = record["alternatives"]
+        assert (alternative["candidate_id"], alternative["reason"], alternative["train_delta"]) == (
+            "c001a",
+            "not_selected",
+            50.0,
+        )
+        assert "val" not in alternative
+        assert sorted(_eval_dirs(policy_path)) == sorted(
+            ["c000-train", "c000-val", "c001a-train", "c001b-train", "c001b-val"]
+        )
+
+    def test_alternatives_reach_the_analyst_history(self, tenant: Callable[..., Path]) -> None:
+        """Later analyst calls see every screened candidate, not only the selected one."""
+        policy_path = tenant(budget={"max_iterations": 2}, search={"candidates": 2, "merge": False})
+        generator = ScriptedGenerator(
+            {
+                "analyst": [_plans("heat hint", "role framing"), _plans("output-format constraint")],
+                "prompt_proposer": [
+                    {"prompt": HEAT_PROMPT},
+                    {"prompt": WORSE_PROMPT},
+                    {"prompt": STRICT_PROMPT},
+                ],
+                "reviewer": [PASS_REVIEW],
+            }
+        )
+
+        _run(policy_path, generator)
+
+        history = generator.calls_for("analyst")[1]["history"]
+        assert [(entry["candidate_id"], entry["iteration"]) for entry in history] == [
+            ("c001a", 1),
+            ("c001b", 1),
+        ]
+        assert generator.calls_for("analyst")[0]["max_plans"] == 2
+
+    @pytest.mark.parametrize("confidence, reason", [(0.6, "accepted"), (0.8, "selection_below_threshold")])
+    def test_confidence_gates_a_small_val_gain(
+        self, tenant: Callable[..., Path], confidence: float, reason: str
+    ) -> None:
+        """One more correct val case out of three (p about 0.70) passes at 0.6 but not 0.8."""
+        policy_path = tenant(
+            budget={"max_iterations": 1},
+            acceptance={"min_val_delta": 1.0, "confidence": confidence, "train_tiebreak": False},
+        )
+        generator = ScriptedGenerator(_proposal_script(DESSERT_PROMPT))
+
+        result = _run(policy_path, generator)
+
+        record = _ledger(result)[1]
+        assert record["val_delta"] == pytest.approx(100 / 3)
+        assert 0.65 < record["p_improve"] < 0.75
+        assert record["reason"] == reason
+
+    def test_tiebreak_needs_a_credible_train_gain(self, tenant: Callable[..., Path]) -> None:
+        """A val tie with only one more correct train case out of four is not accepted."""
+        policy_path = tenant(budget={"max_iterations": 1})
+        generator = ScriptedGenerator(_proposal_script(FLAME_PROMPT))
+
+        result = _run(policy_path, generator)
+
+        record = _ledger(result)[1]
+        assert (record["train_delta"], record["val_delta"]) == (25.0, 0.0)
+        assert record["reason"] == "selection_below_threshold"
+
+    def test_duplicate_configs_are_screened_once(self, tenant: Callable[..., Path]) -> None:
+        """Two plans that produce the same config cost one train eval."""
+        policy_path = tenant(
+            levels=["parameter"],
+            parameter_space={"provider_settings.max_tokens": {"type": "int", "min": 1, "max": 64}},
+            budget={"max_iterations": 1},
+            search={"candidates": 2, "merge": False},
+        )
+        first = _parameter_plan(3)["plan"]
+        second = dict(first, technique="shorter output", hypothesis="Same change, other words.")
+        generator = ScriptedGenerator({"analyst": [{"clusters": [], "plans": [first, second]}]})
+
+        result = _run(policy_path, generator)
+
+        record = _ledger(result)[1]
+        assert [entry["reason"] for entry in record["alternatives"]] == ["duplicate_config"]
+        assert [name for name in _eval_dirs(policy_path) if name.endswith("-train")] == [
+            "c000-train",
+            "c001a-train",
+        ]
+
+    def test_finalists_are_reevaluated_before_choosing_the_best(self, tenant: Callable[..., Path]) -> None:
+        """The top pool members get fresh val runs, and the best fresh score is the final pick."""
+        policy_path = tenant(budget={"max_iterations": 1}, selection={"finalists": 2})
+        generator = ScriptedGenerator(_proposal_script(STRICT_PROMPT))
+
+        result = _run(policy_path, generator)
+
+        ledger = _ledger(result)
+        [selection] = [record for record in ledger if record["type"] == "final_selection"]
+        assert [row["candidate_id"] for row in selection["finalists"]] == ["c001", "c000"]
+        assert [row["reevaluation"]["score"] for row in selection["finalists"]] == [100.0, 0.0]
+        assert selection["chosen_id"] == result.best.candidate_id == "c001"
+        assert {"c001-final-val", "c000-final-val"} <= set(_eval_dirs(policy_path))
+
+
+class TestFinalSelection:
+    def _coordinator(self, tenant: Callable[..., Path]) -> Any:
+        policy_path = tenant(selection={"finalists": 2})
+        return coordinator._Coordinator(
+            load_policy(policy_path), policy_path.parent / "workspace", ScriptedGenerator({})
+        )
+
+    def _pool(self) -> List[Any]:
+        val = {"stored": coordinator.SplitScore(80.0, 3, 0), "runner_up": coordinator.SplitScore(70.0, 3, 0)}
+        pool = []
+        for candidate_id in ("stored", "runner_up"):
+            member = _member(candidate_id, {"a": 50.0}, {"id": candidate_id})
+            member.val = val[candidate_id]
+            pool.append(member)
+        return pool
+
+    def test_fresh_scores_decide_between_finalists(
+        self, tenant: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The finalist with the best fresh score wins, even if its stored score was lower."""
+        coord = self._coordinator(tenant)
+        fresh = {"stored": 60.0, "runner_up": 75.0}
+        monkeypatch.setattr(
+            coord,
+            "_evaluate",
+            lambda name, config, split, repeats=1: (
+                coordinator.SplitScore(fresh[config["id"]], 3, 0),
+                [],
+                {},
+            ),
+        )
+
+        assert coord._final_selection(self._pool(), []).candidate_id == "runner_up"
+
+    def test_selection_is_reused_only_for_the_same_finalists(
+        self, tenant: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A saved selection is reused when its finalists still lead, and redone when they changed."""
+        coord = self._coordinator(tenant)
+        calls: List[str] = []
+
+        def evaluate(name: str, config: Dict[str, Any], split: str, repeats: int = 1) -> Any:
+            calls.append(name)
+            return coordinator.SplitScore(50.0, 3, 0), [], {}
+
+        monkeypatch.setattr(coord, "_evaluate", evaluate)
+        saved = {
+            "type": "final_selection",
+            "finalists": [{"candidate_id": "stored"}, {"candidate_id": "runner_up"}],
+            "chosen_id": "runner_up",
+        }
+
+        assert coord._final_selection(self._pool(), [saved]).candidate_id == "runner_up"
+        assert calls == []
+        stale = dict(saved, finalists=[{"candidate_id": "stored"}, {"candidate_id": "older"}])
+        coord._final_selection(self._pool(), [stale])
+        assert calls == ["stored-final", "runner_up-final"]
+
+    def test_resume_reselects_when_a_better_candidate_arrives(self, tenant: Callable[..., Path]) -> None:
+        """Resuming a finished run reconsiders the final pick when the pool's leaders change."""
+        policy_path = tenant(budget={"max_iterations": 1}, selection={"finalists": 2})
+        script = {
+            "analyst": [_prompt_plan("heat hint"), _prompt_plan("output-format constraint")],
+            "prompt_proposer": [{"prompt": HEAT_PROMPT}, {"prompt": STRICT_PROMPT}],
+            "reviewer": [PASS_REVIEW],
+        }
+        generator = ScriptedGenerator(script)
+        first = _run(policy_path, generator)
+        assert first.best.candidate_id == "c001"
+
+        policy = load_policy(policy_path)
+        policy.budget.max_iterations = 2
+        resumed = coordinator.run_optimization(
+            policy, policy_path.parent / "workspace", generator=generator, resume=True
+        )
+
+        assert resumed.best.candidate_id == "c002"
+        selections = [record for record in _ledger(resumed) if record["type"] == "final_selection"]
+        assert [record["chosen_id"] for record in selections] == ["c001", "c002"]
+
+    def test_interrupted_test_run_cannot_be_resumed(self, tenant: Callable[..., Path]) -> None:
+        """Once test evaluation has started, the workspace cannot run again."""
+        policy_path = tenant(budget={"max_iterations": 0})
+        _run(policy_path, ScriptedGenerator({}))
+        ledger = policy_path.parent / "workspace" / coordinator.LEDGER_FILE
+        with ledger.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "test_started"}) + "\n")
+
+        with pytest.raises(ValueError, match="test split was already evaluated"):
+            _run(policy_path, ScriptedGenerator({}), resume=True)
+
+
+class TestParentSelection:
+    def _coordinator(self, tenant: Callable[..., Path], **search: Any) -> Any:
+        policy_path = tenant(search={"candidates": 1, **search})
+        return coordinator._Coordinator(
+            load_policy(policy_path), policy_path.parent / "workspace", ScriptedGenerator({})
+        )
+
+    def test_member_winning_cases_can_be_the_parent(self, tenant: Callable[..., Path]) -> None:
+        """A pool member that is best on some train cases gets sampled as a parent."""
+        coord = self._coordinator(tenant)
+        base = _member("c000", {"a": 100.0, "b": 0.0, "c": 0.0}, {})
+        other = _member("c001", {"a": 0.0, "b": 100.0, "c": 100.0}, {})
+
+        parents = {coord._select_parent([base, other], iteration).candidate_id for iteration in range(1, 30)}
+
+        assert parents == {"c000", "c001"}
+
+    def test_best_selection_always_uses_the_best(self, tenant: Callable[..., Path]) -> None:
+        """With parent_selection "best", the parent is always the current best."""
+        coord = self._coordinator(tenant, parent_selection="best")
+        base = _member("c000", {"a": 100.0, "b": 0.0, "c": 0.0}, {})
+        other = _member("c001", {"a": 0.0, "b": 100.0, "c": 100.0}, {})
+
+        assert {coord._select_parent([base, other], i).candidate_id for i in range(1, 10)} == {"c001"}
+
+    def test_dominated_members_are_never_sampled(self, tenant: Callable[..., Path]) -> None:
+        """A member that another member matches or beats on every case is not a parent."""
+        coord = self._coordinator(tenant)
+        dominated = _member("c000", {"a": 100.0, "b": 0.0, "c": 0.0}, {})
+        dominating = _member("c001", {"a": 100.0, "b": 100.0, "c": 0.0}, {})
+        other = _member("c002", {"a": 0.0, "b": 0.0, "c": 100.0}, {})
+
+        parents = {
+            coord._select_parent([dominated, dominating, other], i).candidate_id for i in range(1, 60)
+        }
+
+        assert parents == {"c001", "c002"}
+
+
+class TestMerge:
+    def _setup(self, tenant: Callable[..., Path]) -> Any:
+        policy_path = tenant(
+            levels=["prompt", "parameter"],
+            parameter_space={"provider_settings.max_tokens": {"type": "int", "min": 1, "max": 64}},
+        )
+        coord = coordinator._Coordinator(
+            load_policy(policy_path), policy_path.parent / "workspace", ScriptedGenerator({})
+        )
+        base_config = copy.deepcopy(coord.base_config)
+        prompt_config = copy.deepcopy(base_config)
+        prompt_config["chain"]["config"]["prompt_paths"]["answer"] = "variant-002.md"
+        token_config = copy.deepcopy(base_config)
+        token_config["provider_settings"]["max_tokens"] = 32
+        pool = [
+            _member("c000", {"a": 0.0}, base_config),
+            _member("c001", {"a": 100.0}, prompt_config, parent_id="c000"),
+            _member("c002", {"a": 50.0}, token_config, parent_id="c000"),
+        ]
+        return coord, pool
+
+    def test_disjoint_changes_are_combined(self, tenant: Callable[..., Path]) -> None:
+        """Two members that changed different settings from a common ancestor are merged."""
+        coord, pool = self._setup(tenant)
+        tried: set = set()
+
+        entry = coord._merge_entry(3, pool, tried, [])
+
+        assert entry["merge_of"] == ["c001", "c002"]
+        assert entry["parent"].candidate_id == "c001"
+        assert entry["config"]["chain"]["config"]["prompt_paths"]["answer"] == "variant-002.md"
+        assert entry["config"]["provider_settings"]["max_tokens"] == 32
+        assert coord._merge_entry(4, pool, tried, []) is None
+
+    def test_descendants_are_not_merged(self, tenant: Callable[..., Path]) -> None:
+        """A member is never merged with its own ancestor."""
+        coord, pool = self._setup(tenant)
+        child_config = copy.deepcopy(pool[1].config)
+        child_config["provider_settings"]["max_tokens"] = 16
+        descendant = _member("c003", {"a": 100.0}, child_config, parent_id="c001")
+
+        assert coord._merge_entry(4, [pool[0], pool[1], descendant], set(), []) is None
+
+    def test_overlapping_changes_are_not_merged(self, tenant: Callable[..., Path]) -> None:
+        """Siblings that changed the same setting are not merged."""
+        coord, pool = self._setup(tenant)
+        sibling_config = copy.deepcopy(pool[0].config)
+        sibling_config["provider_settings"]["max_tokens"] = 16
+        sibling = _member("c003", {"a": 40.0}, sibling_config, parent_id="c000")
+
+        assert coord._merge_entry(4, [pool[0], pool[2], sibling], set(), []) is None

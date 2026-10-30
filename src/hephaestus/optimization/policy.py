@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 from src.hephaestus.datasets.rubric_providers import DEFAULT_OPENAI_RUBRIC_MODEL
 
 ALLOWED_LEVELS = ("prompt", "parameter")
+PARENT_SELECTIONS = ("pareto", "best")
 PARAMETER_TYPES = ("int", "float", "choice", "bool")
 # resolve_provider_settings drops unknown keys, so only these can take effect.
 TUNABLE_PROVIDER_SETTINGS = ("model", "temperature", "top_p", "max_tokens")
@@ -64,14 +65,45 @@ class ParameterSpec:
 
 @dataclass
 class AcceptancePolicy:
-    """Thresholds a candidate must clear to replace the current best."""
+    """Thresholds a candidate must clear to join the pool.
+
+    A candidate is compared with its parent case by case on the selection
+    split. It is accepted when its mean gain is positive, at least
+    ``min_val_delta``, and the paired bootstrap probability that the gain is
+    real is at least ``confidence``.
+    """
 
     min_train_delta: float = 0.0
-    min_val_delta: float = 1.0
+    min_val_delta: float = 0.0
+    confidence: float = 0.8
     val_repeats: int = 1
-    # Accept a candidate that does not lose on val (gain below min_val_delta)
-    # but strictly improves train; small val splits tie often.
+    # Accept a candidate that does not lose on val but strictly improves
+    # train; small val splits tie often.
     train_tiebreak: bool = True
+
+
+@dataclass
+class SearchPolicy:
+    """How each iteration generates candidates and where they branch from."""
+
+    # Plans the analyst proposes per iteration; each is screened on train.
+    candidates: int = 3
+    # "pareto" samples a parent from the pool by the train cases each member
+    # does best on; "best" always branches from the current best.
+    parent_selection: str = "pareto"
+    # Also screen the combination of two pool members that changed different
+    # modules or parameters since their common ancestor.
+    merge: bool = True
+
+
+@dataclass
+class SelectionPolicy:
+    """How the final best is chosen once the loop stops."""
+
+    # Re-evaluate this many top pool members on the selection split and keep
+    # the best fresh score; 1 keeps the loop's best without re-evaluation.
+    finalists: int = 3
+    repeats: int = 1
 
 
 @dataclass
@@ -95,6 +127,8 @@ class OptimizationPolicy:
     prompt_modules: List[str] = field(default_factory=list)
     parameter_space: List[ParameterSpec] = field(default_factory=list)
     acceptance: AcceptancePolicy = field(default_factory=AcceptancePolicy)
+    search: SearchPolicy = field(default_factory=SearchPolicy)
+    selection: SelectionPolicy = field(default_factory=SelectionPolicy)
     budget: BudgetPolicy = field(default_factory=BudgetPolicy)
     role_model: str = DEFAULT_OPENAI_RUBRIC_MODEL
     llm_review: bool = True
@@ -131,6 +165,8 @@ def load_policy(path: Path) -> OptimizationPolicy:
     datasets = _object(raw.get("datasets"), "datasets")
     acceptance = _object(raw.get("acceptance", {}), "acceptance")
     budget = _object(raw.get("budget", {}), "budget")
+    search = _object(raw.get("search", {}), "search")
+    selection = _object(raw.get("selection", {}), "selection")
     roles = _object(raw.get("roles", {}), "roles")
     parameter_space = [
         _parameter_spec(param_path, _object(spec, f"parameter_space.{param_path}"))
@@ -146,9 +182,19 @@ def load_policy(path: Path) -> OptimizationPolicy:
         parameter_space=parameter_space,
         acceptance=AcceptancePolicy(
             min_train_delta=float(acceptance.get("min_train_delta", 0.0)),
-            min_val_delta=float(acceptance.get("min_val_delta", 1.0)),
+            min_val_delta=float(acceptance.get("min_val_delta", 0.0)),
+            confidence=float(acceptance.get("confidence", 0.8)),
             val_repeats=int(acceptance.get("val_repeats", 1)),
             train_tiebreak=bool(acceptance.get("train_tiebreak", True)),
+        ),
+        search=SearchPolicy(
+            candidates=int(search.get("candidates", 3)),
+            parent_selection=str(search.get("parent_selection", "pareto")),
+            merge=bool(search.get("merge", True)),
+        ),
+        selection=SelectionPolicy(
+            finalists=int(selection.get("finalists", 3)),
+            repeats=int(selection.get("repeats", 1)),
         ),
         budget=BudgetPolicy(
             max_iterations=int(budget.get("max_iterations", 10)),
@@ -183,6 +229,16 @@ def validate_policy(policy: OptimizationPolicy) -> None:
         _validate_parameter_path(spec.path)
     if policy.acceptance.val_repeats < 1:
         raise ValueError("acceptance.val_repeats must be >= 1")
+    if not 0.0 <= policy.acceptance.confidence <= 1.0:
+        raise ValueError("acceptance.confidence must be between 0 and 1")
+    if not 1 <= policy.search.candidates <= 26:
+        raise ValueError("search.candidates must be between 1 and 26")
+    if policy.search.parent_selection not in PARENT_SELECTIONS:
+        raise ValueError(f"search.parent_selection must be one of {list(PARENT_SELECTIONS)}")
+    if policy.selection.finalists < 1:
+        raise ValueError("selection.finalists must be >= 1")
+    if policy.selection.repeats < 1:
+        raise ValueError("selection.repeats must be >= 1")
     if policy.budget.max_iterations < 0:
         raise ValueError("budget.max_iterations must be >= 0")
     if policy.budget.plateau_patience < 1:
