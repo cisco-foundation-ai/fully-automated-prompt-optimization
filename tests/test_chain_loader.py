@@ -6,11 +6,13 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
 
 from src.hephaestus.chains.loader import load_chain_factory
+from src.hephaestus.loader import _load_module, released_loaded_modules
 
 
 class TestLoadChainFactory:
@@ -130,3 +132,28 @@ def build_chain(provider, config):
 
         assert factory_a(None, {}) == "chain_a"
         assert factory_b(None, {}) == "chain_b"
+
+
+class TestReleasedLoadedModules:
+    def test_unregisters_modules_loaded_in_the_block(self, tmp_path: Path) -> None:
+        """Modules loaded inside the block are removed from sys.modules when it exits."""
+        module_file = tmp_path / "probe_module.py"
+        module_file.write_text("VALUE = 1\n", encoding="utf-8")
+
+        with released_loaded_modules():
+            module = _load_module(module_file)
+            assert sys.modules[module.__name__] is module
+
+        assert module.__name__ not in sys.modules
+
+    def test_keeps_modules_loaded_before_the_block(self, tmp_path: Path) -> None:
+        """Modules that were loaded before the block stay registered."""
+        module_file = tmp_path / "earlier_module.py"
+        module_file.write_text("VALUE = 2\n", encoding="utf-8")
+        module = _load_module(module_file)
+
+        with released_loaded_modules():
+            pass
+
+        assert sys.modules.get(module.__name__) is module
+        sys.modules.pop(module.__name__, None)

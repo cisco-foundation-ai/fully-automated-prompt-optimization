@@ -30,6 +30,7 @@ from src.hephaestus.datasets.jsonl_loader import (
     load_cases_with_identity,
 )
 from src.hephaestus.datasets.trust_tiers import CURRENT_TRUST_TIERS
+from src.hephaestus.loader import released_loaded_modules
 from src.hephaestus.mcp.manager import MCPServerManager
 from src.hephaestus.mcp.types import MCPConfig, MCPServerConfig
 from src.hephaestus.providers import (
@@ -1460,7 +1461,10 @@ def run_evaluation(config: EvalConfig) -> List[Dict]:
     )
     mcp_manager: MCPServerManager | None = None
     try:
-        with _snapshot_runtime_inputs(logical_config, loaded_cases) as input_snapshot:
+        with (
+            released_loaded_modules(),
+            _snapshot_runtime_inputs(logical_config, loaded_cases) as input_snapshot,
+        ):
             execution_config = input_snapshot.execution_config
             cases = list(input_snapshot.execution_cases)
             scoring_profile = copy.deepcopy(execution_config.scoring_profile)
