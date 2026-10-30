@@ -19,19 +19,64 @@ synthetic-data generation remain agent-only.
 ## Loop
 
 ```text
-baseline: eval train (+ val)
+baseline: eval train (+ val); the pool starts with the baseline
 repeat until a stop condition:
-  1. attribute   rule-based step attribution over the current best's train results
-  2. plan        analyst role: study the training overview, cluster train failures, pick ONE
-                 change (level, module, scope "edit" or "rewrite", technique)
-  3. propose     prompt proposer writes one module   |   parameter plan sets declared knobs
-  4. review      static checks (code) + reviewer role; one revision, then reject
-  5. screen      eval train; reject if train delta < min_train_delta
-  6. select      eval val (val_repeats times); accept if val delta > 0 and >= min_val_delta,
-                 or (train_tiebreak) if val does not drop and train strictly improves
-  7. record      append to ledger.jsonl; accepted candidate becomes the new best
-optional: eval baseline and best once on test
+  1. parent      sample a pool member by the train cases it does best on (or take the best)
+  2. attribute   rule-based step attribution over the parent's train results
+  3. plan        analyst role: study the training overview, cluster train failures, and pick
+                 up to `search.candidates` distinct changes (level, module, scope, technique)
+  4. propose     prompt proposer writes one module per prompt plan | parameter plans set knobs
+  5. review      static checks (code) + reviewer role; one revision, then reject
+  6. merge       optionally add the combination of two pool members that changed different
+                 settings since their common ancestor (no model call)
+  7. screen      eval every candidate on train; reject if train delta < min_train_delta
+  8. select      eval the best-screened candidate on val (val_repeats times); accept when the
+                 paired test against its parent passes, or by train tie-break
+  9. record      append to ledger.jsonl; an accepted candidate joins the pool
+after the loop: re-evaluate the top pool members on val and keep the best fresh score
+optional: eval baseline and the chosen best once on test
 ```
+
+### Acceptance
+
+A candidate is compared with its parent case by case on the same val cases. The
+coordinator computes the mean gain and a paired bootstrap probability that it is real:
+the share of resamples of the cases whose mean gain is strictly positive. Each case's gain
+includes the sampling noise of both runs; `val_repeats` averages it down. A candidate is
+accepted when the gain is positive, at least `min_val_delta`, and the probability is at
+least `acceptance.confidence`. A single improved case among many stays below 0.8, so one
+lucky flip is not enough. With `train_tiebreak`, a candidate whose val score does not drop
+is also accepted when its train gain passes the same probability test. Without a val
+split, the test runs on train.
+
+On 300 val cases with 20% flaky cases, a simulation gave these acceptance rates:
+
+| Rule | No real change | +3 points | +5 points |
+|---|---|---|---|
+| Accept any positive gain (previous behavior) | 48% | 93% | 100% |
+| `confidence` 0.8 (default) | 17% | 67% | 93% |
+| `confidence` 0.9 | 9% | 45% | 83% |
+
+### Pool, parents, and merges
+
+Accepted candidates form a pool. Each iteration's parent is sampled from the pool with
+weight equal to the number of train cases where that member reaches the top score
+(GEPA-style Pareto selection), so members that solve different cases keep being explored.
+`search.parent_selection: "best"` always branches from the current best.
+
+When two pool members changed different prompt modules or parameters since their common
+ancestor, the coordinator also screens their combination. This finds gains that need two
+modules to change together, which one-module plans cannot reach. All candidates run on the
+same train cases, so the best-screened candidate is the one with the highest train score,
+whatever it branched from.
+
+### Final selection
+
+A single best score is biased upward, because it was chosen as the maximum of many noisy
+scores. When the loop stops, the top `selection.finalists` pool members are re-evaluated on
+val (train without a val split) `selection.repeats` times, and the best fresh score is the
+final pick. A resumed run reuses an earlier selection only when its finalists are still
+the top pool members.
 
 The loop stops when any of these holds:
 
@@ -45,12 +90,12 @@ The loop stops when any of these holds:
 
 | Role | Input | Output |
 |------|-------|--------|
-| Analyst | current best prompts, the training overview, sampled failing **train** cases with metadata, attribution summary, run history with per-case flips, techniques tried since the last improvement, tenant guidance, scorer source | failure clusters and one plan |
+| Analyst | the parent's prompts, the training overview, sampled failing **train** cases with metadata, attribution summary, run history with per-case flips for every screened candidate, techniques tried since the last improvement, tenant guidance, scorer source | failure clusters and up to `max_plans` distinct plans |
 | Prompt proposer | one module's prompt body, its placeholders, the plan, the analyst's clusters, the targeted train cases, the training overview, tenant guidance, scorer source | full new prompt body |
 | Reviewer | previous and proposed prompt, plan scope and hypothesis, the targeted train cases | verdict and issues |
 
 The **training overview** lists every training case (inputs, expected output,
-metadata, and whether the current best passes it) when the train split has at
+metadata, and whether the parent passes it) when the train split has at
 most `train_overview_limit` cases. It lets the roles induce the structure of
 the task, such as which kinds of inputs map to each output, instead of
 patching individual failures.
@@ -86,7 +131,10 @@ enforces only what the policy says.
     "provider_settings.temperature": {"type": "float", "min": 0.0, "max": 1.0},
     "chain.config.retrieval_k": {"type": "int", "min": 3, "max": 20}
   },
-  "acceptance": {"min_train_delta": 0.0, "min_val_delta": 1.0, "val_repeats": 1, "train_tiebreak": true},
+  "acceptance": {"min_train_delta": 0.0, "min_val_delta": 0.0, "confidence": 0.8,
+                 "val_repeats": 1, "train_tiebreak": true},
+  "search": {"candidates": 3, "parent_selection": "pareto", "merge": true},
+  "selection": {"finalists": 3, "repeats": 1},
   "budget": {"max_iterations": 10, "plateau_patience": 3, "target_score": null},
   "roles": {"model": "<openai-model>", "llm_review": true},
   "guidance_paths": ["tenants/<tenant_id>/docs/iteration-playbook.md"],
@@ -102,7 +150,13 @@ enforces only what the policy says.
 | `prompt_modules` | Optional allowlist of `chain.config.prompt_paths` keys. Defaults to every module. |
 | `parameter_space` | Dotted paths into the eval config, each with an `int`, `float`, `choice`, or `bool` spec. Allowed paths are `provider_settings.<key>` for `model`, `temperature`, `top_p`, and `max_tokens`, and top-level `chain.config.<key>` keys other than `prompt_paths`, `skill_paths`, and `optimization_target`. |
 | `datasets.val` | Strongly recommended. Without it, selection falls back to the train split and `train_tiebreak` does not apply. |
-| `acceptance.train_tiebreak` | Accept a candidate whose val gain is below `min_val_delta` but not negative when its train score strictly improves. Small val splits tie often; without this, real train gains are discarded. |
+| `acceptance.confidence` | Minimum paired bootstrap probability that a candidate's gain over its parent is real. Default 0.8. |
+| `acceptance.min_val_delta` | Optional minimum mean val gain, in score points. Default 0. |
+| `acceptance.train_tiebreak` | Accept a candidate whose val score does not drop when its train gain passes the confidence test. Small val splits tie often; without this, real train gains are discarded. |
+| `search.candidates` | Plans the analyst proposes per iteration, each screened on train. Default 3. Train eval cost scales with it; val cost does not. |
+| `search.parent_selection` | `"pareto"` (default) samples parents from the pool; `"best"` always uses the current best. |
+| `search.merge` | Also screen combinations of pool members with disjoint changes. Default true. |
+| `selection.finalists`, `selection.repeats` | Pool members re-evaluated after the loop, and val runs each. `finalists: 1` skips re-evaluation. |
 | `train_overview_limit` | Show the full training overview when the train split has at most this many cases (`0` disables it). Larger splits get only the `max_failures_shown` sampled failing cases. |
 | `roles.model` | Defaults to the same OpenAI model the evaluation-asset pipeline uses. |
 
@@ -122,7 +176,7 @@ policy. The command prints a JSON summary when the loop stops.
 
 | Path | Content |
 |------|---------|
-| `<workspace>/ledger.jsonl` | One record per baseline, iteration, and stop: plan, clusters, review issues, train/val scores and deltas, decision reason, candidate config, and per-role token usage |
+| `<workspace>/ledger.jsonl` | One record per baseline, iteration, final selection, and stop. An iteration record holds the selected candidate (plan, clusters, review issues, train/val scores and deltas, `p_improve`, decision reason, config, per-role token usage) and its `alternatives`: every other candidate tried that iteration, with the reason it was not selected (for example `not_selected`, `train_screen`, `review_failed`, or `duplicate_config`) |
 | `<workspace>/configs/` | The exact eval config used for every eval run |
 | `<workspace>/evals/<candidate>-<split>/` | Standard eval run bundles |
 | `<workspace>/best-config.json` | Runnable eval config for the best candidate |
@@ -138,8 +192,11 @@ In the agent loop these controls are agent-enforced. Here the coordinator
 enforces them in code, within the limits of the policy:
 
 - **Training-only authoring:** role payloads contain per-case data from the
-  train split only. Val and test contribute aggregate scores only.
-- **Validation-only selection:** candidates are accepted on the val split.
+  train split only. Val and test reach roles as aggregate scores only. Per-case
+  val scores are used in code for the paired test and never enter a payload or
+  the ledger.
+- **Validation-only selection:** candidates are accepted, and the final pick is
+  made, on the val split.
 - **Single test evaluation:** test runs only with `--final-test`, after
   optimization stops. A workspace with a test result cannot be resumed.
 - **Scope:** only declared levels, modules, and parameter bounds can change.
