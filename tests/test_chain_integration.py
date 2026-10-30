@@ -10,7 +10,9 @@ score_pipeline_case dispatch, and output file verification.
 
 from __future__ import annotations
 
+import gc
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -288,3 +290,61 @@ class TestThreeNodeChainIntegration:
         summary_text = summary_path.read_text(encoding="utf-8")
         assert "Evaluation Summary" in summary_text
         assert "Total cases: 2" in summary_text
+
+
+class TestEvalModuleRelease:
+    """Evals release the tenant modules they load."""
+
+    def test_repeated_evals_free_chain_module_data(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Module-level data in a chain does not survive its eval, so repeated evals do not accumulate it."""
+        chain_file = tmp_path / "probe_chain.py"
+        chain_file.write_text(
+            """\
+from langgraph.graph import StateGraph, END
+
+
+class _LeakProbePayload:
+    pass
+
+
+PAYLOAD = _LeakProbePayload()
+
+
+def _answer(state):
+    return {"output_text": "ok", "step_outputs": {"answer": "ok"}}
+
+
+def build_chain(provider, config):
+    graph = StateGraph(dict)
+    graph.add_node("answer", _answer)
+    graph.set_entry_point("answer")
+    graph.add_edge("answer", END)
+    return graph.compile()
+""",
+            encoding="utf-8",
+        )
+        scorer = write_scorer(tmp_path)
+        dataset = write_dataset(tmp_path)
+        monkeypatch.setattr(eval_runner, "build_provider_client", lambda _p, _s: TrackingProvider([]))
+        modules_before = set(sys.modules)
+
+        for run in range(2):
+            config_path = tmp_path / f"config-{run}.json"
+            config = {
+                "tenant_id": "integration_test",
+                "provider": "baseten",
+                "provider_settings": {},
+                "dataset": {"path": str(dataset)},
+                "chain": {"path": str(chain_file), "fn": "build_chain", "config": {}},
+                "scoring_profile": {"scorer": {"module_path": str(scorer)}},
+                "output_dir": str(tmp_path / f"out-{run}"),
+            }
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            assert len(run_evaluation(load_eval_config(config_path))) == 1
+        gc.collect()
+
+        leftover = [name for name in set(sys.modules) - modules_before if "hephaestus_tenant" in name]
+        assert leftover == []
+        assert not [obj for obj in gc.get_objects() if type(obj).__name__ == "_LeakProbePayload"]

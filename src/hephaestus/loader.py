@@ -12,6 +12,26 @@ from pathlib import Path
 from types import ModuleType
 from typing import Iterator
 
+# Prefixes of the module names `_load_module` registers in `sys.modules`.
+_LOADED_MODULE_PREFIXES = ("_hephaestus_tenant_pkg_", "hephaestus_tenant_module_")
+
+
+@contextlib.contextmanager
+def released_loaded_modules() -> Iterator[None]:
+    """Unregister the modules `_load_module` registers inside the block.
+
+    An eval loads its chain and scorer from a fresh snapshot, so each eval
+    registers new module names. Without this, every eval's modules, and any
+    large data they hold at module level, stay alive for the whole process.
+    """
+    before = set(sys.modules)
+    try:
+        yield
+    finally:
+        for name in [name for name in sys.modules if name not in before]:
+            if name.startswith(_LOADED_MODULE_PREFIXES):
+                sys.modules.pop(name, None)
+
 
 def _infer_module_name(module_path: Path) -> tuple[str, Path | None, list[str], str | None]:
     stem = module_path.stem
