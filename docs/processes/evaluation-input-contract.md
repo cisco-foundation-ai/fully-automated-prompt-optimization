@@ -7,14 +7,14 @@ SPDX-License-Identifier: Apache-2.0
 # FAFO Evaluation Input Contract
 
 `fafo-evaluation-input-v1` is the vendor-neutral JSONL format for both input
-files of the evaluation-asset pipeline: labeled feedback and unlabeled traces.
+files of the FAFO data pipeline: labeled feedback and unlabeled traces.
 Read it if you write an exporter or adapter that converts source data into
 pipeline inputs.
 
-Both files must conform before asset creation. The core never contains
+Both files must conform before `assets build` runs. The core never contains
 field-name mappings for observability vendors, products, or tenants.
 Source-specific exporters or adapters convert external records into this
-contract before the evaluation-asset workflow runs:
+contract first:
 
 ```text
 Vendor or application export
@@ -23,7 +23,7 @@ Source-specific conversion
         ↓
 FAFO Evaluation Input v1 JSONL
         ↓
-Eight-stage evaluation-asset pipeline
+FAFO data pipeline (assets build)
 ```
 
 ## Common Record
@@ -55,15 +55,15 @@ Optional common fields:
 
 - `group_id` is mandatory. For a genuinely independent record, use its
   `record_id`.
-- The core also unites supplied groups that share exact canonical
-  model-visible context into a derived `split_group_id` for split safety. It
-  does not use embeddings, case-folding, whitespace folding, token overlap, or
-  paraphrase similarity for that identity.
+- The core also joins records that share an exact model-visible context
+  (messages, tool context, and runtime) into one connected group, so they
+  land in the same split. It does not use embeddings, case-folding,
+  whitespace folding, token overlap, or paraphrase similarity for that.
 
 ### Routing identity
 
-The effective routing identity is exact and shared by Stage 1 preflight,
-prepared records, clustering, and coverage matching:
+The effective routing identity is exact. The pipeline builds one guideline
+catalog section per route:
 
 - When `route` is present, its string is used byte-for-byte, including leading
   or trailing whitespace.
@@ -172,26 +172,6 @@ Only the canonical feedback on a labeled record supports evaluation-guideline
 claims. An unlabeled episode remains usage evidence even when it contains tool
 results or a successful termination reason.
 
-## Intent Text
-
-The pipeline builds canonical intent text for clustering from user messages
-only:
-
-- **With an episode that contains user messages:** every such message
-  contributes, in event order. Episode messages are authoritative over the
-  backward-compatible flat message fields. Repeated user messages are
-  retained.
-- **Without an `episode`:** every prior `conversation_context` message whose
-  role is exactly `user`, followed by the current `user_input`.
-- Canonical user messages are separated by newlines in the text supplied for
-  clustering.
-- Assistant messages and tool activity do not enter the intent text. Prepared
-  intent records retain deduplicated tool names as structural trajectory
-  metadata, but tool names are not included in intent-embedding text.
-
-Clusters are sampling and analysis metadata; they do not select guidelines or
-determine rubric correctness.
-
 ## Labeled Records
 
 Labeled rows additionally require:
@@ -205,7 +185,7 @@ Optional `feedback` fields:
 
 | Field | Contents |
 |---|---|
-| `rationale` | A string or `null`. It may be omitted when only categorical feedback exists. Stage 2 normalizes an absent or null value to an empty string. |
+| `rationale` | A string or `null`. It may be omitted when only categorical feedback exists. |
 | `correction` | Corrected output or structured correction evidence. |
 | `source` | Nonempty source category such as `user`, `annotator`, or `sme`. |
 | `correctness_signals` | An array of closed objects requiring `kind` (`deterministic` or `executable`), a nonempty `check_id`, and boolean `passed`. An optional `content` field may carry arbitrary content-bearing evidence and is redacted by the core. |
@@ -298,13 +278,9 @@ Example:
 
 ## Validation Rules
 
-Stage 1 validates every record and stops on the first precise
-`file:row:field` error. Blank lines are not records, but diagnostics retain the
-physical JSONL line number across source validation, copied-input validation,
-and normalized-identity checks.
-
-Stage 1 runs the checks below against the copied Stage 1 files, before any
-evaluation-guideline or embedding provider call. It rejects:
+`assets build` validates every record before any model call and stops on
+the first precise `file:row:field` error. Blank lines are not records, but
+diagnostics keep the physical JSONL line number. It rejects:
 
 - Missing required fields.
 - A missing or unsupported `schema_version`.
@@ -320,36 +296,24 @@ evaluation-guideline or embedding provider call. It rejects:
   IDs, non-boolean outcomes, or unsupported fields; `content` is the only
   optional field.
 - Unlabeled records containing feedback.
-- When clustering is enabled, a requested cluster count greater than the
-  copied unlabeled row count.
-- When clustering is enabled, a requested cluster count smaller than the
-  number of distinct effective routes, using the exact
-  [routing identity](#routing-identity). A count of zero skips Stages 4 and 5.
+- A `record_id` that appears in both files.
+- An empty feedback file.
 
-Adapters can fetch the contract from the FAFO Explorer server
-(`python -m hephaestus.cli ui`) at:
+A failed validation starts nothing, so the build can rerun once the input is
+fixed. Adapters can validate their output with `validate_input_records` and
+read a machine-readable summary from `input_contract_document()`, both in
+`src/hephaestus/data_pipeline/contract.py`.
 
-```text
-GET /api/evaluation-assets/input-contract
-```
+## What the Pipeline Preserves and Adds
 
-## What Stage 2 Preserves and Adds
-
-Stage 2 consumes and preserves the canonical names above:
-
-- It applies schema-aware redaction only to content-bearing fields, including
-  every nested string below an explicitly content-bearing mapping or list.
-- It applies documented defaults and may add derived fields.
-- It does not rename or rewrite source identity, routing, role, or structural
-  tool-name fields. `schema_version`, `record_id`, `group_id`, `request_id`,
-  `task_type`, `route`, intent labels, message roles, and tool names remain
-  byte-for-byte unchanged at their defined structural paths.
-- It rechecks normalized `record_id` uniqueness and reports both physical
-  source rows and source IDs if a transformation creates a collision.
-- It derives a `split_group_id`, assigns connected trusted groups to a split
-  before guideline authoring, and records whether each feedback row has
-  minimum usable correctness evidence. These are internal derived fields; the
-  supplied `group_id` remains unchanged.
+- Redaction replaces email and IPv4 addresses in every string and object key
+  except the identity fields `schema_version`, `record_id`, `group_id`,
+  `request_id`, `task_type`, and `route`. Set `redact: false` in the build
+  config when replay needs exact values.
+- No field is renamed, and identity fields stay byte-for-byte unchanged.
+- Connected groups are assigned to splits before any model call. The split
+  and group of each record are written to the asset's `splits.jsonl`; the
+  supplied `group_id` is unchanged.
 
 ## Adapter Responsibility
 
@@ -370,6 +334,6 @@ adapter must replace them with stable pseudonyms before this boundary,
 preserving equality and grouping relationships. Core content redaction is not
 identifier pseudonymization.
 
-Adapters must not implement evaluation-guideline creation, clustering,
-case-specific rubric generation, synthetic generation, or dataset splitting.
+Adapters must not implement guideline creation, case-specific rubric
+generation, or dataset splitting.
 Those operations remain in the shared core after the contract boundary.

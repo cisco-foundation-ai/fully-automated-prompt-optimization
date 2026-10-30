@@ -25,17 +25,6 @@ _UNSPECIFIED_TARGET = object()
 _UNSPECIFIED_TARGET_CONTENT = object()
 
 
-def _descriptor_bytes(descriptor: int) -> bytes:
-    """Read an opened regular file from its stable descriptor identity."""
-    os.lseek(descriptor, 0, os.SEEK_SET)
-    chunks: list[bytes] = []
-    while True:
-        chunk = os.read(descriptor, 1024 * 1024)
-        if not chunk:
-            return b"".join(chunks)
-        chunks.append(chunk)
-
-
 def _rename_with_flags_at(
     directory_descriptor: int,
     source: str,
@@ -219,108 +208,6 @@ def rename_noreplace_at(
         raise OSError("raced rename source recovery could not be verified")
     os.fsync(directory_descriptor)
     raise ValueError("rename source changed during installation")
-
-
-def rename_exchange_at(
-    directory_descriptor: int,
-    source: str,
-    destination: str,
-    *,
-    expected_source: tuple[int, int, int] | None = None,
-    expected_destination: tuple[int, int, int] | None = None,
-) -> None:
-    """Atomically exchange two names beneath one stable directory descriptor."""
-    for name, expected in (
-        (source, expected_source),
-        (destination, expected_destination),
-    ):
-        if expected is None:
-            continue
-        details = os.stat(
-            name,
-            dir_fd=directory_descriptor,
-            follow_symlinks=False,
-        )
-        if (
-            details.st_dev,
-            details.st_ino,
-            stat.S_IFMT(details.st_mode),
-        ) != expected:
-            raise ValueError("rename exchange node is not the expected identity")
-    if not _rename_with_flags_at(
-        directory_descriptor,
-        source,
-        destination,
-        darwin_flags=0x00000002,
-        linux_flags=2,
-    ):
-        raise OSError("atomic exchange unexpectedly found a competing target")
-    source_after = os.stat(
-        source,
-        dir_fd=directory_descriptor,
-        follow_symlinks=False,
-    )
-    destination_after = os.stat(
-        destination,
-        dir_fd=directory_descriptor,
-        follow_symlinks=False,
-    )
-    source_after_identity = (
-        source_after.st_dev,
-        source_after.st_ino,
-        stat.S_IFMT(source_after.st_mode),
-    )
-    destination_after_identity = (
-        destination_after.st_dev,
-        destination_after.st_ino,
-        stat.S_IFMT(destination_after.st_mode),
-    )
-    source_mismatch = (
-        expected_source is not None
-        and destination_after_identity != expected_source
-    )
-    destination_mismatch = (
-        expected_destination is not None
-        and source_after_identity != expected_destination
-    )
-    if not source_mismatch and not destination_mismatch:
-        return
-
-    # Reverse this operation's exact exchange before reporting the failed
-    # compare-and-swap.  This makes the pre-syscall concurrent target live
-    # again and retains this operation's source under its private name.
-    if not _rename_with_flags_at(
-        directory_descriptor,
-        source,
-        destination,
-        darwin_flags=0x00000002,
-        linux_flags=2,
-    ):
-        raise OSError("raced rename exchange could not be reversed")
-    restored_source = os.stat(
-        source,
-        dir_fd=directory_descriptor,
-        follow_symlinks=False,
-    )
-    restored_destination = os.stat(
-        destination,
-        dir_fd=directory_descriptor,
-        follow_symlinks=False,
-    )
-    if (
-        restored_source.st_dev,
-        restored_source.st_ino,
-        stat.S_IFMT(restored_source.st_mode),
-    ) != destination_after_identity or (
-        restored_destination.st_dev,
-        restored_destination.st_ino,
-        stat.S_IFMT(restored_destination.st_mode),
-    ) != source_after_identity:
-        raise OSError("raced rename exchange recovery could not be verified")
-    os.fsync(directory_descriptor)
-    if source_mismatch:
-        raise ValueError("rename source changed during exchange")
-    raise ValueError("rename destination changed during exchange")
 
 
 def atomic_write_bytes_at(
@@ -575,25 +462,6 @@ def atomic_copy_file(source: Path, destination: Path) -> None:
             shutil.copyfileobj(source_handle, handle)
 
     _atomic_write_binary(destination, produce)
-
-
-def atomic_append_jsonl(path: Path, payload: Mapping[str, Any]) -> None:
-    """Append one JSONL row by atomically replacing a copied prior file."""
-
-    def produce(handle: BinaryIO) -> None:
-        needs_newline = False
-        if path.is_file():
-            with path.open("rb") as source_handle:
-                shutil.copyfileobj(source_handle, handle)
-                if source_handle.tell() > 0:
-                    source_handle.seek(-1, os.SEEK_END)
-                    needs_newline = source_handle.read(1) != b"\n"
-        if needs_newline:
-            handle.write(b"\n")
-        serialized = json.dumps(dict(payload), sort_keys=True, allow_nan=False) + "\n"
-        handle.write(serialized.encode("utf-8"))
-
-    _atomic_write_binary(path, produce)
 
 
 def _atomic_write_text(

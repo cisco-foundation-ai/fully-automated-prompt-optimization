@@ -19,7 +19,7 @@ SPDX-License-Identifier: Apache-2.0
 | `recipe/configs/regression.json` | Trusted regression gate |
 
 All configs assume a sibling Tau checkout at `../tau2-bench` and a local FAFO
-asset named `fafo-v3-luna-v1`.
+asset named `fafo-v4-luna-v1`, built from `recipe/asset-build.json`.
 
 ## Standard Eval Commands
 

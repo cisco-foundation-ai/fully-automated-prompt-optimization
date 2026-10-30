@@ -71,6 +71,7 @@ class ScriptedModel:
         self._lock = threading.Lock()
         self.fail_rubrics_for: set[str] = set()
         self.empty_rubrics_for: set[str] = set()
+        self.trace_inferred_for: set[str] = set()
 
     def generate_json(self, system_prompt: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
         with self._lock:
@@ -104,6 +105,8 @@ class ScriptedModel:
                 raise ConnectionError("provider unavailable")
             if record_id in self.empty_rubrics_for:
                 return {"applicable_guideline_ids": [], "case_criteria": [], "confidence": 0.2}
+            if record_id in self.trace_inferred_for:
+                return {"applicable_guideline_ids": [], "case_criteria": [CRITERION], "confidence": 0.6}
             feedback = payload.get("trusted_feedback") or {}
             case_criteria = []
             if feedback.get("rationale"):

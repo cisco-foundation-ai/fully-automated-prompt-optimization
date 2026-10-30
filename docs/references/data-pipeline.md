@@ -18,9 +18,8 @@ rubric      write a rubric for every episode: chosen guidelines plus case criter
 publish     write the dataset splits, the review report, and the manifest
 ```
 
-The code is in `src/hephaestus/data_pipeline/`. It replaces the eight-stage
-pipeline in the [evaluation asset reference](evaluation-assets.md), which will
-be removed.
+The code is in `src/hephaestus/data_pipeline/`. For the concepts and trust
+model, see the [data pipeline guide](../processes/feedback-dataset-flow.md).
 
 ## Inputs
 
@@ -131,7 +130,7 @@ and listed in the review report.
 | Field | Notes |
 |---|---|
 | `feedback`, `unlabeled` | Paths relative to the repository root. `unlabeled` is optional. |
-| `model` | OpenAI model for all three steps. Defaults to the same model as the eight-stage pipeline. |
+| `model` | OpenAI model for all three steps. Defaults to `gpt-6-luna`. |
 | `workers` | Concurrent model calls. With the input paths, the only setting that can change when a build resumes. |
 | `trace.result_keys` | Optional regex, matched against object keys at every depth, ignoring case. A matching key keeps its whole value; other keys keep only the matches nested inside them. Values outside any object are kept. |
 | `trace.drop_keys` | Tool-result keys to remove at every depth, such as bulky listings. |

@@ -20,10 +20,6 @@ import pytest
 from src.hephaestus import artifact_io
 from src.hephaestus import local_authority_io as authority_io
 from src.hephaestus.artifact_io import atomic_write_bytes_at
-from src.hephaestus.evaluation_assets import control_jsonl as control_jsonl_module
-from src.hephaestus.evaluation_assets.control_jsonl import (
-    create_and_open_local_directory_at,
-)
 
 
 def test_atomic_text_writers_request_literal_lf_and_emit_portable_bytes(
@@ -57,15 +53,10 @@ def test_atomic_text_writers_request_literal_lf_and_emit_portable_bytes(
     assert text_path.read_bytes() == b"alpha\nbeta\n"
 
 
-def test_public_imports_survive_missing_fcntl_and_lock_fails_explicitly(
-    tmp_path: Path,
-) -> None:
-    """A missing POSIX hard-lock module is an execution error, not import failure."""
-    script = r'''
+def test_public_imports_survive_missing_fcntl(tmp_path: Path) -> None:
+    """A missing POSIX hard-lock module does not break importing the public modules."""
+    script = r"""
 import builtins
-import errno
-import os
-from pathlib import Path
 
 real_import = builtins.__import__
 def guarded_import(name, *args, **kwargs):
@@ -74,28 +65,14 @@ def guarded_import(name, *args, **kwargs):
     return real_import(name, *args, **kwargs)
 builtins.__import__ = guarded_import
 
-import src.hephaestus.evaluation_assets
 import src.hephaestus.cli
-from src.hephaestus.evaluation_assets.control_jsonl import acquire_local_authority_lock
-
-root = Path(__import__("sys").argv[1])
-root.mkdir()
-if os.name == "nt":
-    with acquire_local_authority_lock(root / "asset.lock", root, timeout=0):
-        pass
-else:
-    try:
-        with acquire_local_authority_lock(root / "asset.lock", root, timeout=0):
-            raise AssertionError("unsupported hard lock yielded")
-    except OSError as exc:
-        assert exc.errno == errno.ENOTSUP, exc
-    else:
-        raise AssertionError("missing native hard lock did not fail")
-'''
+import src.hephaestus.local_authority_io
+import src.hephaestus.runs.bundle
+"""
     env = dict(os.environ)
     env.pop("OPENAI_API_KEY", None)
     completed = subprocess.run(
-        [sys.executable, "-c", script, str(tmp_path / "authority")],
+        [sys.executable, "-c", script],
         cwd=Path(__file__).parents[1],
         env=env,
         text=True,
@@ -250,10 +227,7 @@ def test_native_atomic_replacement_leaves_no_owned_hidden_nodes(
         )
         assert second != first
         assert (tmp_path / "authority.json").read_bytes() == b"TWO"
-        assert not any(
-            path.name.endswith((".tmp", ".removed", ".rejected"))
-            for path in tmp_path.iterdir()
-        )
+        assert not any(path.name.endswith((".tmp", ".removed", ".rejected")) for path in tmp_path.iterdir())
     finally:
         directory.close()
 
@@ -277,10 +251,7 @@ def test_native_atomic_replacement_rollback_restores_original(
 
         assert (tmp_path / "authority.json").read_bytes() == b"ONE"
         assert authority_io.stat_child(directory, "authority.json").identity == first
-        assert not any(
-            path.name.endswith((".tmp", ".removed", ".rejected"))
-            for path in tmp_path.iterdir()
-        )
+        assert not any(path.name.endswith((".tmp", ".removed", ".rejected")) for path in tmp_path.iterdir())
     finally:
         directory.close()
 
@@ -387,10 +358,7 @@ def test_atomic_replacement_prepares_replaces_rebinds_and_syncs(
         assert second != first
         assert events == ["prepare", "replace", "bind", "sync"]
         assert (tmp_path / "authority.json").read_bytes() == b"TWO"
-        assert not any(
-            path.name.endswith((".tmp", ".removed", ".rejected"))
-            for path in tmp_path.iterdir()
-        )
+        assert not any(path.name.endswith((".tmp", ".removed", ".rejected")) for path in tmp_path.iterdir())
     finally:
         directory.close()
 
@@ -551,9 +519,7 @@ def test_bound_filelock_backend_rejects_inherited_pid_without_native_unlock(
             patch.setattr(
                 authority_io._fcntl,
                 "flock",
-                lambda descriptor, operation: native_calls.append(
-                    (descriptor, operation)
-                ),
+                lambda descriptor, operation: native_calls.append((descriptor, operation)),
             )
             with pytest.raises(ValueError, match="different process"):
                 lock._acquire()
@@ -738,7 +704,7 @@ def test_fork_child_cannot_unwind_parent_exact_file_lock(
     directory = authority_io.open_bound_directory(tmp_path)
     file: authority_io.BoundFile | None = None
     context: Any = None
-    script = r'''
+    script = r"""
 import sys
 from pathlib import Path
 from src.hephaestus import local_authority_io as authority_io
@@ -755,7 +721,7 @@ try:
 finally:
     file.close()
     directory.close()
-'''
+"""
 
     def legacy_release(lock: authority_io._BoundFileLock, force: bool = False) -> None:
         del force
@@ -813,7 +779,7 @@ def test_fork_child_cannot_unwind_parent_namespace_lock(tmp_path: Path) -> None:
     """A copied parent-lock context never unlocks the parent's directory OFD."""
     directory = authority_io.open_bound_directory(tmp_path)
     context: Any = authority_io.exclusive_parent_namespace_lock(directory)
-    script = r'''
+    script = r"""
 import sys
 from pathlib import Path
 from src.hephaestus import local_authority_io as authority_io
@@ -824,7 +790,7 @@ try:
         print("acquired", flush=True)
 finally:
     directory.close()
-'''
+"""
 
     def start_probe() -> subprocess.Popen[str]:
         return subprocess.Popen(
@@ -1150,118 +1116,6 @@ def test_exclusive_file_identity_retry_retains_lexical_replacement(
         directory.close()
 
 
-def test_private_directory_create_reclaims_name_when_open_after_mkdir_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A successful mkdir is owned before the child descriptor can fail."""
-    parent = authority_io.open_bound_directory(tmp_path)
-    real_open_child = authority_io.open_child_directory
-    injected = False
-
-    def fail_first_private_open(
-        directory: authority_io.DirectoryLike,
-        name: str,
-        *,
-        expected: authority_io.NodeIdentity | None = None,
-    ) -> authority_io.BoundDirectory:
-        nonlocal injected
-        if not injected and name.endswith(".directory"):
-            injected = True
-            raise OSError("injected post-mkdir open failure")
-        return real_open_child(directory, name, expected=expected)
-
-    monkeypatch.setattr(
-        authority_io,
-        "open_child_directory",
-        fail_first_private_open,
-    )
-    try:
-        with pytest.raises(OSError, match="post-mkdir open failure"):
-            create_and_open_local_directory_at(
-                parent,
-                "installed",
-                final_mode=0o700,
-                replacement_error="injected replacement",
-            )
-        assert injected
-        assert authority_io.list_children(parent) == ()
-    finally:
-        parent.close()
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX create identity contract")
-def test_private_directory_create_reclaims_name_when_identity_is_unavailable(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A locked successful mkdir owns its empty name before identity reads."""
-    parent = authority_io.open_bound_directory(tmp_path)
-    real_stat_child = authority_io.stat_child
-    injected = 0
-
-    def fail_private_identity(
-        directory: authority_io.DirectoryLike,
-        name: str,
-    ) -> authority_io.NodeInfo:
-        nonlocal injected
-        if name.endswith(".directory"):
-            injected += 1
-            raise OSError("injected unavailable directory identity")
-        return real_stat_child(directory, name)
-
-    monkeypatch.setattr(authority_io, "stat_child", fail_private_identity)
-    try:
-        with pytest.raises(OSError, match="unavailable directory identity"):
-            create_and_open_local_directory_at(
-                parent,
-                "installed",
-                final_mode=0o700,
-                replacement_error="injected replacement",
-            )
-        assert injected >= 2
-        assert authority_io.list_children(parent) == ()
-    finally:
-        parent.close()
-
-
-def test_private_directory_wrapper_owns_descriptor_before_validation_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The wrapper captures identity before its post-create inventory recheck."""
-    parent = authority_io.open_bound_directory(tmp_path)
-    real_inventory = control_jsonl_module._local_directory_inventory_at
-    inventory_calls = 0
-
-    def fail_second_inventory(
-        directory: authority_io.DirectoryLike,
-    ) -> dict[str, authority_io.NodeIdentity]:
-        nonlocal inventory_calls
-        inventory_calls += 1
-        if inventory_calls == 2:
-            raise OSError("injected post-create inventory failure")
-        return real_inventory(directory)
-
-    monkeypatch.setattr(
-        control_jsonl_module,
-        "_local_directory_inventory_at",
-        fail_second_inventory,
-    )
-    try:
-        with pytest.raises(OSError, match="post-create inventory failure"):
-            create_and_open_local_directory_at(
-                parent,
-                "installed",
-                final_mode=0o700,
-                replacement_error="injected replacement",
-            )
-        assert inventory_calls == 2
-        assert authority_io.list_children(parent) == ()
-    finally:
-        parent.close()
-
-
 @pytest.mark.skipif(os.name == "nt", reason="POSIX namespace race contract")
 def test_posix_owned_leaf_reclaim_holds_parent_lock_through_unlink(
     tmp_path: Path,
@@ -1400,10 +1254,7 @@ def test_atomic_write_holds_parent_namespace_lock_for_complete_transaction(
         try:
             assert write_entered.wait(timeout=2)
             with authority_io.exclusive_parent_namespace_lock(other):
-                target_visible.append(
-                    authority_io.optional_stat_child(other, "authority.json")
-                    is not None
-                )
+                target_visible.append(authority_io.optional_stat_child(other, "authority.json") is not None)
             racer_finished.set()
         finally:
             other.close()
@@ -1546,9 +1397,7 @@ def test_posix_open_child_directory_closes_descriptor_when_path_rebind_fails(
             patch.setattr(
                 authority_io,
                 "_directory_path",
-                lambda _directory: (_ for _ in ()).throw(
-                    OSError("injected child path rebind failure")
-                ),
+                lambda _directory: (_ for _ in ()).throw(OSError("injected child path rebind failure")),
             )
             with pytest.raises(OSError, match="child path rebind failure"):
                 authority_io.open_child_directory(directory, "child")
@@ -1577,9 +1426,7 @@ def test_windows_rename_payload_has_absolute_unicode_null_root_contract() -> Non
     assert bytes(buffer[offset : offset + len(encoded)]) == encoded
     assert bytes(buffer[offset : offset + len(encoded)]).decode("utf-16-le") == destination
     assert bytes(buffer[offset + len(encoded) : offset + len(encoded) + 2]) == b"\0\0"
-    assert ctypes.sizeof(buffer) >= (
-        ctypes.sizeof(authority_io._WindowsRenameInfoPrefix) + len(encoded)
-    )
+    assert ctypes.sizeof(buffer) >= (ctypes.sizeof(authority_io._WindowsRenameInfoPrefix) + len(encoded))
 
 
 def test_mocked_windows_bound_directory_retains_ancestor_handle_chain(
@@ -1870,9 +1717,7 @@ def test_mocked_windows_created_directory_prehandle_failure_uses_fallback(
     monkeypatch.setattr(
         authority_io,
         "_win_open_path",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            OSError("injected pre-handle failure")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("injected pre-handle failure")),
     )
 
     def remove_created(path: Path) -> None:
@@ -1921,6 +1766,7 @@ def test_mocked_windows_created_file_disposal_failure_uses_locked_fallback(
     monkeypatch.setattr(authority_io.os, "name", "nt")
     monkeypatch.setattr(authority_io, "_one_component", lambda name: name)
     monkeypatch.setattr(authority_io, "_directory_path", lambda _parent: root)
+
     class LockedContext:
         def __enter__(self) -> None:
             nonlocal lock_held
@@ -2107,9 +1953,7 @@ def test_mocked_windows_persistent_file_reopen_failure_reclaims_created_identity
 
     assert len(open_options) == 2
     assert closed == [73]
-    assert reclaimed == [
-        authority_io.OwnedNode("authority.lock", identity, "file")
-    ]
+    assert reclaimed == [authority_io.OwnedNode("authority.lock", identity, "file")]
 
 
 def test_mocked_windows_persistent_file_reopen_retains_foreign_identity(
@@ -2121,9 +1965,7 @@ def test_mocked_windows_persistent_file_reopen_retains_foreign_identity(
     foreign_identity = (7, 12, stat.S_IFREG)
     parent = authority_io.BoundDirectory(root, 91, (7, 9, stat.S_IFDIR))
     handles = iter([73, 74])
-    observations = iter(
-        [created_identity, foreign_identity, foreign_identity]
-    )
+    observations = iter([created_identity, foreign_identity, foreign_identity])
     closed: list[int] = []
     reclaimed: list[authority_io.OwnedNode] = []
     for name, value in {
@@ -2183,9 +2025,7 @@ def test_mocked_windows_persistent_file_reopen_retains_foreign_identity(
         )
 
     assert closed == [73, 74]
-    assert reclaimed == [
-        authority_io.OwnedNode("authority.lock", created_identity, "file")
-    ]
+    assert reclaimed == [authority_io.OwnedNode("authority.lock", created_identity, "file")]
 
 
 def test_mocked_windows_open_child_file_closes_handle_on_rebind_failure(
@@ -2383,57 +2223,6 @@ def test_mocked_windows_replaced_file_rejects_foreign_rebind(
 
     assert foreign.closed
     assert closed == [73]
-
-
-def test_directory_creation_workflow_prepares_and_rebinds_installed_leaf(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Private-directory installation uses the close/rebind portability seam."""
-    parent = authority_io.open_bound_directory(tmp_path)
-    events: list[str] = []
-    real_prepare = authority_io.prepare_directory_source_rename
-    real_bind = authority_io.bind_renamed_directory
-
-    def record_prepare(directory: authority_io.BoundDirectory) -> None:
-        events.append(f"prepare:{directory.path.name}")
-        real_prepare(directory)
-
-    def record_bind(
-        directory: authority_io.DirectoryLike,
-        name: str,
-        *,
-        expected: authority_io.NodeIdentity,
-        previous: authority_io.BoundDirectory,
-    ) -> authority_io.BoundDirectory:
-        events.append(f"bind:{name}")
-        return real_bind(
-            directory,
-            name,
-            expected=expected,
-            previous=previous,
-        )
-
-    monkeypatch.setattr(
-        authority_io,
-        "prepare_directory_source_rename",
-        record_prepare,
-    )
-    monkeypatch.setattr(authority_io, "bind_renamed_directory", record_bind)
-    child: authority_io.BoundDirectory | None = None
-    try:
-        child, _ = create_and_open_local_directory_at(
-            parent,
-            "installed",
-            final_mode=0o700,
-            replacement_error="injected replacement",
-        )
-        assert events[0].startswith("prepare:.installed.")
-        assert events[1] == "bind:installed"
-    finally:
-        if child is not None:
-            child.close()
-        parent.close()
 
 
 def test_mocked_darwin_rejects_unicode_casefold_authority_alias(
@@ -2647,6 +2436,7 @@ def test_mocked_windows_lock_and_disposition_use_the_bound_handle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Win32 lock and reclamation APIs receive no reusable lexical handle."""
+
     class Overlapped(ctypes.Structure):
         _fields_: list[tuple[str, Any]] = []
 

@@ -1,0 +1,15 @@
+{
+  "tenant_id": "tau3_retail",
+  "asset_id": "fafo-v4-luna-v1",
+  "feedback": "tenants/tau3_retail/source_artifacts/labeled_feedback.jsonl",
+  "unlabeled": "tenants/tau3_retail/source_artifacts/unlabeled_traffic.jsonl",
+  "model": "gpt-5.6-luna",
+  "split_seed": 42,
+  "regression_split": true,
+  "batch_size": 3,
+  "workers": 4,
+  "trace": {
+    "result_keys": "status|state|reason|error|address|payment|refund|balance|price|difference|tracking|cancel|return|exchange|available|order_id|item_id|product_id|resource_id|method|amount|name",
+    "drop_keys": ["variants", "products"]
+  }
+}

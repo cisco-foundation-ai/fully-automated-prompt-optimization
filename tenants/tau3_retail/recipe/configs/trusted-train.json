@@ -10,7 +10,7 @@
     "retry_backoff_seconds": 2
   },
   "dataset": {
-    "path": "tenants/tau3_retail/evaluation_assets/fafo-v3-luna-v1/stages/08_dataset_splits/train_trusted.jsonl"
+    "path": "tenants/tau3_retail/evaluation_assets/fafo-v4-luna-v1/datasets/train_trusted.jsonl"
   },
   "chain": {
     "path": "tenants/tau3_retail/chains/tau_episode.py",

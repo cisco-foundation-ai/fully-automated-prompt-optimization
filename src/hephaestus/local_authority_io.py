@@ -252,13 +252,6 @@ def _bound_file_identity(file: BoundFile) -> NodeIdentity:
     return live
 
 
-def close_directory(directory: DirectoryLike) -> None:
-    if isinstance(directory, BoundDirectory):
-        directory.close()
-    else:
-        os.close(directory)
-
-
 def open_bound_directory(path: Path) -> BoundDirectory:
     """Open one exact directory and reject symlink/reparse traversal."""
     lexical = Path(os.path.abspath(os.fspath(path)))

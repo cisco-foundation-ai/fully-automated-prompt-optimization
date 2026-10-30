@@ -45,17 +45,13 @@ committed. A tracked starter template is at
 | `path` | string | yes | — | Literal repository-relative path to one JSONL dataset file |
 
 - The evaluation runtime does not resolve catalog pointers or directory aliases.
-- For an evaluation-asset release, use the exact immutable file path from the
-  asset manifest, for example
-  `tenants/<tenant_id>/datasets/evaluation_assets/<asset_id>/generations/sha256-<hash>/test.jsonl`.
-  The pipeline computes that literal path from the explicit
-  repository/invocation base; CLI and service entry points reject a tenants root
-  outside that base before creating or adopting an asset.
-- `release.json` identifies the current generation for catalog readers, but it
-  is not itself a dataset and must not be used as `dataset.path`.
+- For an evaluation asset built by `assets build`, use one of its split files,
+  for example `tenants/<tenant_id>/evaluation_assets/<asset_id>/datasets/test.jsonl`.
+  A finished asset is never rewritten, so the path always names the same
+  cases.
 
-A literal path makes each evaluation run auditable against one immutable
-generation.
+A literal path, together with the dataset hash recorded in each run bundle,
+makes every evaluation run auditable against the exact cases it used.
 
 ## `chain` fields
 
