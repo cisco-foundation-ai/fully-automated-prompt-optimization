@@ -6,10 +6,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, Dict, List
 
 import pytest
+from data_pipeline_fakes import ScriptedModel, make_record, write_jsonl
 
 from src.hephaestus.cli import build_parser
+from src.hephaestus.data_pipeline.build import build_asset
+from src.hephaestus.data_pipeline.config import AssetConfig
 from src.hephaestus.memory_assets import (
     MEMORY_ASSET_SCHEMA_VERSION,
     MEMORY_CARD_SCHEMA_VERSION,
@@ -17,48 +21,45 @@ from src.hephaestus.memory_assets import (
 )
 from src.hephaestus.memory_evidence import build_additive_memory_asset
 
+CRITERION_ID = "G001.c1"
+
 
 class FakeMemoryProvider:
     provider_name = "fake"
     model = "fake-memory"
 
-    def __init__(self, *, criterion_id: str = "criterion-required") -> None:
+    def __init__(self, *, criterion_id: str = CRITERION_ID) -> None:
         self.criterion_id = criterion_id
-        self.payloads: list[dict] = []
+        self.payloads: List[Dict[str, Any]] = []
 
-    def generate_json(self, system_prompt, payload):
+    def generate_json(self, system_prompt: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         del system_prompt
-        self.payloads.append(dict(payload))
+        self.payloads.append(json.loads(json.dumps(payload)))
         traces = payload["supporting_traces"]
         return {
             "memory_card": {
-                "title": "Complete a supported account action",
-                "summary": "Inspect state, confirm eligibility, act, and verify the result.",
-                "when_to_use": ["The user requests this account action."],
+                "title": "Confirm before changing an order",
+                "summary": "Confirm the order, act, and verify the result.",
+                "when_to_use": ["The user asks to change an order."],
                 "when_not_to_use": [],
                 "instructions": [
                     {
-                        "text": "Confirm the current state before changing it.",
+                        "text": "Confirm the order before changing it.",
                         "source_criterion_ids": [self.criterion_id],
                     }
                 ],
-                "avoid": [
-                    {
-                        "text": "Do not report success before observing the resulting state.",
-                        "source_criterion_ids": ["criterion-prohibited"],
-                    }
-                ],
+                "avoid": [],
                 "tool_guidance": [],
                 "example_steps": [
                     {
-                        "text": "Inspect the resource, apply the allowed action, then verify.",
+                        "text": "Confirm, apply the change, then verify.",
                         "source_trace_ids": [traces[0]["trace_id"]],
                     }
                 ],
             }
         }
 
-    def drain_call_metadata(self):
+    def drain_call_metadata(self) -> List[Dict[str, Any]]:
         return [{"request_id": "request-1"}]
 
 
@@ -67,373 +68,242 @@ class FakeAdditiveProvider:
     model = "fake-additive-memory"
 
     def __init__(self) -> None:
-        self.payloads: list[dict] = []
-        self.call_count = 0
+        self.payloads: List[Dict[str, Any]] = []
 
-    def generate_json(self, system_prompt, payload):
+    def generate_json(self, system_prompt: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         del system_prompt
-        self.call_count += 1
-        self.payloads.append(dict(payload))
+        self.payloads.append(json.loads(json.dumps(payload)))
         if payload["mode"] == "runtime_memory_evidence_mining":
-            trace_id = payload["episodes"][0]["trace_id"]
-            return {
-                "patterns": [
-                    {
-                        "guideline_id": "guideline-account-action",
-                        "kind": "procedure",
-                        "text": "Verify the resulting resource state after the update.",
-                        "source_criterion_ids": ["criterion-required"],
-                        "source_trace_ids": [trace_id],
-                        "confidence": 0.95,
-                    }
-                ]
-            }
-        pattern = payload["candidate_patterns"][0]
-        return {
-            "additions": [
-                {
-                    "kind": "procedure",
-                    "text": "After updating, inspect the returned resource state.",
-                    "source_criterion_ids": pattern["source_criterion_ids"],
-                    "source_trace_ids": pattern["source_trace_ids"],
-                    "source_pattern_ids": [pattern["pattern_id"]],
-                }
-            ]
-        }
-
-    def drain_call_metadata(self):
-        return [{"request_id": f"request-{self.call_count}"}]
-
-
-def _write_json(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
-
-
-def _write_jsonl(path: Path, rows: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "".join(json.dumps(row) + "\n" for row in rows),
-        encoding="utf-8",
-    )
-
-
-def _feedback_row(record_id: str, polarity: str, *, split: str = "train") -> dict:
-    return {
-        "record_id": record_id,
-        "task_type": "account_action",
-        "route": "account_action",
-        "user_input": "Please perform the requested action.",
-        "assistant_output": "The action is complete.",
-        "conversation_context": [],
-        "tool_calls": [
-            {
-                "name": "update_resource",
-                "arguments": {"resource_id": "resource-1"},
-                "result": {"status": "updated"},
-            }
-        ],
-        "runtime": {},
-        "feedback": {
-            "polarity": polarity,
-            "rationale": "The observed behavior was reviewed.",
-        },
-        "trusted_split": split,
-        "evidence_eligible": True,
-    }
-
-
-def _source_asset(tmp_path: Path) -> Path:
-    root = tmp_path / "tenants" / "tenant-a" / "evaluation_assets" / "asset-v1"
-    _write_json(root / "pipeline_state.json", {"status": "released"})
-    _write_json(root / "asset_manifest.json", {"asset_id": "asset-v1"})
-    _write_json(root / "config.json", {"rubric_model": "source-model"})
-    _write_jsonl(
-        root
-        / "stages"
-        / "03_evaluation_guidelines"
-        / "evaluation_guidelines.jsonl",
-        [
-            {
-                "guideline_id": "guideline-account-action",
-                "route": "account_action",
-                "intent_label": "perform an account action",
-                "description": "Perform only supported account actions.",
+            pattern = {
+                "guideline_id": "G001",
+                "kind": "procedure",
+                "text": "Verify the order state after the change.",
+                "source_criterion_ids": [CRITERION_ID],
+                "source_trace_ids": [payload["episodes"][0]["trace_id"]],
                 "confidence": 0.9,
-                "source_record_ids": ["record-negative", "record-positive", "record-extra"],
-                "criteria": [
-                    {
-                        "criterion_id": "criterion-required",
-                        "kind": "required",
-                        "statement": "Confirm the current state before acting.",
-                    },
-                    {
-                        "criterion_id": "criterion-prohibited",
-                        "kind": "prohibited",
-                        "statement": "Do not claim an unobserved successful state change.",
-                    },
-                ],
-                "tool_expectations": {},
-                "conflicts": [],
-                "uncertainties": [],
             }
-        ],
-    )
-    _write_jsonl(
-        root / "stages" / "02_prepared_inputs" / "normalized_feedback.jsonl",
-        [
-            _feedback_row("record-negative", "negative"),
-            _feedback_row("record-positive", "positive"),
-            _feedback_row("record-extra", "positive"),
-        ],
-    )
-    return root
+            return {"patterns": [pattern]}
+        pattern = payload["candidate_patterns"][0]
+        addition = {
+            "kind": "procedure",
+            "text": "After changing an order, check the returned state.",
+            "source_criterion_ids": pattern["source_criterion_ids"],
+            "source_trace_ids": pattern["source_trace_ids"],
+            "source_pattern_ids": [pattern["pattern_id"]],
+        }
+        return {"additions": [addition]}
+
+    def drain_call_metadata(self) -> List[Dict[str, Any]]:
+        return []
 
 
-def _add_inferred_training_sources(root: Path) -> None:
-    guideline_id = "guideline-account-action"
-    raw_rows = []
-    inferred_rows = []
-    for index, cluster in enumerate(("cluster-a", "cluster-b", "cluster-c"), start=1):
-        record_id = f"inferred-record-{index}"
-        raw = _feedback_row(record_id, "positive")
-        raw.pop("feedback")
-        raw_rows.append(raw)
-        inferred_rows.append(
-            {
-                "case_id": f"inferred-{record_id}",
-                "task_type": "account_action",
-                "context": {},
-                "expected": {
-                    "evaluation_guideline_ids": [guideline_id],
-                    "rubric": {
-                        "must": ["Confirm the current state before acting."],
-                        "must_not": [],
-                        "should": [],
-                    },
-                },
-                "metadata": {
-                    "applicable_guideline_ids": [guideline_id],
-                    "request_id": record_id,
-                    "review_status": "approved",
-                    "split": "train",
-                    "trust_tier": "inferred_from_trusted_feedback",
-                    "source_cluster": cluster,
-                    "rubric_confidence": 0.99,
-                    "rubric_evidence_pointers": ["tool_calls[0]"],
-                },
-            }
+def _asset(tmp_path: Path, model: ScriptedModel | None = None) -> Path:
+    """Build a small finished asset with the pipeline and return its directory."""
+    feedback = [
+        make_record(
+            f"f{i:02d}", labeled=True, rationale=f"Changed order {i} without confirming; mail a{i}@b.com."
         )
-    _write_jsonl(root / "stages" / "01_raw_inputs" / "unlabeled.jsonl", raw_rows)
-    _write_jsonl(
-        root / "stages" / "08_dataset_splits" / "train_inferred.jsonl",
-        inferred_rows,
+        for i in range(10)
+    ]
+    for row in feedback[::2]:
+        row["feedback"]["polarity"] = "positive"
+    write_jsonl(tmp_path / "feedback.jsonl", feedback)
+    write_jsonl(tmp_path / "unlabeled.jsonl", [make_record(f"u{i:02d}", labeled=False) for i in range(10)])
+    config = AssetConfig.from_dict(
+        {
+            "tenant_id": "tenant-a",
+            "asset_id": "asset-v1",
+            "feedback": "feedback.jsonl",
+            "unlabeled": "unlabeled.jsonl",
+            "model": "source-model",
+            "workers": 1,
+        }
     )
+    scripted = model or ScriptedModel()
+    build_asset(config, repository_root=tmp_path, provider_factory=lambda: scripted)
+    return config.asset_root(tmp_path)
 
 
-def test_build_memory_asset_creates_one_grounded_card_per_guideline(tmp_path: Path) -> None:
-    _source_asset(tmp_path)
-    provider = FakeMemoryProvider()
-
-    manifest = build_memory_asset(
+def _build(tmp_path: Path, provider: FakeMemoryProvider, **overrides: Any) -> Dict[str, Any]:
+    return build_memory_asset(
         tenants_root=tmp_path / "tenants",
         tenant_id="tenant-a",
         source_asset_id="asset-v1",
-        memory_asset_id="memory-v1",
-        max_source_traces=2,
+        memory_asset_id=overrides.pop("memory_asset_id", "memory-v1"),
         provider=provider,
+        **overrides,
     )
 
-    output = tmp_path / "tenants" / "tenant-a" / "memory_assets" / "memory-v1"
-    card = json.loads((output / "memory_cards.jsonl").read_text().splitlines()[0])
-    saved_manifest = json.loads((output / "manifest.json").read_text())
 
-    assert manifest["card_count"] == 1
-    assert saved_manifest["schema_version"] == MEMORY_ASSET_SCHEMA_VERSION
-    assert saved_manifest["evidence_mode"] == "trusted_only"
-    assert saved_manifest["include_approved_inferred"] is False
-    assert "train_inferred.jsonl" not in saved_manifest["source_artifacts"]
-    assert card["schema_version"] == MEMORY_CARD_SCHEMA_VERSION
-    assert card["source_guideline_id"] == "guideline-account-action"
-    assert card["trust_tier"] == "trusted_feedback"
-    assert card["selected_source_record_ids"] == ["record-extra", "record-negative"]
-    assert card["example_steps"][0]["source_record_ids"] == ["record-extra"]
-    assert "Procedure:" in card["injection_text"]
-    assert [row["trusted_feedback"]["polarity"] for row in provider.payloads[0]["supporting_traces"]] == [
-        "positive",
-        "negative",
-    ]
+def _memory_root(tmp_path: Path, memory_id: str) -> Path:
+    return tmp_path / "tenants" / "tenant-a" / "memory_assets" / memory_id
 
 
-def test_build_memory_asset_rejects_unknown_criterion_citations(tmp_path: Path) -> None:
-    _source_asset(tmp_path)
+class TestBuildMemoryAsset:
+    def test_creates_one_grounded_card_per_guideline(self, tmp_path: Path) -> None:
+        """Each catalog guideline becomes one card built from its train feedback traces."""
+        _asset(tmp_path)
+        provider = FakeMemoryProvider()
 
-    with pytest.raises(ValueError, match="unknown IDs"):
-        build_memory_asset(
-            tenants_root=tmp_path / "tenants",
-            tenant_id="tenant-a",
-            source_asset_id="asset-v1",
-            memory_asset_id="memory-v1",
-            provider=FakeMemoryProvider(criterion_id="invented-criterion"),
+        manifest = _build(tmp_path, provider, max_source_traces=2)
+
+        output = _memory_root(tmp_path, "memory-v1")
+        [card] = [json.loads(line) for line in (output / "memory_cards.jsonl").read_text().splitlines()]
+        assert manifest["card_count"] == 1
+        assert manifest["schema_version"] == MEMORY_ASSET_SCHEMA_VERSION
+        assert manifest["evidence_mode"] == "trusted_only"
+        assert manifest["include_inferred"] is False
+        assert {"manifest.json", "catalog.json", "lessons.jsonl", "inputs/feedback.jsonl"} <= set(
+            manifest["source_artifacts"]
         )
-
-    assert not (
-        tmp_path / "tenants" / "tenant-a" / "memory_assets" / "memory-v1"
-    ).exists()
-
-
-def test_build_memory_asset_rejects_protected_feedback(tmp_path: Path) -> None:
-    root = _source_asset(tmp_path)
-    feedback_path = (
-        root / "stages" / "02_prepared_inputs" / "normalized_feedback.jsonl"
-    )
-    rows = [json.loads(line) for line in feedback_path.read_text().splitlines()]
-    rows[0]["trusted_split"] = "test"
-    _write_jsonl(feedback_path, rows)
-
-    with pytest.raises(ValueError, match="non-reusable feedback"):
-        build_memory_asset(
-            tenants_root=tmp_path / "tenants",
-            tenant_id="tenant-a",
-            source_asset_id="asset-v1",
-            memory_asset_id="memory-v1",
-            provider=FakeMemoryProvider(),
+        assert "datasets/train.jsonl" not in manifest["source_artifacts"]
+        assert card["schema_version"] == MEMORY_CARD_SCHEMA_VERSION
+        assert (card["source_guideline_id"], card["trust_tier"], card["confidence"]) == (
+            "G001",
+            "trusted_feedback",
+            0.9,
         )
+        assert len(card["selected_source_record_ids"]) == 2
+        assert "Procedure:" in card["injection_text"]
+
+    def test_traces_are_redacted_aliased_and_mix_polarities(self, tmp_path: Path) -> None:
+        """Supporting traces follow the asset's redaction, hide record IDs, and lead with both polarities."""
+        _asset(tmp_path)
+        provider = FakeMemoryProvider()
+
+        _build(tmp_path, provider, max_source_traces=2)
+
+        payload = provider.payloads[0]
+        traces = payload["supporting_traces"]
+        assert [trace["trusted_feedback"]["polarity"] for trace in traces] == ["positive", "negative"]
+        assert all("record_id" not in trace["trace"] for trace in traces)
+        assert "<email>" in json.dumps(traces) and "@b.com" not in json.dumps(traces)
+        assert payload["guideline"]["criteria"][0]["criterion_id"] == CRITERION_ID
+        assert "lesson_ids" not in payload["guideline"]
+
+    def test_uses_the_assets_model_by_default(self, tmp_path: Path) -> None:
+        """Without --model, the card model defaults to the model the asset was built with."""
+        _asset(tmp_path)
+
+        with pytest.raises(ValueError, match="injected provider model"):
+            _build(tmp_path, FakeMemoryProvider(), model="other-model")
+
+    def test_rejects_unknown_criterion_citations(self, tmp_path: Path) -> None:
+        """An instruction citing an invented criterion fails and writes nothing."""
+        _asset(tmp_path)
+
+        with pytest.raises(ValueError, match="unknown IDs"):
+            _build(tmp_path, FakeMemoryProvider(criterion_id="invented"))
+        assert not _memory_root(tmp_path, "memory-v1").exists()
+
+    def test_rejects_non_train_feedback(self, tmp_path: Path) -> None:
+        """A guideline whose feedback record is not in train fails the build."""
+        root = _asset(tmp_path)
+        rows = [json.loads(line) for line in (root / "splits.jsonl").read_text().splitlines()]
+        lesson = json.loads((root / "lessons.jsonl").read_text().splitlines()[0])
+        for row in rows:
+            if row["record_id"] == lesson["record_id"]:
+                row["split"] = "test"
+        write_jsonl(root / "splits.jsonl", rows)
+
+        with pytest.raises(ValueError, match="non-train feedback"):
+            _build(tmp_path, FakeMemoryProvider())
+
+    def test_requires_a_finished_asset(self, tmp_path: Path) -> None:
+        """An asset without manifest.json is not a valid source."""
+        root = _asset(tmp_path)
+        (root / "manifest.json").unlink()
+
+        with pytest.raises(ValueError, match="not finished"):
+            _build(tmp_path, FakeMemoryProvider())
 
 
-def test_build_additive_memory_asset_processes_every_inferred_case_once(
-    tmp_path: Path,
-) -> None:
-    root = _source_asset(tmp_path)
-    _add_inferred_training_sources(root)
-    build_memory_asset(
-        tenants_root=tmp_path / "tenants",
-        tenant_id="tenant-a",
-        source_asset_id="asset-v1",
-        memory_asset_id="memory-v1",
-        provider=FakeMemoryProvider(),
-    )
-    base_path = (
-        tmp_path / "tenants" / "tenant-a" / "memory_assets" / "memory-v1"
-    )
-    base_card = json.loads((base_path / "memory_cards.jsonl").read_text().splitlines()[0])
-    provider = FakeAdditiveProvider()
-
-    manifest = build_additive_memory_asset(
-        tenants_root=tmp_path / "tenants",
-        tenant_id="tenant-a",
-        source_asset_id="asset-v1",
-        base_memory_asset_id="memory-v1",
-        memory_asset_id="memory-additive-v1",
-        batch_size=2,
-        max_additions_per_card=1,
-        provider=provider,
-    )
-
-    output = (
-        tmp_path
-        / "tenants"
-        / "tenant-a"
-        / "memory_assets"
-        / "memory-additive-v1"
-    )
-    card = json.loads((output / "memory_cards.jsonl").read_text().splitlines()[0])
-    trace_index = [
-        json.loads(line) for line in (output / "trace_index.jsonl").read_text().splitlines()
-    ]
-    mined_case_ids = [
-        episode["inferred_case_id"]
-        for payload in provider.payloads
-        if payload["mode"] == "runtime_memory_evidence_mining"
-        for episode in payload["episodes"]
-    ]
-
-    assert manifest["inferred_candidate_pool"] == 3
-    assert manifest["evidence_mode"] == "trusted_plus_approved_inferred"
-    assert manifest["include_approved_inferred"] is True
-    assert manifest["inferred_cases_processed"] == 3
-    assert manifest["batch_count"] == 2
-    assert manifest["addition_count"] == 1
-    assert len(trace_index) == 3
-    assert len(mined_case_ids) == len(set(mined_case_ids)) == 3
-    assert card["title"] == base_card["title"]
-    assert card["summary"] == base_card["summary"]
-    assert card["when_to_use"] == base_card["when_to_use"]
-    assert card["instructions"][:-1] == base_card["instructions"]
-    assert card["addition_count"] == 1
-    assert card["trusted_spine_preserved"] is True
-    assert card["trust_tier"] == "trusted_memory_with_approved_inferred_addendum"
-
-
-def test_memory_build_cli_contract() -> None:
-    args = build_parser().parse_args(
-        [
-            "memory",
-            "build",
-            "--tenant",
-            "tenant-a",
-            "--asset-id",
-            "asset-v1",
-            "--memory-id",
-            "memory-v1",
-            "--max-source-traces",
-            "3",
+class TestBuildAdditiveMemoryAsset:
+    def test_mines_inferred_train_cases_that_apply_a_guideline(self, tmp_path: Path) -> None:
+        """Inferred train cases that applied a guideline are mined once; trace-inferred ones are skipped."""
+        model = ScriptedModel()
+        model.trace_inferred_for = {"u06", "u07", "u08", "u09"}
+        root = _asset(tmp_path, model)
+        _build(tmp_path, FakeMemoryProvider())
+        base_card = json.loads((_memory_root(tmp_path, "memory-v1") / "memory_cards.jsonl").read_text())
+        train_cases = [
+            json.loads(line) for line in (root / "datasets" / "train.jsonl").read_text().splitlines()
         ]
-    )
+        expected = sorted(
+            case["case_id"]
+            for case in train_cases
+            if case["metadata"]["trust_tier"] == "inferred_from_trusted_feedback"
+            and case["expected"]["evaluation_guideline_ids"]
+        )
+        trace_inferred = [
+            case
+            for case in train_cases
+            if case["metadata"]["trust_tier"] == "inferred_from_trusted_feedback"
+            and not case["expected"]["evaluation_guideline_ids"]
+        ]
+        assert trace_inferred, "fixture must put a trace-inferred case in train"
+        provider = FakeAdditiveProvider()
 
-    assert args.command == "memory"
-    assert args.memory_command == "build"
-    assert args.max_source_traces == 3
+        manifest = build_additive_memory_asset(
+            tenants_root=tmp_path / "tenants",
+            tenant_id="tenant-a",
+            source_asset_id="asset-v1",
+            base_memory_asset_id="memory-v1",
+            memory_asset_id="memory-additive-v1",
+            batch_size=2,
+            max_additions_per_card=1,
+            provider=provider,
+        )
 
-    with pytest.raises(SystemExit):
-        build_parser().parse_args(
+        mined = [
+            episode["inferred_case_id"]
+            for payload in provider.payloads
+            if payload["mode"] == "runtime_memory_evidence_mining"
+            for episode in payload["episodes"]
+        ]
+        [card] = [
+            json.loads(line)
+            for line in (_memory_root(tmp_path, "memory-additive-v1") / "memory_cards.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        assert expected and sorted(mined) == expected
+        assert manifest["inferred_candidate_pool"] == len(expected)
+        assert manifest["evidence_mode"] == "trusted_plus_inferred"
+        assert manifest["addition_count"] == 1
+        assert card["instructions"][:-1] == base_card["instructions"]
+        assert card["trusted_spine_preserved"] is True
+        assert card["trust_tier"] == "trusted_memory_with_inferred_addendum"
+
+
+class TestMemoryCli:
+    def test_build_arguments(self) -> None:
+        """`memory build` takes the source asset and trace limit."""
+        args = build_parser().parse_args(
             [
                 "memory",
                 "build",
                 "--tenant",
-                "tenant-a",
+                "t",
                 "--asset-id",
-                "asset-v1",
+                "a",
                 "--memory-id",
-                "memory-v1",
-                "--include-approved-inferred",
+                "m",
+                "--max-source-traces",
+                "3",
             ]
         )
 
-    with pytest.raises(SystemExit):
-        build_parser().parse_args(
-            [
-                "memory",
-                "build-additive",
-                "--tenant",
-                "tenant-a",
-                "--asset-id",
-                "asset-v1",
-                "--base-memory-id",
-                "memory-v1",
-                "--memory-id",
-                "memory-additive-v1",
-            ]
+        assert (args.memory_command, args.max_source_traces) == ("build", 3)
+
+    def test_additive_requires_explicit_consent(self) -> None:
+        """`memory build-additive` requires --include-inferred."""
+        base = ["memory", "build-additive", "--tenant", "t", "--asset-id", "a", "--base-memory-id", "m"]
+        with pytest.raises(SystemExit):
+            build_parser().parse_args([*base, "--memory-id", "m2"])
+
+        args = build_parser().parse_args(
+            [*base, "--memory-id", "m2", "--include-inferred", "--batch-size", "12"]
         )
 
-    additive_args = build_parser().parse_args(
-        [
-            "memory",
-            "build-additive",
-            "--tenant",
-            "tenant-a",
-            "--asset-id",
-            "asset-v1",
-            "--base-memory-id",
-            "memory-v1",
-            "--memory-id",
-            "memory-additive-v1",
-            "--include-approved-inferred",
-            "--batch-size",
-            "12",
-        ]
-    )
-    assert additive_args.memory_command == "build-additive"
-    assert additive_args.include_approved_inferred is True
-    assert additive_args.batch_size == 12
-    assert additive_args.max_additions_per_card == 3
+        assert (args.include_inferred, args.batch_size, args.max_additions_per_card) == (True, 12, 3)

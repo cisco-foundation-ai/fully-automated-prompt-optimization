@@ -385,7 +385,7 @@ def test_readme_describes_final_step_fallback_and_conditional_summary_output() -
     assert "appears automatically in each run's `summary.md`" not in readme
 
 
-def test_web_ui_labels_run_authority_and_authenticates_asset_ground_truth() -> None:
+def test_web_ui_labels_run_authority_and_authenticates_dataset_ground_truth() -> None:
     web_ui = _compact(_read("docs/web-ui.md"))
 
     for required in (
@@ -395,30 +395,27 @@ def test_web_ui_labels_run_authority_and_authenticates_asset_ground_truth() -> N
         "`live_unverified`",
         "validated `run_manifest.json`",
         "authenticated only when the bundle's dataset path agrees with its run identity",
-        "dataset bytes match the recorded fingerprint",
-            "Evaluation-asset dataset ground truth is not joined from a fallback path",
+        "dataset bytes and case order match the recorded fingerprint",
         "`results.jsonl`, `run_config.json`, `summary.md`, `progress.json`, or `run_manifest.json`",
     ):
         assert required in web_ui
 
 
-def test_iteration_doc_keeps_generic_synthetic_agents_separate_from_studio_stage_7() -> None:
+def test_iteration_doc_keeps_generic_synthetic_agents_separate_from_the_data_pipeline() -> None:
     loop = _compact(_read("docs/processes/prompt-iteration-loop.md"))
 
     assert "generic tenant-level synthetic-data helpers" in loop
-    assert "not evaluation-asset pipeline Stage 7" in loop
+    assert "They are not part of the data pipeline" in loop
 
 
-def test_feedback_flow_retains_narrow_stage_3_and_stage_7_guarantees() -> None:
+def test_feedback_flow_states_the_held_out_guarantees() -> None:
     flow = _compact(_read("docs/processes/feedback-dataset-flow.md"))
 
     for required in (
-        "eligible training feedback only",
-        "never expose protected criteria to Stages 5–7, later provider payloads, or API previews",
-        "Synthetic proposals are requested only for clusters with a scoreable inferred rubric",
-        "They do not define new trusted intents or correctness criteria.",
-        "Mechanically accepted synthetic items and scoreable inferred items are automatically "
-        "approved by the pipeline.",
-        "derived cases never enter `regression_trusted`",
+        "Splits are assigned before any model call",
+        "Only train episodes are observed, and the build fails otherwise",
+        "A held-out record's own feedback is used only for its own rubric",
+        "Catalog criteria are copied verbatim into cases",
+        "The regression split is optional and trusted-only",
     ):
         assert required in flow

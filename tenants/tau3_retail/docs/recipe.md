@@ -191,67 +191,31 @@ and protected native scoring fields.
 ## 7. Run the FAFO Data Pipeline
 
 ```bash
-python -m hephaestus.cli assets create \
-  --tenant tau3_retail \
-  --asset-id fafo-v3-luna-v1 \
-  --feedback tenants/tau3_retail/source_artifacts/labeled_feedback.jsonl \
-  --unlabeled tenants/tau3_retail/source_artifacts/unlabeled_traffic.jsonl \
-  --rubric-model gpt-5.6-luna \
-  --embedding-model text-embedding-3-small \
-  --clusters 50 \
-  --match-threshold 0.65
-
-python -m hephaestus.cli assets run \
-  --tenant tau3_retail \
-  --asset-id fafo-v3-luna-v1 \
-  --rubric-model gpt-5.6-luna \
-  --embedding-model text-embedding-3-small \
-  --clusters 50 \
-  --batch-size 3 \
-  --match-threshold 0.65 \
-  --min-trusted-examples 1 \
-  --min-trusted-groups 1 \
-  --max-unlabeled-to-trusted-ratio 20 \
-  --no-synthetic-coverage \
-  --split-seed 42
+python -m hephaestus.cli assets build --config tenants/tau3_retail/recipe/asset-build.json
 ```
 
-The FAFO data pipeline performs these relevant operations:
+`recipe/asset-build.json` builds asset `fafo-v4-luna-v1` with `gpt-5.6-luna`,
+split seed 42, batch size 3, and a trusted regression split. Its `trace`
+filters keep the state-bearing fields of Retail tool results (status,
+payment, refund, address, item and order identity, and similar) and drop bulky
+`variants` and `products` listings. The build:
 
-1. Validate, redact, and split trusted connected groups before authoring.
-2. Correlate eligible training feedback with full trace/tool evidence.
-3. Consolidate supported mistake and success patterns into reusable guidelines.
-4. Cluster all-user-message intent text as sampling metadata only.
-5. Make one full-catalog rubric-generation call per episode. The model selects
-   zero, one, or many applicable guidelines; with none, it writes a
-   `trace_inferred` rubric from explicit trace evidence and available constraints.
-6. Fingerprint cases and dependencies, automatically approve scoreable inferred
-   cases, hold conflicts or protected-regression derivatives, and pause.
+1. Validates, redacts, and assigns scenario-family groups to splits before any
+   model call.
+2. Extracts lessons, with verbatim evidence, from the train feedback episodes.
+3. Groups the lessons into a guideline catalog.
+4. Writes one rubric per episode: the applicable catalog guidelines plus
+   case-specific criteria.
 
-The recorded run disabled synthetic coverage. Keep it disabled for direct
-replication. Its other explicit controls were batch size 3, match threshold
-0.65, split seed 42, minimum one trusted example and group, and a maximum
-unlabeled-to-trusted ratio of 20.
+Read `tenants/tau3_retail/evaluation_assets/fafo-v4-luna-v1/review.md` before
+optimizing. Sample guidelines and both rubric provenances, and check excluded
+records and low-confidence rubrics.
 
-Inspect the review snapshot:
-
-```bash
-python -m hephaestus.cli assets reviews list \
-  --tenant tau3_retail \
-  --asset-id fafo-v3-luna-v1
-```
-
-Sample guidelines and both rubric provenances, inspect all holds, and retain the
-returned fingerprints. Then publish exactly that snapshot:
-
-```bash
-python -m hephaestus.cli assets reviews finalize \
-  --tenant tau3_retail \
-  --asset-id fafo-v3-luna-v1 \
-  --reviewer <reviewer_name> \
-  --review-set <sha256:review_set_fingerprint> \
-  --decision-set <sha256:decision_set_fingerprint>
-```
+The recorded v3 study used `fafo-v3-luna-v1`, built by the earlier
+eight-stage pipeline from the same inputs. `fafo-v4-luna-v1` uses the same
+inputs, model, and split seed but a different split method and rubric
+prompts, so its splits and rubrics differ. Rerun the arms on it rather than
+comparing its scores with the v3 reports directly.
 
 ## 8. Run FAFO-Guided Evaluation
 
@@ -270,7 +234,7 @@ Example views are under `recipe/configs/`:
 | `mixed-train.json` | `train.jsonl` | Joint trusted + inferred optimization |
 | `validation.json` | `validation.jsonl` | Prompt selection |
 | `test.json` | `test.jsonl` | Final in-asset evaluation |
-| `regression.json` | `regression_trusted.jsonl` | Trusted regression gate |
+| `regression.json` | `regression.jsonl` | Trusted regression gate |
 
 Run one evaluation:
 

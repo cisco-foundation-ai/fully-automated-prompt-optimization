@@ -12,15 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from src.hephaestus.evaluation_assets.publication import (
-    LOGICAL_SPLITS,
-    build_release_pointer,
-    install_generation,
-    write_release_pointer,
-)
 from src.hephaestus.runs.bundle import RunBundleWriter
 from src.hephaestus.runs.identity import build_run_identity
-from src.hephaestus.webui import data as webui_data_module
 from src.hephaestus.webui.data import TenantStore
 from src.hephaestus.webui.frontend import INDEX_HTML
 
@@ -45,6 +38,7 @@ def _publish_authenticated_run(
     tenant: Path,
     *,
     run_name: str = "authenticated-run",
+    dataset_rel: str = "datasets/cases.jsonl",
     dataset_rows: list[dict[str, object]] | None = None,
     identity_case_ids: list[str] | None = None,
     progress_overrides: dict[str, object] | None = None,
@@ -59,11 +53,11 @@ def _publish_authenticated_run(
             "metadata": {"source": "protected"},
         }
     ]
-    dataset_path = tenant / "datasets" / "cases.jsonl"
+    dataset_path = tenant / dataset_rel
     dataset_path.parent.mkdir(parents=True, exist_ok=True)
     content = _dataset_bytes(rows)
     dataset_path.write_bytes(content)
-    dataset_literal = f"tenants/{tenant.name}/datasets/cases.jsonl"
+    dataset_literal = f"tenants/{tenant.name}/{dataset_rel}"
     case_ids = [str(row["case_id"]) for row in rows]
     recorded_case_ids = identity_case_ids or case_ids
     identity = build_run_identity(
@@ -136,262 +130,31 @@ def _write_loose_run(
     return run_dir
 
 
-def _publish_generation(
+def _write_asset(
     tenant: Path,
-    *,
     asset_id: str,
-    suffix: str,
-    fingerprint: str,
-    split_rows: dict[str, dict[str, object]] | None = None,
-):
-    sources: dict[str, Path] = {}
-    for split in LOGICAL_SPLITS:
-        path = tenant / "workspace" / suffix / f"{split}.jsonl"
+    splits: dict[str, list[dict[str, object]]],
+) -> Path:
+    """Write a built evaluation asset with dataset splits and non-dataset files."""
+    asset = tenant / "evaluation_assets" / asset_id
+    for split, rows in splits.items():
+        path = asset / "datasets" / f"{split}.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(
-                (split_rows or {}).get(
-                    split,
-                    {"case_id": f"{suffix}-{split}"},
-                )
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        sources[split] = path
-    catalog = tenant / "datasets" / "evaluation_assets" / asset_id
-    generation = install_generation(
-        catalog,
-        tenant_id=tenant.name,
-        asset_id=asset_id,
-        split_paths=sources,
-        build_fingerprint=fingerprint,
-    )
-    pointer = build_release_pointer(
-        tenant_id=tenant.name,
-        asset_id=asset_id,
-        generation=generation,
-        stage_8_receipt_sha256="a" * 64,
-        build_provenance_sha256="b" * 64,
-        published_at="2026-08-20T00:00:00+00:00",
-    )
-    write_release_pointer(catalog, pointer)
-    return generation
-
-
-def test_dataset_catalog_lists_only_pointer_current_studio_splits(
-    tmp_path: Path,
-) -> None:
-    """Studio discovery omits generations, temps, and legacy catalog copies."""
-    tenants = tmp_path / "tenants"
-    tenant = tenants / "demo"
-    tenant.mkdir(parents=True)
-    (tenant / "__init__.py").write_text("", encoding="utf-8")
-    ordinary = tenant / "datasets" / "ordinary.jsonl"
-    ordinary.parent.mkdir(parents=True)
-    ordinary.write_text('{"case_id":"ordinary"}\n', encoding="utf-8")
-    historical = _publish_generation(
-        tenant,
-        asset_id="asset",
-        suffix="historical",
-        fingerprint="c" * 64,
-    )
-    current = _publish_generation(
-        tenant,
-        asset_id="asset",
-        suffix="current",
-        fingerprint="d" * 64,
-    )
-    catalog = tenant / "datasets" / "evaluation_assets" / "asset"
-    (catalog / "train.jsonl").write_text("legacy\n", encoding="utf-8")
-    temporary = catalog / "generations" / ".unfinished.tmp"
-    temporary.mkdir()
-    (temporary / "train.jsonl").write_text("partial\n", encoding="utf-8")
-
-    store = TenantStore(tenants, repository_base=tmp_path)
-    listed = store.list_datasets("demo")
-    listed_paths = {row["path"] for row in listed}
-
-    expected_current = {
-        path.relative_to(tenant).as_posix() for path in current.files.values()
-    }
-    assert listed_paths == {"datasets/ordinary.jsonl", *expected_current}
-    assert store.has_evaluation_asset_datasets("demo") is True
-    current_train = current.files["train"].relative_to(tenant).as_posix()
-    assert store.get_dataset("demo", current_train)["rows"] == [
-        {"case_id": "current-train"}
-    ]
-    historical_train = historical.files["train"].relative_to(tenant).as_posix()
-    assert store.get_dataset("demo", historical_train)["rows"] == [
-        {"case_id": "historical-train"}
-    ]
-    assert store.get_dataset(
-        "demo", "datasets/evaluation_assets/asset/train.jsonl"
-    ) is None
-
-    (historical.generation_dir / "generation_manifest.json").write_text(
-        "{}\n", encoding="utf-8"
-    )
-    assert store.get_dataset("demo", historical_train) is None
-
-
-def test_corrupt_studio_pointer_fails_closed_without_hiding_ordinary_data(
-    tmp_path: Path,
-) -> None:
-    """A corrupt release pointer never causes raw generation recursion."""
-    tenants = tmp_path / "tenants"
-    tenant = tenants / "demo"
-    tenant.mkdir(parents=True)
-    (tenant / "__init__.py").write_text("", encoding="utf-8")
-    ordinary = tenant / "datasets" / "ordinary.jsonl"
-    ordinary.parent.mkdir(parents=True)
-    ordinary.write_text('{"case_id":"ordinary"}\n', encoding="utf-8")
-    _publish_generation(
-        tenant,
-        asset_id="asset",
-        suffix="current",
-        fingerprint="e" * 64,
-    )
-    pointer = tenant / "datasets" / "evaluation_assets" / "asset" / "release.json"
-    pointer.write_text("{}\n", encoding="utf-8")
-
-    store = TenantStore(tenants, repository_base=tmp_path)
-
-    assert [row["path"] for row in store.list_datasets("demo")] == [
-        "datasets/ordinary.jsonl"
-    ]
-    assert store.has_evaluation_asset_datasets("demo") is False
-
-
-def test_ordinary_symlink_alias_into_studio_is_protected_and_unreadable(
-    tmp_path: Path,
-) -> None:
-    """An ordinary-looking alias cannot bypass immutable Studio validation."""
-    tenants = tmp_path / "tenants"
-    tenant = tenants / "demo"
-    tenant.mkdir(parents=True)
-    (tenant / "__init__.py").write_text("", encoding="utf-8")
-    current = _publish_generation(
-        tenant,
-        asset_id="asset",
-        suffix="current",
-        fingerprint="f" * 64,
-    )
-    alias = tenant / "datasets" / "alias.jsonl"
-    alias.symlink_to(current.files["train"])
-    store = TenantStore(tenants, repository_base=tmp_path)
-
-    assert "datasets/alias.jsonl" not in {
-        row["path"] for row in store.list_datasets("demo")
-    }
-    assert store.is_evaluation_asset_dataset("demo", "datasets/alias.jsonl")
-    assert store.get_dataset("demo", "datasets/alias.jsonl") is None
-
-
-def test_prepared_ordinary_snapshot_rejects_swap_to_studio_before_read(
-    tmp_path: Path,
-) -> None:
-    """A path swap after classification cannot expose Studio row bytes."""
-    tenants = tmp_path / "tenants"
-    tenant = tenants / "demo"
-    tenant.mkdir(parents=True)
-    (tenant / "__init__.py").write_text("", encoding="utf-8")
-    ordinary = tenant / "datasets" / "ordinary.jsonl"
-    ordinary.parent.mkdir(parents=True)
-    ordinary.write_text('{"case_id":"ordinary"}\n', encoding="utf-8")
-    current = _publish_generation(
-        tenant,
-        asset_id="asset",
-        suffix="current",
-        fingerprint="e" * 64,
-    )
-    store = TenantStore(tenants, repository_base=tmp_path)
-    snapshot, studio_data = store.prepare_dataset(
-        "demo",
-        "datasets/ordinary.jsonl",
-    )
-    assert studio_data is False
-    ordinary.unlink()
-    ordinary.symlink_to(current.files["train"])
-
-    assert store.materialize_dataset(snapshot) is None
-
-
-def test_studio_listing_defers_release_validation_until_materialization(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Pre-authorization listing preparation never hashes Studio split bytes."""
-    tenants = tmp_path / "tenants"
-    tenant = tenants / "demo"
-    tenant.mkdir(parents=True)
-    (tenant / "__init__.py").write_text("", encoding="utf-8")
-    _publish_generation(
-        tenant,
-        asset_id="asset",
-        suffix="current",
-        fingerprint="9" * 64,
-    )
-    store = TenantStore(tenants, repository_base=tmp_path)
-    real_resolve = webui_data_module.resolve_evaluation_asset_release
-    calls: list[Path] = []
-
-    def tracked_resolve(catalog: Path, **kwargs):
-        calls.append(catalog)
-        return real_resolve(catalog, **kwargs)
-
-    monkeypatch.setattr(
-        webui_data_module,
-        "resolve_evaluation_asset_release",
-        tracked_resolve,
-    )
-
-    prepared, studio_data = store.prepare_dataset_listing("demo")
-
-    assert studio_data is True
-    assert calls == []
-    assert len(store.materialize_dataset_listing(prepared)) == 4
-    assert calls
-
-
-def test_historical_studio_read_defers_generation_hashes_until_materialization(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Historical Studio files are classified cheaply before authorization."""
-    tenants = tmp_path / "tenants"
-    tenant = tenants / "demo"
-    tenant.mkdir(parents=True)
-    (tenant / "__init__.py").write_text("", encoding="utf-8")
-    generation = _publish_generation(
-        tenant,
-        asset_id="asset",
-        suffix="historical",
-        fingerprint="8" * 64,
-    )
-    relative = generation.files["train"].relative_to(tenant).as_posix()
-    store = TenantStore(tenants, repository_base=tmp_path)
-    real_validate = webui_data_module.validate_historical_generation
-    calls: list[Path] = []
-
-    def tracked_validate(directory: Path, **kwargs):
-        calls.append(directory)
-        return real_validate(directory, **kwargs)
-
-    monkeypatch.setattr(
-        webui_data_module,
-        "validate_historical_generation",
-        tracked_validate,
-    )
-
-    prepared, studio_data = store.prepare_dataset("demo", relative)
-
-    assert studio_data is True
-    assert calls == []
-    assert store.materialize_dataset(prepared)["rows"] == [
-        {"case_id": "historical-train"}
-    ]
-    assert calls
+        path.write_bytes(_dataset_bytes(rows))
+    for relative in (
+        "inputs/feedback.jsonl",
+        "cache/rubric.jsonl",
+        "lessons.jsonl",
+        "rubrics.jsonl",
+        "splits.jsonl",
+    ):
+        path = asset / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"case_id":"not-a-dataset"}\n', encoding="utf-8")
+    _write_json(asset / "catalog.json", {"guidelines": []})
+    _write_json(asset / "manifest.json", {"asset_id": asset_id})
+    (asset / "review.md").write_text("# Review\n", encoding="utf-8")
+    return asset
 
 
 def test_list_runs_recurses_under_evals_tmp(tmp_path: Path) -> None:
@@ -506,17 +269,10 @@ def test_manifest_valid_bundle_for_another_tenant_is_omitted(tmp_path: Path) -> 
     _publish_authenticated_run(tenant, run_config_tenant_id="other-tenant")
     store = TenantStore(tenants, repository_base=tmp_path)
 
-    snapshot, studio_data = store.prepare_case(
-        "demo",
-        "evals/authenticated-run",
-        0,
-    )
-
     assert store.list_runs("demo") == []
     assert store.get_run("demo", "evals/authenticated-run") is None
     assert store.list_tenants()[0]["run_count"] == 0
-    assert snapshot is None
-    assert studio_data is False
+    assert store.get_case("demo", "evals/authenticated-run", 0) is None
 
 
 def test_symlinked_tenant_alias_is_not_a_tenant_identity(tmp_path: Path) -> None:
@@ -881,52 +637,6 @@ def test_case_payload_exposes_manifest_authority(tmp_path: Path) -> None:
     assert corrupt["authority"] == "invalid_unverified"
 
 
-@pytest.mark.parametrize(
-    "status",
-    ("completed", "running"),
-)
-def test_unverified_run_never_joins_protected_studio_ground_truth(
-    tmp_path: Path,
-    status: str,
-) -> None:
-    """A release manifest cannot replace an authenticated run-to-dataset binding."""
-    tenants = tmp_path / "tenants"
-    tenant = tenants / "demo"
-    tenant.mkdir(parents=True)
-    (tenant / "__init__.py").write_text("", encoding="utf-8")
-    generation = _publish_generation(
-        tenant,
-        asset_id="asset",
-        suffix="protected",
-        fingerprint="7" * 64,
-        split_rows={
-            "train": {
-                "case_id": "protected-train",
-                "context": {"secret": "protected-context"},
-                "expected": {"secret": "protected-expected"},
-                "metadata": {"secret": "protected-metadata"},
-            }
-        },
-    )
-    dataset_path = generation.files["train"].relative_to(tmp_path).as_posix()
-    _write_loose_run(
-        tenant,
-        run_name=status,
-        status=status,
-        dataset_path=dataset_path,
-        case_id="protected-train",
-    )
-    store = TenantStore(tenants, repository_base=tmp_path)
-
-    snapshot, studio_data = store.prepare_case("demo", f"evals/{status}", 0)
-    case = store.materialize_case(snapshot)
-
-    assert studio_data is True
-    assert case is not None
-    assert case["case"]["case_id"] == "protected-train"
-    assert case["ground_truth"] is None
-
-
 def test_legacy_run_still_joins_ordinary_dataset_ground_truth(tmp_path: Path) -> None:
     """The authenticated-join requirement does not break ordinary legacy data."""
     tenants = tmp_path / "tenants"
@@ -1115,570 +825,155 @@ def test_list_and_get_configs_support_config_and_configs_dirs(tmp_path: Path) ->
 
 
 def test_evaluation_asset_only_directory_is_a_tenant(tmp_path: Path) -> None:
-    tenant = tmp_path / "bootstrap_tenant"
-    asset = tenant / "evaluation_assets" / "v1"
-    for name in (
-        "raw_inputs",
-        "prepared_inputs",
-        "decision_assets",
-        "review_queues",
-        "dataset_splits",
-    ):
-        (asset / name).mkdir(parents=True, exist_ok=True)
-    (asset / "config.json").write_text(
-        json.dumps(
-            {
-                "tenant_id": "bootstrap_tenant",
-                "asset_id": "v1",
-                "cluster_count": 10,
-            }
-        ),
-        encoding="utf-8",
-    )
-    (asset / "pipeline_state.json").write_text(
-        json.dumps(
-            {
-                "tenant_id": "bootstrap_tenant",
-                "asset_id": "v1",
-                "status": "running",
-                "current_stage": "rubric_extraction",
-                "stages": [],
-            }
-        ),
-        encoding="utf-8",
-    )
+    """A directory holding only built evaluation assets is listed as a tenant."""
+    _write_asset(tmp_path / "bootstrap_tenant", "v1", {"train": [{"case_id": "case-1"}]})
 
-    store = TenantStore(tmp_path, repository_base=tmp_path.parent)
-    listed = store.list_tenants()
+    listed = TenantStore(tmp_path, repository_base=tmp_path.parent).list_tenants()
 
     assert [row["tenant_id"] for row in listed] == ["bootstrap_tenant"]
-    assert listed[0]["evaluation_asset_count"] == 1
-    assert listed[0]["evaluation_asset"]["state"]["current_stage"] == "rubric_extraction"
-    assert listed[0]["evaluation_asset"]["review_authority_revision"] is None
+    assert listed[0]["dataset_count"] == 1
+    assert "evaluation_asset_count" not in listed[0]
 
 
-def test_evaluation_asset_stage_returns_bounded_artifact_previews(
-    tmp_path: Path,
-) -> None:
-    tenant = tmp_path / "bootstrap_tenant"
-    asset = tenant / "evaluation_assets" / "v1"
-    for name in ("raw_inputs", "prepared_inputs", "decision_assets", "dataset_splits"):
-        (asset / name).mkdir(parents=True, exist_ok=True)
-    _write_json(
-        asset / "config.json",
-        {
-            "tenant_id": "bootstrap_tenant",
-            "asset_id": "v1",
-            "cluster_count": 10,
-        },
-    )
-    _write_json(
-        asset / "pipeline_state.json",
-        {
-            "tenant_id": "bootstrap_tenant",
-            "asset_id": "v1",
-            "status": "completed",
-            "counts": {"intent_clusters": 82},
-            "stages": [
-                {
-                    "stage": "intent_clustering",
-                    "label": "Mine intent clusters",
-                    "status": "completed",
-                    "message": "82 clusters created",
-                }
-            ],
-        },
-    )
-    inventory = asset / "decision_assets" / "intent_inventory.jsonl"
-    inventory.write_text(
-        "\n".join(
-            json.dumps(
-                {
-                    "cluster_id": f"route-{index:03d}",
-                    "route": "route",
-                    "size": index + 1,
-                }
-            )
-            for index in range(82)
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+class TestEvaluationAssetDatasets:
+    """Datasets built by ``assets build`` under ``evaluation_assets/<asset_id>/``."""
 
-    store = TenantStore(tmp_path, repository_base=tmp_path.parent)
-    detail = store.get_evaluation_asset_stage(
-        "bootstrap_tenant",
-        "v1",
-        "intent_clustering",
-    )
+    @staticmethod
+    def _tenant(tmp_path: Path) -> Path:
+        tenant = tmp_path / "tenants" / "demo"
+        tenant.mkdir(parents=True)
+        (tenant / "__init__.py").write_text("", encoding="utf-8")
+        return tenant
 
-    assert detail is not None
-    assert detail["status"] == "completed"
-    assert detail["counts"]["intent_clusters"] == 82
-    assert detail["artifacts"][0]["row_count"] == 82
-    assert len(detail["artifacts"][0]["preview"]) == 1
-    assert len(detail["clusters"]) == 82
-    assert (
-        store.get_evaluation_asset_stage("bootstrap_tenant", "v1", "unknown")
-        is None
-    )
-
-
-def test_evaluation_asset_stage_reads_stage_oriented_layout(
-    tmp_path: Path,
-) -> None:
-    tenant = tmp_path / "bootstrap_tenant"
-    asset = tenant / "evaluation_assets" / "v1"
-    prepared = asset / "stages" / "02_prepared_inputs"
-    guidelines = asset / "stages" / "03_evaluation_guidelines"
-    clustering = asset / "stages" / "04_intent_clustering"
-    prepared.mkdir(parents=True)
-    guidelines.mkdir(parents=True)
-    clustering.mkdir(parents=True)
-    _write_json(
-        asset / "config.json",
-        {"tenant_id": "bootstrap_tenant", "asset_id": "v1"},
-    )
-    _write_json(
-        asset / "pipeline_state.json",
-        {
-            "tenant_id": "bootstrap_tenant",
-            "asset_id": "v1",
-            "status": "completed",
-            "stages": [],
-        },
-    )
-    (prepared / "intent_records.jsonl").write_text(
-        '{"record_id":"r1","user_input":"request alpha"}\n',
-        encoding="utf-8",
-    )
-    (guidelines / "feedback_evidence.jsonl").write_text(
-        '{"record_id":"f1","observations":[]}\n',
-        encoding="utf-8",
-    )
-    (guidelines / "candidate_guidelines.jsonl").write_text(
-        '{"intent_label":"answer"}\n',
-        encoding="utf-8",
-    )
-    (guidelines / "evaluation_guidelines.jsonl").write_text(
-        '{"guideline_id":"guideline-answer"}\n',
-        encoding="utf-8",
-    )
-    (clustering / "intent_inventory.jsonl").write_text(
-        json.dumps(
+    def test_lists_split_files_and_hides_other_asset_files(self, tmp_path: Path) -> None:
+        """Only an asset's ``datasets/*.jsonl`` files join the dataset listing."""
+        tenant = self._tenant(tmp_path)
+        (tenant / "datasets").mkdir()
+        (tenant / "datasets" / "ordinary.jsonl").write_text('{"case_id":"ordinary"}\n', encoding="utf-8")
+        _write_asset(
+            tenant,
+            "v1",
             {
-                "cluster_id": "route-001",
-                "route": "route",
-                "size": 1,
-                "record_ids": ["r1"],
-                "representative_ids": ["r1"],
-                "top_terms": ["alpha"],
-            }
+                "train": [{"case_id": "t1"}, {"case_id": "t2"}],
+                "train_trusted": [{"case_id": "t1"}],
+            },
         )
-        + "\n",
-        encoding="utf-8",
-    )
+        store = TenantStore(tmp_path / "tenants", repository_base=tmp_path)
 
-    detail = TenantStore(
-        tmp_path,
-        repository_base=tmp_path.parent,
-    ).get_evaluation_asset_stage(
-        "bootstrap_tenant",
-        "v1",
-        "intent_clustering",
-    )
+        listed = store.list_datasets("demo")
 
-    assert detail is not None
-    assert detail["artifacts"][0]["path"].endswith(
-        "stages/04_intent_clustering/intent_inventory.jsonl"
-    )
-    assert detail["clusters"][0]["representative_ids"] == ["r1"]
-    assert "request alpha" not in json.dumps(detail)
-    guideline_detail = TenantStore(
-        tmp_path,
-        repository_base=tmp_path.parent,
-    ).get_evaluation_asset_stage(
-        "bootstrap_tenant",
-        "v1",
-        "rubric_extraction",
-    )
-    assert guideline_detail is not None
-    artifacts = {item["name"]: item for item in guideline_detail["artifacts"]}
-    assert artifacts["evaluation_guidelines.jsonl"]["display_name"] == (
-        "Evaluation guidelines"
-    )
-    assert artifacts["evaluation_guidelines.jsonl"]["group"] == "Key outputs"
+        assert [(row["path"], row["row_count"]) for row in listed] == [
+            ("datasets/ordinary.jsonl", 1),
+            ("evaluation_assets/v1/datasets/train.jsonl", 2),
+            ("evaluation_assets/v1/datasets/train_trusted.jsonl", 1),
+        ]
+        assert store.list_tenants()[0]["dataset_count"] == 3
 
+    def test_reads_split_files_but_no_other_asset_file(self, tmp_path: Path) -> None:
+        """The dataset reader pages asset splits and rejects every other asset path."""
+        tenant = self._tenant(tmp_path)
+        _write_asset(tenant, "v1", {"validation": [{"case_id": "v-1"}, {"case_id": "v-2"}]})
+        store = TenantStore(tmp_path / "tenants", repository_base=tmp_path)
 
-def test_missing_label_artifacts_belong_to_label_inference(
-    tmp_path: Path,
-) -> None:
-    tenant = tmp_path / "bootstrap_tenant"
-    asset = tenant / "evaluation_assets" / "v1"
-    for name in (
-        "raw_inputs",
-        "prepared_inputs",
-        "decision_assets",
-        "review_queues",
-        "dataset_splits",
-    ):
-        (asset / name).mkdir(parents=True, exist_ok=True)
-    _write_json(
-        asset / "config.json",
-        {"tenant_id": "bootstrap_tenant", "asset_id": "v1"},
-    )
-    _write_json(
-        asset / "pipeline_state.json",
-        {
-            "tenant_id": "bootstrap_tenant",
-            "asset_id": "v1",
-            "status": "completed",
-            "stages": [],
-        },
-    )
-    (asset / "decision_assets" / "intent_matches.jsonl").write_text(
-        '{"cluster_id":"cluster-1"}\n',
-        encoding="utf-8",
-    )
-    (asset / "decision_assets" / "coverage_report.md").write_text(
-        "# Coverage\n",
-        encoding="utf-8",
-    )
-    (asset / "review_queues" / "labeling_queue.jsonl").write_text(
-        '{"queue_id":"cluster-1:record-1"}\n',
-        encoding="utf-8",
-    )
-    (
-        asset
-        / "decision_assets"
-        / "missing_labeled_feedback_clusters.jsonl"
-    ).write_text('{"cluster_id":"cluster-2"}\n', encoding="utf-8")
-    (
-        asset
-        / "decision_assets"
-        / "missing_labeled_feedback_report.md"
-    ).write_text("# Missing\n", encoding="utf-8")
-
-    store = TenantStore(tmp_path, repository_base=tmp_path.parent)
-    coverage = store.get_evaluation_asset_stage(
-        "bootstrap_tenant",
-        "v1",
-        "coverage_decisions",
-    )
-    inference = store.get_evaluation_asset_stage(
-        "bootstrap_tenant",
-        "v1",
-        "label_inference",
-    )
-
-    assert coverage is not None
-    assert inference is not None
-    assert {item["name"] for item in coverage["artifacts"]} == {
-        "intent_matches.jsonl",
-        "coverage_report.md",
-        "labeling_queue.jsonl",
-    }
-    labeling_queue = next(
-        item
-        for item in coverage["artifacts"]
-        if item["name"] == "labeling_queue.jsonl"
-    )
-    assert labeling_queue["display_name"] == "Legacy traces-to-label queue"
-    assert labeling_queue["group"] == "Needs attention"
-    coverage_report = next(
-        item
-        for item in coverage["artifacts"]
-        if item["name"] == "coverage_report.md"
-    )
-    assert coverage_report["content"] == "# Coverage\n"
-    assert coverage_report["content_truncated"] is False
-    assert {
-        "missing_labeled_feedback_clusters.jsonl",
-        "missing_labeled_feedback_report.md",
-    }.issubset(item["name"] for item in inference["artifacts"])
-
-
-def test_evaluation_asset_stage_disables_protected_content_previews(
-    tmp_path: Path,
-) -> None:
-    tenant = tmp_path / "bootstrap_tenant"
-    asset = tenant / "evaluation_assets" / "v1"
-    _write_json(
-        asset / "config.json",
-        {"tenant_id": "bootstrap_tenant", "asset_id": "v1"},
-    )
-    _write_json(
-        asset / "pipeline_state.json",
-        {
-            "tenant_id": "bootstrap_tenant",
-            "asset_id": "v1",
-            "status": "awaiting_review",
-            "stages": [],
-        },
-    )
-    protected_rows = {
-        "stages/01_raw_inputs/labeled_feedback.jsonl": "RAW-FEEDBACK-CANARY",
-        "stages/01_raw_inputs/unlabeled.jsonl": "RAW-UNLABELED-CANARY",
-        "stages/02_prepared_inputs/normalized_feedback.jsonl": (
-            "NORMALIZED-FEEDBACK-CANARY"
-        ),
-        "stages/02_prepared_inputs/intent_records.jsonl": "INTENT-SOURCE-CANARY",
-        "stages/03_evaluation_guidelines/protected_feedback_evidence.jsonl": (
-            "PROTECTED-EVIDENCE-CANARY"
-        ),
-        "stages/03_evaluation_guidelines/protected_candidate_guidelines.jsonl": (
-            "PROTECTED-CANDIDATE-CANARY"
-        ),
-        "stages/03_evaluation_guidelines/protected_evaluation_guidelines.jsonl": (
-            "PROTECTED-GUIDELINE-CANARY"
-        ),
-        "stages/03_evaluation_guidelines/protected_trusted_cases.jsonl": (
-            "PROTECTED-CASE-CANARY"
-        ),
-        "stages/06_label_inference/episode_rubrics.jsonl": (
-            "EPISODE-RUBRIC-CANARY"
-        ),
-        "stages/06_label_inference/trusted_cases.jsonl": (
-            "TRUSTED-CASE-CANARY"
-        ),
-        "stages/06_label_inference/case_dependencies.jsonl": (
-            "CASE-DEPENDENCY-CANARY"
-        ),
-        "stages/06_label_inference/held_rubric_outputs.jsonl": (
-            "HELD-RUBRIC-CANARY"
-        ),
-        "stages/06_label_inference/inferred_unlabeled_cluster_rubrics.jsonl": (
-            "INFERRED-RUBRIC-CANARY"
-        ),
-        "stages/06_label_inference/inferred_unlabeled_labels.jsonl": (
-            "INFERRED-LABEL-CANARY"
-        ),
-        "stages/06_label_inference/inferred_cases.jsonl": "INFERRED-CASE-CANARY",
-        "stages/06_label_inference/inference_dependencies.jsonl": (
-            "INFERENCE-DEPENDENCY-CANARY"
-        ),
-        "stages/06_label_inference/held_inference_outputs.jsonl": (
-            "HELD-INFERENCE-CANARY"
-        ),
-        "stages/07_synthetic_coverage/synthetic_candidates.jsonl": (
-            "SYNTHETIC-CANDIDATE-CANARY"
-        ),
-        "stages/07_synthetic_coverage/synthetic_cases.jsonl": (
-            "SYNTHETIC-CASE-CANARY"
-        ),
-        "stages/07_synthetic_coverage/rejected_synthetic.jsonl": (
-            "REJECTED-SYNTHETIC-CANARY"
-        ),
-        "stages/07_synthetic_coverage/synthetic_dependencies.jsonl": (
-            "SYNTHETIC-DEPENDENCY-CANARY"
-        ),
-        "stages/08_dataset_splits/validation.jsonl": "VALIDATION-CANARY",
-        "stages/08_dataset_splits/test.jsonl": "TEST-CANARY",
-        "stages/08_dataset_splits/regression_trusted.jsonl": (
-            "REGRESSION-CANARY"
-        ),
-        "stages/08_dataset_splits/validation_inferred.jsonl": (
-            "VALIDATION-INFERRED-CANARY"
-        ),
-        "stages/08_dataset_splits/test_synthetic.jsonl": (
-            "TEST-SYNTHETIC-CANARY"
-        ),
-        "stages/08_dataset_splits/triage_hold.jsonl": "TRIAGE-HOLD-CANARY",
-    }
-    for relative_path, canary in protected_rows.items():
-        path = asset / relative_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(
-                {
-                    "record_id": "record-1",
-                    "user_input": canary,
-                    "assistant_output": canary,
-                    "feedback": {"rationale": canary, "correction": canary},
-                    "criteria": [canary],
-                    "provider_payload": canary,
-                }
-            )
-            + "\n",
-            encoding="utf-8",
+        page = store.get_dataset(
+            "demo",
+            "evaluation_assets/v1/datasets/validation.jsonl",
+            offset=1,
+            limit=5,
         )
 
-    store = TenantStore(tmp_path, repository_base=tmp_path.parent)
-    details = [
-        store.get_evaluation_asset_stage("bootstrap_tenant", "v1", stage)
-        for stage in (
-            "raw_inputs",
-            "prepared_inputs",
-            "rubric_extraction",
-            "label_inference",
-            "synthetic_coverage",
-            "dataset_splits",
+        assert page == {
+            "path": "evaluation_assets/v1/datasets/validation.jsonl",
+            "total": 2,
+            "offset": 1,
+            "limit": 5,
+            "rows": [{"case_id": "v-2"}],
+        }
+        for rel in (
+            "evaluation_assets/v1/inputs/feedback.jsonl",
+            "evaluation_assets/v1/cache/rubric.jsonl",
+            "evaluation_assets/v1/lessons.jsonl",
+            "evaluation_assets/v1/catalog.json",
+            "evaluation_assets/v1/datasets",
+            "evaluation_assets/v1/datasets/../inputs/feedback.jsonl",
+            "evaluation_assets/datasets/validation.jsonl",
+        ):
+            assert store.get_dataset("demo", rel) is None
+
+    def test_rejects_aliased_asset_directories(self, tmp_path: Path) -> None:
+        """Symlinked asset and asset-dataset directories are neither listed nor read."""
+        tenant = self._tenant(tmp_path)
+        asset = _write_asset(tenant, "v1", {"train": [{"case_id": "t1"}]})
+        (tenant / "evaluation_assets" / "alias").symlink_to(asset, target_is_directory=True)
+        linked = tenant / "evaluation_assets" / "linked"
+        linked.mkdir()
+        (linked / "datasets").symlink_to(asset / "inputs", target_is_directory=True)
+        store = TenantStore(tmp_path / "tenants", repository_base=tmp_path)
+
+        assert [row["path"] for row in store.list_datasets("demo")] == [
+            "evaluation_assets/v1/datasets/train.jsonl"
+        ]
+        assert store.get_dataset("demo", "evaluation_assets/alias/datasets/train.jsonl") is None
+        assert store.get_dataset("demo", "evaluation_assets/linked/datasets/feedback.jsonl") is None
+
+    def test_authenticated_run_joins_asset_split(self, tmp_path: Path) -> None:
+        """A bundle recorded against an asset split joins that split's ground truth."""
+        tenant = self._tenant(tmp_path)
+        _publish_authenticated_run(tenant, dataset_rel="evaluation_assets/v1/datasets/train.jsonl")
+        store = TenantStore(tmp_path / "tenants", repository_base=tmp_path)
+
+        case = store.get_case("demo", "evals/authenticated-run", 0)
+
+        assert case is not None
+        assert case["authority"] == "authoritative"
+        assert case["ground_truth"] == {
+            "dataset": "evaluation_assets/v1/datasets/train.jsonl",
+            "expected": {"answer": "protected-answer"},
+            "context": {"question": "protected-question"},
+            "metadata": {"source": "protected"},
+        }
+
+    def test_authenticated_run_cannot_join_non_dataset_asset_file(self, tmp_path: Path) -> None:
+        """A bundle recorded against an asset input file gets no ground truth."""
+        tenant = self._tenant(tmp_path)
+        _publish_authenticated_run(tenant, dataset_rel="evaluation_assets/v1/inputs/feedback.jsonl")
+        store = TenantStore(tmp_path / "tenants", repository_base=tmp_path)
+
+        case = store.get_case("demo", "evals/authenticated-run", 0)
+
+        assert case is not None
+        assert case["case"]["case_id"] == "case-1"
+        assert case["ground_truth"] is None
+
+    def test_legacy_run_joins_asset_split(self, tmp_path: Path) -> None:
+        """A loose run whose config names an asset split joins it best-effort."""
+        tenant = self._tenant(tmp_path)
+        _write_asset(
+            tenant,
+            "v1",
+            {
+                "train": [{"case_id": "train-case"}],
+                "test": [{"case_id": "test-case", "expected": {"answer": "test-answer"}}],
+            },
         )
-    ]
-
-    assert all(detail is not None for detail in details)
-    artifacts = [
-        artifact
-        for detail in details
-        if detail is not None
-        for artifact in detail["artifacts"]
-    ]
-    assert {artifact["name"] for artifact in artifacts} == {
-        Path(relative_path).name for relative_path in protected_rows
-    }
-    for artifact in artifacts:
-        assert artifact["preview_policy"] == "disabled"
-        assert artifact["preview"] == []
-        assert "content" not in artifact
-        assert artifact["row_count"] == 1
-    serialized = json.dumps(details)
-    for canary in protected_rows.values():
-        assert canary not in serialized
-
-
-def test_evaluation_asset_stage_projects_split_and_review_metadata_only(
-    tmp_path: Path,
-) -> None:
-    tenant = tmp_path / "bootstrap_tenant"
-    asset = tenant / "evaluation_assets" / "v1"
-    _write_json(
-        asset / "config.json",
-        {"tenant_id": "bootstrap_tenant", "asset_id": "v1"},
-    )
-    _write_json(
-        asset / "pipeline_state.json",
-        {
-            "tenant_id": "bootstrap_tenant",
-            "asset_id": "v1",
-            "status": "awaiting_review",
-            "stages": [],
-        },
-    )
-    metadata_files = {
-        "stages/02_prepared_inputs/trusted_split_plan.jsonl": {
-            "schema_version": "fafo-trusted-split-assignment-v1",
-            "record_id": "record-1",
-            "group_id": "group-1",
-            "split_group_id": "split-group-1",
-            "context_fingerprint": "sha256:" + "1" * 64,
-            "split": "validation",
-            "assignment_source": "seeded",
-            "evidence_eligible": False,
-            "hold_reason": "insufficient_correctness_evidence",
-        },
-        "stages/02_prepared_inputs/feedback_eligibility.jsonl": {
-            "record_id": "record-1",
-            "split": "validation",
-            "evidence_eligible": False,
-            "hold_reason": "insufficient_correctness_evidence",
-        },
-        "stages/07_synthetic_coverage/derived_review_items.jsonl": {
-            "review_item_id": "review-1",
-            "case_id": "case-1",
-            "fingerprint": "sha256:" + "2" * 64,
-            "status": "pending",
-        },
-        "stages/07_synthetic_coverage/duplicate_families.jsonl": {
-            "family_id": "family-1",
-            "member_case_ids": ["case-1", "case-2"],
-            "status": "held",
-            "hold_reason": "conflicting_expected_truth",
-        },
-        "stages/07_synthetic_coverage/held_derived_cases.jsonl": {
-            "case_id": "case-3",
-            "fingerprint": "sha256:" + "3" * 64,
-            "status": "held",
-            "hold_reason": "empty_rubric",
-        },
-        "reviews/decisions.jsonl": {
-            "decision_id": "decision-1",
-            "fingerprint": "sha256:" + "2" * 64,
-            "decision": "approved",
-            "reviewer": "REVIEWER-METADATA-CANARY",
-            "timestamp": "TIMESTAMP-METADATA-CANARY",
-        },
-        "reviews/finalizations.jsonl": {
-            "finalization_id": "finalization-1",
-            "review_set_fingerprint": "sha256:" + "4" * 64,
-            "status": "finalized",
-            "reviewer": "FINALIZER-METADATA-CANARY",
-            "timestamp": "FINALIZATION-TIME-CANARY",
-        },
-    }
-    canaries: list[str] = []
-    for index, (relative_path, safe_metadata) in enumerate(metadata_files.items()):
-        canary = f"METADATA-BODY-CANARY-{index}"
-        canaries.append(canary)
-        path = asset / relative_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(
-                {
-                    **safe_metadata,
-                    "user_input": canary,
-                    "assistant_output": canary,
-                    "rationale": canary,
-                    "correction": canary,
-                    "criteria": [canary],
-                    "provider_payload": {"body": canary},
-                    "case": {"input": canary, "expected": canary},
-                }
-            )
-            + "\n",
-            encoding="utf-8",
+        _write_loose_run(
+            tenant,
+            run_name="legacy",
+            status="completed",
+            dataset_path="tenants/demo/evaluation_assets/v1/datasets/test.jsonl",
+            case_id="test-case",
         )
-    _write_json(
-        asset / "stages/08_dataset_splits/review_snapshot.json",
-        {
-            "finalization_id": "finalization-1",
-            "review_set_fingerprint": "sha256:" + "4" * 64,
-            "approved_fingerprints": ["sha256:" + "2" * 64],
-            "provider_payload": {"body": "REVIEW-SNAPSHOT-CANARY"},
-        },
-    )
-    canaries.append("REVIEW-SNAPSHOT-CANARY")
-    canaries.extend(
-        (
-            "REVIEWER-METADATA-CANARY",
-            "TIMESTAMP-METADATA-CANARY",
-            "FINALIZER-METADATA-CANARY",
-            "FINALIZATION-TIME-CANARY",
+
+        case = TenantStore(tmp_path / "tenants", repository_base=tmp_path).get_case(
+            "demo",
+            "evals/legacy",
+            0,
         )
-    )
 
-    store = TenantStore(tmp_path, repository_base=tmp_path.parent)
-    details = [
-        store.get_evaluation_asset_stage("bootstrap_tenant", "v1", stage)
-        for stage in ("prepared_inputs", "synthetic_coverage", "dataset_splits")
-    ]
-
-    assert all(detail is not None for detail in details)
-    artifacts = {
-        artifact["name"]: artifact
-        for detail in details
-        if detail is not None
-        for artifact in detail["artifacts"]
-    }
-    assert set(metadata_files).issubset(
-        artifact["path"].split("evaluation_assets/v1/", 1)[-1]
-        for artifact in artifacts.values()
-    )
-    for name in (
-        "trusted_split_plan.jsonl",
-        "feedback_eligibility.jsonl",
-        "derived_review_items.jsonl",
-        "duplicate_families.jsonl",
-        "held_derived_cases.jsonl",
-        "decisions.jsonl",
-        "finalizations.jsonl",
-        "review_snapshot.json",
-    ):
-        assert artifacts[name]["preview_policy"] == "metadata_only"
-        assert artifacts[name]["preview"]
-    serialized = json.dumps(details)
-    for canary in canaries:
-        assert canary not in serialized
-    assert "record-1" in serialized
-    assert "review-1" in serialized
-    assert "decision-1" in serialized
-    assert "finalization-1" in serialized
+        assert case is not None
+        assert case["ground_truth"] == {
+            "dataset": "evaluation_assets/v1/datasets/test.jsonl",
+            "expected": {"answer": "test-answer"},
+            "context": None,
+            "metadata": None,
+        }

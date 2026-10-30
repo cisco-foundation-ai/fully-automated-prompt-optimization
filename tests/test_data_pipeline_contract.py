@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from src.hephaestus.evaluation_assets.input_contract import (
+from src.hephaestus.data_pipeline.contract import (
     SCHEMA_VERSION,
     canonical_user_intent_text,
     episode_tool_names,

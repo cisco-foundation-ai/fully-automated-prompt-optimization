@@ -15,7 +15,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-from src.hephaestus.evaluation_assets.input_contract import validate_input_records
+from src.hephaestus.data_pipeline.contract import validate_input_records
 
 TENANT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ALL = TENANT_ROOT / "source_artifacts/all_unlabeled.jsonl"

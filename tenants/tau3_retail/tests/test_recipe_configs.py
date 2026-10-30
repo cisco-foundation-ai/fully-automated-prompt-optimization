@@ -24,7 +24,7 @@ def test_recipe_config_loads_and_is_tenant_scoped(path: Path) -> None:
     assert config.tenant_id == "tau3_retail"
     assert config.provider == "openai"
     assert config.dataset_path.startswith(
-        "tenants/tau3_retail/evaluation_assets/fafo-v3-luna-v1/"
+        "tenants/tau3_retail/evaluation_assets/fafo-v4-luna-v1/datasets/"
     )
     assert config.chain.path == "tenants/tau3_retail/chains/tau_episode.py"
     assert config.chain.config["tau_runtime_path"] == "../tau2-bench"

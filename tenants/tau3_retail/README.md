@@ -82,36 +82,13 @@ python tenants/tau3_retail/code/feedback_workflow.py render
 # Edit the files under source_artifacts/feedback-review/, then join them.
 python tenants/tau3_retail/code/feedback_workflow.py join
 
-# 6. Build and run the FAFO evaluation asset.
-python -m hephaestus.cli assets create \
-  --tenant tau3_retail \
-  --asset-id fafo-v3-luna-v1 \
-  --feedback tenants/tau3_retail/source_artifacts/labeled_feedback.jsonl \
-  --unlabeled tenants/tau3_retail/source_artifacts/unlabeled_traffic.jsonl \
-  --rubric-model gpt-5.6-luna \
-  --embedding-model text-embedding-3-small \
-  --clusters 50 \
-  --match-threshold 0.65
-
-python -m hephaestus.cli assets run \
-  --tenant tau3_retail \
-  --asset-id fafo-v3-luna-v1 \
-  --rubric-model gpt-5.6-luna \
-  --embedding-model text-embedding-3-small \
-  --clusters 50 \
-  --batch-size 3 \
-  --match-threshold 0.65 \
-  --min-trusted-examples 1 \
-  --min-trusted-groups 1 \
-  --max-unlabeled-to-trusted-ratio 20 \
-  --no-synthetic-coverage \
-  --split-seed 42
+# 6. Build the FAFO evaluation asset.
+python -m hephaestus.cli assets build --config tenants/tau3_retail/recipe/asset-build.json
 ```
 
-The pipeline pauses at `awaiting_review` after Stage 7. Inspect the review
-snapshot and holds, then finalize with its exact review-set and decision-set
-fingerprints. The detailed commands and safeguards are in the
-[complete recipe](docs/recipe.md).
+The build writes `tenants/tau3_retail/evaluation_assets/fafo-v4-luna-v1/`.
+Read its `review.md` before optimizing. The detailed commands and safeguards
+are in the [complete recipe](docs/recipe.md).
 
 ## Included Components
 

@@ -24,9 +24,8 @@ memory work. The `optimization` agent drives the loop autonomously.
 | Reset tenant | `.claude/commands/reset-tenant.md` | `.codex/commands/reset-tenant.md` | Resets generated tenant optimization and eval artifacts when explicitly requested |
 
 The synthetic-samples and synthetic-pruner commands are generic tenant-level
-synthetic-data helpers, not evaluation-asset pipeline Stage 7. Stage 7 is a
-receipt-backed core-pipeline stage with its own homogeneous-cluster,
-mechanical-filter, dependency-fingerprint, and review/finalization rules.
+synthetic-data helpers. They are not part of the data pipeline, which builds
+cases only from recorded traces.
 
 ## Prompt sets by tool
 

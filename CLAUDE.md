@@ -51,5 +51,4 @@ The repo separates reusable optimization and evaluation core logic from tenant-s
 - PR lifecycle agent: `.claude/agents/pr-lifecycle.md` (creates, reviews, simplifies, addresses review comments, and loops until PR is merge-ready)
 - Optimization agent: `.claude/agents/optimization.md` (optimizes eval scores across all granularities: prompt text, chain parameters, and chain structure)
 - Evaluation asset assistant: `.claude/agents/evaluation-asset-creator.md`
-  (creates and monitors self-contained evaluation assets through the shared
-  eight-stage core pipeline)
+  (builds, checks, and explains evaluation assets with `assets build`)

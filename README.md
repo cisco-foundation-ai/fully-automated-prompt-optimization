@@ -383,11 +383,11 @@ datasets, so the loop can learn from the agent's real behavior:
  └──────────┘   deploy, then collect new traces
 ```
 
-The released train, validation, and test splits are the datasets the
+The built train, validation, and test splits are the datasets the
 optimization loop trains on, selects with, and tests on, under the same held-out
 rules as any other dataset. An optional trusted regression split checks that
-previously correct behavior still holds. Each deployment produces new traces and feedback,
-so repeating the cycle gives recursive self-improvement. The
+previously correct behavior still holds. Each deployment produces new traces and
+feedback, so repeating the cycle gives recursive self-improvement. The
 [recursive self-improvement post](https://cisco-foundation-ai.github.io/blogs/fafo-recursive-self-improvement/)
 explains the approach and its results.
 
@@ -419,18 +419,16 @@ Inputs must follow the
 Datasets are written to
 `tenants/<tenant_id>/evaluation_assets/<asset_id>/datasets/<split>.jsonl`. See
 the [data pipeline reference](docs/references/data-pipeline.md) for the config,
-outputs, and case format.
-
-The previous eight-stage pipeline (`assets create`, `run`, `reviews`, `extend`,
-and `adopt`) still works and will be removed; see the
-[evaluation asset reference](docs/references/evaluation-assets.md).
+outputs, and case format, and the
+[data pipeline guide](docs/processes/feedback-dataset-flow.md) for the concepts
+and trust model.
 
 ### Runtime memory cards
 
-Assets from the eight-stage pipeline can also feed the agent directly.
-`python -m hephaestus.cli memory build` compiles each trusted guideline and a
-few supporting traces into a compact procedural card that the agent reads at
-runtime. This is a second way to bring what the traces taught back into the
+An asset's guideline catalog can also feed the agent directly.
+`python -m hephaestus.cli memory build` compiles each guideline and a few
+supporting feedback traces into a compact procedural card that the agent reads
+at runtime. This is a second way to bring what the traces taught back into the
 agent; see [runtime memory cards](docs/processes/runtime-memory-cards.md).
 
 ## Guarantees and limits
@@ -459,8 +457,7 @@ agent; see [runtime memory cards](docs/processes/runtime-memory-cards.md).
 | `eval-progress --output-dir <dir> [--json]` | Show a run's status, progress, and average score |
 | `optimize --policy <policy> [--final-test] [--resume]` | Run the headless optimizer |
 | `assets build --config <asset>` | Build evaluation datasets from traces and feedback |
-| `assets create \| run \| status \| reviews \| extend \| adopt` | The previous eight-stage pipeline, to be removed |
-| `memory build \| build-additive` | Build runtime memory cards from a released asset |
+| `memory build \| build-additive` | Build runtime memory cards from an evaluation asset |
 | `customer-data pull \| push \| remove-local --tenant <id> --scope raw\|derived\|all` | Sync tenant data with GCS |
 | `ui` | Start the FAFO Explorer UI |
 
@@ -489,7 +486,7 @@ Claude Code and Codex use parallel prompt sets for the same workflows:
 | Step attribution | Dispatched by `/optimization` | `.codex/agents/step-attribution.md` | Post-eval failure analysis |
 | Variant review | Dispatched by `/optimization` | `.codex/agents/variant-reviewer.md` | Guardrail check before each eval |
 | Eval runner | `/eval-runner` | `.codex/commands/eval-runner.md` | Run and summarize an eval |
-| Evaluation assets | `evaluation-asset-creator` agent | `.codex/agents/evaluation-asset-creator.md` | Run and monitor the data pipeline |
+| Evaluation assets | `evaluation-asset-creator` agent | `.codex/agents/evaluation-asset-creator.md` | Build and check evaluation assets |
 | Synthetic data | `/synthetic-samples`, `/synthetic-pruner` | `.codex/commands/synthetic-*.md` | Create and clean synthetic cases |
 | Reset tenant | `/reset-tenant` | `.codex/commands/reset-tenant.md` | Reset a tenant to its baseline |
 
@@ -502,8 +499,8 @@ Repository tooling for Claude Code only: `/pr-lifecycle` and `/k8s-manager`.
 
 1. Run `pip install --upgrade openai httpx certifi truststore`.
 2. Uncomment the `truststore.inject_into_ssl()` block in
-   `src/hephaestus/providers/openai.py`, `src/hephaestus/datasets/rubric_providers.py`,
-   and `src/hephaestus/datasets/embedding_providers.py`.
+   `src/hephaestus/providers/openai.py` and
+   `src/hephaestus/datasets/rubric_providers.py`.
 3. Restart the process.
 
 This only fixes certificate errors, not invalid keys, unavailable models, or rate
@@ -531,10 +528,9 @@ limits.
 | [Headless optimization](docs/processes/headless-optimization.md) | API-only optimizer: policy, roles, outputs |
 | [Chain variant conventions](docs/processes/chain-variant-conventions.md) | Structural variant naming and metadata |
 | [Data pipeline reference](docs/references/data-pipeline.md) | `assets build`: steps, config, outputs, case format |
-| [Data pipeline guide](docs/processes/feedback-dataset-flow.md) | The eight-stage pipeline: concepts and trust model |
+| [Data pipeline guide](docs/processes/feedback-dataset-flow.md) | Concepts and trust model |
 | [Evaluation input contract](docs/processes/evaluation-input-contract.md) | Input JSONL format for the data pipeline |
-| [Evaluation asset reference](docs/references/evaluation-assets.md) | The eight-stage pipeline: workspace, stages, CLI |
-| [Runtime memory cards](docs/processes/runtime-memory-cards.md) | Memory cards from released assets |
+| [Runtime memory cards](docs/processes/runtime-memory-cards.md) | Memory cards from an asset's guidelines |
 | [MCP quick start](docs/mcp-quick-start.md) | Agentic (tool-using) tenants |
 | [Web UI](docs/web-ui.md) | FAFO Explorer |
 | [Prompting guides](docs/prompting-guides/) | Prompting practices and agentic chain patterns |

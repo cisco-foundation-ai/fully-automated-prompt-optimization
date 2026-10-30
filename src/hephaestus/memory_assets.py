@@ -2,23 +2,27 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Build compact runtime memory cards from released FAFO evaluation assets."""
+"""Build compact runtime memory cards from evaluation assets built by ``assets build``."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from statistics import mean
 from typing import Any, Mapping, Protocol, Sequence
 
 from src.hephaestus.artifact_io import atomic_write_json, atomic_write_jsonl
+from src.hephaestus.data_pipeline.config import TraceSettings
+from src.hephaestus.data_pipeline.prepare import load_input
+from src.hephaestus.data_pipeline.trace import episode_view, redact_record
 from src.hephaestus.datasets.rubric_providers import (
     DEFAULT_OPENAI_RUBRIC_MODEL,
     OpenAIRubricProvider,
 )
-from src.hephaestus.evaluation_assets.pipeline import _episode_observables
 
 MEMORY_CARD_SCHEMA_VERSION = "fafo-runtime-memory-card-v1"
 MEMORY_ASSET_SCHEMA_VERSION = "fafo-runtime-memory-asset-v1"
@@ -230,6 +234,110 @@ def _normalize_memory_body(
     }
 
 
+@dataclass
+class SourceAsset:
+    """A finished evaluation asset, read for memory construction.
+
+    Attributes:
+        root: The asset directory.
+        model: The model the asset was built with.
+        trace_settings: The asset's tool-result compaction settings.
+        guidelines: Catalog guidelines that entered the catalog, each with
+            ``source_record_ids`` (its train feedback episodes) and
+            ``confidence`` (the mean confidence of its lessons).
+        feedback_by_id: Feedback records, redacted as the build redacted them.
+        unlabeled_by_id: Unlabeled records, redacted the same way.
+        split_by_id: The split of every kept record.
+        source_files: Files whose hashes the memory manifest records.
+    """
+
+    root: Path
+    model: str
+    trace_settings: TraceSettings
+    guidelines: list[dict[str, Any]]
+    feedback_by_id: dict[str, dict[str, Any]]
+    unlabeled_by_id: dict[str, dict[str, Any]]
+    split_by_id: dict[str, str]
+    source_files: dict[str, Path]
+
+
+def load_source_asset(tenant_root: Path, asset_id: str) -> SourceAsset:
+    """Read a finished asset under ``tenant_root/evaluation_assets/``.
+
+    Raises:
+        ValueError: If the asset is unfinished or its files are inconsistent.
+    """
+    root = tenant_root / "evaluation_assets" / asset_id
+    manifest_path = root / "manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError(f"source evaluation asset is not finished (no manifest.json): {root}")
+    settings = _load_json(root / "build.json").get("settings")
+    if not isinstance(settings, Mapping):
+        raise ValueError(f"source evaluation asset has no build settings: {root}")
+    trace_settings = TraceSettings(**dict(settings.get("trace") or {}))
+    prepare = redact_record if settings.get("redact", True) else dict
+
+    feedback_path = root / "inputs" / "feedback.jsonl"
+    unlabeled_path = root / "inputs" / "unlabeled.jsonl"
+    feedback = {str(row["record_id"]): prepare(row) for row in load_input(feedback_path, labeled=True)}
+    unlabeled = (
+        {str(row["record_id"]): prepare(row) for row in load_input(unlabeled_path, labeled=False)}
+        if unlabeled_path.is_file()
+        else {}
+    )
+    split_by_id = {str(row["record_id"]): str(row["split"]) for row in _load_jsonl(root / "splits.jsonl")}
+    lessons = {str(row["lesson_id"]): row for row in _load_jsonl(root / "lessons.jsonl")}
+
+    guidelines = []
+    for guideline in _load_json(root / "catalog.json").get("guidelines") or []:
+        if not guideline.get("included"):
+            continue
+        guideline_id = _nonempty_string(guideline.get("guideline_id"), "guideline_id")
+        supporting = [lessons[str(lesson_id)] for lesson_id in guideline.get("lesson_ids") or []]
+        if not supporting:
+            raise ValueError(f"guideline {guideline_id} has no lessons")
+        trusted = sorted(
+            {str(lesson["record_id"]) for lesson in supporting if lesson.get("source") == "feedback"}
+        )
+        guidelines.append(
+            {
+                **guideline,
+                "source_record_ids": trusted,
+                "confidence": round(mean(float(lesson["confidence"]) for lesson in supporting), 4),
+            }
+        )
+    files = {
+        "manifest.json": manifest_path,
+        "build.json": root / "build.json",
+        "catalog.json": root / "catalog.json",
+        "lessons.jsonl": root / "lessons.jsonl",
+        "inputs/feedback.jsonl": feedback_path,
+    }
+    return SourceAsset(
+        root=root,
+        model=str(settings.get("model") or DEFAULT_OPENAI_RUBRIC_MODEL),
+        trace_settings=trace_settings,
+        guidelines=guidelines,
+        feedback_by_id=feedback,
+        unlabeled_by_id=unlabeled,
+        split_by_id=split_by_id,
+        source_files=files,
+    )
+
+
+def guideline_payload(guideline: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the guideline fields a memory prompt needs."""
+    fields = ("guideline_id", "route", "title", "dividing_line", "criteria", "strength", "support")
+    return {name: guideline[name] for name in fields if name in guideline}
+
+
+def trace_view(row: Mapping[str, Any], settings: TraceSettings) -> dict[str, Any]:
+    """Return an episode view without its record ID, which prompts see only as an alias."""
+    view = episode_view(row, settings)
+    view.pop("record_id")
+    return view
+
+
 def _feedback_polarity(row: Mapping[str, Any]) -> str:
     feedback = row.get("feedback")
     if isinstance(feedback, Mapping):
@@ -254,58 +362,44 @@ def _select_supporting_rows(
     return selected[:limit]
 
 
-def _supporting_trace(row: Mapping[str, Any], alias: str) -> dict[str, Any]:
+def _supporting_trace(row: Mapping[str, Any], alias: str, settings: TraceSettings) -> dict[str, Any]:
     feedback = row.get("feedback")
     return {
         "trace_id": alias,
         "evidence_tier": "trusted_feedback_trace",
         "task_type": str(row.get("task_type") or ""),
         "route": str(row.get("route") or row.get("task_type") or ""),
-        "trace": _episode_observables(row),
+        "trace": trace_view(row, settings),
         "trusted_feedback": dict(feedback) if isinstance(feedback, Mapping) else None,
     }
 
 
-def _inferred_trace_details(
+def inferred_supporting_trace(
     case: Mapping[str, Any],
-    raw_rows_by_id: Mapping[str, Mapping[str, Any]],
+    raw: Mapping[str, Any],
+    alias: str,
+    settings: TraceSettings,
 ) -> dict[str, Any]:
-    metadata = case["metadata"]
-    request_id = _nonempty_string(metadata.get("request_id"), "metadata.request_id")
-    raw = raw_rows_by_id[request_id]
-    observables = _episode_observables(raw)
-    tool_names = sorted(
-        {
-            str(item.get("name") or "")
-            for item in observables.get("tool_observations") or []
-            if isinstance(item, Mapping) and str(item.get("name") or "")
-        }
-    )
-    return {
-        "case": case,
-        "raw": raw,
-        "request_id": request_id,
-        "cluster": str(metadata.get("source_cluster") or "unclustered"),
-        "tool_names": tool_names,
-        "observables": observables,
-    }
-
-
-def _inferred_supporting_trace(item: Mapping[str, Any], alias: str) -> dict[str, Any]:
-    case = item["case"]
+    """Return one inferred training case and its trace as memory evidence."""
     metadata = case["metadata"]
     expected = case["expected"]
+    case_criteria = [
+        criterion
+        for group in expected.get("evaluation_guidelines") or []
+        if group.get("guideline_id") == "case"
+        for criterion in group.get("criteria") or []
+    ]
     return {
         "trace_id": alias,
-        "evidence_tier": "approved_inferred_trace",
+        "evidence_tier": "inferred_training_trace",
         "inferred_case_id": str(case.get("case_id") or ""),
-        "source_record_id": item["request_id"],
+        "source_record_id": str(metadata["record_id"]),
         "task_type": str(case.get("task_type") or ""),
-        "route": str(item["raw"].get("route") or case.get("task_type") or ""),
-        "source_cluster": item["cluster"],
-        "rubric_confidence": float(metadata.get("rubric_confidence") or 0.0),
-        "case_specific_rubric": dict(expected.get("rubric") or {}),
-        "trace": item["observables"],
+        "route": str(metadata.get("route") or case.get("task_type") or ""),
+        "source_group": str(metadata.get("group_id") or ""),
+        "rubric_confidence": float(expected.get("confidence") or 0.0),
+        "case_criteria": case_criteria,
+        "trace": trace_view(raw, settings),
         "trusted_feedback": None,
     }
 
@@ -326,9 +420,7 @@ def _render_memory(body: Mapping[str, Any]) -> str:
         lines.extend(["", "Do not use when:"])
         lines.extend(f"- {item}" for item in body["when_not_to_use"])
     lines.extend(["", "Procedure:"])
-    lines.extend(
-        f"{index}. {item['text']}" for index, item in enumerate(body["instructions"], start=1)
-    )
+    lines.extend(f"{index}. {item['text']}" for index, item in enumerate(body["instructions"], start=1))
     if body["avoid"]:
         lines.extend(["", "Avoid:"])
         lines.extend(f"- {item['text']}" for item in body["avoid"])
@@ -337,10 +429,7 @@ def _render_memory(body: Mapping[str, Any]) -> str:
         lines.extend(f"- {item['text']}" for item in body["tool_guidance"])
     if body["example_steps"]:
         lines.extend(["", "Abstract example:"])
-        lines.extend(
-            f"{index}. {item['text']}"
-            for index, item in enumerate(body["example_steps"], start=1)
-        )
+        lines.extend(f"{index}. {item['text']}" for index, item in enumerate(body["example_steps"], start=1))
     return "\n".join(lines)
 
 
@@ -401,43 +490,22 @@ def build_memory_asset(
 
     tenants_root = tenants_root.resolve()
     tenant_root = tenants_root / tenant_id
-    source_root = tenant_root / "evaluation_assets" / source_asset_id
     output_root = tenant_root / "memory_assets" / memory_asset_id
     if output_root.exists():
         raise FileExistsError(f"memory asset already exists: {output_root}")
 
-    state_path = source_root / "pipeline_state.json"
-    source_manifest_path = source_root / "asset_manifest.json"
-    config_path = source_root / "config.json"
-    guidelines_path = (
-        source_root
-        / "stages"
-        / "03_evaluation_guidelines"
-        / "evaluation_guidelines.jsonl"
+    source = load_source_asset(tenant_root, source_asset_id)
+    guidelines = [guideline for guideline in source.guidelines if guideline["source_record_ids"]]
+    skipped_guideline_ids = sorted(
+        str(guideline["guideline_id"])
+        for guideline in source.guidelines
+        if not guideline["source_record_ids"]
     )
-    feedback_path = (
-        source_root / "stages" / "02_prepared_inputs" / "normalized_feedback.jsonl"
-    )
-    state = _load_json(state_path)
-    if state.get("status") != "released":
-        raise ValueError("source evaluation asset must be released")
-    _load_json(source_manifest_path)
-    source_config = _load_json(config_path)
-    guidelines = _load_jsonl(guidelines_path)
-    feedback_rows = _load_jsonl(feedback_path)
     if not guidelines:
-        raise ValueError("source evaluation asset has no reusable guidelines")
-    guideline_ids = [str(row.get("guideline_id") or "") for row in guidelines]
-    if "" in guideline_ids or len(guideline_ids) != len(set(guideline_ids)):
-        raise ValueError("evaluation guideline IDs must be unique and non-empty")
+        raise ValueError("source evaluation asset has no guidelines backed by trusted feedback")
+    rows_by_id = source.feedback_by_id
 
-    rows_by_id = {str(row.get("record_id") or ""): row for row in feedback_rows}
-    if "" in rows_by_id or len(rows_by_id) != len(feedback_rows):
-        raise ValueError("normalized feedback record IDs must be unique and non-empty")
-
-    selected_model = model or str(
-        source_config.get("rubric_model") or DEFAULT_OPENAI_RUBRIC_MODEL
-    )
+    selected_model = model or source.model
     active_provider = provider or OpenAIRubricProvider(model=selected_model)
     if model is not None and active_provider.model != model:
         raise ValueError("injected provider model does not match requested model")
@@ -458,13 +526,8 @@ def build_memory_asset(
         if missing:
             raise ValueError(f"guideline {guideline_id} has missing source records: {missing}")
         for source_id in source_ids:
-            source_row = rows_by_id[source_id]
-            if source_row.get("trusted_split") != "train" or source_row.get(
-                "evidence_eligible"
-            ) is not True:
-                raise ValueError(
-                    f"guideline {guideline_id} cites non-reusable feedback: {source_id}"
-                )
+            if source.split_by_id.get(source_id) != "train":
+                raise ValueError(f"guideline {guideline_id} cites non-train feedback: {source_id}")
 
         criteria = guideline.get("criteria")
         if not isinstance(criteria, list) or not criteria:
@@ -479,11 +542,10 @@ def build_memory_asset(
 
         selected_rows = _select_supporting_rows(source_ids, rows_by_id, max_source_traces)
         alias_by_id = {
-            str(row["record_id"]): f"trace-{index:03d}"
-            for index, row in enumerate(selected_rows, start=1)
+            str(row["record_id"]): f"trace-{index:03d}" for index, row in enumerate(selected_rows, start=1)
         }
         supporting_traces = [
-            _supporting_trace(row, alias_by_id[str(row["record_id"])])
+            _supporting_trace(row, alias_by_id[str(row["record_id"])], source.trace_settings)
             for row in selected_rows
         ]
         response = active_provider.generate_json(
@@ -491,7 +553,7 @@ def build_memory_asset(
             {
                 "mode": "runtime_memory_card",
                 "evidence_mode": "trusted_only",
-                "guideline": guideline,
+                "guideline": guideline_payload(guideline),
                 "supporting_traces": supporting_traces,
             },
         )
@@ -504,11 +566,7 @@ def build_memory_asset(
             {
                 "text": item["text"],
                 "source_record_ids": [
-                    next(
-                        record_id
-                        for record_id, alias in alias_by_id.items()
-                        if alias == trace_alias
-                    )
+                    next(record_id for record_id, alias in alias_by_id.items() if alias == trace_alias)
                     for trace_alias in item["source_trace_ids"]
                 ],
             }
@@ -565,19 +623,14 @@ def build_memory_asset(
         "provider": active_provider.provider_name,
         "model": active_provider.model,
         "max_source_traces": max_source_traces,
+        "skipped_guideline_ids": skipped_guideline_ids,
         "evidence_mode": "trusted_only",
-        "include_approved_inferred": False,
+        "include_inferred": False,
         "inferred_candidate_pool": 0,
         "max_inferred_traces": 0,
         "prompt_revision": MEMORY_PROMPT_REVISION,
-        "prompt_sha256": "sha256:"
-        + hashlib.sha256(MEMORY_CARD_PROMPT.encode("utf-8")).hexdigest(),
-        "source_artifacts": {
-            "asset_manifest.json": _file_sha256(source_manifest_path),
-            "config.json": _file_sha256(config_path),
-            "evaluation_guidelines.jsonl": _file_sha256(guidelines_path),
-            "normalized_feedback.jsonl": _file_sha256(feedback_path),
-        },
+        "prompt_sha256": "sha256:" + hashlib.sha256(MEMORY_CARD_PROMPT.encode("utf-8")).hexdigest(),
+        "source_artifacts": {name: _file_sha256(path) for name, path in source.source_files.items()},
         "artifacts": {
             "memory_cards.jsonl": _file_sha256(cards_path),
             "provider_calls.jsonl": _file_sha256(calls_path),
@@ -588,6 +641,8 @@ def build_memory_asset(
 
 
 __all__ = [
+    "SourceAsset",
+    "load_source_asset",
     "MEMORY_CARD_PROMPT",
     "MEMORY_CARD_SCHEMA_VERSION",
     "MEMORY_ASSET_SCHEMA_VERSION",
