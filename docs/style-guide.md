@@ -4,9 +4,9 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAFO style guide
+# Fully Automated Flow Optimization style guide
 
-Coding standards for the FAFO evaluation engine. They follow existing patterns
+Coding standards for the Fully Automated Flow Optimization evaluation engine. They follow existing patterns
 in the codebase; apply them to all new code.
 
 ## Python and tooling

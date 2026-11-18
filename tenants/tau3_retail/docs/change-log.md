@@ -6,12 +6,12 @@ SPDX-License-Identifier: Apache-2.0
 
 # Change Log
 
-## 2026-09-08 — Publishable Tau-3 FAFO data pipeline recipe
+## 2026-09-08 — Publishable Tau-3 Fully Automated Flow Optimization data pipeline recipe
 
 - Added a pinned, side-by-side Tau `v1.0.1` setup with an optional version-bound
   system-truststore patch.
 - Added frozen Retail development/final-holdout membership, integrity hashes,
-  baseline rollout commands, and a complete-episode FAFO exporter.
+  baseline rollout commands, and a complete-episode Fully Automated Flow Optimization exporter.
 - Added outcome-blind feedback sampling, conversation-only review forms, and an
   explicit manual-trust join gate.
 - Added the Tau episode chain, case-rubric judge, trusted/mixed/staged configs,
@@ -20,7 +20,7 @@ SPDX-License-Identifier: Apache-2.0
 - Kept raw benchmark data, episodes, feedback, generated assets, evaluations,
   and credentials outside the published tenant.
 
-## Recorded FAFO evaluation asset
+## Recorded Fully Automated Flow Optimization evaluation asset
 
 - Input: 37 manually reviewed trusted-feedback episodes plus 331 unlabeled
   episodes from 92 Tau Retail development tasks and four trials.

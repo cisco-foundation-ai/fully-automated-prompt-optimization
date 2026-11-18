@@ -92,7 +92,7 @@ The default template for any task domain:
    taxonomy building. Formalize them as graders, then split into
    train/validation/test plus adversarial sets.
 3. **Implement the eval harness.** Define scoring checks for task performance,
-   format compliance, and safety. In FAFO this is a scoring profile with check
+   format compliance, and safety. In Fully Automated Flow Optimization this is a scoring profile with check
    functions.
 4. **Select an optimization algorithm.** Start with cheap black-box search
    (APE-style candidate generation and selection). Move to evolutionary or
@@ -152,9 +152,9 @@ These belong in the optimization framework, not in ad-hoc fixes:
    versioned artifacts. Re-run eval suites on every change. Integrate into CI/CD
    when possible.
 
-## FAFO mapping
+## Fully Automated Flow Optimization mapping
 
-| Concept | FAFO equivalent | How to apply |
+| Concept | Fully Automated Flow Optimization equivalent | How to apply |
 |---|---|---|
 | Scoring profile | `scoring_profile` in eval config | Each eval config specifies which checks to run. Map metric categories to check functions. |
 | Multi-metric evaluation | `score_breakdown` in `results.jsonl` | Per-check scores already give vector-valued evaluation. Rank by composite score, but inspect individual checks for regressions. |

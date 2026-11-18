@@ -4,9 +4,9 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAFO Data Pipeline
+# Fully Automated Flow Optimization Data Pipeline
 
-The FAFO data pipeline turns agent traces and a small amount of user
+The Fully Automated Flow Optimization data pipeline turns agent traces and a small amount of user
 feedback into evaluation datasets with case-specific rubrics. The
 optimization loop then trains, selects, and tests on those datasets, so an
 agent can improve from its own production traffic.
@@ -106,7 +106,7 @@ ceremony. Before optimizing against an asset, read:
 If the asset is not good enough, build a new version with different inputs
 or settings. A finished asset is never rewritten.
 
-## Using the asset with FAFO
+## Using the asset with Fully Automated Flow Optimization
 
 Point eval configs at the asset's datasets:
 

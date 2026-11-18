@@ -14,12 +14,12 @@ score-representative. Read aggregate results from the per-cell artifacts under
 
 | File | Source cell | What it is |
 |------|-------------|------------|
-| `fafo/hotpotqa-gpt-4.1-mini-trial-1.chain-best-test.results.sample.jsonl` | FAFO `hotpotqa / gpt-4.1-mini / trial-1`, run `chain-best-test` | The per-case detail behind a FAFO `evals/<run>/summary.md` |
-| `gepa/aime2025-gpt-4.1-mini-trial-1.test.sample.jsonl` | GEPA `aime2025 / gpt-4.1-mini / trial-1`, `metric_logs/test.jsonl` | GEPA's per-case scored-prediction log, its analog of the FAFO `results.jsonl` |
+| `fafo/hotpotqa-gpt-4.1-mini-trial-1.chain-best-test.results.sample.jsonl` | Fully Automated Flow Optimization `hotpotqa / gpt-4.1-mini / trial-1`, run `chain-best-test` | The per-case detail behind a Fully Automated Flow Optimization `evals/<run>/summary.md` |
+| `gepa/aime2025-gpt-4.1-mini-trial-1.test.sample.jsonl` | GEPA `aime2025 / gpt-4.1-mini / trial-1`, `metric_logs/test.jsonl` | GEPA's per-case scored-prediction log, its analog of the Fully Automated Flow Optimization `results.jsonl` |
 
 Both files have one JSON object per line:
 
-- **FAFO** (300 lines): `case_id`, `task_type`, `diagnostics`,
+- **Fully Automated Flow Optimization** (300 lines): `case_id`, `task_type`, `diagnostics`,
   `score_breakdown`, `composite_score`, `output_text`, `step_outputs`,
   `step_timings`.
 - **GEPA**: `prediction`, `metric_output`, `metric_call_count`, `step_counter`,

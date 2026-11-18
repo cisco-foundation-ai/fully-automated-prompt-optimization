@@ -4,13 +4,13 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Fully Automated Flow Optimization (FAFO)
+# Fully Automated Flow Optimization
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/actions/workflows/ci.yml/badge.svg)](https://github.com/cisco-foundation-ai/fully-automated-prompt-optimization/actions/workflows/ci.yml)
 [![arXiv](https://img.shields.io/badge/arXiv-2606.19605-b31b1b.svg)](https://arxiv.org/abs/2606.19605)
 
-FAFO optimizes multi-step LLM pipelines. It evaluates a pipeline on a dataset,
+Fully Automated Flow Optimization optimizes multi-step LLM pipelines. It evaluates a pipeline on a dataset,
 finds the step that caused each failure, proposes one scoped change (prompt,
 agent skill, parameter, or chain structure), and keeps the change only if it
 improves the held-out score.
@@ -23,7 +23,7 @@ The optimizer is either:
   with API credentials only, for prompt and parameter changes. Use it where no
   coding agent is available, such as in production.
 
-On top of the optimization loop, the FAFO data pipeline turns agent traces and
+On top of the optimization loop, the Fully Automated Flow Optimization data pipeline turns agent traces and
 sparse user feedback into evaluation datasets with case-specific rubrics.
 Together they form an end-to-end recursive self-improvement (RSI) loop: collect
 traces, build datasets, optimize the agent, deploy it, and repeat. A local UI
@@ -35,7 +35,7 @@ Blog posts:
 
 - [Fully Automated Prompt Optimization](https://cisco-foundation-ai.github.io/blogs/fully-automated-prompt-optimization/):
   the Claude Code-driven optimization loop and its benchmark results.
-- [Optimize your agents with FAPO and the Explorer UI](https://cisco-foundation-ai.github.io/blogs/optimize-and-visualize-with-fapo/):
+- [Optimize your agents with Fully Automated Prompt Optimization and the Explorer UI](https://cisco-foundation-ai.github.io/blogs/optimize-and-visualize-with-fapo/):
   running optimization and tracking its progress in the Explorer UI.
 - [From Prompt Optimization to a Recursive Self-Improvement Framework](https://cisco-foundation-ai.github.io/blogs/fafo-recursive-self-improvement/):
   turning sparse user feedback into evaluation rubrics for continuous agent improvement.
@@ -68,24 +68,24 @@ Blog posts:
 
 Pipelines are [LangGraph](https://langchain-ai.github.io/langgraph/) graphs whose
 nodes each write a named output, so a failure can be traced to retrieval,
-reasoning, or formatting instead of only to the final answer. FAFO starts with
+reasoning, or formatting instead of only to the final answer. Fully Automated Flow Optimization starts with
 the cheapest change (prompt text) and escalates to parameters or chain structure
 only when attribution shows that text cannot fix the remaining failures.
 
 The loop needs a dataset to evaluate against. You can write one by hand, or let
-the [FAFO data pipeline](#building-evaluation-datasets-from-traces) build it from
+the [Fully Automated Flow Optimization data pipeline](#building-evaluation-datasets-from-traces) build it from
 production agent traces and feedback, which turns optimization into a
 self-improvement cycle.
 
-FAFO's baseline is the GEPA prompt optimizer:
+Fully Automated Flow Optimization's baseline is the GEPA prompt optimizer:
 
-| | GEPA | FAFO |
+| | GEPA | Fully Automated Flow Optimization |
 |---|---|---|
 | **Action space** | Instruction text inside a fixed chain | Prompt text, agent skills, chain parameters, and chain structure |
 | **Search** | Evolutionary search over prompts | Attribution-driven scoped edits, escalating only when needed |
 | **Failure signal** | Final-score feedback | Step-level attribution over recorded intermediate outputs |
 
-Both start from the same pipeline and baseline prompts. FAFO does not depend on
+Both start from the same pipeline and baseline prompts. Fully Automated Flow Optimization does not depend on
 GEPA or DSPy; see the paper for benchmark results.
 
 ## Quick start
@@ -371,14 +371,14 @@ for the policy format, the roles, and the outputs.
 
 Everything above assumes you already have a labeled dataset. A deployed agent
 usually has traces instead: many unlabeled conversations, a few with user
-feedback, and no ground-truth answers. The FAFO data pipeline is an add-on to
+feedback, and no ground-truth answers. The Fully Automated Flow Optimization data pipeline is an add-on to
 the optimization loop that fills this gap. It turns those traces into evaluation
 datasets, so the loop can learn from the agent's real behavior:
 
 ```text
  ┌─► agent traces + user feedback
  │          │
- │          ▼   FAFO data pipeline
+ │          ▼   Fully Automated Flow Optimization data pipeline
  │   evaluation datasets with case-specific rubrics
  │          │
  │          ▼   optimization loop (coding agent or headless)
@@ -463,7 +463,7 @@ agent; see [runtime memory cards](docs/processes/runtime-memory-cards.md).
 | `assets build --config <asset>` | Build evaluation datasets from traces and feedback |
 | `memory build \| build-additive` | Build runtime memory cards from an evaluation asset |
 | `customer-data pull \| push \| remove-local --tenant <id> --scope raw\|derived\|all` | Sync tenant data with GCS |
-| `ui` | Start the FAFO Explorer UI |
+| `ui` | Start the Explorer UI |
 
 All commands run as `python -m hephaestus.cli <command>`; add `--help` for every
 option.
@@ -474,7 +474,7 @@ last and authenticates the bundle. Score averages use successful cases only.
 `results.jsonl` can repeat tenant data, so treat it as tenant data. See
 [eval output paths](docs/references/eval_paths.md).
 
-**FAFO Explorer** (`python -m hephaestus.cli ui`) is a local, read-only web UI at
+The **Explorer UI** (`python -m hephaestus.cli ui`) is a local, read-only web UI at
 <http://127.0.0.1:8765/>. It shows runs, per-case outputs, score breakdowns,
 prompt and skill variants, datasets, iteration history, and tenant docs; see
 [web UI](docs/web-ui.md) and the
@@ -536,7 +536,7 @@ limits.
 | [Evaluation input contract](docs/processes/evaluation-input-contract.md) | Input JSONL format for the data pipeline |
 | [Runtime memory cards](docs/processes/runtime-memory-cards.md) | Memory cards from an asset's guidelines |
 | [MCP quick start](docs/mcp-quick-start.md) | Agentic (tool-using) tenants |
-| [Web UI](docs/web-ui.md) | FAFO Explorer |
+| [Web UI](docs/web-ui.md) | Explorer UI |
 | [Prompting guides](docs/prompting-guides/) | Prompting practices and agentic chain patterns |
 
 ## Citation

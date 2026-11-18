@@ -20,7 +20,7 @@ before running evals.
 
 ## Curated sources
 
-| # | Source | Why it matters | How to apply in FAFO |
+| # | Source | Why it matters | How to apply in Fully Automated Flow Optimization |
 |---|---|---|---|
 | 1 | [OpenAI: Evaluation best practices](https://developers.openai.com/api/docs/guides/evaluation-best-practices) | Recommends synthetic eval data as one dataset type. Stresses continuous expansion with typical, edge, and adversarial cases. Frames evaluation as an iterative engineering loop, not one-time scoring. | Maintain synthetic splits as living datasets. Add explicit edge and adversarial coverage for recurring tenant-defined scoring failures. |
 | 2 | [OpenAI: Getting started with datasets](https://developers.openai.com/api/docs/guides/evaluation-getting-started) | Treats datasets as dynamic artifacts that grow over time. Encourages adding blind spots and new edge cases as they are found. | Treat `cases_synthetic.jsonl` as continuously updated, not static. Add synthetic cases right after a failure pattern is discovered. |
@@ -33,7 +33,7 @@ before running evals.
 | 9 | [Self-Instruct (Wang et al., 2022/2023)](https://arxiv.org/abs/2212.10560) | Establishes generate-then-filter as a practical synthetic-data pipeline. Shows quality gains from filtering invalid or near-duplicate generations. | Apply deterministic deduplication and quality filtering before adding new synthetic cases. Reject examples that are too similar or internally inconsistent. |
 | 10 | [WizardLM / Evol-Instruct (Xu et al., 2023/2025)](https://arxiv.org/abs/2304.12244) | Introduces stepwise complexity evolution for synthetic instructions and examples. Supports deliberately building harder examples beyond easy baseline cases. | Raise synthetic-case difficulty in controlled tiers. Add "hard" variants with conflicting but plausible signals to test robustness. |
 
-## FAFO synthetic quality checklist
+## Fully Automated Flow Optimization synthetic quality checklist
 
 Before committing new synthetic examples, check:
 

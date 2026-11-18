@@ -4,9 +4,9 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAFO GitHub hygiene guide
+# Fully Automated Flow Optimization GitHub hygiene guide
 
-Rules for commits, branches, and pull requests in FAFO, taken from the
+Rules for commits, branches, and pull requests in Fully Automated Flow Optimization, taken from the
 project's commit history and branch patterns.
 
 ## Commits

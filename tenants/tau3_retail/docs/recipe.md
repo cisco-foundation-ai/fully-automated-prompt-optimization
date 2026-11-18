@@ -4,7 +4,7 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Tau-3 Retail FAFO Data Pipeline Recipe
+# Tau-3 Retail Fully Automated Flow Optimization Data Pipeline Recipe
 
 ## Goal
 
@@ -14,7 +14,7 @@ prompt, and measure the selected prompt with Tau's native evaluator on a sealed
 task-family-disjoint holdout.
 
 This is a recipe, not a prebuilt dataset. It deliberately regenerates traces,
-feedback, FAFO assets, and eval outputs locally.
+feedback, Fully Automated Flow Optimization assets, and eval outputs locally.
 
 ## 1. Create Side-by-Side Environments
 
@@ -26,7 +26,7 @@ workspace/
 └── tau2-bench/
 ```
 
-The FAFO and Tau environments stay independent. From the FAFO root:
+The Fully Automated Flow Optimization and Tau environments stay independent. From the Fully Automated Flow Optimization root:
 
 Install Git and [`uv`](https://docs.astral.sh/uv/) first. Tau `v1.0.1`
 requires Python 3.12 or 3.13; `uv sync` selects a compatible interpreter.
@@ -103,13 +103,13 @@ python tenants/tau3_retail/scripts/run_tau.py \
 
 This creates 368 episodes under the sibling Tau checkout. Tau owns its policy,
 tools, simulator, fresh per-episode database, and native score. Keep the
-unaltered result as the protected research source; the FAFO adapter reads only
+unaltered result as the protected research source; the Fully Automated Flow Optimization adapter reads only
 the model-visible trajectory fields it needs.
 
 Use `--dry-run` to inspect the command without making model calls. A prompt file
 can be supplied with `--prompt`; omit it for Tau's baseline instruction.
 
-## 4. Convert Complete Episodes to FAFO Records
+## 4. Convert Complete Episodes to Fully Automated Flow Optimization Records
 
 ```bash
 python tenants/tau3_retail/code/export_fafo_traces.py \
@@ -129,7 +129,7 @@ It explicitly omits native reward, reward components, expected actions,
 database assertions, natural-language assertions, hidden task state, and all
 other Tau correctness-oracle fields. The exported file contains no feedback.
 
-The full episode is important: FAFO guideline extraction correlates feedback with
+The full episode is important: Fully Automated Flow Optimization guideline extraction correlates feedback with
 assistant behavior, tool calls, tool results, and runtime evidence. Clustering,
 however, embeds only the ordered user messages.
 
@@ -172,7 +172,7 @@ For each file in `source_artifacts/feedback-review/`, fill in:
 Write feedback from the user's perspective in natural language. Cover both good
 behavior and mistakes when the episode is mixed. Judge the whole interaction,
 including whether the final statement is supported by tool outcomes, but do not
-show annotators hidden native rewards, expected actions, or FAFO guidelines.
+show annotators hidden native rewards, expected actions, or Fully Automated Flow Optimization guidelines.
 
 The final `yes` is an explicit trust decision. Do not classify generated or
 unreviewed rationales as manual trusted feedback.
@@ -184,11 +184,11 @@ python tenants/tau3_retail/code/feedback_workflow.py join
 ```
 
 The command writes `labeled_feedback.jsonl` and `unlabeled_traffic.jsonl` under
-`source_artifacts/`, validates both against the FAFO contract, and rejects
+`source_artifacts/`, validates both against the Fully Automated Flow Optimization contract, and rejects
 missing trust decisions, missing rationales, altered selected records, overlap,
 and protected native scoring fields.
 
-## 7. Run the FAFO Data Pipeline
+## 7. Run the Fully Automated Flow Optimization Data Pipeline
 
 ```bash
 python -m hephaestus.cli assets build --config tenants/tau3_retail/recipe/asset-build.json
@@ -217,12 +217,12 @@ inputs, model, and split seed but a different split method and rubric
 prompts, so its splits and rubrics differ. Rerun the arms on it rather than
 comparing its scores with the v3 reports directly.
 
-## 8. Run FAFO-Guided Evaluation
+## 8. Run Fully Automated Flow Optimization-Guided Evaluation
 
-The evaluation chain starts one fresh Tau environment for every FAFO case. The
+The evaluation chain starts one fresh Tau environment for every Fully Automated Flow Optimization case. The
 case context supplies only task ID and seed; Tau supplies policy, tools, user
 simulator, and fresh database. The scorer gives the resulting episode and its
-case-specific FAFO rubric to the fixed judge and aggregates criterion statuses
+case-specific Fully Automated Flow Optimization rubric to the fixed judge and aggregates criterion statuses
 deterministically.
 
 Example views are under `recipe/configs/`:
@@ -299,6 +299,6 @@ iteration memory, and changelog. Never commit:
 - Tau runtime or native task data;
 - raw or converted episodes;
 - annotation review files or feedback;
-- FAFO evaluation-asset workspaces or published dataset payloads;
-- FAFO/Tau eval output directories; or
+- Fully Automated Flow Optimization evaluation-asset workspaces or published dataset payloads;
+- Fully Automated Flow Optimization/Tau eval output directories; or
 - `.env` files, API keys, or provider request logs.

@@ -4,9 +4,9 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAFO Web UI
+# Fully Automated Flow Optimization Web UI
 
-FAFO Explorer browses the artifacts a tenant accumulates during optimization:
+The Explorer UI browses the artifacts a tenant accumulates during optimization:
 eval runs, per-case outputs, iteration history, prompt variants and agent
 skills, datasets, and tenant docs. It is read-only. Evaluation assets are built
 with `python -m hephaestus.cli assets build`; their dataset splits appear with

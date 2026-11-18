@@ -6,21 +6,21 @@ SPDX-License-Identifier: Apache-2.0
 
 # Software Name Categorization Tenant
 
-This example tenant is for the FAFO Software Name Categorization Challenge.
+This example tenant is for the Fully Automated Flow Optimization Software Name Categorization Challenge.
 Participants classify software names into domains of security concern using
 `gpt-4o-mini`.
 
 ## Challenge Task
 
 You will be provided training, eval, and test datasets that categorize software
-names to domains of security concern. Use FAFO to build an LLM prompt for
+names to domains of security concern. Use Fully Automated Flow Optimization to build an LLM prompt for
 `gpt-4o-mini` that achieves F1 > 95 on both eval and test.
 
 ## Prerequisites
 
 - An OpenAI API key.
 - Access to `gpt-4o-mini`.
-- A working FAFO development environment.
+- A working Fully Automated Flow Optimization development environment.
 
 ## Load Challenge Data
 
@@ -46,7 +46,7 @@ python -m hephaestus.cli eval --config tenants/software_name_categorization/conf
 
 ## Rules
 
-- You can use this example tenant, or prompt FAFO to create a tenant with your
+- You can use this example tenant, or prompt Fully Automated Flow Optimization to create a tenant with your
   own optimization strategies.
 - Only conduct error attribution over the training dataset.
 - Evaluate each variant using eval and test datasets.

@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Prompting guides
 
-Distilled prompting, chain-design, and evaluation guidance for FAFO operators
+Distilled prompting, chain-design, and evaluation guidance for Fully Automated Flow Optimization operators
 during prompt iteration.
 
 | Document | Covers | Read when |

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 cff-version: 1.2.0
-title: Fully Automated Flow Optimization (FAFO)
+title: Fully Automated Flow Optimization
 message: >-
   If you use this software, please cite the paper below
   (see preferred-citation).

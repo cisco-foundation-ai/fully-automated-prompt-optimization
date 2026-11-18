@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 # Prompt Lineages
 
 These files preserve the exact Tau agent instructions evaluated in the recorded
-FAFO experiment. Every variant includes repository license metadata; the Tau
+Fully Automated Flow Optimization experiment. Every variant includes repository license metadata; the Tau
 launchers remove that exact header before sending the instruction to the model.
 
 | Arm | Sequence | Winner |

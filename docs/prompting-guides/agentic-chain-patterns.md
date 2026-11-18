@@ -180,7 +180,7 @@ Patterns compose. Common combinations:
 - **Least-to-Most + Tool-Augmented:** decompose, then use tools for each
   subproblem.
 
-## FAFO mapping
+## Fully Automated Flow Optimization mapping
 
 | Pattern | Current chain support | How to apply |
 |---|---|---|

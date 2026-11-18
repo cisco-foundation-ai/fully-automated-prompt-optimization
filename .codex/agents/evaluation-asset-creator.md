@@ -4,7 +4,7 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAFO Evaluation Asset Assistant for Codex
+# Fully Automated Flow Optimization Evaluation Asset Assistant for Codex
 
 Use this phase when the user wants Codex to build, resume, check, or explain
 an evaluation asset. The core code owns every data transformation and model

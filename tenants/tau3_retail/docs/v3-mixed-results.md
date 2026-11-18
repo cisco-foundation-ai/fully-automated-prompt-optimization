@@ -4,7 +4,7 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAFO Luna full-data mixed arm
+# Fully Automated Flow Optimization Luna full-data mixed arm
 
 This working record contains training-only prompt optimization on all 236 released training cases (20 trusted and 216 approved inferred). Protected validation, test, regression, and native Tau held-out outcomes are not used for prompt authoring.
 

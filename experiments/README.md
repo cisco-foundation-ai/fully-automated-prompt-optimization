@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Reference experiment results
 
-Reference results for FAFO (the proposed method) and GEPA (the baseline). They
+Reference results for Fully Automated Flow Optimization (the proposed method) and GEPA (the baseline). They
 show what a complete optimization run produces and how its outputs are laid out
 on disk.
 
@@ -27,7 +27,7 @@ that format.
 ## Directory layout
 
 Both methods share one scaffold, `<method>/<benchmark>/<model>/trial-N/`.
-Inside a cell, each method keeps its own file layout, because FAFO and GEPA
+Inside a cell, each method keeps its own file layout, because Fully Automated Flow Optimization and GEPA
 emit different artifacts.
 
 ```text
@@ -35,7 +35,7 @@ experiments/
 ├── README.md
 │
 ├── fafo/
-│   └── <benchmark>/<model>/trial-N/                    ← FAFO cell:
+│   └── <benchmark>/<model>/trial-N/                    ← Fully Automated Flow Optimization cell:
 │       ├── run-metadata.json       ← provenance: model, trial, created_at
 │       ├── configs/*.json          ← eval / optimization configs for this cell
 │       ├── prompts/                ← evolved prompt variants (variant-*.md)
@@ -79,7 +79,7 @@ inside each cell's own files; for example, GEPA's `config.json` keeps
 **Benchmarks.** Canonical names are lowercase snake case, matching the repo's
 tenant IDs.
 
-| Canonical | FAFO native | GEPA native |
+| Canonical | Fully Automated Flow Optimization native | GEPA native |
 |-----------|-------------|-------------|
 | `aime2025` | `aime2025` | `AIMEBench` |
 | `hotpotqa` | `hotpotqa` | `HotpotQABench` |
@@ -90,7 +90,7 @@ tenant IDs.
 
 **Models.** Canonical names are the dotted API model strings.
 
-| Canonical | FAFO native | GEPA native | GEPA `task_model` |
+| Canonical | Fully Automated Flow Optimization native | GEPA native | GEPA `task_model` |
 |-----------|-------------|-------------|-------------------|
 | `gpt-4.1-mini` | `gpt41mini` | `gpt-41-mini` | `openai/gpt-4.1-mini-2025-04-14` |
 | `gpt-5.4-mini` | `gpt54mini` | `gpt-54-mini` | `openai/gpt-5.4-mini` |
@@ -98,7 +98,7 @@ tenant IDs.
 
 **Trials.** Canonical trials are 1-indexed; GEPA's upstream seeds are 0-indexed.
 
-| Canonical | FAFO native | GEPA native | GEPA `config.json` `seed` |
+| Canonical | Fully Automated Flow Optimization native | GEPA native | GEPA `config.json` `seed` |
 |-----------|-------------|-------------|---------------------------|
 | `trial-1` | `-t1` | `seed_0` | `0` |
 | `trial-2` | `-t2` | `seed_1` | `1` |
@@ -118,7 +118,7 @@ separate from the task model being evaluated.
   under each module's `…predict.signature.instructions`.
 - Cost and token usage: `token_stats.json`. Timing and budget: `timing.json`.
 
-**FAFO**, per eval run:
+**Fully Automated Flow Optimization**, per eval run:
 
 - Headline score: `progress.json` → `avg_composite_score`. `summary.md` gives a
   readable view, and `run_config.json` records what was evaluated.

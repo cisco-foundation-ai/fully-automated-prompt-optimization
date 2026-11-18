@@ -11,7 +11,7 @@ SPDX-License-Identifier: Apache-2.0
 Local, ignored source artifacts:
 
 - `source_artifacts/all_unlabeled.jsonl`: every development Tau episode mapped
-  to an unlabeled FAFO record.
+  to an unlabeled Fully Automated Flow Optimization record.
 - `source_artifacts/feedback-selection.jsonl`: outcome-blind manual review
   sample.
 - `source_artifacts/feedback-review/`: conversation-only annotation files.
@@ -19,7 +19,7 @@ Local, ignored source artifacts:
   feedback.
 - `source_artifacts/unlabeled_traffic.jsonl`: disjoint remainder.
 
-Local, ignored FAFO output:
+Local, ignored Fully Automated Flow Optimization output:
 
 - `evaluation_assets/<asset_id>/datasets/train.jsonl`
 - `validation.jsonl`, `test.jsonl`, and `regression.jsonl`
@@ -48,7 +48,7 @@ Input records follow `fafo-evaluation-input-v1`:
 - `feedback`: trusted records only; polarity, rationale, optional correction,
   and `human_review` source.
 
-Evaluation cases use FAFO's `EvalCase` schema and contain the Tau task/seed
+Evaluation cases use Fully Automated Flow Optimization's `EvalCase` schema and contain the Tau task/seed
 runtime context plus the case's evaluation criteria
 (`expected.evaluation_guidelines`), tool expectations, provenance, confidence,
 and trust tier.
@@ -66,9 +66,9 @@ and trust tier.
 - Labeled and unlabeled IDs are unique, disjoint, and reconstruct the full
   development export.
 - Tool calls have unique IDs and exactly one linked result.
-- Protected Tau correctness keys never appear in FAFO inputs.
+- Protected Tau correctness keys never appear in Fully Automated Flow Optimization inputs.
 - Every trusted feedback record has a rationale and explicit human trust.
-- FAFO split families do not cross partitions; inferred cases never enter
+- Fully Automated Flow Optimization split families do not cross partitions; inferred cases never enter
   `regression`.
 - `GuidelineJudgeScorer` returns `guideline_score`, `guideline_pass`,
   `critical_violations`, and `applicable_criteria`.

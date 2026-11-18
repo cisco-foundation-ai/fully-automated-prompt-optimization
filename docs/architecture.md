@@ -4,7 +4,7 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAFO Architecture
+# Fully Automated Flow Optimization Architecture
 
 How the eval runtime turns a config into a scored, authenticated run bundle, and
 where core code ends and tenant code begins.
