@@ -264,7 +264,7 @@ def serve(
 ) -> None:
     """Start the UI server and block until interrupted."""
     if not _is_loopback_name(host):
-        raise ValueError("FAFO web server must bind to a loopback host")
+        raise ValueError("Explorer UI server must bind to a loopback host")
     bind_host = host.strip().strip("[]")
     try:
         bind_address = ipaddress.ip_address(bind_host)

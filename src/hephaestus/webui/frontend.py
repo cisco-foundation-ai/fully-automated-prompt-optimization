@@ -16,7 +16,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>FAFO Explorer</title>
+<title>Explorer UI</title>
 <style>
   :root {
     --bg: #0f1117; --panel: #171a23; --panel-2: #1e222e; --border: #2a2f3d;
@@ -223,7 +223,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <div id="home-link" class="brand" title="Back to dashboard" role="button" tabindex="0">
       <img class="brand-logo" src="/assets/fafo-explorer-logo.webp" alt="" aria-hidden="true" />
       <div>
-        <h1>FAFO Explorer</h1>
+        <h1>Explorer UI</h1>
         <div class="sub">tenant outputs &amp; iterations</div>
       </div>
     </div>
