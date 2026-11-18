@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 
 Runtime memory cards turn the guideline catalog of an evaluation asset into
 compact procedural cards that an agent reads at runtime. This optional
-downstream step does not modify the asset and is separate from FAFO prompt
+downstream step does not modify the asset and is separate from Fully Automated Flow Optimization prompt
 optimization.
 
 The contract is intentionally small:

@@ -4,7 +4,7 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAFO challenge assets
+# Fully Automated Flow Optimization challenge assets
 
 Reusable public challenge datasets and instructions, kept outside `tenants/` on
 purpose.
@@ -30,4 +30,4 @@ cp fafo_challenge/software_name_categorization/data/*.jsonl \
   tenants/<tenant_id>/datasets/datasets/
 ```
 
-Then point the tenant's FAFO eval configs at the copied files.
+Then point the tenant's Fully Automated Flow Optimization eval configs at the copied files.

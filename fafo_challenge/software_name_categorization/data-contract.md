@@ -62,7 +62,7 @@ The allowed labels (also listed in [`labels.md`](labels.md)):
 - The model should output exactly one label string.
 - The model input should be only the software name. Prompts should not require
   vendor, description, URL, or catalog fields.
-- A FAFO scorer should perform case-insensitive exact match after stripping
+- A Fully Automated Flow Optimization scorer should perform case-insensitive exact match after stripping
   whitespace and common punctuation.
 - Recommended `score_breakdown` keys:
   - `exact_match`: 0 or 100.

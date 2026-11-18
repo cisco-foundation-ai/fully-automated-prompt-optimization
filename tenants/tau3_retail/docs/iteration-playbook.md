@@ -11,7 +11,7 @@ SPDX-License-Identifier: Apache-2.0
 - Read the global `docs/processes/prompt-iteration-loop.md` and this tenant's
   `docs/recipe.md`.
 - Verify the pinned Tau sibling runtime and fixed split.
-- Finalize a FAFO asset and verify its trusted/inferred counts and holds.
+- Finalize a Fully Automated Flow Optimization asset and verify its trusted/inferred counts and holds.
 - Complete the unchanged-prompt baseline on the exact training view.
 - Set `OPENAI_API_KEY` without persisting it.
 

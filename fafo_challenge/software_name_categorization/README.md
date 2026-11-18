@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 # Software Name Categorization Challenge
 
 You get training, eval, and test datasets that categorize software names into
-domains of security concern. Use FAFO to build an LLM prompt for `gpt-4o-mini`
+domains of security concern. Use Fully Automated Flow Optimization to build an LLM prompt for `gpt-4o-mini`
 that achieves `F1 > 90` on both the test dataset.
 
 Each case's only model-visible input is a software name. The model should
@@ -17,7 +17,7 @@ output exactly one label from [`labels.md`](labels.md).
 
 - An OpenAI API key.
 - Access to `gpt-4o-mini`.
-- A working FAFO setup.
+- A working Fully Automated Flow Optimization setup.
 
 ## Dataset files
 
@@ -27,7 +27,7 @@ output exactly one label from [`labels.md`](labels.md).
 | `data/eval.jsonl` | Evaluation cases for variant evaluation |
 | `data/test.jsonl` | Test cases for variant evaluation and leaderboard results |
 
-Each line is a FAFO-compatible JSON object with `context.software_name` and
+Each line is a Fully Automated Flow Optimization-compatible JSON object with `context.software_name` and
 `expected.category`. See [`data-contract.md`](data-contract.md) for the full
 schema.
 
@@ -42,7 +42,7 @@ cp fafo_challenge/software_name_categorization/data/*.jsonl \
   tenants/software_name_categorization/datasets/datasets/
 ```
 
-Then prompt FAFO to optimize the example tenant. For example:
+Then prompt Fully Automated Flow Optimization to optimize the example tenant. For example:
 
 ```text
 Optimize the software_name_categorization tenant until composite score on test set reaches 90.
@@ -53,12 +53,12 @@ Optimize the software_name_categorization tenant until composite score on test s
 [`mini_challenge/`](mini_challenge/) is a standalone manual prompt-tuning mini
 challenge. It includes a 10-case test subset, a command-line evaluator, a
 training dataset viewer, easy/medium/difficult level selection, and a local UI
-that compares a manually tuned prompt against bundled FAFO v006 results. It is
-decoupled from FAFO and runs directly from that folder.
+that compares a manually tuned prompt against bundled Fully Automated Flow Optimization v006 results. It is
+decoupled from Fully Automated Flow Optimization and runs directly from that folder.
 
 ## Rules
 
-- Use the provided example tenant, or prompt FAFO to create a tenant with your
+- Use the provided example tenant, or prompt Fully Automated Flow Optimization to create a tenant with your
   own optimization strategies.
 - Only conduct error attribution over the training dataset. Eval and test
   datasets are for scoring variants, not for failure attribution or manual

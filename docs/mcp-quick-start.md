@@ -6,13 +6,13 @@ SPDX-License-Identifier: Apache-2.0
 
 # MCP Quick Start Guide
 
-FAFO evaluates agentic chains whose model calls tools exposed by
+Fully Automated Flow Optimization evaluates agentic chains whose model calls tools exposed by
 [Model Context Protocol](https://modelcontextprotocol.io/) servers, using a real
 ReAct loop. The protocol is implemented with the official `mcp` Python SDK;
 nothing is stubbed. This guide runs the example tenant, then builds a new
 agentic tenant.
 
-What FAFO provides:
+What Fully Automated Flow Optimization provides:
 
 - MCP server lifecycle management (start, tool discovery, execution, clean shutdown)
 - A ReAct agentic node (`make_agentic_node`) with iterative tool calling

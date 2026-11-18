@@ -70,7 +70,7 @@ rather than the hash of the licensed file as stored in the repository.
 
 - Do not optimize Tau policy text, tool implementations, environment state,
   agent/user model settings, judge prompt, score aggregation, task split, or
-  FAFO chain structure under this tenant's autonomous scope.
+  Fully Automated Flow Optimization chain structure under this tenant's autonomous scope.
 - Do not train on native Tau reward or hidden expected actions.
 - Do not use final-holdout failures to revise a selected prompt.
 - Do not treat the recorded winner as universally optimal; rerun the recipe for

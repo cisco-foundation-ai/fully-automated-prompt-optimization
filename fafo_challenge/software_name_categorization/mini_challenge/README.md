@@ -7,11 +7,11 @@ SPDX-License-Identifier: Apache-2.0
 # Software Name Mini Challenge
 
 A standalone manual prompt-tuning add-on for the software name categorization
-challenge. It does not import FAFO code or tenant assets.
+challenge. It does not import Fully Automated Flow Optimization code or tenant assets.
 
 ## Contents
 
-| Level | Labels | Test subset (10 cases) | Starter prompt | Bundled FAFO v006 comparison |
+| Level | Labels | Test subset (10 cases) | Starter prompt | Bundled Fully Automated Flow Optimization v006 comparison |
 |---|---|---|---|---|
 | `easy` | 2 | `data/mini_test_easy.jsonl` | `prompts/starter_prompt_easy.txt` | `data/fafo_v006_results_easy.json` |
 | `medium` | 4 | `data/mini_test_medium.jsonl` | `prompts/starter_prompt_medium.txt` | `data/fafo_v006_results_medium.json` |
@@ -55,7 +55,7 @@ python3 mini_eval.py \
   --output results/manual_results.json
 ```
 
-Validate the bundled FAFO v006 comparison without calling OpenAI:
+Validate the bundled Fully Automated Flow Optimization v006 comparison without calling OpenAI:
 
 ```bash
 python3 mini_eval.py --level difficult --prompt prompts/starter_prompt_difficult.txt --fafo-reference
@@ -74,4 +74,4 @@ Open `http://127.0.0.1:8766`.
 The UI reads `OPENAI_API_KEY` from the server process environment. It shows the
 training dataset as a ground-truth reference, lets participants edit a prompt,
 runs the selected 10-case mini evaluation, and compares the manual result with
-the bundled FAFO v006 reference for that level.
+the bundled Fully Automated Flow Optimization v006 reference for that level.

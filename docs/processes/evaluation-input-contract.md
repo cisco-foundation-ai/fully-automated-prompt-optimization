@@ -4,10 +4,10 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAFO Evaluation Input Contract
+# Fully Automated Flow Optimization Evaluation Input Contract
 
 `fafo-evaluation-input-v1` is the vendor-neutral JSONL format for both input
-files of the FAFO data pipeline: labeled feedback and unlabeled traces.
+files of the Fully Automated Flow Optimization data pipeline: labeled feedback and unlabeled traces.
 Read it if you write an exporter or adapter that converts source data into
 pipeline inputs.
 
@@ -21,9 +21,9 @@ Vendor or application export
         ↓
 Source-specific conversion
         ↓
-FAFO Evaluation Input v1 JSONL
+Fully Automated Flow Optimization Evaluation Input v1 JSONL
         ↓
-FAFO data pipeline (assets build)
+Fully Automated Flow Optimization data pipeline (assets build)
 ```
 
 ## Common Record

@@ -4,9 +4,9 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAFO K8s deployment
+# Fully Automated Flow Optimization K8s deployment
 
-Run FAFO evals on a Kubernetes cluster. Each run gets its own pod, and results
+Run Fully Automated Flow Optimization evals on a Kubernetes cluster. Each run gets its own pod, and results
 persist on a shared PVC.
 
 ## Prerequisites

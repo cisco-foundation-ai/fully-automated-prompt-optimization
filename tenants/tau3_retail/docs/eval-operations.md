@@ -18,7 +18,7 @@ SPDX-License-Identifier: Apache-2.0
 | `recipe/configs/mixed-train.json` | Full mixed training |
 | `recipe/configs/regression.json` | Trusted regression gate |
 
-All configs assume a sibling Tau checkout at `../tau2-bench` and a local FAFO
+All configs assume a sibling Tau checkout at `../tau2-bench` and a local Fully Automated Flow Optimization
 asset named `fafo-v4-luna-v1`, built from `recipe/asset-build.json`.
 
 ## Standard Eval Commands
@@ -30,7 +30,7 @@ python tenants/tau3_retail/scripts/setup_tau_runtime.py --dry-run
 ../tau2-bench/.venv/bin/tau2 check-data
 ```
 
-Run a FAFO-guided evaluation:
+Run a Fully Automated Flow Optimization-guided evaluation:
 
 ```bash
 .venv/bin/python scripts/eval/run_eval_and_summarize.py \
@@ -55,7 +55,7 @@ python tenants/tau3_retail/scripts/run_tau.py \
   assertion completion.
 - Internal variant ranking: more guideline passes, then fewer critical
   violations, then higher mean guideline score.
-- A FAFO-judge gain alone is not sufficient; the selected prompt must be
+- A Fully Automated Flow Optimization-judge gain alone is not sufficient; the selected prompt must be
   evaluated natively against the unchanged baseline.
 
 ## Failure Triage
@@ -73,8 +73,8 @@ python tenants/tau3_retail/scripts/run_tau.py \
 ## Output Management
 
 - Tau outputs remain under the sibling checkout's `data/simulations/`.
-- FAFO outputs remain under `tenants/tau3_retail/evals/`.
-- FAFO workspaces remain under `tenants/tau3_retail/evaluation_assets/`.
+- Fully Automated Flow Optimization outputs remain under `tenants/tau3_retail/evals/`.
+- Fully Automated Flow Optimization workspaces remain under `tenants/tau3_retail/evaluation_assets/`.
 - All are ignored and must not be committed.
 - Commit only aggregate reports, prompt text, configs, code, iteration memory,
   changelog, and public split metadata.

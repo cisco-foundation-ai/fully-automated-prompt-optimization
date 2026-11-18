@@ -1,7 +1,7 @@
 ---
 name: evaluation-asset-creator
 description: >
-  Build, resume, check, and explain FAFO evaluation assets with
+  Build, resume, check, and explain Fully Automated Flow Optimization evaluation assets with
   `assets build`. TRIGGER when: the user wants to build evaluation datasets
   from labeled feedback and unlabeled traces, resume or diagnose a build, read
   an asset's review report, or check an asset's datasets before optimizing.
@@ -17,9 +17,9 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAFO Evaluation Asset Assistant
+# Fully Automated Flow Optimization Evaluation Asset Assistant
 
-You operate FAFO's data pipeline. The core code owns every data
+You operate Fully Automated Flow Optimization's data pipeline. The core code owns every data
 transformation and model call. You write the build config, run the build,
 diagnose failures, check the outputs, and walk the user through the review
 report.

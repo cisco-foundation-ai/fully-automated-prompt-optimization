@@ -4,11 +4,11 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAFO staged optimization results
+# Fully Automated Flow Optimization staged optimization results
 
 ## Experiment
 
-This arm optimized the Tau Retail prompt in two stages using the FAFO Luna evaluation assets:
+This arm optimized the Tau Retail prompt in two stages using the Fully Automated Flow Optimization Luna evaluation assets:
 
 1. Optimize on all 216 inferred training cases until the inferred-stage search was stopped.
 2. Start from the best inferred-stage prompt and refine on all 20 trusted-feedback training cases until plateau.
@@ -69,7 +69,7 @@ The three explicit retries were the S008 recovery episodes. S016's three active 
 
 ## Frozen T001 native Tau final holdout
 
-After T001 was frozen and selected, it was run once on the same 22 native Tau Retail held-out tasks and four fixed trial seeds used by the earlier native evaluations. This evaluation used native Tau scoring only; it did not use the FAFO guideline judge and did not change the prompt.
+After T001 was frozen and selected, it was run once on the same 22 native Tau Retail held-out tasks and four fixed trial seeds used by the earlier native evaluations. This evaluation used native Tau scoring only; it did not use the Fully Automated Flow Optimization guideline judge and did not change the prompt.
 
 | Native metric | T001 staged winner |
 |---|---:|
@@ -115,4 +115,4 @@ Agent cost was $6.661982 in total ($0.075704 per episode), user-simulator cost w
 
 ## Final artifact
 
-The staged winner is [`prompts/v3/staged/trusted/t001.txt`](../prompts/v3/staged/trusted/t001.txt). No protected result was used to create or select it. Native Tau results and FAFO evaluation outputs remain local and are not published with this recipe.
+The staged winner is [`prompts/v3/staged/trusted/t001.txt`](../prompts/v3/staged/trusted/t001.txt). No protected result was used to create or select it. Native Tau results and Fully Automated Flow Optimization evaluation outputs remain local and are not published with this recipe.

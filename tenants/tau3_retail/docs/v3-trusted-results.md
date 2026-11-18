@@ -4,7 +4,7 @@ Copyright 2026 Cisco Systems, Inc. and its affiliates
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# FAFO Luna — trusted-only prompt optimization
+# Fully Automated Flow Optimization Luna — trusted-only prompt optimization
 
 ## Data asset
 
@@ -92,7 +92,7 @@ The regression runner initially received one invalid judge response. That judge 
 
 After T008 was frozen, it was evaluated once on the same 22 native Tau Retail held-out tasks, four fixed trial seeds, and fixed runtime controls as the baseline and prior trusted-only run.
 
-| Native metric | Baseline B0 | Prior trusted V019 | FAFO trusted T008 |
+| Native metric | Baseline B0 | Prior trusted V019 | Fully Automated Flow Optimization trusted T008 |
 |---|---:|---:|---:|
 | Passes | 63/88 | 71/88 | 71/88 |
 | `pass^1` | 0.7159 | 0.8068 | 0.8068 |
@@ -112,7 +112,7 @@ All 88 T008 trajectories completed with normal user-stop termination. The run ha
 
 The optimization succeeded on training and validation but did not generalize to the four-case protected test split. Relative to validation baseline, T008 improved pass rate from 44.44% to 77.78% and reduced critical violations from 6 to 1. On test, however, three failures involved complex multi-part scope control, operation-order constraints, or superseded user choices. The test cases also averaged 10.75 applicable criteria, versus 6.45 on T008 training and 9.00 on validation.
 
-The FAFO judge test and native Tau holdout give different pictures: T008 scored poorly on the four-case protected FAFO test but improved native Tau `pass^1` by 0.0909 over B0 and matched the prior trusted-only prompt's total native passes. This divergence is evidence that the four-case proxy gate is noisy and/or emphasizes requirements differently from native Tau scoring. Neither protected result should be used to revise the prompt in this experiment arm. A later, separately declared experiment can test whether inferred rubrics improve coverage before a fresh held-out evaluation.
+The Fully Automated Flow Optimization judge test and native Tau holdout give different pictures: T008 scored poorly on the four-case protected Fully Automated Flow Optimization test but improved native Tau `pass^1` by 0.0909 over B0 and matched the prior trusted-only prompt's total native passes. This divergence is evidence that the four-case proxy gate is noisy and/or emphasizes requirements differently from native Tau scoring. Neither protected result should be used to revise the prompt in this experiment arm. A later, separately declared experiment can test whether inferred rubrics improve coverage before a fresh held-out evaluation.
 
 ## Inference ledger
 
